@@ -1476,6 +1476,32 @@ fn group_into_tiles(entries: Vec<(String, String)>) -> Vec<MemoryTile> {
         .collect()
 }
 
+/// Split a string into chunks that each fit within `max_width` display columns,
+/// respecting multi-column characters (CJK characters take 2 columns, etc.).
+fn split_by_display_width(s: &str, max_width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + cw > max_width && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += cw;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
+}
+
 fn render_memory_tiles(
     tiles: &[MemoryTile],
     total_width: usize,
@@ -1541,11 +1567,11 @@ fn render_memory_tiles(
 
             let mut content_lines: Vec<Line<'static>> = Vec::new();
             for item in &tile.items {
-                let chars: Vec<char> = item.chars().collect();
-                if chars.len() <= item_width {
+                let text_display_width = unicode_width::UnicodeWidthStr::width(item.as_str());
+                if text_display_width <= item_width {
                     let text = item.to_string();
                     let padding = inner_width
-                        .saturating_sub(bullet_width + unicode_width::UnicodeWidthStr::width(text.as_str()));
+                        .saturating_sub(bullet_width + text_display_width);
                     let mut spans = vec![
                         Span::styled("│ ", border_style),
                         Span::styled(bullet.to_string(), border_style),
@@ -1557,38 +1583,47 @@ fn render_memory_tiles(
                     spans.push(Span::styled(" │", border_style));
                     content_lines.push(Line::from(spans));
                 } else {
-                    let first: String = chars[..item_width].iter().collect();
-                    let padding = inner_width
-                        .saturating_sub(bullet_width + unicode_width::UnicodeWidthStr::width(first.as_str()));
-                    let mut spans = vec![
-                        Span::styled("│ ", border_style),
-                        Span::styled(bullet.to_string(), border_style),
-                        Span::styled(first, text_style),
-                    ];
-                    if padding > 0 {
-                        spans.push(Span::raw(" ".repeat(padding)));
-                    }
-                    spans.push(Span::styled(" │", border_style));
-                    content_lines.push(Line::from(spans));
                     let indent = bullet_width;
                     let cont_width = inner_width.saturating_sub(indent);
-                    let mut pos = item_width;
-                    while pos < chars.len() {
-                        let end = (pos + cont_width).min(chars.len());
-                        let chunk: String = chars[pos..end].iter().collect();
-                        let padding = inner_width
-                            .saturating_sub(indent + unicode_width::UnicodeWidthStr::width(chunk.as_str()));
-                        let mut spans = vec![
-                            Span::styled("│ ", border_style),
-                            Span::raw(" ".repeat(indent)),
-                            Span::styled(chunk, text_style),
-                        ];
-                        if padding > 0 {
-                            spans.push(Span::raw(" ".repeat(padding)));
+                    let first_chunk_width = item_width;
+                    let mut all_chunks: Vec<String> = Vec::new();
+                    let first_chunks = split_by_display_width(item, first_chunk_width);
+                    if let Some(first) = first_chunks.first() {
+                        all_chunks.push(first.clone());
+                        let remainder: String = item.chars().skip(first.chars().count()).collect();
+                        if !remainder.is_empty() {
+                            all_chunks.extend(split_by_display_width(&remainder, cont_width));
                         }
-                        spans.push(Span::styled(" │", border_style));
-                        content_lines.push(Line::from(spans));
-                        pos = end;
+                    }
+                    for (ci, chunk) in all_chunks.iter().enumerate() {
+                        let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
+                        if ci == 0 {
+                            let padding = inner_width
+                                .saturating_sub(bullet_width + chunk_width);
+                            let mut spans = vec![
+                                Span::styled("│ ", border_style),
+                                Span::styled(bullet.to_string(), border_style),
+                                Span::styled(chunk.clone(), text_style),
+                            ];
+                            if padding > 0 {
+                                spans.push(Span::raw(" ".repeat(padding)));
+                            }
+                            spans.push(Span::styled(" │", border_style));
+                            content_lines.push(Line::from(spans));
+                        } else {
+                            let padding = inner_width
+                                .saturating_sub(indent + chunk_width);
+                            let mut spans = vec![
+                                Span::styled("│ ", border_style),
+                                Span::raw(" ".repeat(indent)),
+                                Span::styled(chunk.clone(), text_style),
+                            ];
+                            if padding > 0 {
+                                spans.push(Span::raw(" ".repeat(padding)));
+                            }
+                            spans.push(Span::styled(" │", border_style));
+                            content_lines.push(Line::from(spans));
+                        }
                     }
                 }
             }
@@ -4098,16 +4133,12 @@ pub(crate) fn render_tool_message(
         let inner_width = max_box.saturating_sub(4);
 
         let mut box_content: Vec<Line<'static>> = Vec::new();
-        let chars: Vec<char> = content.chars().collect();
-        if chars.len() <= inner_width {
+        let text_display_width = unicode_width::UnicodeWidthStr::width(content);
+        if text_display_width <= inner_width {
             box_content.push(Line::from(Span::styled(content.to_string(), text_style)));
         } else {
-            let mut pos = 0;
-            while pos < chars.len() {
-                let end = (pos + inner_width).min(chars.len());
-                let chunk: String = chars[pos..end].iter().collect();
+            for chunk in split_by_display_width(content, inner_width) {
                 box_content.push(Line::from(Span::styled(chunk, text_style)));
-                pos = end;
             }
         }
 
@@ -5382,20 +5413,49 @@ fn compute_prompt_preview_line_count(
 /// If the text fits, returns it unchanged.
 fn truncate_middle(text: &str, max_width: usize) -> String {
     let text = text.replace('\n', " ");
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_width {
+    let display_width = unicode_width::UnicodeWidthStr::width(text.as_str());
+    if display_width <= max_width {
         return text;
     }
     if max_width <= 5 {
-        return chars[..max_width].iter().collect();
+        let mut result = String::new();
+        let mut w = 0;
+        for ch in text.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w + cw > max_width {
+                break;
+            }
+            result.push(ch);
+            w += cw;
+        }
+        return result;
     }
     let ellipsis = " ... ";
-    let ellipsis_len = ellipsis.len();
-    let remaining = max_width.saturating_sub(ellipsis_len);
-    let head = remaining * 2 / 3;
-    let tail = remaining - head;
-    let head_str: String = chars[..head].iter().collect();
-    let tail_str: String = chars[chars.len() - tail..].iter().collect();
+    let ellipsis_width = unicode_width::UnicodeWidthStr::width(ellipsis);
+    let remaining = max_width.saturating_sub(ellipsis_width);
+    let head_target = remaining * 2 / 3;
+    let tail_target = remaining - head_target;
+    let mut head_str = String::new();
+    let mut head_w = 0;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if head_w + cw > head_target {
+            break;
+        }
+        head_str.push(ch);
+        head_w += cw;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut tail_str = String::new();
+    let mut tail_w = 0;
+    for &ch in chars.iter().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if tail_w + cw > tail_target {
+            break;
+        }
+        tail_str.insert(0, ch);
+        tail_w += cw;
+    }
     format!("{}{}{}", head_str, ellipsis, tail_str)
 }
 
