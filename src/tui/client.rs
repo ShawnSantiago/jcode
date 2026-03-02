@@ -692,6 +692,9 @@ impl ClientApp {
                                     _ => {}
                                 }
                             }
+                            Some(Ok(Event::Resize(_, _))) => {
+                                let _ = terminal.clear();
+                            }
                             _ => {}
                         }
                         while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
@@ -707,6 +710,9 @@ impl ClientApp {
                                             MouseEventKind::ScrollDown => self.scroll_down(3),
                                             _ => {}
                                         }
+                                    }
+                                    Event::Resize(_, _) => {
+                                        let _ = terminal.clear();
                                     }
                                     _ => {}
                                 }

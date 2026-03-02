@@ -2441,6 +2441,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    // Clear full frame to prevent stale cells from prior layouts.
+    // This is critical on macOS terminals where ratatui's diff-based updates
+    // can leave outdated content when layout dimensions change between frames
+    // (e.g., diagram pane toggling, streaming text clearing, tool calls finishing).
+    frame.render_widget(Clear, area);
+
     if let Some(scroll) = app.changelog_scroll() {
         draw_changelog_overlay(frame, area, scroll);
         return;

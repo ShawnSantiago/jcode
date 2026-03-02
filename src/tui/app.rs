@@ -4052,6 +4052,9 @@ impl App {
                             Some(Ok(Event::Mouse(mouse))) => {
                                 self.handle_mouse_event(mouse);
                             }
+                            Some(Ok(Event::Resize(_, _))) => {
+                                let _ = terminal.clear();
+                            }
                             _ => {}
                         }
                         while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
@@ -4065,6 +4068,9 @@ impl App {
                                     }
                                     Event::Mouse(mouse) => {
                                         self.handle_mouse_event(mouse);
+                                    }
+                                    Event::Resize(_, _) => {
+                                        let _ = terminal.clear();
                                     }
                                     _ => {}
                                 }
@@ -4691,6 +4697,9 @@ impl App {
                             Some(Ok(Event::Mouse(mouse))) => {
                                 self.handle_mouse_event(mouse);
                             }
+                            Some(Ok(Event::Resize(_, _))) => {
+                                let _ = terminal.clear();
+                            }
                             _ => {}
                         }
                     }
@@ -4814,6 +4823,9 @@ impl App {
                             }
                             Event::Mouse(mouse) => {
                                 self.handle_mouse_event(mouse);
+                            }
+                            Event::Resize(_, _) => {
+                                let _ = terminal.clear();
                             }
                             _ => {}
                         }
@@ -12448,6 +12460,9 @@ impl App {
                             Some(Ok(Event::Paste(text))) => {
                                 self.handle_paste(text);
                             }
+                            Some(Ok(Event::Resize(_, _))) => {
+                                let _ = terminal.clear();
+                            }
                             _ => {}
                         }
                     }
@@ -12635,6 +12650,9 @@ impl App {
                             }
                             Some(Ok(Event::Paste(text))) => {
                                 self.handle_paste(text);
+                            }
+                            Some(Ok(Event::Resize(_, _))) => {
+                                let _ = terminal.clear();
                             }
                             _ => {}
                         }
@@ -13153,6 +13171,9 @@ impl App {
                                 }
                                 Some(Ok(Event::Paste(text))) => {
                                     self.handle_paste(text);
+                                }
+                                Some(Ok(Event::Resize(_, _))) => {
+                                    let _ = terminal.clear();
                                 }
                                 _ => {}
                             }
