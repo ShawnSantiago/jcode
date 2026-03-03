@@ -1919,8 +1919,26 @@ async fn handle_client(
                             // Task exited gracefully within timeout
                         }
                         Err(_) => {
-                            // Timed out waiting for graceful exit, force abort
+                            // Timed out waiting for graceful exit, force abort and wait
+                            // for the task to actually release resources (e.g. agent mutex)
                             handle.abort();
+                            match tokio::time::timeout(
+                                std::time::Duration::from_millis(2000),
+                                handle,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    crate::logging::info(
+                                        "Aborted processing task released resources",
+                                    );
+                                }
+                                Err(_) => {
+                                    crate::logging::warn(
+                                        "Aborted processing task did not release resources within 2s",
+                                    );
+                                }
+                            }
                         }
                     }
                     // Reset the signal for future turns

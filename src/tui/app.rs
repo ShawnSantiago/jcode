@@ -765,6 +765,8 @@ pub struct App {
     ambient_system_prompt: Option<String>,
     /// Pending login flow: if set, next input is intercepted as OAuth code or API key
     pending_login: Option<PendingLogin>,
+    /// Last mouse scroll event timestamp (for trackpad velocity detection)
+    last_mouse_scroll: Option<Instant>,
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
     /// Session picker overlay (None = not visible)
@@ -1070,6 +1072,7 @@ impl App {
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
             ambient_system_prompt: None,
             pending_login: None,
+            last_mouse_scroll: None,
             changelog_scroll: None,
             session_picker_overlay: None,
         };
@@ -1957,13 +1960,14 @@ impl App {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
             )
         {
+            let amt = self.mouse_scroll_amount();
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(3);
+                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(amt);
                     self.diff_pane_auto_scroll = false;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(3);
+                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(amt);
                 }
                 _ => {}
             }
@@ -1976,13 +1980,31 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                self.scroll_up(3);
+                let amt = self.mouse_scroll_amount();
+                self.scroll_up(amt);
             }
             MouseEventKind::ScrollDown => {
-                self.scroll_down(3);
+                let amt = self.mouse_scroll_amount();
+                self.scroll_down(amt);
             }
             _ => {}
         }
+    }
+
+    fn mouse_scroll_amount(&mut self) -> usize {
+        let now = Instant::now();
+        let amount = if let Some(last) = self.last_mouse_scroll {
+            let gap = now.duration_since(last);
+            if gap.as_millis() < 50 {
+                1
+            } else {
+                3
+            }
+        } else {
+            3
+        };
+        self.last_mouse_scroll = Some(now);
+        amount
     }
 
     fn scroll_up(&mut self, amount: usize) {
@@ -4516,7 +4538,9 @@ impl App {
                         }
                         // Stall detection: if processing for too long with no server events,
                         // cancel and reset so the user isn't stuck forever.
-                        const STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+                        // Provider-level SSE timeouts (90s) should catch most stalls first;
+                        // this is a secondary safety net.
+                        const STALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
                         if self.is_processing {
                             let stalled = self.last_stream_activity
                                 .map(|t| t.elapsed() > STALL_TIMEOUT)
@@ -4550,7 +4574,7 @@ impl App {
                                     });
                                 }
                                 self.push_display_message(DisplayMessage::system(
-                                    "⚠ Stream stalled (no response for 5 minutes). Processing cancelled. You can resend your message.".to_string()
+                                    "⚠ Stream stalled (no response for 2 minutes). Processing cancelled. You can resend your message.".to_string()
                                 ));
                             }
                         }

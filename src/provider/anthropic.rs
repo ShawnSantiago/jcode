@@ -900,8 +900,17 @@ async fn stream_response(
     let mut cache_read_input_tokens: Option<u64> = None;
     let mut cache_creation_input_tokens: Option<u64> = None;
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.context("Error reading stream chunk")?;
+    const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+    loop {
+        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk_result)) => chunk_result.context("Error reading stream chunk")?,
+            Ok(None) => break, // stream ended normally
+            Err(_) => {
+                crate::logging::warn("Anthropic SSE stream timed out (no data for 90s)");
+                anyhow::bail!("Stream read timeout: no data received for 90 seconds");
+            }
+        };
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
 
