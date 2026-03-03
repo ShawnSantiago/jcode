@@ -19,11 +19,11 @@ workflows:
       branch_patterns:
         - pattern: master
           include: true
-      when:
-        changeset:
-          includes:
-            - 'ios/**'
-            - 'codemagic.yaml'
+    when:
+      changeset:
+        includes:
+          - 'ios/**'
+          - 'codemagic.yaml'
     scripts:
       - name: Install XcodeGen
         script: brew install xcodegen
