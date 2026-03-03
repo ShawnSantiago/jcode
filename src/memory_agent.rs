@@ -366,7 +366,7 @@ impl MemoryAgent {
 
         let candidate_ids: Vec<String> = new_candidates.iter().map(|(e, _)| e.id.clone()).collect();
 
-        let relevant = self.evaluate_candidates(&context, new_candidates).await?;
+        let relevant = self.evaluate_candidates(session_id, &context, new_candidates).await?;
 
         let verified_ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
         let rejected_ids: Vec<String> = candidate_ids
@@ -423,6 +423,7 @@ impl MemoryAgent {
     /// Use Haiku to evaluate which candidates are actually relevant
     async fn evaluate_candidates(
         &self,
+        session_id: &str,
         context: &str,
         candidates: Vec<(MemoryEntry, f32)>,
     ) -> Result<Vec<MemoryEntry>> {
@@ -456,7 +457,8 @@ impl MemoryAgent {
 
                     if is_relevant {
                         crate::logging::info(&format!(
-                            "Memory relevant (sim={:.2}): {} - {}",
+                            "[{}] Memory relevant (sim={:.2}): {} - {}",
+                            session_id,
                             sim,
                             &entry.content[..entry.content.len().min(40)],
                             reason

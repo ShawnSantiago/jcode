@@ -1763,7 +1763,7 @@ impl MemoryManager {
                 test_mode: false,
             };
 
-            match manager.get_relevant_parallel(&messages).await {
+            match manager.get_relevant_parallel(&sid, &messages).await {
                 Ok((Some(prompt), memory_ids)) => {
                     let count = prompt
                         .lines()
@@ -1811,6 +1811,7 @@ impl MemoryManager {
     /// Returns (formatted_prompt, memory_ids) on success
     pub async fn get_relevant_parallel(
         &self,
+        session_id: &str,
         messages: &[crate::message::Message],
     ) -> Result<(Option<String>, Vec<String>)> {
         let context = format_context_for_relevance(messages);
@@ -1965,7 +1966,8 @@ impl MemoryManager {
                             relevant_ids.push(memory.id.clone());
                             relevant.push(memory.clone());
                             crate::logging::info(&format!(
-                                "Memory relevant (sim={:.2}): {}",
+                                "[{}] Memory relevant (sim={:.2}): {}",
+                                session_id,
                                 sim,
                                 crate::util::truncate_str(&memory.content, 50)
                             ));
@@ -2318,7 +2320,7 @@ impl MemoryManager {
 
 /// Embedding similarity threshold (0.0 - 1.0)
 /// Lower = more candidates, higher = fewer but more relevant
-pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.4;
+pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Maximum embedding hits to verify with sidecar
 pub const EMBEDDING_MAX_HITS: usize = 10;

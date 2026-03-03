@@ -197,9 +197,9 @@ impl Tool for MemoryTool {
                         });
 
                         let results = if mode == "cascade" {
-                            self.manager.find_similar_with_cascade(&query, 0.3, limit)?
+                            self.manager.find_similar_with_cascade(&query, 0.5, limit)?
                         } else {
-                            self.manager.find_similar(&query, 0.3, limit)?
+                            self.manager.find_similar(&query, 0.5, limit)?
                         };
 
                         memory::add_event(MemoryEventKind::ToolRecalled {
