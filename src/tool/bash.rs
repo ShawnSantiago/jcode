@@ -131,6 +131,15 @@ impl Tool for BashTool {
             }
 
             params.command = crate::browser::rewrite_command_with_full_path(&params.command);
+
+            // Start/attach a browser session for this jcode session.
+            // This gives each agent its own browser tab, preventing
+            // multi-agent conflicts when using the browser bridge.
+            if std::env::var("BROWSER_SESSION").is_err() {
+                if let Some(session_name) = crate::browser::ensure_browser_session(&ctx.session_id) {
+                    params.command = format!("BROWSER_SESSION={} {}", session_name, params.command);
+                }
+            }
         }
 
         // Foreground execution with stdin detection

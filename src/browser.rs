@@ -50,6 +50,82 @@ fn setup_marker_path() -> PathBuf {
     browser_dir().join(".setup-complete")
 }
 
+fn runtime_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(dir)
+    } else {
+        PathBuf::from("/tmp")
+    }
+}
+
+fn session_socket_path(name: &str) -> PathBuf {
+    runtime_dir().join(format!("browser-session-{}.sock", name))
+}
+
+fn session_pid_path(name: &str) -> PathBuf {
+    runtime_dir().join(format!("browser-session-{}.pid", name))
+}
+
+fn is_session_alive(name: &str) -> bool {
+    let pid_path = session_pid_path(name);
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            let proc_path = format!("/proc/{}", pid);
+            if std::path::Path::new(&proc_path).exists() {
+                return session_socket_path(name).exists();
+            }
+        }
+    }
+    false
+}
+
+pub fn ensure_browser_session(session_id: &str) -> Option<String> {
+    let session_name = sanitize_session_name(session_id);
+
+    if is_session_alive(&session_name) {
+        return Some(session_name);
+    }
+
+    let bin = browser_binary_path();
+    if !bin.exists() {
+        return None;
+    }
+
+    let result = std::process::Command::new(&bin)
+        .args(["session", "start", &session_name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match result {
+        Ok(mut child) => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if session_socket_path(&session_name).exists() && is_session_alive(&session_name) {
+                    let _ = child.stdout.take();
+                    return Some(session_name);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            eprintln!("[browser] session '{}' did not start within 5s", session_name);
+            None
+        }
+        Err(e) => {
+            eprintln!("[browser] Failed to start browser session '{}': {}", session_name, e);
+            None
+        }
+    }
+}
+
+fn sanitize_session_name(session_id: &str) -> String {
+    session_id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect()
+}
+
 pub fn is_browser_command(command: &str) -> bool {
     let trimmed = command.trim_start();
     trimmed.starts_with("browser ")
