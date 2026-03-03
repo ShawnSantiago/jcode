@@ -11,6 +11,7 @@ mod communicate;
 mod conversation_search;
 mod debug_socket;
 mod edit;
+mod gmail;
 mod glob;
 mod grep;
 mod invalid;
@@ -258,6 +259,7 @@ impl Registry {
                 Arc::new(remember::RememberTool::new()) as _,
             );
             m.insert("memory".into(), Arc::new(memory::MemoryTool::new()) as _);
+            m.insert("gmail".into(), Arc::new(gmail::GmailTool::new()) as _);
             m.insert(
                 "schedule".into(),
                 Arc::new(ambient::ScheduleTool::new()) as _,

@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
+pub mod google;
 pub mod oauth;
 
 use std::collections::HashMap;
@@ -40,6 +41,10 @@ pub struct AuthStatus {
     pub antigravity: AuthState,
     /// Cursor CLI available (via `cursor-agent` binary or API key)
     pub cursor: AuthState,
+    /// Google/Gmail OAuth configured
+    pub google: AuthState,
+    /// Google Gmail has send capability (Full tier)
+    pub google_can_send: bool,
 }
 
 /// Auth state for Anthropic which has multiple auth methods
@@ -209,6 +214,21 @@ impl AuthStatus {
         } else {
             AuthState::NotConfigured
         };
+
+        // Check Google/Gmail OAuth
+        match google::load_tokens() {
+            Ok(tokens) => {
+                if tokens.is_expired() {
+                    status.google = AuthState::Expired;
+                } else {
+                    status.google = AuthState::Available;
+                }
+                status.google_can_send = tokens.tier.can_send();
+            }
+            Err(_) => {
+                status.google = AuthState::NotConfigured;
+            }
+        }
 
         status
     }

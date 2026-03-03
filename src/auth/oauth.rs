@@ -67,8 +67,16 @@ fn generate_state() -> String {
     hex::encode(bytes)
 }
 
+pub fn generate_pkce_public() -> (String, String) {
+    generate_pkce()
+}
+
+pub fn generate_state_public() -> String {
+    generate_state()
+}
+
 /// Start local server and wait for OAuth callback
-fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
+pub fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
     eprintln!("Waiting for OAuth callback on port {}...", port);
 
