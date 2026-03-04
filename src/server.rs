@@ -1300,10 +1300,12 @@ impl Server {
         let debug_client_debug_response_tx = self.client_debug_response_tx.clone();
         let debug_jobs = Arc::clone(&self.debug_jobs);
         let debug_event_history = Arc::clone(&self.event_history);
+        let debug_event_counter = Arc::clone(&self.event_counter);
         let debug_swarm_event_tx = self.swarm_event_tx.clone();
         let debug_server_identity = self.identity.clone();
         let debug_start_time = std::time::Instant::now();
         let debug_ambient_runner = self.ambient_runner.clone();
+        let debug_mcp_pool = Arc::clone(&self.mcp_pool);
 
         let debug_handle = tokio::spawn(async move {
             loop {
@@ -1325,10 +1327,12 @@ impl Server {
                         let client_debug_response_tx = debug_client_debug_response_tx.clone();
                         let debug_jobs = Arc::clone(&debug_jobs);
                         let event_history = Arc::clone(&debug_event_history);
+                        let event_counter = Arc::clone(&debug_event_counter);
                         let swarm_event_tx = debug_swarm_event_tx.clone();
                         let server_identity = debug_server_identity.clone();
                         let server_start_time = debug_start_time;
                         let ambient_runner = debug_ambient_runner.clone();
+                        let mcp_pool = Some(debug_mcp_pool.clone());
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_debug_client(
@@ -1349,10 +1353,12 @@ impl Server {
                                 client_debug_response_tx,
                                 debug_jobs,
                                 event_history,
+                                event_counter,
                                 swarm_event_tx,
                                 server_identity,
                                 server_start_time,
                                 ambient_runner,
+                                mcp_pool,
                             )
                             .await
                             {
@@ -2344,6 +2350,7 @@ async fn handle_client(
                     provider_model,
                     available_models,
                     tool_names,
+                    upstream_provider,
                 ) = {
                     let agent_guard = agent.lock().await;
                     (
@@ -2353,6 +2360,7 @@ async fn handle_client(
                         agent_guard.provider_model(),
                         agent_guard.available_models_display(),
                         agent_guard.tool_names().await,
+                        agent_guard.last_upstream_provider(),
                     )
                 };
 
@@ -2402,6 +2410,7 @@ async fn handle_client(
                     server_icon: Some(server_icon.clone()),
                     server_has_update: Some(server_has_newer_binary()),
                     was_interrupted: None,
+                    upstream_provider,
                 };
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
@@ -2600,6 +2609,7 @@ async fn handle_client(
                             provider_model,
                             available_models,
                             tool_names,
+                            upstream_provider,
                         ) = {
                             let agent_guard = agent.lock().await;
                             (
@@ -2609,6 +2619,7 @@ async fn handle_client(
                                 agent_guard.provider_model(),
                                 agent_guard.available_models_display(),
                                 agent_guard.tool_names().await,
+                                agent_guard.last_upstream_provider(),
                             )
                         };
 
@@ -2656,6 +2667,7 @@ async fn handle_client(
                             server_icon: Some(server_icon.clone()),
                             server_has_update: Some(server_has_newer_binary()),
                             was_interrupted: if was_interrupted { Some(true) } else { None },
+                            upstream_provider,
                         };
                         let json = encode_event(&event);
                         let mut w = writer.lock().await;
@@ -4098,6 +4110,7 @@ async fn handle_client(
                     &swarm_coordinators,
                     &swarm_plans,
                     coordinator_model,
+                    Some(Arc::clone(&mcp_pool)),
                 )
                 .await
                 {
@@ -4914,6 +4927,198 @@ async fn handle_client(
                 }
             }
 
+            Request::CommAwaitMembers {
+                id,
+                session_id: req_session_id,
+                target_status,
+                session_ids: requested_ids,
+                timeout_secs,
+            } => {
+                let swarm_id = {
+                    let members = swarm_members.read().await;
+                    members
+                        .get(&req_session_id)
+                        .and_then(|m| m.swarm_id.clone())
+                };
+
+                if let Some(swarm_id) = swarm_id {
+                    // Determine which sessions to watch
+                    let watch_ids: Vec<String> = if requested_ids.is_empty() {
+                        // Watch all non-self members in the swarm
+                        let swarms = swarms_by_id.read().await;
+                        swarms
+                            .get(&swarm_id)
+                            .map(|s| {
+                                s.iter()
+                                    .filter(|sid| *sid != &req_session_id)
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        requested_ids
+                    };
+
+                    if watch_ids.is_empty() {
+                        let _ = client_event_tx.send(ServerEvent::CommAwaitMembersResponse {
+                            id,
+                            completed: true,
+                            members: vec![],
+                            summary: "No other members in swarm to wait for.".to_string(),
+                        });
+                    } else {
+                        let timeout = std::time::Duration::from_secs(
+                            timeout_secs.unwrap_or(3600),
+                        );
+                        let swarm_members_clone = swarm_members.clone();
+                        let mut event_rx = swarm_event_tx.subscribe();
+                        let client_tx = client_event_tx.clone();
+
+                        // Spawn a task that watches for status changes
+                        tokio::spawn(async move {
+                            let deadline = tokio::time::Instant::now() + timeout;
+
+                            loop {
+                                // Check current state
+                                let (all_done, member_statuses) = {
+                                    let members = swarm_members_clone.read().await;
+                                    let statuses: Vec<crate::protocol::AwaitedMemberStatus> =
+                                        watch_ids
+                                            .iter()
+                                            .map(|sid| {
+                                                let (name, status) = members
+                                                    .get(sid)
+                                                    .map(|m| {
+                                                        (
+                                                            m.friendly_name.clone(),
+                                                            m.status.clone(),
+                                                        )
+                                                    })
+                                                    .unwrap_or((None, "unknown".to_string()));
+                                                let done = target_status.contains(&status)
+                                                    || (status == "unknown"
+                                                        && (target_status.contains(&"stopped".to_string())
+                                                            || target_status.contains(&"completed".to_string())));
+                                                crate::protocol::AwaitedMemberStatus {
+                                                    session_id: sid.clone(),
+                                                    friendly_name: name,
+                                                    status,
+                                                    done,
+                                                }
+                                            })
+                                            .collect();
+                                    let all = statuses.iter().all(|s| s.done);
+                                    (all, statuses)
+                                };
+
+                                if all_done {
+                                    let done_names: Vec<String> = member_statuses
+                                        .iter()
+                                        .map(|m| {
+                                            m.friendly_name
+                                                .clone()
+                                                .unwrap_or_else(|| m.session_id[..8.min(m.session_id.len())].to_string())
+                                        })
+                                        .collect();
+                                    let _ = client_tx.send(
+                                        ServerEvent::CommAwaitMembersResponse {
+                                            id,
+                                            completed: true,
+                                            members: member_statuses,
+                                            summary: format!(
+                                                "All {} members are done: {}",
+                                                done_names.len(),
+                                                done_names.join(", ")
+                                            ),
+                                        },
+                                    );
+                                    return;
+                                }
+
+                                // Wait for next status change event or timeout
+                                let remaining = deadline.saturating_duration_since(
+                                    tokio::time::Instant::now(),
+                                );
+                                if remaining.is_zero() {
+                                    let pending: Vec<String> = member_statuses
+                                        .iter()
+                                        .filter(|m| !m.done)
+                                        .map(|m| {
+                                            let name = m
+                                                .friendly_name
+                                                .clone()
+                                                .unwrap_or_else(|| m.session_id[..8.min(m.session_id.len())].to_string());
+                                            format!("{} ({})", name, m.status)
+                                        })
+                                        .collect();
+                                    let _ = client_tx.send(
+                                        ServerEvent::CommAwaitMembersResponse {
+                                            id,
+                                            completed: false,
+                                            members: member_statuses,
+                                            summary: format!(
+                                                "Timed out. Still waiting on: {}",
+                                                pending.join(", ")
+                                            ),
+                                        },
+                                    );
+                                    return;
+                                }
+
+                                // Wait for a relevant status_change event
+                                match tokio::time::timeout(remaining, event_rx.recv()).await {
+                                    Ok(Ok(event)) => {
+                                        // Only recheck on status changes for watched sessions
+                                        if let SwarmEventType::StatusChange { .. } = &event.event {
+                                            if watch_ids.contains(&event.session_id) {
+                                                continue; // Recheck at top of loop
+                                            }
+                                        }
+                                        // Also recheck on member leave events
+                                        if let SwarmEventType::MemberChange {
+                                            action,
+                                        } = &event.event
+                                        {
+                                            if action == "left"
+                                                && watch_ids.contains(&event.session_id)
+                                            {
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                                        // Missed events, recheck state immediately
+                                        continue;
+                                    }
+                                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                                        let _ = client_tx.send(
+                                            ServerEvent::CommAwaitMembersResponse {
+                                                id,
+                                                completed: false,
+                                                members: member_statuses,
+                                                summary: "Server shutting down.".to_string(),
+                                            },
+                                        );
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        // Timeout
+                                        continue; // Will hit the timeout check at top
+                                    }
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Not in a swarm. Use a git repository to enable swarm features."
+                            .to_string(),
+                        retry_after_secs: None,
+                    });
+                }
+            }
+
             // These are handled via channels, not direct requests from TUI
             Request::ClientDebugCommand { id, .. } => {
                 let _ = client_event_tx.send(ServerEvent::Error {
@@ -5517,6 +5722,7 @@ async fn create_headless_session(
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
     _swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     model_override: Option<String>,
+    mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
 ) -> Result<String> {
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
@@ -5552,8 +5758,11 @@ async fn create_headless_session(
         registry.register_selfdev_tools().await;
     }
 
-    // Register MCP tools for headless sessions (no event channel)
-    registry.register_mcp_tools(None, None, None).await;
+    // Register MCP tools for headless sessions (no event channel).
+    // Use the shared pool if available to avoid spawning duplicate MCP server processes.
+    registry
+        .register_mcp_tools(None, mcp_pool, Some("headless".to_string()))
+        .await;
 
     // Create a new agent
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
@@ -6722,10 +6931,12 @@ async fn handle_debug_client(
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
     debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
     event_history: Arc<RwLock<Vec<SwarmEvent>>>,
+    event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
     server_identity: ServerIdentity,
     server_start_time: std::time::Instant,
     ambient_runner: Option<AmbientRunnerHandle>,
+    mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -6969,6 +7180,7 @@ async fn handle_debug_client(
                                 &swarm_coordinators,
                                 &swarm_plans,
                                 None,
+                                mcp_pool.clone(),
                             )
                             .await
                         } else if cmd.starts_with("destroy_session:") {
@@ -7001,11 +7213,38 @@ async fn handle_debug_client(
                                 let removed = removed_agent.is_some();
                                 if removed {
                                     // Clean up swarm membership
-                                    let swarm_id = {
+                                    let (swarm_id, friendly_name) = {
                                         let mut members = swarm_members.write().await;
-                                        members.remove(target_id).and_then(|m| m.swarm_id)
+                                        let info = members.remove(target_id).map(|m| (m.swarm_id, m.friendly_name));
+                                        info.map(|(sid, name)| (sid, name)).unwrap_or((None, None))
                                     };
                                     if let Some(ref id) = swarm_id {
+                                        // Fire status change event before removing from swarm
+                                        record_swarm_event(
+                                            &event_history,
+                                            &event_counter,
+                                            &swarm_event_tx,
+                                            target_id.to_string(),
+                                            friendly_name.clone(),
+                                            Some(id.clone()),
+                                            SwarmEventType::StatusChange {
+                                                old_status: "ready".to_string(),
+                                                new_status: "stopped".to_string(),
+                                            },
+                                        )
+                                        .await;
+                                        record_swarm_event(
+                                            &event_history,
+                                            &event_counter,
+                                            &swarm_event_tx,
+                                            target_id.to_string(),
+                                            friendly_name,
+                                            Some(id.clone()),
+                                            SwarmEventType::MemberChange {
+                                                action: "left".to_string(),
+                                            },
+                                        )
+                                        .await;
                                         // Remove from swarm (scoped to drop write guard)
                                         {
                                             let mut swarms = swarms_by_id.write().await;

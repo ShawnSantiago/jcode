@@ -327,6 +327,21 @@ pub enum Request {
         session_id: String,
         channel: String,
     },
+
+    /// Wait until specified (or all) swarm members reach a target status
+    #[serde(rename = "comm_await_members")]
+    CommAwaitMembers {
+        id: u64,
+        session_id: String,
+        /// Statuses that count as "done" (e.g. ["completed", "stopped"])
+        target_status: Vec<String>,
+        /// Specific session IDs to watch. If empty, watches all non-self members.
+        #[serde(default)]
+        session_ids: Vec<String>,
+        /// Timeout in seconds (default 3600 = 1 hour)
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// Server event sent to client
@@ -562,6 +577,9 @@ pub enum ServerEvent {
         /// Whether the session was interrupted mid-generation (crashed/disconnected while processing)
         #[serde(skip_serializing_if = "Option::is_none")]
         was_interrupted: Option<bool>,
+        /// Upstream provider (e.g., which provider OpenRouter routed to, or calculated preference)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        upstream_provider: Option<String>,
     },
 
     /// Server is reloading (clients should reconnect)
@@ -652,6 +670,18 @@ pub enum ServerEvent {
         new_session_id: String,
     },
 
+    /// Response to comm_await_members request
+    #[serde(rename = "comm_await_members_response")]
+    CommAwaitMembersResponse {
+        id: u64,
+        /// Whether the condition was met (false = timed out)
+        completed: bool,
+        /// Final status of each watched member
+        members: Vec<AwaitedMemberStatus>,
+        /// Human-readable summary
+        summary: String,
+    },
+
     /// Response to split request — new session created with cloned conversation
     #[serde(rename = "split_response")]
     SplitResponse {
@@ -731,6 +761,17 @@ pub struct SwarmMemberStatus {
     /// Role: "agent", "coordinator", "worktree_manager"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+}
+
+/// Status of a member being awaited by comm_await_members
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwaitedMemberStatus {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    pub status: String,
+    /// Whether this member reached the target status
+    pub done: bool,
 }
 
 /// Type of notification from another agent
@@ -814,6 +855,7 @@ impl Request {
             Request::CommAssignTask { id, .. } => *id,
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
+            Request::CommAwaitMembers { id, .. } => *id,
         }
     }
 }
@@ -1046,6 +1088,96 @@ mod tests {
                 assert!(!is_password, "is_password should default to false");
             }
             _ => panic!("expected StdinRequest"),
+        }
+    }
+
+    #[test]
+    fn test_comm_await_members_roundtrip() {
+        let req = Request::CommAwaitMembers {
+            id: 55,
+            session_id: "sess_waiter".to_string(),
+            target_status: vec!["completed".to_string(), "stopped".to_string()],
+            session_ids: vec!["sess_a".to_string(), "sess_b".to_string()],
+            timeout_secs: Some(120),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"comm_await_members\""));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id(), 55);
+        match decoded {
+            Request::CommAwaitMembers {
+                session_id,
+                target_status,
+                session_ids,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(session_id, "sess_waiter");
+                assert_eq!(target_status, vec!["completed", "stopped"]);
+                assert_eq!(session_ids, vec!["sess_a", "sess_b"]);
+                assert_eq!(timeout_secs, Some(120));
+            }
+            _ => panic!("expected CommAwaitMembers"),
+        }
+    }
+
+    #[test]
+    fn test_comm_await_members_defaults() {
+        let json = r#"{"type":"comm_await_members","id":1,"session_id":"s1","target_status":["completed"]}"#;
+        let decoded: Request = serde_json::from_str(json).unwrap();
+        match decoded {
+            Request::CommAwaitMembers {
+                session_ids,
+                timeout_secs,
+                ..
+            } => {
+                assert!(session_ids.is_empty(), "session_ids should default to empty");
+                assert_eq!(timeout_secs, None, "timeout_secs should default to None");
+            }
+            _ => panic!("expected CommAwaitMembers"),
+        }
+    }
+
+    #[test]
+    fn test_comm_await_members_response_roundtrip() {
+        let event = ServerEvent::CommAwaitMembersResponse {
+            id: 55,
+            completed: true,
+            members: vec![
+                AwaitedMemberStatus {
+                    session_id: "sess_a".to_string(),
+                    friendly_name: Some("fox".to_string()),
+                    status: "completed".to_string(),
+                    done: true,
+                },
+                AwaitedMemberStatus {
+                    session_id: "sess_b".to_string(),
+                    friendly_name: Some("wolf".to_string()),
+                    status: "stopped".to_string(),
+                    done: true,
+                },
+            ],
+            summary: "All 2 members are done: fox, wolf".to_string(),
+        };
+        let json = encode_event(&event);
+        assert!(json.contains("\"type\":\"comm_await_members_response\""));
+        let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
+        match decoded {
+            ServerEvent::CommAwaitMembersResponse {
+                id,
+                completed,
+                members,
+                summary,
+            } => {
+                assert_eq!(id, 55);
+                assert!(completed);
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0].friendly_name.as_deref(), Some("fox"));
+                assert!(members[0].done);
+                assert_eq!(members[1].status, "stopped");
+                assert!(summary.contains("fox"));
+            }
+            _ => panic!("expected CommAwaitMembersResponse"),
         }
     }
 }

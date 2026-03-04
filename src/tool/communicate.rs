@@ -12,8 +12,19 @@ fn socket_path() -> std::path::PathBuf {
 }
 
 fn send_request(request: &Value) -> Result<Value> {
+    send_request_with_timeout(request, None)
+}
+
+fn send_request_with_timeout(
+    request: &Value,
+    timeout: Option<std::time::Duration>,
+) -> Result<Value> {
     let path = socket_path();
     let mut stream = SyncStream::connect(&path)?;
+
+    if let Some(t) = timeout {
+        stream.set_read_timeout(Some(t))?;
+    }
 
     let json = serde_json::to_string(request)? + "\n";
     stream.write_all(json.as_bytes())?;
@@ -80,6 +91,12 @@ struct CommunicateInput {
     task_id: Option<String>,
     #[serde(default)]
     plan_items: Option<Vec<PlanItem>>,
+    #[serde(default)]
+    target_status: Option<Vec<String>>,
+    #[serde(default)]
+    session_ids: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_minutes: Option<u64>,
 }
 
 #[async_trait]
@@ -109,7 +126,9 @@ impl Tool for CommunicateTool {
          - \"resync_plan\": Attach your session to the current swarm plan and re-sync.\n\
          - \"assign_task\": (Coordinator only) Assign a plan task to a specific agent.\n\
          - \"subscribe_channel\": Subscribe to a named channel.\n\
-         - \"unsubscribe_channel\": Unsubscribe from a named channel."
+         - \"unsubscribe_channel\": Unsubscribe from a named channel.\n\
+         - \"await_members\": Block until other agents reach a target status (e.g. completed/stopped). \
+         Use this to wait for other agents to finish before proceeding with a task like cutting a release."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -122,7 +141,7 @@ impl Tool for CommunicateTool {
                     "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list",
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
                              "summary", "read_context", "resync_plan", "assign_task",
-                             "subscribe_channel", "unsubscribe_channel"],
+                             "subscribe_channel", "unsubscribe_channel", "await_members"],
                     "description": "The communication action to perform"
                 },
                 "key": {
@@ -177,6 +196,20 @@ impl Tool for CommunicateTool {
                 "task_id": {
                     "type": "string",
                     "description": "For 'assign_task': the ID of the task in the swarm plan to assign."
+                },
+                "target_status": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For 'await_members': statuses that count as done (e.g. ['completed', 'stopped']). Defaults to ['completed', 'stopped', 'failed']."
+                },
+                "session_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For 'await_members': specific session IDs to watch. If omitted, watches all other members in the swarm."
+                },
+                "timeout_minutes": {
+                    "type": "integer",
+                    "description": "For 'await_members': max minutes to wait (default: 60)."
                 },
                 "plan_items": {
                     "type": "array",
@@ -796,10 +829,95 @@ impl Tool for CommunicateTool {
                 }
             }
 
+            "await_members" => {
+                let target_status = params.target_status.unwrap_or_else(|| {
+                    vec![
+                        "completed".to_string(),
+                        "stopped".to_string(),
+                        "failed".to_string(),
+                    ]
+                });
+                let session_ids = params.session_ids.unwrap_or_default();
+                let timeout_minutes = params.timeout_minutes.unwrap_or(60);
+                let timeout_secs = timeout_minutes * 60;
+
+                let request = json!({
+                    "type": "comm_await_members",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "target_status": target_status,
+                    "session_ids": session_ids,
+                    "timeout_secs": timeout_secs
+                });
+
+                let socket_timeout =
+                    std::time::Duration::from_secs(timeout_secs + 30);
+
+                match send_request_with_timeout(&request, Some(socket_timeout)) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        let completed = response
+                            .get("completed")
+                            .and_then(|c| c.as_bool())
+                            .unwrap_or(false);
+                        let summary = response
+                            .get("summary")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("Unknown result")
+                            .to_string();
+
+                        let mut output = if completed {
+                            format!("All members done. {}\n", summary)
+                        } else {
+                            format!("Await incomplete. {}\n", summary)
+                        };
+
+                        if let Some(members) =
+                            response.get("members").and_then(|m| m.as_array())
+                        {
+                            output.push_str("\nMember statuses:\n");
+                            for member in members {
+                                let name = member
+                                    .get("friendly_name")
+                                    .and_then(|n| n.as_str())
+                                    .or_else(|| {
+                                        member
+                                            .get("session_id")
+                                            .and_then(|s| s.as_str())
+                                    })
+                                    .unwrap_or("?");
+                                let status = member
+                                    .get("status")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("?");
+                                let done = member
+                                    .get("done")
+                                    .and_then(|d| d.as_bool())
+                                    .unwrap_or(false);
+                                let icon = if done { "✓" } else { "✗" };
+                                output.push_str(&format!(
+                                    "  {} {} ({})",
+                                    icon, name, status
+                                ));
+                                output.push('\n');
+                            }
+                        }
+
+                        Ok(ToolOutput::new(output))
+                    }
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Failed to await members: {}",
+                        e
+                    )),
+                }
+            }
+
             _ => Err(anyhow::anyhow!(
                 "Unknown action '{}'. Valid actions: share, read, message, broadcast, dm, channel, list, \
                  approve_plan, reject_plan, spawn, stop, assign_role, summary, read_context, \
-                 resync_plan, assign_task, subscribe_channel, unsubscribe_channel",
+                 resync_plan, assign_task, subscribe_channel, unsubscribe_channel, await_members",
                 params.action
             )),
         }
