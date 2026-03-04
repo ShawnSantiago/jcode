@@ -139,6 +139,47 @@ fn build_search_index(
     combined.to_lowercase()
 }
 
+fn build_search_index_from_summary(
+    id: &str,
+    short_name: &str,
+    title: &str,
+    working_dir: Option<&str>,
+    save_label: Option<&str>,
+    messages: &[SessionMessageSummary],
+) -> String {
+    let mut combined = String::new();
+    combined.push_str(title);
+    combined.push(' ');
+    combined.push_str(short_name);
+    combined.push(' ');
+    combined.push_str(id);
+
+    if let Some(dir) = working_dir {
+        combined.push(' ');
+        combined.push_str(dir);
+    }
+
+    if let Some(label) = save_label {
+        combined.push(' ');
+        combined.push_str(label);
+    }
+
+    let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
+    for msg in messages {
+        let content = msg.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        combined.push(' ');
+        push_with_byte_budget(&mut combined, content, &mut budget);
+        if budget == 0 {
+            break;
+        }
+    }
+
+    combined.to_lowercase()
+}
+
 fn session_scan_limit() -> usize {
     std::env::var("JCODE_SESSION_PICKER_MAX_SESSIONS")
         .ok()
@@ -248,8 +289,61 @@ struct SessionSummary {
 #[derive(Deserialize)]
 struct SessionMessageSummary {
     role: Role,
+    #[serde(default, deserialize_with = "deserialize_content_text")]
+    content: String,
     #[serde(default)]
     token_usage: Option<SessionTokenUsageSummary>,
+}
+
+fn deserialize_content_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct ContentVisitor;
+
+    impl<'de> de::Visitor<'de> for ContentVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or array of content blocks")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<String, A::Error> {
+            let mut text = String::new();
+            while let Some(block) = seq.next_element::<serde_json::Value>()? {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if block_type == "text" || block_type == "" {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(t);
+                    }
+                }
+            }
+            Ok(text)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+    }
+
+    deserializer.deserialize_any(ContentVisitor)
 }
 
 #[derive(Deserialize)]
@@ -380,13 +474,13 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
 
             let title = session.title.unwrap_or_else(|| "Untitled".to_string());
             let messages_preview: Vec<PreviewMessage> = Vec::new();
-            let search_index = build_search_index(
+            let search_index = build_search_index_from_summary(
                 &stem,
                 &short_name,
                 &title,
                 session.working_dir.as_deref(),
                 session.save_label.as_deref(),
-                &messages_preview,
+                &session.messages,
             );
 
             sessions.push(SessionInfo {
