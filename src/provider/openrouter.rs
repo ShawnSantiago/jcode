@@ -813,6 +813,41 @@ impl OpenRouterProvider {
         self.provider_routing.read().await.clone()
     }
 
+    /// Return the currently preferred provider for display.
+    /// Returns the pinned provider if set, otherwise the top-ranked provider from endpoint data.
+    pub fn preferred_provider(&self) -> Option<String> {
+        let model = self.model.try_read().ok()?.clone();
+
+        // Check pin first
+        if let Ok(pin) = self.provider_pin.lock() {
+            if let Some(ref pin) = *pin {
+                if pin.model == model {
+                    return Some(pin.provider.clone());
+                }
+            }
+        }
+
+        // Check explicit routing
+        if let Ok(routing) = self.provider_routing.try_read() {
+            if let Some(ref order) = routing.order {
+                if let Some(first) = order.first() {
+                    return Some(first.clone());
+                }
+            }
+        }
+
+        // Fall back to ranked endpoint data
+        let endpoints = load_endpoints_disk_cache(&model).or_else(|| {
+            self.endpoints_cache
+                .try_read()
+                .ok()?
+                .get(&model)
+                .map(|(_, eps)| eps.clone())
+        })?;
+        let ranked = Self::rank_providers_from_endpoints(&endpoints);
+        ranked.into_iter().next()
+    }
+
     /// Return a list of known/observed providers for a model (for autocomplete).
     pub fn available_providers_for_model(&self, model: &str) -> Vec<String> {
         let mut providers: Vec<String> = Vec::new();
@@ -1772,6 +1807,10 @@ impl Provider for OpenRouterProvider {
 
     fn supports_compaction(&self) -> bool {
         true
+    }
+
+    fn preferred_provider(&self) -> Option<String> {
+        self.preferred_provider()
     }
 
     fn context_window(&self) -> usize {

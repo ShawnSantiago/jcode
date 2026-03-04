@@ -118,6 +118,11 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// Return the currently preferred upstream provider (e.g., for OpenRouter routing display).
+    fn preferred_provider(&self) -> Option<String> {
+        None
+    }
+
     /// Get all model routes for the unified picker.
     /// Returns every (model, provider, api_method, available, detail) combination.
     fn model_routes(&self) -> Vec<ModelRoute> {
@@ -1899,6 +1904,15 @@ impl Provider for MultiProvider {
             }
         }
         Vec::new()
+    }
+
+    fn preferred_provider(&self) -> Option<String> {
+        if let Some(ref openrouter) = self.openrouter {
+            if matches!(*self.active.read().unwrap(), ActiveProvider::OpenRouter) {
+                return openrouter.preferred_provider();
+            }
+        }
+        None
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {

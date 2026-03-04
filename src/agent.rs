@@ -1034,7 +1034,9 @@ impl Agent {
     }
 
     pub fn last_upstream_provider(&self) -> Option<String> {
-        self.last_upstream_provider.clone()
+        self.last_upstream_provider
+            .clone()
+            .or_else(|| self.provider.preferred_provider())
     }
 
     pub fn provider_name(&self) -> String {
