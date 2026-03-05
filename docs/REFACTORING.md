@@ -23,7 +23,11 @@ This document defines the safe, incremental path for refactoring jcode while pre
 
    - `scripts/check_warning_budget.sh`
 
-4. Prefer behavior-preserving moves first (extract/rename/split), then logic changes.
+4. Run security preflight before merges:
+
+   - `scripts/security_preflight.sh`
+
+5. Prefer behavior-preserving moves first (extract/rename/split), then logic changes.
 
 ## Phase Plan
 
@@ -60,6 +64,7 @@ This document defines the safe, incremental path for refactoring jcode while pre
 
 - Compile: `cargo check -q`
 - Warnings: `scripts/check_warning_budget.sh`
+- Security: `scripts/security_preflight.sh`
 - Unit+integration tests: `cargo test -q`
 - E2E tests: `cargo test --test e2e -q`
 - Combined: `scripts/refactor_phase1_verify.sh`
