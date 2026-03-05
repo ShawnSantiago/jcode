@@ -42,7 +42,7 @@ pub struct AuthStatus {
     pub copilot_has_api_token: bool,
     /// Antigravity CLI available
     pub antigravity: AuthState,
-    /// Cursor CLI available (via `cursor-agent` binary or API key)
+    /// Cursor provider configured via Cursor Agent plus API key or CLI session
     pub cursor: AuthState,
     /// Google/Gmail OAuth configured
     pub google: AuthState,
@@ -256,11 +256,18 @@ impl AuthStatus {
                 AuthState::NotConfigured
             };
 
-        status.cursor = if cursor::has_cursor_api_key()
-            || cursor::has_cursor_agent_cli()
-            || cursor::has_cursor_vscdb_token()
-        {
+        let cursor_has_cli = cursor::has_cursor_agent_cli();
+        let cursor_has_api_key = cursor::has_cursor_api_key();
+        let cursor_has_cli_auth = if cursor_has_cli {
+            cursor::has_cursor_agent_auth()
+        } else {
+            false
+        };
+
+        status.cursor = if cursor_has_cli && (cursor_has_api_key || cursor_has_cli_auth) {
             AuthState::Available
+        } else if cursor_has_cli || cursor_has_api_key {
+            AuthState::Expired
         } else {
             AuthState::NotConfigured
         };
@@ -468,9 +475,32 @@ fn dedup_preserve_order(mut values: Vec<std::ffi::OsString>) -> Vec<std::ffi::Os
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn restore_env_var(key: &str, previous: Option<OsString>) {
+        if let Some(previous) = previous {
+            std::env::set_var(key, previous);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_mock_cursor_agent(dir: &std::path::Path, script_body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("cursor-agent-mock");
+        std::fs::write(&path, script_body).expect("write mock cursor agent");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat mock cursor agent")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("chmod mock cursor agent");
+        path
+    }
 
     #[test]
     fn command_candidates_adds_extension_on_windows() {
@@ -642,6 +672,53 @@ mod tests {
         if status.copilot_has_api_token {
             assert_eq!(status.copilot, AuthState::Available);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_status_is_partial_when_api_key_exists_without_cli() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_api_key = std::env::var_os("CURSOR_API_KEY");
+        let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+
+        std::env::set_var("CURSOR_API_KEY", "cursor-test-key");
+        std::env::set_var(
+            "JCODE_CURSOR_CLI_PATH",
+            temp.path().join("missing-cursor-agent"),
+        );
+        AuthStatus::invalidate_cache();
+
+        let status = AuthStatus::check();
+        assert_eq!(status.cursor, AuthState::Expired);
+
+        restore_env_var("CURSOR_API_KEY", prev_api_key);
+        restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+        AuthStatus::invalidate_cache();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_status_is_available_for_authenticated_cli_session() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_api_key = std::env::var_os("CURSOR_API_KEY");
+        let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+        let mock_cli = write_mock_cursor_agent(
+            temp.path(),
+            "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo \"Authenticated\\nAccount: test@example.com\"\n  exit 0\nfi\nexit 1\n",
+        );
+
+        std::env::remove_var("CURSOR_API_KEY");
+        std::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
+        AuthStatus::invalidate_cache();
+
+        let status = AuthStatus::check();
+        assert_eq!(status.cursor, AuthState::Available);
+
+        restore_env_var("CURSOR_API_KEY", prev_api_key);
+        restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+        AuthStatus::invalidate_cache();
     }
 
     #[test]

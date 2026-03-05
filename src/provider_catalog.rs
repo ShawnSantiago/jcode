@@ -319,7 +319,7 @@ pub const CURSOR_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     auth_state_key: LoginProviderAuthStateKey::Cursor,
     auth_status_method: "API key / CLI",
     aliases: &[],
-    menu_detail: "API key or CLI login",
+    menu_detail: "browser login or API key",
     recommended: false,
     target: LoginProviderTarget::Cursor,
     order: LoginProviderSurfaceOrder::new(Some(11), Some(12), None, Some(9), Some(12)),

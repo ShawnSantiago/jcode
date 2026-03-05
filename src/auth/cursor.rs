@@ -6,9 +6,31 @@ pub fn has_cursor_api_key() -> bool {
     load_api_key().is_ok()
 }
 
+/// Resolve the Cursor Agent CLI path from the environment or default.
+pub fn cursor_agent_cli_path() -> String {
+    std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string())
+}
+
 /// Check if `cursor-agent` CLI is available on PATH.
 pub fn has_cursor_agent_cli() -> bool {
     super::command_available_from_env("JCODE_CURSOR_CLI_PATH", "cursor-agent")
+}
+
+/// Check whether Cursor Agent reports an authenticated local session.
+pub fn has_cursor_agent_auth() -> bool {
+    if !has_cursor_agent_cli() {
+        return false;
+    }
+
+    let output = match std::process::Command::new(cursor_agent_cli_path())
+        .arg("status")
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    status_output_indicates_authenticated(output.status.success(), &output.stdout, &output.stderr)
 }
 
 /// Check if Cursor IDE's local vscdb has an access token.
@@ -103,6 +125,7 @@ pub fn load_api_key() -> Result<String> {
 
     let file_path = config_file_path()?;
     if file_path.exists() {
+        crate::storage::harden_secret_file_permissions(&file_path);
         let content = std::fs::read_to_string(&file_path)
             .with_context(|| format!("Failed to read {}", file_path.display()))?;
         for line in content.lines() {
@@ -129,6 +152,7 @@ pub fn save_api_key(key: &str) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("No parent dir"))?;
     std::fs::create_dir_all(config_dir)?;
+    crate::platform::set_directory_permissions_owner_only(config_dir)?;
 
     let content = format!("CURSOR_API_KEY={}\n", key);
     std::fs::write(&file_path, &content)?;
@@ -143,6 +167,33 @@ fn config_file_path() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
         .join("jcode");
     Ok(config_dir.join("cursor.env"))
+}
+
+fn status_output_indicates_authenticated(success: bool, stdout: &[u8], stderr: &[u8]) -> bool {
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+    .to_ascii_lowercase();
+
+    if combined.contains("not authenticated")
+        || combined.contains("login required")
+        || combined.contains("not logged in")
+        || combined.contains("unauthenticated")
+    {
+        return false;
+    }
+
+    if combined.contains("authenticated")
+        || combined.contains("account")
+        || combined.contains("email")
+        || combined.contains("endpoint")
+    {
+        return true;
+    }
+
+    success
 }
 
 #[cfg(test)]
@@ -259,6 +310,24 @@ mod tests {
     fn load_api_key_empty_env_falls_through() {
         let key_str = "";
         assert!(key_str.trim().is_empty());
+    }
+
+    #[test]
+    fn status_output_detects_authenticated_session() {
+        assert!(status_output_indicates_authenticated(
+            true,
+            b"Authenticated\nAccount: user@example.com\nEndpoint: production",
+            b""
+        ));
+    }
+
+    #[test]
+    fn status_output_detects_missing_authentication() {
+        assert!(!status_output_indicates_authenticated(
+            true,
+            b"Not authenticated. Run cursor-agent login.",
+            b""
+        ));
     }
 
     fn load_key_from_file(path: &PathBuf) -> Result<String> {

@@ -19,6 +19,10 @@ const AVAILABLE_MODELS: &[&str] = &[
     "sonnet-4-thinking",
 ];
 
+fn runtime_cursor_api_key() -> Option<String> {
+    crate::auth::cursor::load_api_key().ok()
+}
+
 pub struct CursorCliProvider {
     cli_path: String,
     model: Arc<RwLock<String>>,
@@ -54,6 +58,7 @@ impl Provider for CursorCliProvider {
         let prompt = build_cli_prompt(system, messages);
         let model = self.model.read().unwrap().clone();
         let cli_path = self.cli_path.clone();
+        let api_key = runtime_cursor_api_key();
         let resume = resume_session_id.map(|s| s.to_string());
         let cwd = std::env::current_dir().ok();
         let (tx, rx) = mpsc::channel::<Result<crate::message::StreamEvent>>(100);
@@ -81,6 +86,10 @@ impl Provider for CursorCliProvider {
             cmd.arg(prompt);
             if let Some(dir) = cwd {
                 cmd.current_dir(dir);
+            }
+            if let Some(api_key) = api_key {
+                // Prefer env injection so the key never appears in argv/process listings.
+                cmd.env("CURSOR_API_KEY", api_key);
             }
 
             if let Err(e) = run_cli_text_command(cmd, tx.clone(), "Cursor").await {
@@ -149,5 +158,19 @@ mod tests {
 
         provider.set_model("composer-1.5").unwrap();
         assert_eq!(provider.model(), "composer-1.5");
+    }
+
+    #[test]
+    fn runtime_cursor_api_key_reads_env() {
+        let previous = std::env::var_os("CURSOR_API_KEY");
+        std::env::set_var("CURSOR_API_KEY", "cursor-env-test");
+
+        assert_eq!(runtime_cursor_api_key().as_deref(), Some("cursor-env-test"));
+
+        if let Some(previous) = previous {
+            std::env::set_var("CURSOR_API_KEY", previous);
+        } else {
+            std::env::remove_var("CURSOR_API_KEY");
+        }
     }
 }

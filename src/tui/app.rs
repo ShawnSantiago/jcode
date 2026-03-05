@@ -531,7 +531,7 @@ enum PendingLogin {
         key_name: String,
         default_model: Option<String>,
     },
-    /// Waiting for user to paste Cursor API key
+    /// Waiting for user to paste a Cursor API key.
     CursorApiKey,
     /// GitHub Copilot device flow in progress (polling in background)
     Copilot,
@@ -10254,37 +10254,13 @@ impl App {
     }
 
     fn start_cursor_login(&mut self) {
-        let binary =
-            std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
-
-        if let Ok(token) = crate::auth::cursor::read_vscdb_token() {
-            let preview = if token.len() > 20 {
-                format!("{}...", &token[..20])
-            } else {
-                token.clone()
-            };
-            if let Err(e) = crate::auth::cursor::save_api_key(&token) {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Found Cursor token in IDE storage but failed to save: {}",
-                    e
-                )));
-            } else {
-                self.push_display_message(DisplayMessage::system(format!(
-                    "✓ **Cursor token imported from IDE storage.**\n\n\
-                     Token: `{}`\n\
-                     Saved to `~/.config/jcode/cursor.env`",
-                    preview
-                )));
-                self.set_status_notice("Login: ✓ cursor (from IDE)");
-                crate::auth::AuthStatus::invalidate_cache();
-                return;
-            }
-        }
+        let binary = crate::auth::cursor::cursor_agent_cli_path();
 
         if crate::auth::cursor::has_cursor_agent_cli() {
             self.push_display_message(DisplayMessage::system(format!(
                 "**Cursor Login**\n\n\
-                 Running `{} login` to open browser authentication...",
+                 Running `{} login` to open browser authentication.\n\n\
+                 If that fails, jcode will fall back to saving a Cursor API key for `cursor-agent`.",
                 binary
             )));
             self.set_status_notice("Login: cursor browser...");
@@ -10311,7 +10287,9 @@ impl App {
             "**Cursor API Key**\n\n\
              Get your API key from: https://cursor.com/settings\n\
              (Dashboard > Integrations > User API Keys)\n\n\
-             **Paste your API key below** (it will be saved securely)."
+             jcode will save it securely and provide it to `cursor-agent` at runtime.\n\
+             You still need Cursor Agent installed to use the Cursor provider.\n\n\
+             **Paste your API key below**."
                 .to_string(),
         ));
         self.set_status_notice("Login: paste cursor key...");
@@ -10687,7 +10665,8 @@ impl App {
                         self.push_display_message(DisplayMessage::system(
                             "✓ **Cursor API key saved!**\n\n\
                              Stored at `~/.config/jcode/cursor.env`.\n\
-                             You can now use `/model` to switch to Cursor models."
+                             jcode will pass it to `cursor-agent` automatically.\n\
+                             Install Cursor Agent if it is not already on PATH."
                                 .to_string(),
                         ));
                         self.set_status_notice("Login: ✓ cursor");
