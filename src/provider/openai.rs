@@ -31,7 +31,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
-const DEFAULT_MODEL: &str = "gpt-5.3-codex-spark";
+const DEFAULT_MODEL: &str = "gpt-5.4";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/openai_chatgpt.md");
 const SELFDEV_SECTION_HEADER: &str = "# Self-Development Mode";
@@ -63,6 +63,8 @@ static WEBSOCKET_FAILURE_STREAKS: LazyLock<Arc<RwLock<HashMap<String, u32>>>> =
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.4-pro",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
     "gpt-5.2-chat-latest",
@@ -178,7 +180,10 @@ impl OpenAIProvider {
         // Check for model override from environment
         let mut model =
             std::env::var("JCODE_OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        if !AVAILABLE_MODELS.contains(&model.as_str()) {
+        if !crate::provider::known_openai_model_ids()
+            .iter()
+            .any(|known| known == &model)
+        {
             crate::logging::info(&format!(
                 "Warning: '{}' is not supported; falling back to '{}'",
                 model, DEFAULT_MODEL
@@ -321,6 +326,51 @@ impl OpenAIProvider {
             .replace("http://", "ws://")
     }
 
+    fn build_response_request(
+        model_id: &str,
+        instructions: String,
+        input: &[Value],
+        api_tools: &[Value],
+        is_chatgpt_mode: bool,
+        max_output_tokens: Option<u32>,
+        reasoning_effort: Option<&str>,
+        prompt_cache_key: Option<&str>,
+        prompt_cache_retention: Option<&str>,
+    ) -> Value {
+        let mut request = serde_json::json!({
+            "model": model_id,
+            "instructions": instructions,
+            "input": input,
+            "tools": api_tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+        });
+
+        if !is_chatgpt_mode {
+            if let Some(max_output_tokens) = max_output_tokens {
+                request["max_output_tokens"] = serde_json::json!(max_output_tokens);
+            }
+        }
+
+        if let Some(effort) = reasoning_effort {
+            request["reasoning"] = serde_json::json!({ "effort": effort });
+        }
+
+        if !is_chatgpt_mode {
+            if let Some(key) = prompt_cache_key {
+                request["prompt_cache_key"] = serde_json::json!(key);
+            }
+            if let Some(retention) = prompt_cache_retention {
+                request["prompt_cache_retention"] = serde_json::json!(retention);
+            }
+        }
+
+        request
+    }
+
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
         let availability = crate::provider::model_availability_for_account(&current);
@@ -361,9 +411,8 @@ impl OpenAIProvider {
             crate::provider::AccountModelAvailabilityState::Available => {}
         }
 
-        current
+        current.strip_suffix("[1m]").unwrap_or(&current).to_string()
     }
-
 }
 
 fn extract_selfdev_section(system: &str) -> Option<&str> {
@@ -1335,7 +1384,6 @@ impl OpenAIResponsesStream {
 
         None
     }
-
 }
 
 fn extract_cached_input_tokens(usage: &Value) -> Option<u64> {
@@ -1415,37 +1463,18 @@ impl Provider for OpenAIProvider {
             };
             (instructions, is_chatgpt)
         };
-
-        let mut request = serde_json::json!({
-            "model": model_id,
-            "instructions": instructions,
-            "input": input,
-            "tools": api_tools,
-            "tool_choice": "auto",
-            "parallel_tool_calls": false,
-            "stream": true,
-            "store": false,
-            "include": ["reasoning.encrypted_content"],
-        });
-
-        if !is_chatgpt_mode {
-            if let Some(max_output_tokens) = self.max_output_tokens {
-                request["max_output_tokens"] = serde_json::json!(max_output_tokens);
-            }
-        }
-
-        if let Some(ref effort) = *self.reasoning_effort.read().await {
-            request["reasoning"] = serde_json::json!({ "effort": effort });
-        }
-
-        if !is_chatgpt_mode {
-            if let Some(key) = self.prompt_cache_key.as_ref() {
-                request["prompt_cache_key"] = serde_json::json!(key);
-            }
-            if let Some(retention) = self.prompt_cache_retention.as_ref() {
-                request["prompt_cache_retention"] = serde_json::json!(retention);
-            }
-        }
+        let reasoning_effort = self.reasoning_effort.read().await.clone();
+        let request = Self::build_response_request(
+            &model_id,
+            instructions,
+            &input,
+            &api_tools,
+            is_chatgpt_mode,
+            self.max_output_tokens,
+            reasoning_effort.as_deref(),
+            self.prompt_cache_key.as_deref(),
+            self.prompt_cache_retention.as_deref(),
+        );
 
         // --- Persistent WebSocket continuation path ---
         // Try to reuse an existing WebSocket connection with previous_response_id
@@ -1661,11 +1690,13 @@ impl Provider for OpenAIProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        if !AVAILABLE_MODELS.contains(&model) {
+        if !crate::provider::known_openai_model_ids()
+            .iter()
+            .any(|known| known == model)
+        {
             anyhow::bail!(
-                "Unsupported OpenAI model '{}'. Only supported model is '{}'.",
+                "Unsupported OpenAI model '{}'. Use /model to choose from the models available to your account.",
                 model,
-                DEFAULT_MODEL
             );
         }
         let availability = crate::provider::model_availability_for_account(model);
@@ -1692,6 +1723,10 @@ impl Provider for OpenAIProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         AVAILABLE_MODELS.to_vec()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        crate::provider::known_openai_model_ids()
     }
 
     fn reasoning_effort(&self) -> Option<String> {
@@ -3066,10 +3101,123 @@ async fn record_websocket_success(
 mod tests {
     use super::*;
     use crate::auth::codex::CodexCredentials;
+    use anyhow::Result;
     use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
     const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str =
         include_str!("../../tests/fixtures/openai/bright_pearl_wrapped_tool_call.txt");
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct LiveOpenAITestEnv {
+        _lock: MutexGuard<'static, ()>,
+        _jcode_home: EnvVarGuard,
+        _transport: EnvVarGuard,
+        _temp: tempfile::TempDir,
+    }
+
+    impl LiveOpenAITestEnv {
+        fn new() -> Result<Option<Self>> {
+            let lock = ENV_LOCK.lock().unwrap();
+            let Some(source_auth) = real_codex_auth_path() else {
+                return Ok(None);
+            };
+
+            let temp = tempfile::Builder::new()
+                .prefix("jcode-openai-live-")
+                .tempdir()?;
+            let target_auth = temp
+                .path()
+                .join("external")
+                .join(".codex")
+                .join("auth.json");
+            std::fs::create_dir_all(
+                target_auth
+                    .parent()
+                    .expect("temp auth target should have a parent"),
+            )?;
+            std::fs::copy(source_auth, &target_auth)?;
+
+            let jcode_home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+            let transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "https");
+
+            Ok(Some(Self {
+                _lock: lock,
+                _jcode_home: jcode_home,
+                _transport: transport,
+                _temp: temp,
+            }))
+        }
+    }
+
+    fn real_codex_auth_path() -> Option<PathBuf> {
+        let home = dirs::home_dir()?;
+        let path = home.join(".codex").join("auth.json");
+        path.exists().then_some(path)
+    }
+
+    async fn live_openai_catalog() -> Result<Option<crate::provider::OpenAIModelCatalog>> {
+        let Some(_env) = LiveOpenAITestEnv::new()? else {
+            return Ok(None);
+        };
+        let creds = crate::auth::codex::load_credentials()?;
+        if !OpenAIProvider::is_chatgpt_mode(&creds) {
+            return Ok(None);
+        }
+
+        let token = openai_access_token(&Arc::new(RwLock::new(creds))).await?;
+        Ok(Some(
+            crate::provider::fetch_openai_model_catalog(&token).await?,
+        ))
+    }
+
+    async fn live_openai_smoke(model: &str, sentinel: &str) -> Result<Option<String>> {
+        let Some(_env) = LiveOpenAITestEnv::new()? else {
+            return Ok(None);
+        };
+        let creds = crate::auth::codex::load_credentials()?;
+        if !OpenAIProvider::is_chatgpt_mode(&creds) {
+            return Ok(None);
+        }
+
+        let provider = OpenAIProvider::new(creds);
+        provider.set_model(model)?;
+        let response = provider
+            .complete_simple(&format!("Reply with exactly {}.", sentinel), "")
+            .await?;
+        Ok(Some(response))
+    }
 
     #[test]
     fn test_openai_supports_codex_models() {
@@ -3309,6 +3457,145 @@ mod tests {
             OpenAIProvider::parse_max_output_tokens(Some("not-a-number")),
             Some(DEFAULT_MAX_OUTPUT_TOKENS)
         );
+    }
+
+    #[test]
+    fn test_build_response_request_for_gpt_5_4_1m_uses_base_model_without_extra_flags() {
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.4",
+            "system".to_string(),
+            &[],
+            &[],
+            true,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            Some("xhigh"),
+            Some("unused"),
+            Some("unused"),
+        );
+
+        assert_eq!(request["model"], serde_json::json!("gpt-5.4"));
+        assert!(request.get("model_context_window").is_none());
+        assert!(request.get("max_output_tokens").is_none());
+        assert!(request.get("prompt_cache_key").is_none());
+        assert!(request.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn test_build_response_request_omits_long_context_for_plain_gpt_5_4() {
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.4",
+            "system".to_string(),
+            &[],
+            &[],
+            true,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            None,
+            None,
+            None,
+        );
+
+        assert!(request.get("model_context_window").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires real OpenAI OAuth credentials"]
+    async fn live_openai_catalog_lists_gpt_5_4_family() -> Result<()> {
+        let Some(catalog) = live_openai_catalog().await? else {
+            eprintln!("skipping live OpenAI catalog test: no real OAuth credentials");
+            return Ok(());
+        };
+
+        crate::provider::populate_context_limits(catalog.context_limits.clone());
+        crate::provider::populate_account_models(catalog.available_models.clone());
+
+        assert!(
+            catalog
+                .available_models
+                .iter()
+                .any(|model| model.starts_with("gpt-5.4")),
+            "expected GPT-5.4 family in live catalog, got {:?}",
+            catalog.available_models
+        );
+        assert!(
+            crate::provider::known_openai_model_ids()
+                .iter()
+                .any(|model| model == "gpt-5.4"),
+            "expected GPT-5.4 in display model list"
+        );
+
+        let reports_long_context = catalog
+            .context_limits
+            .get("gpt-5.4")
+            .copied()
+            .unwrap_or_default()
+            >= 1_000_000;
+        assert_eq!(
+            crate::provider::known_openai_model_ids()
+                .iter()
+                .any(|model| model == "gpt-5.4[1m]"),
+            reports_long_context,
+            "displayed 1m alias should follow the live catalog"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires real OpenAI OAuth credentials"]
+    async fn live_openai_gpt_5_4_and_fast_requests_succeed() -> Result<()> {
+        let Some(catalog) = live_openai_catalog().await? else {
+            eprintln!("skipping live OpenAI response test: no real OAuth credentials");
+            return Ok(());
+        };
+        crate::provider::populate_context_limits(catalog.context_limits.clone());
+        crate::provider::populate_account_models(catalog.available_models.clone());
+
+        let Some(plain_response) = live_openai_smoke("gpt-5.4", "JCODE_GPT54_OK").await? else {
+            eprintln!("skipping live OpenAI response test: no real OAuth credentials");
+            return Ok(());
+        };
+        assert!(
+            plain_response.contains("JCODE_GPT54_OK"),
+            "unexpected GPT-5.4 response: {}",
+            plain_response
+        );
+
+        if catalog
+            .available_models
+            .iter()
+            .any(|model| model == "gpt-5.3-codex-spark")
+        {
+            let Some(fast_response) =
+                live_openai_smoke("gpt-5.3-codex-spark", "JCODE_GPT53_SPARK_OK").await?
+            else {
+                eprintln!("skipping live OpenAI fast-model test: no real OAuth credentials");
+                return Ok(());
+            };
+            assert!(
+                fast_response.contains("JCODE_GPT53_SPARK_OK"),
+                "unexpected gpt-5.3-codex-spark response: {}",
+                fast_response
+            );
+        }
+
+        if crate::provider::known_openai_model_ids()
+            .iter()
+            .any(|model| model == "gpt-5.4[1m]")
+        {
+            let Some(long_context_response) =
+                live_openai_smoke("gpt-5.4[1m]", "JCODE_GPT54_1M_OK").await?
+            else {
+                eprintln!("skipping live OpenAI 1m test: no real OAuth credentials");
+                return Ok(());
+            };
+            assert!(
+                long_context_response.contains("JCODE_GPT54_1M_OK"),
+                "unexpected GPT-5.4[1m] response: {}",
+                long_context_response
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

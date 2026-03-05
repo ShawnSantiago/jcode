@@ -226,8 +226,10 @@ pub trait Provider: Send + Sync {
         tokio::pin!(response);
 
         while let Some(event) = response.next().await {
-            if let Ok(StreamEvent::TextDelta(text)) = event {
-                result.push_str(&text);
+            match event {
+                Ok(StreamEvent::TextDelta(text)) => result.push_str(&text),
+                Ok(_) => {}
+                Err(err) => return Err(err),
             }
         }
 
@@ -248,6 +250,8 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 ];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.4-pro",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
     "gpt-5.2-chat-latest",
@@ -366,11 +370,31 @@ pub fn format_account_model_availability_detail(
 }
 
 fn normalize_model_id(model: &str) -> String {
-    model.trim().to_ascii_lowercase()
+    let normalized = model.trim().to_ascii_lowercase();
+    normalized
+        .strip_suffix("[1m]")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 fn normalize_provider_id(provider: &str) -> String {
     provider.trim().to_ascii_lowercase()
+}
+
+fn openai_static_model_ids() -> Vec<String> {
+    let mut models: Vec<String> = ALL_OPENAI_MODELS.iter().map(|m| (*m).to_string()).collect();
+
+    // Only advertise the explicit [1m] alias when the live catalog we fetched
+    // says this backend exposes a >=1M context window for GPT-5.4.
+    if get_cached_context_limit("gpt-5.4").unwrap_or_default() >= 1_000_000 {
+        if let Some(index) = models.iter().position(|model| model == "gpt-5.4") {
+            models.insert(index + 1, "gpt-5.4[1m]".to_string());
+        } else {
+            models.push("gpt-5.4[1m]".to_string());
+        }
+    }
+
+    models
 }
 
 /// Look up a cached context limit for a model.
@@ -428,6 +452,46 @@ pub fn populate_account_models(slugs: Vec<String>) {
         }
         crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
     }
+}
+
+fn merge_openai_model_ids(dynamic_models: Vec<String>) -> Vec<String> {
+    let mut models = openai_static_model_ids();
+    let mut seen: HashSet<String> = models
+        .iter()
+        .map(|model| normalize_model_id(model))
+        .collect();
+    let mut extras = Vec::new();
+
+    for model in dynamic_models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_model_id(trimmed);
+        if normalized.is_empty() || !seen.insert(normalized) {
+            continue;
+        }
+
+        extras.push(trimmed.to_string());
+    }
+
+    extras.sort();
+    models.extend(extras);
+    models
+}
+
+pub fn known_openai_model_ids() -> Vec<String> {
+    let dynamic_models = ACCOUNT_AVAILABLE_MODELS
+        .read()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .as_ref()
+                .map(|models| models.iter().cloned().collect())
+        })
+        .unwrap_or_default();
+    merge_openai_model_ids(dynamic_models)
 }
 
 pub fn note_openai_model_catalog_refresh_attempt() {
@@ -727,6 +791,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// Preferred model order for fallback selection.
 /// If the desired model isn't available, we try these in order.
 const OPENAI_MODEL_PREFERENCE: &[&str] = &[
+    "gpt-5.4",
     "gpt-5.3-codex-spark",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -860,6 +925,12 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
     };
     let model = model.as_str();
 
+    if is_1m {
+        if let Some(limit) = get_cached_context_limit(model) {
+            return Some(limit);
+        }
+    }
+
     // Spark variant has a smaller context window than the full codex model
     if model.starts_with("gpt-5.3-codex-spark") {
         return Some(128_000);
@@ -870,6 +941,12 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
         || model.starts_with("gpt-5-chat")
     {
         return Some(128_000);
+    }
+
+    // GPT-5.4 currently reports 272k on the live Codex OAuth catalog.
+    // If the backend starts advertising >=1M, the dynamic cache above takes over.
+    if model.starts_with("gpt-5.4") {
+        return Some(272_000);
     }
 
     // Most GPT-5.x codex/reasoning models: 272k per Codex backend API
@@ -1846,7 +1923,7 @@ impl Provider for MultiProvider {
                 .openai
                 .as_ref()
                 .map(|o| o.model())
-                .unwrap_or_else(|| "gpt-5.3-codex-spark".to_string()),
+                .unwrap_or_else(|| "gpt-5.4".to_string()),
             ActiveProvider::Copilot => self
                 .copilot_api
                 .read()
@@ -1987,7 +2064,7 @@ impl Provider for MultiProvider {
     fn available_models_display(&self) -> Vec<String> {
         let mut models = Vec::new();
         models.extend(ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()));
-        models.extend(ALL_OPENAI_MODELS.iter().map(|m| (*m).to_string()));
+        models.extend(known_openai_model_ids());
         {
             let copilot_guard = self.copilot_api.read().unwrap();
             if let Some(ref copilot) = *copilot_guard {
@@ -2089,8 +2166,8 @@ impl Provider for MultiProvider {
         }
 
         // OpenAI models
-        for model in ALL_OPENAI_MODELS {
-            let availability = model_availability_for_account(model);
+        for model in known_openai_model_ids() {
+            let availability = model_availability_for_account(&model);
             let (available, detail) = if !self.has_openai_creds {
                 (false, "no credentials".to_string())
             } else {
@@ -2109,7 +2186,7 @@ impl Provider for MultiProvider {
                 }
             };
             routes.push(ModelRoute {
-                model: model.to_string(),
+                model,
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
                 available,
@@ -2519,6 +2596,9 @@ mod tests {
     #[test]
     fn test_provider_for_model_openai() {
         assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
+        assert_eq!(provider_for_model("gpt-5.4"), Some("openai"));
+        assert_eq!(provider_for_model("gpt-5.4[1m]"), Some("openai"));
+        assert_eq!(provider_for_model("gpt-5.4-pro"), Some("openai"));
     }
 
     #[test]
@@ -2553,6 +2633,40 @@ mod tests {
         assert_eq!(context_limit_for_model("gpt-5.3-codex"), Some(272_000));
         assert_eq!(context_limit_for_model("gpt-5.2-codex"), Some(272_000));
         assert_eq!(context_limit_for_model("gpt-5-codex"), Some(272_000));
+    }
+
+    #[test]
+    fn test_context_limit_gpt_5_4() {
+        assert_eq!(context_limit_for_model("gpt-5.4"), Some(272_000));
+        assert_eq!(context_limit_for_model("gpt-5.4-pro"), Some(272_000));
+        assert_eq!(context_limit_for_model("gpt-5.4[1m]"), Some(272_000));
+    }
+
+    #[test]
+    fn test_normalize_model_id_strips_1m_suffix() {
+        assert_eq!(normalize_model_id("gpt-5.4[1m]"), "gpt-5.4");
+        assert_eq!(normalize_model_id(" GPT-5.4[1M] "), "gpt-5.4");
+    }
+
+    #[test]
+    fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
+        let models = merge_openai_model_ids(vec![
+            "gpt-5.4".to_string(),
+            "gpt-5.4-fast-preview".to_string(),
+            "gpt-5.4-fast-preview".to_string(),
+            " gpt-5.5-experimental ".to_string(),
+        ]);
+
+        assert!(models.iter().any(|model| model == "gpt-5.4"));
+        assert!(models.iter().any(|model| model == "gpt-5.4-fast-preview"));
+        assert!(models.iter().any(|model| model == "gpt-5.5-experimental"));
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.as_str() == "gpt-5.4-fast-preview")
+                .count(),
+            1
+        );
     }
 
     #[test]
