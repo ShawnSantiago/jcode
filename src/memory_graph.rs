@@ -788,7 +788,7 @@ mod tests {
             graph.add_memory(make_test_memory("B").with_tags(vec!["t1".into(), "t2".into()]));
         let id_c =
             graph.add_memory(make_test_memory("C").with_tags(vec!["t2".into(), "t3".into()]));
-        let id_d = graph.add_memory(make_test_memory("D").with_tags(vec!["t3".into()]));
+        let _id_d = graph.add_memory(make_test_memory("D").with_tags(vec!["t3".into()]));
 
         // Depth 1: should find A, B (via t1)
         let results_d1 = graph.cascade_retrieve(&[id_a.clone()], &[1.0], 1, 10);

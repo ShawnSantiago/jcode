@@ -363,7 +363,7 @@ mod tests {
         let content = "line 1\nline 2\nline 3\nline 4\nline 5";
 
         // Edit at line 1, with 2 lines padding - shouldn't go negative
-        let (start, end, ctx) = extract_context(content, 1, 1, 2);
+        let (start, _end, ctx) = extract_context(content, 1, 1, 2);
 
         assert_eq!(start, 1, "Should start at line 1 (can't go before)");
         assert!(ctx.contains("line 1"), "Should include line 1");
@@ -375,7 +375,7 @@ mod tests {
         let content = "line 1\nline 2\nline 3\nline 4\nline 5";
 
         // Edit at line 5, with 2 lines padding - shouldn't go past end
-        let (start, end, ctx) = extract_context(content, 5, 5, 2);
+        let (_start, end, ctx) = extract_context(content, 5, 5, 2);
 
         assert_eq!(end, 5, "Should end at line 5 (can't go past)");
         assert!(ctx.contains("line 5"), "Should include line 5");

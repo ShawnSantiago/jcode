@@ -53,19 +53,24 @@ pub fn is_release_build() -> bool {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitHubRelease {
     pub tag_name: String,
-    pub name: Option<String>,
-    pub html_url: String,
-    pub published_at: Option<String>,
+    #[serde(rename = "name")]
+    pub _name: Option<String>,
+    #[serde(rename = "html_url")]
+    pub _html_url: String,
+    #[serde(rename = "published_at")]
+    pub _published_at: Option<String>,
     pub assets: Vec<GitHubAsset>,
     #[serde(default)]
-    pub target_commitish: String,
+    #[serde(rename = "target_commitish")]
+    pub _target_commitish: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitHubAsset {
     pub name: String,
     pub browser_download_url: String,
-    pub size: u64,
+    #[serde(rename = "size")]
+    pub _size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,11 +383,11 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                 // Return a synthetic release so the caller knows an update was installed
                 return Ok(Some(GitHubRelease {
                     tag_name: format!("main-{}", latest_sha),
-                    name: Some(format!("Built from main ({})", latest_sha)),
-                    html_url: format!("https://github.com/{}/commit/{}", GITHUB_REPO, latest_sha),
-                    published_at: None,
+                    _name: Some(format!("Built from main ({})", latest_sha)),
+                    _html_url: format!("https://github.com/{}/commit/{}", GITHUB_REPO, latest_sha),
+                    _published_at: None,
                     assets: vec![],
-                    target_commitish: latest_sha.to_string(),
+                    _target_commitish: latest_sha.to_string(),
                 }));
             }
             Err(e) => {
@@ -605,7 +610,7 @@ pub enum UpdateCheckResult {
     UpdateAvailable {
         current: String,
         latest: String,
-        release: GitHubRelease,
+        _release: GitHubRelease,
     },
     UpdateInstalled {
         version: String,
@@ -666,7 +671,7 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
                 UpdateCheckResult::UpdateAvailable {
                     current,
                     latest,
-                    release,
+                    _release: release,
                 }
             }
         }

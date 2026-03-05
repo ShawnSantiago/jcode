@@ -65,7 +65,8 @@ struct ClaudeCodeEntry {
     entry_type: String,
     uuid: Option<String>,
     parent_uuid: Option<String>,
-    session_id: Option<String>,
+    #[serde(rename = "sessionId")]
+    _session_id: Option<String>,
     cwd: Option<String>,
     message: Option<ClaudeCodeMessage>,
     timestamp: Option<String>,
@@ -105,7 +106,8 @@ enum ClaudeCodeContentBlock {
     Thinking {
         thinking: String,
         #[serde(default)]
-        signature: Option<String>,
+        #[serde(rename = "signature")]
+        _signature: Option<String>,
     },
     ToolUse {
         id: String,
@@ -544,7 +546,7 @@ mod tests {
             },
             ClaudeCodeContentBlock::Thinking {
                 thinking: "let me think".to_string(),
-                signature: None,
+                _signature: None,
             },
             ClaudeCodeContentBlock::ToolUse {
                 id: "tool1".to_string(),
