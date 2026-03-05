@@ -1,6 +1,50 @@
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginProviderAuthKind {
+    OAuth,
+    ApiKey,
+    DeviceCode,
+    Cli,
+    Hybrid,
+}
+
+impl LoginProviderAuthKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OAuth => "OAuth",
+            Self::ApiKey => "API key",
+            Self::DeviceCode => "device code",
+            Self::Cli => "CLI",
+            Self::Hybrid => "API key / CLI",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginProviderTarget {
+    Claude,
+    OpenAi,
+    OpenRouter,
+    OpenAiCompatible(OpenAiCompatibleProfile),
+    Cursor,
+    Copilot,
+    Antigravity,
+    Google,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoginProviderDescriptor {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub auth_kind: LoginProviderAuthKind,
+    pub aliases: &'static [&'static str],
+    pub menu_detail: &'static str,
+    pub recommended: bool,
+    pub target: LoginProviderTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenAiCompatibleProfile {
     pub id: &'static str,
     pub display_name: &'static str,
@@ -91,8 +135,203 @@ const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 6] = [
     OPENAI_COMPAT_PROFILE,
 ];
 
+pub const CLAUDE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "claude",
+    display_name: "Anthropic/Claude",
+    auth_kind: LoginProviderAuthKind::OAuth,
+    aliases: &["anthropic"],
+    menu_detail: "requires Claude Pro or Max subscription",
+    recommended: true,
+    target: LoginProviderTarget::Claude,
+};
+
+pub const OPENAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "openai",
+    display_name: "OpenAI",
+    auth_kind: LoginProviderAuthKind::OAuth,
+    aliases: &[],
+    menu_detail: "requires ChatGPT Plus or Pro subscription",
+    recommended: true,
+    target: LoginProviderTarget::OpenAi,
+};
+
+pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "openrouter",
+    display_name: "OpenRouter",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &[],
+    menu_detail: "API key, pay-per-token, 200+ models",
+    recommended: false,
+    target: LoginProviderTarget::OpenRouter,
+};
+
+pub const OPENCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "opencode",
+    display_name: "OpenCode Zen",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &["opencode-zen", "zen"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(OPENCODE_PROFILE),
+};
+
+pub const OPENCODE_GO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "opencode-go",
+    display_name: "OpenCode Go",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &["opencodego"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(OPENCODE_GO_PROFILE),
+};
+
+pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "zai",
+    display_name: "Z.AI Coding",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &["z.ai", "z-ai", "zai-coding"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
+};
+
+pub const CHUTES_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "chutes",
+    display_name: "Chutes",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &[],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(CHUTES_PROFILE),
+};
+
+pub const CEREBRAS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "cerebras",
+    display_name: "Cerebras",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &["cerebrascode", "cerberascode"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(CEREBRAS_PROFILE),
+};
+
+pub const OPENAI_COMPAT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "openai-compatible",
+    display_name: "OpenAI-compatible",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    aliases: &["openai_compatible", "compat", "custom"],
+    menu_detail: "custom OpenAI-compatible endpoint",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(OPENAI_COMPAT_PROFILE),
+};
+
+pub const CURSOR_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "cursor",
+    display_name: "Cursor",
+    auth_kind: LoginProviderAuthKind::Hybrid,
+    aliases: &[],
+    menu_detail: "API key or CLI login",
+    recommended: false,
+    target: LoginProviderTarget::Cursor,
+};
+
+pub const COPILOT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "copilot",
+    display_name: "GitHub Copilot",
+    auth_kind: LoginProviderAuthKind::DeviceCode,
+    aliases: &[],
+    menu_detail: "GitHub device flow",
+    recommended: false,
+    target: LoginProviderTarget::Copilot,
+};
+
+pub const ANTIGRAVITY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "antigravity",
+    display_name: "Antigravity",
+    auth_kind: LoginProviderAuthKind::Cli,
+    aliases: &[],
+    menu_detail: "CLI login",
+    recommended: false,
+    target: LoginProviderTarget::Antigravity,
+};
+
+pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "google",
+    display_name: "Google/Gmail",
+    auth_kind: LoginProviderAuthKind::OAuth,
+    aliases: &["gmail"],
+    menu_detail: "read, draft, and send emails",
+    recommended: false,
+    target: LoginProviderTarget::Google,
+};
+
+const LOGIN_PROVIDERS: [LoginProviderDescriptor; 13] = [
+    CLAUDE_LOGIN_PROVIDER,
+    OPENAI_LOGIN_PROVIDER,
+    OPENROUTER_LOGIN_PROVIDER,
+    OPENCODE_LOGIN_PROVIDER,
+    OPENCODE_GO_LOGIN_PROVIDER,
+    ZAI_LOGIN_PROVIDER,
+    CHUTES_LOGIN_PROVIDER,
+    CEREBRAS_LOGIN_PROVIDER,
+    OPENAI_COMPAT_LOGIN_PROVIDER,
+    CURSOR_LOGIN_PROVIDER,
+    COPILOT_LOGIN_PROVIDER,
+    ANTIGRAVITY_LOGIN_PROVIDER,
+    GOOGLE_LOGIN_PROVIDER,
+];
+
+const TUI_LOGIN_PROVIDERS: [LoginProviderDescriptor; 12] = [
+    CLAUDE_LOGIN_PROVIDER,
+    OPENAI_LOGIN_PROVIDER,
+    OPENROUTER_LOGIN_PROVIDER,
+    OPENCODE_LOGIN_PROVIDER,
+    OPENCODE_GO_LOGIN_PROVIDER,
+    ZAI_LOGIN_PROVIDER,
+    CHUTES_LOGIN_PROVIDER,
+    CEREBRAS_LOGIN_PROVIDER,
+    OPENAI_COMPAT_LOGIN_PROVIDER,
+    COPILOT_LOGIN_PROVIDER,
+    ANTIGRAVITY_LOGIN_PROVIDER,
+    CURSOR_LOGIN_PROVIDER,
+];
+
 pub fn openai_compatible_profiles() -> &'static [OpenAiCompatibleProfile] {
     &OPENAI_COMPAT_PROFILES
+}
+
+pub fn login_providers() -> &'static [LoginProviderDescriptor] {
+    &LOGIN_PROVIDERS
+}
+
+pub fn tui_login_providers() -> &'static [LoginProviderDescriptor] {
+    &TUI_LOGIN_PROVIDERS
+}
+
+pub fn resolve_login_provider(input: &str) -> Option<LoginProviderDescriptor> {
+    let normalized = normalize_provider_input(input)?;
+    login_providers().iter().copied().find(|provider| {
+        provider.id == normalized || provider.aliases.iter().any(|alias| *alias == normalized)
+    })
+}
+
+pub fn resolve_login_selection(
+    input: &str,
+    providers: &[LoginProviderDescriptor],
+) -> Option<LoginProviderDescriptor> {
+    let trimmed = input.trim();
+    if let Ok(index) = trimmed.parse::<usize>() {
+        return index
+            .checked_sub(1)
+            .and_then(|idx| providers.get(idx))
+            .copied();
+    }
+
+    let provider = resolve_login_provider(trimmed)?;
+    providers
+        .iter()
+        .copied()
+        .find(|candidate| candidate.id == provider.id)
 }
 
 pub fn resolve_openai_compatible_profile(
@@ -340,6 +579,14 @@ fn env_override(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn normalize_provider_input(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
 fn dedup_sources(sources: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut seen = HashSet::new();
     let mut deduped = Vec::with_capacity(sources.len());
@@ -400,6 +647,102 @@ mod tests {
                 Some(profile.api_base)
             );
         }
+    }
+
+    #[test]
+    fn matrix_login_provider_aliases_resolve_to_canonical_ids() {
+        assert_eq!(
+            resolve_login_provider("anthropic").map(|provider| provider.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_login_provider("opencodego").map(|provider| provider.id),
+            Some("opencode-go")
+        );
+        assert_eq!(
+            resolve_login_provider("z.ai").map(|provider| provider.id),
+            Some("zai")
+        );
+        assert_eq!(
+            resolve_login_provider("compat").map(|provider| provider.id),
+            Some("openai-compatible")
+        );
+        assert_eq!(
+            resolve_login_provider("cerberascode").map(|provider| provider.id),
+            Some("cerebras")
+        );
+        assert_eq!(
+            resolve_login_provider("gmail").map(|provider| provider.id),
+            Some("google")
+        );
+    }
+
+    #[test]
+    fn matrix_login_provider_ids_and_aliases_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for provider in login_providers() {
+            assert!(
+                seen.insert(provider.id),
+                "duplicate login provider identifier: {}",
+                provider.id
+            );
+            for alias in provider.aliases {
+                assert!(
+                    seen.insert(*alias),
+                    "duplicate login provider alias: {}",
+                    alias
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_tui_login_selection_supports_numbers_and_names() {
+        let providers = tui_login_providers();
+        assert_eq!(
+            resolve_login_selection("1", providers).map(|provider| provider.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_login_selection("12", providers).map(|provider| provider.id),
+            Some("cursor")
+        );
+        assert_eq!(
+            resolve_login_selection("compat", providers).map(|provider| provider.id),
+            Some("openai-compatible")
+        );
+        assert!(resolve_login_selection("google", providers).is_none());
+    }
+
+    #[test]
+    fn matrix_cli_login_selection_preserves_existing_order() {
+        let providers = [
+            CLAUDE_LOGIN_PROVIDER,
+            OPENAI_LOGIN_PROVIDER,
+            COPILOT_LOGIN_PROVIDER,
+            OPENROUTER_LOGIN_PROVIDER,
+            OPENCODE_LOGIN_PROVIDER,
+            OPENCODE_GO_LOGIN_PROVIDER,
+            ZAI_LOGIN_PROVIDER,
+            CHUTES_LOGIN_PROVIDER,
+            CEREBRAS_LOGIN_PROVIDER,
+            OPENAI_COMPAT_LOGIN_PROVIDER,
+            CURSOR_LOGIN_PROVIDER,
+            ANTIGRAVITY_LOGIN_PROVIDER,
+            GOOGLE_LOGIN_PROVIDER,
+        ];
+        assert_eq!(
+            resolve_login_selection("3", &providers).map(|provider| provider.id),
+            Some("copilot")
+        );
+        assert_eq!(
+            resolve_login_selection("4", &providers).map(|provider| provider.id),
+            Some("openrouter")
+        );
+        assert_eq!(
+            resolve_login_selection("13", &providers).map(|provider| provider.id),
+            Some("google")
+        );
     }
 
     #[test]

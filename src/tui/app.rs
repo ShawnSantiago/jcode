@@ -7437,7 +7437,7 @@ impl App {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
             }
             "auth" | "login" => {
-                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly (anthropic/claude, openai, openrouter, opencode, opencode-go, zai, chutes, cerebras, openai-compatible, copilot, antigravity, cursor)."
+                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly for any provider shown by `/login` or the `/login ` completions."
             }
             "account" | "accounts" => {
                 "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
@@ -8364,27 +8364,22 @@ impl App {
             .strip_prefix("/login ")
             .or_else(|| trimmed.strip_prefix("/auth "))
         {
-            match provider.trim().to_lowercase().as_str() {
-                "claude" | "anthropic" => self.start_claude_login(),
-                "openai" => self.start_openai_login(),
-                "openrouter" => self.start_openrouter_login(),
-                "opencode" => self.start_opencode_login(),
-                "opencode-go" | "opencodego" => self.start_opencode_go_login(),
-                "zai" | "z.ai" => self.start_zai_login(),
-                "chutes" => self.start_chutes_login(),
-                "cerebras" => self.start_cerebras_login(),
-                "openai-compatible" | "openai_compatible" | "compat" => {
-                    self.start_openai_compatible_login()
-                }
-                "copilot" => self.start_copilot_login(),
-                "antigravity" => self.start_antigravity_login(),
-                "cursor" => self.start_cursor_login(),
-                other => {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, opencode, opencode-go, zai, chutes, cerebras, openai-compatible, copilot, antigravity, or cursor",
-                        other
-                    )));
-                }
+            if let Some(provider) = crate::provider_catalog::resolve_login_selection(
+                provider,
+                crate::provider_catalog::tui_login_providers(),
+            ) {
+                self.start_login_provider(provider);
+            } else {
+                let valid = crate::provider_catalog::tui_login_providers()
+                    .iter()
+                    .map(|provider| provider.id)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Unknown provider '{}'. Use: {}",
+                    provider.trim(),
+                    valid
+                )));
             }
             return;
         }
@@ -9728,44 +9723,78 @@ impl App {
     }
 
     fn show_interactive_login(&mut self) {
+        use std::fmt::Write as _;
+
         let status = crate::auth::AuthStatus::check();
         let icon = |state: crate::auth::AuthState| match state {
             crate::auth::AuthState::Available => "✓",
             crate::auth::AuthState::Expired => "⚠",
             crate::auth::AuthState::NotConfigured => "✗",
         };
-
-        self.push_display_message(DisplayMessage::system(format!(
-            "**Login** - select a provider:\n\n\
-             | # | Provider | Status |\n\
-             |---|----------|--------|\n\
-             | 1 | Anthropic/Claude | {} |\n\
-             | 2 | OpenAI | {} |\n\
-             | 3 | OpenRouter | {} |\n\
-             | 4 | OpenCode Zen | {} |\n\
-             | 5 | OpenCode Go | {} |\n\
-             | 6 | Z.AI Coding | {} |\n\
-             | 7 | Chutes | {} |\n\
-             | 8 | Cerebras | {} |\n\
-             | 9 | OpenAI-compatible | {} |\n\
-             | 10 | Copilot | {} |\n\
-             | 11 | Antigravity | {} |\n\
-             | 12 | Cursor | {} |\n\n\
-             Type a number (1-12) or provider name, or `/cancel` to cancel.",
-            icon(status.anthropic.state),
-            icon(status.openai),
-            icon(status.openrouter),
-            icon(status.openrouter),
-            icon(status.openrouter),
-            icon(status.openrouter),
-            icon(status.openrouter),
-            icon(status.openrouter),
-            icon(status.openrouter),
-            icon(status.copilot),
-            icon(status.antigravity),
-            icon(status.cursor),
-        )));
+        let providers = crate::provider_catalog::tui_login_providers();
+        let mut message = String::from(
+            "**Login** - select a provider:\n\n| # | Provider | Auth | Status |\n|---|----------|------|--------|\n",
+        );
+        for (index, provider) in providers.iter().enumerate() {
+            let state = Self::auth_state_for_login_provider(&status, *provider);
+            let _ = writeln!(
+                &mut message,
+                "| {} | {} | {} | {} |",
+                index + 1,
+                provider.display_name,
+                provider.auth_kind.label(),
+                icon(state)
+            );
+        }
+        let _ = write!(
+            &mut message,
+            "\nType a number (1-{}) or provider name, or `/cancel` to cancel.",
+            providers.len()
+        );
+        self.push_display_message(DisplayMessage::system(message));
         self.pending_login = Some(PendingLogin::ProviderSelection);
+    }
+
+    fn auth_state_for_login_provider(
+        status: &crate::auth::AuthStatus,
+        provider: crate::provider_catalog::LoginProviderDescriptor,
+    ) -> crate::auth::AuthState {
+        match provider.target {
+            crate::provider_catalog::LoginProviderTarget::Claude => status.anthropic.state,
+            crate::provider_catalog::LoginProviderTarget::OpenAi => status.openai,
+            crate::provider_catalog::LoginProviderTarget::OpenRouter
+            | crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(_) => {
+                status.openrouter
+            }
+            crate::provider_catalog::LoginProviderTarget::Cursor => status.cursor,
+            crate::provider_catalog::LoginProviderTarget::Copilot => status.copilot,
+            crate::provider_catalog::LoginProviderTarget::Antigravity => status.antigravity,
+            crate::provider_catalog::LoginProviderTarget::Google => status.google,
+        }
+    }
+
+    fn start_login_provider(&mut self, provider: crate::provider_catalog::LoginProviderDescriptor) {
+        match provider.target {
+            crate::provider_catalog::LoginProviderTarget::Claude => self.start_claude_login(),
+            crate::provider_catalog::LoginProviderTarget::OpenAi => self.start_openai_login(),
+            crate::provider_catalog::LoginProviderTarget::OpenRouter => {
+                self.start_openrouter_login()
+            }
+            crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
+                self.start_openai_compatible_profile_login(profile)
+            }
+            crate::provider_catalog::LoginProviderTarget::Cursor => self.start_cursor_login(),
+            crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
+            crate::provider_catalog::LoginProviderTarget::Antigravity => {
+                self.start_antigravity_login()
+            }
+            crate::provider_catalog::LoginProviderTarget::Google => {
+                self.push_display_message(DisplayMessage::error(
+                    "Google/Gmail login is only available from the CLI right now. Run `jcode login --provider google`."
+                        .to_string(),
+                ));
+            }
+        }
     }
 
     fn start_claude_login(&mut self) {
@@ -10688,27 +10717,18 @@ impl App {
                 self.pending_login = Some(PendingLogin::Copilot);
             }
             PendingLogin::ProviderSelection => {
-                let choice = input.trim().to_lowercase();
-                match choice.as_str() {
-                    "1" | "claude" | "anthropic" => self.start_claude_login(),
-                    "2" | "openai" => self.start_openai_login(),
-                    "3" | "openrouter" => self.start_openrouter_login(),
-                    "4" | "opencode" => self.start_opencode_login(),
-                    "5" | "opencode-go" | "opencodego" => self.start_opencode_go_login(),
-                    "6" | "zai" | "z.ai" => self.start_zai_login(),
-                    "7" | "chutes" => self.start_chutes_login(),
-                    "8" | "cerebras" => self.start_cerebras_login(),
-                    "9" | "openai-compatible" | "compat" => self.start_openai_compatible_login(),
-                    "10" | "copilot" => self.start_copilot_login(),
-                    "11" | "antigravity" => self.start_antigravity_login(),
-                    "12" | "cursor" => self.start_cursor_login(),
-                    _ => {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Unknown selection '{}'. Type 1-12 or a provider name.",
-                            input.trim()
-                        )));
-                        self.pending_login = Some(PendingLogin::ProviderSelection);
-                    }
+                let providers = crate::provider_catalog::tui_login_providers();
+                if let Some(provider) =
+                    crate::provider_catalog::resolve_login_selection(&input, providers)
+                {
+                    self.start_login_provider(provider);
+                } else {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Unknown selection '{}'. Type 1-{} or a provider name.",
+                        input.trim(),
+                        providers.len()
+                    )));
+                    self.pending_login = Some(PendingLogin::ProviderSelection);
                 }
             }
         }
@@ -13969,27 +13989,10 @@ impl App {
         }
 
         if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
-            return vec![
-                ("/login anthropic".into(), "Login to Anthropic (OAuth)"),
-                ("/login claude".into(), "Alias for Anthropic login"),
-                ("/login openai".into(), "Login to OpenAI (OAuth)"),
-                ("/login openrouter".into(), "Login to OpenRouter (API key)"),
-                ("/login opencode".into(), "Login to OpenCode Zen (API key)"),
-                (
-                    "/login opencode-go".into(),
-                    "Login to OpenCode Go (API key)",
-                ),
-                ("/login zai".into(), "Login to Z.AI Coding (API key)"),
-                ("/login chutes".into(), "Login to Chutes (API key)"),
-                ("/login cerebras".into(), "Login to Cerebras (API key)"),
-                (
-                    "/login openai-compatible".into(),
-                    "Login to custom OpenAI-compatible endpoint",
-                ),
-                ("/login copilot".into(), "Login to GitHub Copilot CLI"),
-                ("/login antigravity".into(), "Login to Antigravity CLI"),
-                ("/login cursor".into(), "Login to Cursor (API key / CLI)"),
-            ];
+            return crate::provider_catalog::tui_login_providers()
+                .iter()
+                .map(|provider| (format!("/login {}", provider.id), provider.menu_detail))
+                .collect();
         }
 
         if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
@@ -14047,7 +14050,7 @@ impl App {
             ("/auth".into(), "Show authentication status"),
             (
                 "/login".into(),
-                "Login to a provider (anthropic/openai/openrouter/copilot/antigravity/cursor)",
+                "Login to a provider (use `/login <provider>` for the full list)",
             ),
             (
                 "/account".into(),
