@@ -116,9 +116,11 @@ pub fn save_credentials(creds: &GoogleCredentials) -> Result<()> {
     let path = credentials_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        crate::platform::set_directory_permissions_owner_only(parent)?;
     }
     let data = serde_json::to_string_pretty(creds)?;
     std::fs::write(&path, data)?;
+    crate::platform::set_permissions_owner_only(&path)?;
     Ok(())
 }
 
@@ -134,9 +136,11 @@ pub fn save_tokens(tokens: &GoogleTokens) -> Result<()> {
     let path = tokens_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        crate::platform::set_directory_permissions_owner_only(parent)?;
     }
     let data = serde_json::to_string_pretty(tokens)?;
     std::fs::write(&path, data)?;
+    crate::platform::set_permissions_owner_only(&path)?;
     Ok(())
 }
 
@@ -163,11 +167,51 @@ pub async fn login(tier: GmailAccessTier) -> Result<GoogleTokens> {
     );
 
     eprintln!("\nOpening browser for Google login...\n");
-    let _ = open::that(&auth_url);
-
     eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
+    if let Some(qr) = crate::login_qr::indented_section(
+        &auth_url,
+        "Scan this QR on another device if this machine has no browser:",
+        "    ",
+    ) {
+        eprintln!("{qr}\n");
+    }
 
-    let code = super::oauth::wait_for_callback(DEFAULT_PORT, &state)?;
+    let browser_opened = open::that(&auth_url).is_ok();
+    let callback_available = super::oauth::callback_listener_available(DEFAULT_PORT);
+
+    let code = if browser_opened && callback_available {
+        eprintln!(
+            "Waiting up to 300s for automatic callback on {}",
+            redirect_uri
+        );
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            super::oauth::wait_for_callback_async(DEFAULT_PORT, &state),
+        )
+        .await
+        {
+            Ok(Ok(code)) => code,
+            Ok(Err(err)) => {
+                eprintln!("Automatic callback failed ({err}). Falling back to manual paste.");
+                read_manual_callback_code(&state)?
+            }
+            Err(_) => {
+                eprintln!("Timed out waiting for callback. Falling back to manual paste.");
+                read_manual_callback_code(&state)?
+            }
+        }
+    } else if !browser_opened {
+        eprintln!(
+            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
+        );
+        read_manual_callback_code(&state)?
+    } else {
+        eprintln!(
+            "Local callback port {} is unavailable. Finish login in any browser, then paste the full callback URL here.\n",
+            DEFAULT_PORT
+        );
+        read_manual_callback_code(&state)?
+    };
 
     eprintln!("Exchanging code for tokens...");
 
@@ -216,6 +260,27 @@ pub async fn login(tier: GmailAccessTier) -> Result<GoogleTokens> {
 
     save_tokens(&tokens)?;
     Ok(tokens)
+}
+
+fn read_manual_callback_code(expected_state: &str) -> Result<String> {
+    use std::io::Write;
+
+    eprintln!("Paste the full callback URL (or query string) here:\n");
+    eprint!("> ");
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("No callback URL entered.");
+    }
+
+    let (code, callback_state) = crate::auth::oauth::parse_callback_input_with_state(trimmed)?;
+    if callback_state != expected_state {
+        anyhow::bail!("OAuth state mismatch. Start login again and use the latest callback URL.");
+    }
+    Ok(code)
 }
 
 pub async fn refresh_tokens(tokens: &GoogleTokens) -> Result<GoogleTokens> {

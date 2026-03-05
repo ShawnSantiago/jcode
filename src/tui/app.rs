@@ -517,6 +517,12 @@ enum PendingLogin {
         label: String,
         redirect_uri: Option<String>,
     },
+    /// Waiting for user to paste an OpenAI OAuth callback URL/query.
+    OpenAi {
+        verifier: String,
+        expected_state: String,
+        redirect_uri: String,
+    },
     /// Waiting for user to paste an API key for an OpenAI-compatible provider.
     ApiKeyProfile {
         provider: String,
@@ -10059,50 +10065,71 @@ impl App {
 
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
+        let auth_url = crate::auth::oauth::openai_auth_url(&redirect_uri, &challenge, &state);
+        let qr_section = crate::login_qr::markdown_section(
+            &auth_url,
+            "Scan this on another device if this machine has no browser, then paste the full callback URL here:",
+        )
+        .map(|section| format!("\n\n{section}"))
+        .unwrap_or_default();
 
-        let auth_url = format!(
-            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs",
-            crate::auth::oauth::openai::AUTHORIZE_URL,
-            crate::auth::oauth::openai::CLIENT_ID,
-            urlencoding::encode(&redirect_uri),
-            urlencoding::encode(crate::auth::oauth::openai::SCOPES),
-            challenge,
-            state,
-        );
+        let browser_opened = open::that(&auth_url).is_ok();
+        let callback_available = crate::auth::oauth::callback_listener_available(port);
 
-        let _ = open::that(&auth_url);
-
-        let verifier_clone = verifier.clone();
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            match Self::openai_login_callback(verifier_clone, state_clone).await {
-                Ok(msg) => {
-                    crate::logging::info(&format!("OpenAI login: {}", msg));
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "openai".to_string(),
-                        success: true,
-                        message: msg,
-                    }));
+        if callback_available {
+            let verifier_clone = verifier.clone();
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                match Self::openai_login_callback(verifier_clone, state_clone).await {
+                    Ok(msg) => {
+                        crate::logging::info(&format!("OpenAI login: {}", msg));
+                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                            provider: "openai".to_string(),
+                            success: true,
+                            message: msg,
+                        }));
+                    }
+                    Err(e) => {
+                        crate::logging::info(&format!(
+                            "OpenAI automatic callback did not complete: {}",
+                            e
+                        ));
+                    }
                 }
-                Err(e) => {
-                    crate::logging::error(&format!("OpenAI login failed: {}", e));
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "openai".to_string(),
-                        success: false,
-                        message: format!("OpenAI login failed: {}", e),
-                    }));
-                }
-            }
-        });
+            });
+        }
+
+        let callback_line = if callback_available {
+            format!(
+                "Waiting for callback on `localhost:{}`... (this will complete automatically)\n",
+                port
+            )
+        } else {
+            format!(
+                "Local callback port `localhost:{}` is unavailable, so finish in any browser and paste the full callback URL here.\n",
+                port
+            )
+        };
+        let browser_line = if browser_opened {
+            String::new()
+        } else {
+            "This machine could not open a browser automatically.\n".to_string()
+        };
 
         self.push_display_message(DisplayMessage::system(format!(
             "**OpenAI OAuth Login**\n\n\
              Opening browser for authentication...\n\n\
              If the browser didn't open, visit:\n{}\n\n\
-             Waiting for callback on `localhost:{}`... (this will complete automatically)",
-            auth_url, port
+             {}{}\
+             Or paste the full callback URL or query string here to finish from another device.{}",
+            auth_url, browser_line, callback_line, qr_section
         )));
         self.set_status_notice("Login: waiting…");
+        self.pending_login = Some(PendingLogin::OpenAi {
+            verifier,
+            expected_state: state,
+            redirect_uri,
+        });
     }
 
     async fn openai_login_callback(
@@ -10119,45 +10146,28 @@ impl App {
         .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
         .map_err(|e| format!("Callback failed: {}", e))?;
 
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(crate::auth::oauth::openai::TOKEN_URL)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(format!(
-                "grant_type=authorization_code&client_id={}&code={}&code_verifier={}&redirect_uri={}",
-                crate::auth::oauth::openai::CLIENT_ID,
-                code,
-                verifier,
-                urlencoding::encode(&redirect_uri)
-            ))
-            .send()
+        Self::openai_token_exchange(verifier, code, None, &redirect_uri).await
+    }
+
+    async fn openai_token_exchange(
+        verifier: String,
+        input: String,
+        expected_state: Option<String>,
+        redirect_uri: &str,
+    ) -> Result<String, String> {
+        let oauth_tokens = if let Some(expected_state) = expected_state {
+            crate::auth::oauth::exchange_openai_callback_input(
+                &verifier,
+                input.trim(),
+                &expected_state,
+                redirect_uri,
+            )
             .await
-            .map_err(|e| format!("Token exchange request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Token exchange failed: {}", text));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct TokenResponse {
-            access_token: String,
-            refresh_token: String,
-            expires_in: i64,
-            id_token: Option<String>,
-        }
-
-        let tokens: TokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse token response: {}", e))?;
-        let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
-
-        let oauth_tokens = crate::auth::oauth::OAuthTokens {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at,
-            id_token: tokens.id_token,
+            .map_err(|e| e.to_string())?
+        } else {
+            crate::auth::oauth::exchange_openai_code(&input, &verifier, redirect_uri)
+                .await
+                .map_err(|e| e.to_string())?
         };
 
         crate::auth::oauth::save_openai_tokens(&oauth_tokens)
@@ -10580,6 +10590,42 @@ impl App {
                     "Exchanging authorization code for account `{}`...",
                     label
                 )));
+            }
+            PendingLogin::OpenAi {
+                verifier,
+                expected_state,
+                redirect_uri,
+            } => {
+                self.set_status_notice("Login: exchanging...");
+                let input_owned = input.clone();
+                tokio::spawn(async move {
+                    match Self::openai_token_exchange(
+                        verifier,
+                        input_owned,
+                        Some(expected_state),
+                        &redirect_uri,
+                    )
+                    .await
+                    {
+                        Ok(msg) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "openai".to_string(),
+                                success: true,
+                                message: msg,
+                            }));
+                        }
+                        Err(e) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "openai".to_string(),
+                                success: false,
+                                message: format!("OpenAI login failed: {}", e),
+                            }));
+                        }
+                    }
+                });
+                self.push_display_message(DisplayMessage::system(
+                    "Exchanging OpenAI callback for tokens...".to_string(),
+                ));
             }
             PendingLogin::ApiKeyProfile {
                 provider,

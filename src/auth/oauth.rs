@@ -349,6 +349,18 @@ pub fn claude_redirect_uri_for_input(input: &str, fallback_redirect_uri: &str) -
     }
 }
 
+pub fn parse_callback_input_with_state(input: &str) -> Result<(String, String)> {
+    let (code, state) = parse_claude_code_input(input)?;
+    let state = state
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Please paste the full callback URL or query string so jcode can verify the login state."
+            )
+        })?;
+    Ok((code, state))
+}
+
 async fn exchange_claude_code_at_url(
     token_url: &str,
     verifier: &str,
@@ -421,44 +433,43 @@ pub async fn exchange_claude_code(
     exchange_claude_code_at_url(claude::TOKEN_URL, verifier, input, redirect_uri).await
 }
 
-/// Perform OAuth login for OpenAI/Codex
-pub async fn login_openai() -> Result<OAuthTokens> {
-    let (verifier, challenge) = generate_pkce();
-    let state = generate_state();
-
-    let port = openai::DEFAULT_PORT;
-    let redirect_uri = openai::redirect_uri(port);
-
-    let auth_url = format!(
+pub fn openai_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
+    format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs",
         openai::AUTHORIZE_URL,
         openai::CLIENT_ID,
-        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(redirect_uri),
         urlencoding::encode(openai::SCOPES),
         challenge,
         state
-    );
+    )
+}
 
-    eprintln!("\nOpen this URL in your browser:\n");
-    eprintln!("{}\n", auth_url);
+pub fn callback_listener_available(port: u16) -> bool {
+    std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .map(|listener| {
+            drop(listener);
+            true
+        })
+        .unwrap_or(false)
+}
 
-    // Try to open browser
-    let _ = open::that(&auth_url);
-
-    // Wait for callback
-    let code = wait_for_callback(port, &state)?;
-
-    // Exchange code for tokens
+async fn exchange_openai_code_at_url(
+    token_url: &str,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(openai::TOKEN_URL)
+        .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(format!(
             "grant_type=authorization_code&client_id={}&code={}&code_verifier={}&redirect_uri={}",
             openai::CLIENT_ID,
             code,
             verifier,
-            urlencoding::encode(&redirect_uri)
+            urlencoding::encode(redirect_uri)
         ))
         .send()
         .await?;
@@ -485,6 +496,91 @@ pub async fn login_openai() -> Result<OAuthTokens> {
         expires_at,
         id_token: tokens.id_token,
     })
+}
+
+pub async fn exchange_openai_code(
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens> {
+    exchange_openai_code_at_url(openai::TOKEN_URL, code, verifier, redirect_uri).await
+}
+
+pub async fn exchange_openai_callback_input(
+    verifier: &str,
+    input: &str,
+    expected_state: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens> {
+    let (code, callback_state) = parse_callback_input_with_state(input)?;
+    if callback_state != expected_state {
+        anyhow::bail!("OAuth state mismatch. Start login again and use the latest callback URL.");
+    }
+    exchange_openai_code(&code, verifier, redirect_uri).await
+}
+
+/// Perform OAuth login for OpenAI/Codex
+pub async fn login_openai() -> Result<OAuthTokens> {
+    let (verifier, challenge) = generate_pkce();
+    let state = generate_state();
+
+    let port = openai::DEFAULT_PORT;
+    let redirect_uri = openai::redirect_uri(port);
+    let auth_url = openai_auth_url(&redirect_uri, &challenge, &state);
+
+    eprintln!("\nOpen this URL in your browser:\n");
+    eprintln!("{}\n", auth_url);
+    if let Some(qr) = crate::login_qr::indented_section(
+        &auth_url,
+        "Scan this QR on another device if this machine has no browser:",
+        "    ",
+    ) {
+        eprintln!("{qr}\n");
+    }
+
+    let browser_opened = open::that(&auth_url).is_ok();
+    let callback_available = callback_listener_available(port);
+
+    if browser_opened && callback_available {
+        eprintln!(
+            "Waiting up to 300s for automatic callback on {}",
+            redirect_uri
+        );
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            wait_for_callback_async(port, &state),
+        )
+        .await
+        {
+            Ok(Ok(code)) => return exchange_openai_code(&code, &verifier, &redirect_uri).await,
+            Ok(Err(err)) => {
+                eprintln!("Automatic callback failed ({err}). Falling back to manual paste.");
+            }
+            Err(_) => {
+                eprintln!("Timed out waiting for callback. Falling back to manual paste.");
+            }
+        }
+    } else if !browser_opened {
+        eprintln!(
+            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
+        );
+    } else {
+        eprintln!(
+            "Local callback port {} is unavailable. Finish login in any browser, then paste the full callback URL here.\n",
+            port
+        );
+    }
+
+    eprintln!("Paste the full callback URL (or query string) here:\n");
+    eprint!("> ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("No callback URL entered.");
+    }
+    exchange_openai_callback_input(&verifier, trimmed, &state, &redirect_uri).await
 }
 
 /// Save Claude tokens to jcode's credentials file (default account).
@@ -1553,6 +1649,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_callback_input_requires_state() {
+        let err = parse_callback_input_with_state("just-a-code")
+            .expect_err("plain code should not satisfy stateful callback parsing");
+        assert!(err.to_string().contains("full callback URL"));
+    }
+
+    #[test]
+    fn parse_callback_input_extracts_code_and_state() {
+        let (code, state) = parse_callback_input_with_state(
+            "http://localhost:1455/auth/callback?code=mycode&state=mystate",
+        )
+        .unwrap();
+        assert_eq!(code, "mycode");
+        assert_eq!(state, "mystate");
+    }
+
+    #[test]
     fn claude_redirect_uri_uses_manual_callback_for_console_url() {
         let selected = claude_redirect_uri_for_input(
             "https://console.anthropic.com/oauth/code/callback?code=abc&state=xyz",
@@ -1674,6 +1787,23 @@ mod tests {
         .await;
 
         let err = result.expect_err("state mismatch should fail before token exchange");
+        assert!(
+            err.to_string().contains("OAuth state mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_callback_input_rejects_state_mismatch() {
+        let err = exchange_openai_callback_input(
+            "verifier",
+            "http://localhost:1455/auth/callback?code=abc123&state=wrong_state",
+            "expected_state",
+            "http://localhost:1455/auth/callback",
+        )
+        .await
+        .expect_err("state mismatch should fail before token exchange");
+
         assert!(
             err.to_string().contains("OAuth state mismatch"),
             "unexpected error: {err}"
