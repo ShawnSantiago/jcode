@@ -12,7 +12,7 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     // First try: compile-time directory
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir);
-    if path.join(".git").exists() {
+    if is_jcode_repo(&path) {
         return Some(path);
     }
 
@@ -24,12 +24,31 @@ pub fn get_repo_dir() -> Option<PathBuf> {
             .and_then(|p| p.parent())
             .and_then(|p| p.parent())
         {
-            if repo.join(".git").exists() {
+            if is_jcode_repo(repo) {
                 return Some(repo.to_path_buf());
             }
         }
     }
 
+    // Final fallback: search upward from current working directory.
+    // This matters for self-dev sessions launched from the repo but running
+    // from an installed canary/stable binary whose current_exe() is outside
+    // the source tree.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(repo) = find_repo_in_ancestors(&cwd) {
+            return Some(repo);
+        }
+    }
+
+    None
+}
+
+fn find_repo_in_ancestors(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        if is_jcode_repo(dir) {
+            return Some(dir.to_path_buf());
+        }
+    }
     None
 }
 
@@ -672,6 +691,24 @@ mod tests {
             BinaryChoice::Current => {}
             _ => panic!("Expected current binary"),
         }
+    }
+
+    #[test]
+    fn test_find_repo_in_ancestors_walks_upward() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("jcode-repo");
+        let nested = repo.join("a").join("b").join("c");
+
+        std::fs::create_dir_all(repo.join(".git")).expect("create .git");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"jcode\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("write Cargo.toml");
+        std::fs::create_dir_all(&nested).expect("create nested dirs");
+
+        let found = find_repo_in_ancestors(&nested).expect("repo should be found");
+        assert_eq!(found, repo);
     }
 
     #[test]
