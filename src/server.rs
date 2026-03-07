@@ -3,21 +3,19 @@
 mod debug;
 
 use self::debug::{
-    handle_debug_client, ClientConnectionInfo, ClientDebugState, DebugJob, DebugJobStatus,
+    handle_debug_client, ClientConnectionInfo, ClientDebugState, DebugJob,
 };
 use crate::agent::{Agent, StreamError};
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::build;
 use crate::bus::{Bus, BusEvent, FileOp};
 use crate::id;
-use crate::mcp::McpConfig;
 use crate::plan::PlanItem;
 use crate::protocol::{
     decode_request, encode_event, AgentInfo, ContextEntry, FeatureToggle, HistoryMessage,
     NotificationType, Request, ServerEvent,
 };
 use crate::provider::Provider;
-use crate::registry;
 use crate::session::Session;
 use crate::tool::Registry;
 use crate::transport::{Listener, ReadHalf, Stream, WriteHalf};
@@ -25,8 +23,7 @@ use anyhow::Result;
 use futures::future::try_join_all;
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
@@ -4303,7 +4300,8 @@ async fn handle_client(
                         } else if role == "coordinator" && target_session == req_session_id {
                             // Self-promotion: allowed if current coordinator has no active session
                             drop(members);
-                            let coordinator_active = if let Some(ref coord_id) = current_coordinator {
+                            let coordinator_active = if let Some(ref coord_id) = current_coordinator
+                            {
                                 sessions.read().await.contains_key(coord_id)
                             } else {
                                 false

@@ -22,23 +22,56 @@ fn send_request_with_timeout(
     let path = socket_path();
     let mut stream = SyncStream::connect(&path)?;
 
-    if let Some(t) = timeout {
-        stream.set_read_timeout(Some(t))?;
-    }
+    let read_timeout = timeout.unwrap_or(std::time::Duration::from_secs(30));
+    stream.set_read_timeout(Some(read_timeout))?;
+
+    let request_id = request.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
 
     let json = serde_json::to_string(request)? + "\n";
     stream.write_all(json.as_bytes())?;
 
     let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
+    let mut line = String::new();
 
-    // Skip ack, read next
-    response.clear();
-    reader.read_line(&mut response)?;
+    // Read lines until we find the terminal response for our request ID.
+    // Skip: ack events, notification events, swarm_status broadcasts, etc.
+    // Terminal events: done, error, comm_spawn_response, comm_await_members_response,
+    //                  and any other typed response with matching id.
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Err(anyhow::anyhow!("Connection closed before receiving response"));
+        }
 
-    let value: Value = serde_json::from_str(&response)?;
-    Ok(value)
+        let value: Value = serde_json::from_str(line.trim())?;
+
+        let event_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let event_id = value.get("id").and_then(|v| v.as_u64());
+
+        match event_type {
+            // Skip ack — not a response
+            "ack" => continue,
+            // Skip broadcast/async events that are not tied to our request
+            "swarm_status" | "swarm_plan" | "swarm_event" | "notification"
+            | "soft_interrupt_injected" | "session_id" | "history" => continue,
+            // Terminal responses: match on our request id if present
+            "done" | "error" => {
+                if event_id == Some(request_id) || event_id.is_none() {
+                    return Ok(value);
+                }
+                // Wrong id — skip
+                continue;
+            }
+            // All other typed responses (comm_spawn_response, etc.) — return them
+            _ => {
+                if event_id == Some(request_id) || event_id.is_none() {
+                    return Ok(value);
+                }
+                continue;
+            }
+        }
+    }
 }
 
 fn check_error(response: &Value) -> Option<String> {
@@ -570,7 +603,14 @@ impl Tool for CommunicateTool {
                         let new_id = response
                             .get("new_session_id")
                             .and_then(|s| s.as_str())
-                            .unwrap_or("unknown");
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("<unknown>");
+                        if new_id == "<unknown>" {
+                            return Err(anyhow::anyhow!(
+                                "Spawn succeeded but new session ID was not returned. Response: {}",
+                                response
+                            ));
+                        }
                         Ok(ToolOutput::new(format!("Spawned new agent: {}", new_id)))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to spawn agent: {}", e)),
@@ -601,12 +641,19 @@ impl Tool for CommunicateTool {
             }
 
             "assign_role" => {
-                let target = params.target_session.ok_or_else(|| {
+                let target_raw = params.target_session.ok_or_else(|| {
                     anyhow::anyhow!("'target_session' is required for assign_role action")
                 })?;
                 let role = params.role.ok_or_else(|| {
                     anyhow::anyhow!("'role' is required for assign_role action")
                 })?;
+
+                // Resolve "current" to the caller's own session ID
+                let target = if target_raw == "current" {
+                    ctx.session_id.clone()
+                } else {
+                    target_raw
+                };
 
                 let request = json!({
                     "type": "comm_assign_role",
