@@ -1986,13 +1986,23 @@ impl App {
             )
         {
             let amt = self.mouse_scroll_amount();
+            self.set_diff_pane_focus(true);
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(amt);
+                    let current = if self.diff_pane_scroll == usize::MAX {
+                        super::ui::last_diff_pane_effective_scroll()
+                    } else {
+                        self.diff_pane_scroll
+                    };
+                    self.diff_pane_scroll = current.saturating_sub(amt);
                     self.diff_pane_auto_scroll = false;
                 }
                 MouseEventKind::ScrollDown => {
+                    if self.diff_pane_scroll == usize::MAX {
+                        self.diff_pane_scroll = super::ui::last_diff_pane_effective_scroll();
+                    }
                     self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(amt);
+                    self.diff_pane_auto_scroll = false;
                 }
                 _ => {}
             }
@@ -14699,6 +14709,9 @@ impl App {
                     return;
                 }
             };
+
+            // Restrict TUI debug socket to owner-only.
+            let _ = crate::platform::set_permissions_owner_only(&socket_path);
 
             // Accept connections and forward events
             let clients: std::sync::Arc<tokio::sync::Mutex<Vec<crate::transport::WriteHalf>>> =
