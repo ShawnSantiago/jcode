@@ -574,9 +574,10 @@ MEMBERS & STRUCTURE:
   swarm:info:<swarm_id>    - Full info: members, coordinator, plan, context, conflicts
 
 COORDINATORS & ROLES:
-  swarm:coordinators       - List all coordinators (swarm_id -> session_id)
-  swarm:coordinator:<id>   - Get coordinator for specific swarm
-  swarm:roles              - List all members with their roles
+  swarm:coordinators            - List all coordinators (swarm_id -> session_id)
+  swarm:coordinator:<id>        - Get coordinator for specific swarm
+  swarm:clear_coordinator:<id>  - Admin: forcibly clear coordinator so any session can self-promote
+  swarm:roles                   - List all members with their roles
 
 PLANS (server-scoped plan items):
   swarm:plans              - List all swarm plans with item counts
@@ -2014,6 +2015,30 @@ pub(super) async fn handle_debug_client(
                                 .to_string())
                             } else {
                                 Err(anyhow::anyhow!("No coordinator for swarm '{}'", swarm_id))
+                            }
+                        } else if cmd.starts_with("swarm:clear_coordinator:") {
+                            // Admin: forcibly clear the coordinator for a swarm so a new one can be elected.
+                            let swarm_id = cmd
+                                .strip_prefix("swarm:clear_coordinator:")
+                                .unwrap_or("")
+                                .trim();
+                            let mut coordinators = swarm_coordinators.write().await;
+                            if coordinators.remove(swarm_id).is_some() {
+                                // Demote the old coordinator member to "agent" role
+                                let mut members = swarm_members.write().await;
+                                for m in members.values_mut() {
+                                    if m.swarm_id.as_deref() == Some(swarm_id)
+                                        && m.role == "coordinator"
+                                    {
+                                        m.role = "agent".to_string();
+                                    }
+                                }
+                                Ok(format!(
+                                    "Coordinator cleared for swarm '{}'. Any session can now self-promote.",
+                                    swarm_id
+                                ))
+                            } else {
+                                Err(anyhow::anyhow!("No coordinator set for swarm '{}'", swarm_id))
                             }
                         } else if cmd == "swarm:roles" {
                             // List all members with their roles

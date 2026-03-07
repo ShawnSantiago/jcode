@@ -65,6 +65,9 @@ pub struct SwarmMember {
     pub joined_at: Instant,
     /// When status was last changed
     pub last_status_change: Instant,
+    /// Whether this is a headless (spawned) session vs a TUI-connected session.
+    /// Headless sessions should not be automatically elected as coordinator.
+    pub is_headless: bool,
 }
 
 /// A versioned plan for a swarm.
@@ -1538,6 +1541,7 @@ async fn handle_client(
                 role: "agent".to_string(),
                 joined_at: now,
                 last_status_change: now,
+                is_headless: false,
             },
         );
     }
@@ -4299,20 +4303,20 @@ async fn handle_client(
                             true
                         } else if role == "coordinator" && target_session == req_session_id {
                             // Self-promotion: allowed if current coordinator's event channel
-                            // is closed (zombie from a previous server instance) or has no
-                            // active agent session.
+                            // is closed (zombie from a previous server instance), has no
+                            // active agent session, or is a headless (spawned) session.
                             drop(members);
                             let coordinator_is_zombie =
                                 if let Some(ref coord_id) = current_coordinator {
-                                    let channel_closed = {
+                                    let (channel_closed, coord_is_headless) = {
                                         let m = swarm_members.read().await;
                                         m.get(coord_id)
-                                            .map(|mb| mb.event_tx.is_closed())
-                                            .unwrap_or(true)
+                                            .map(|mb| (mb.event_tx.is_closed(), mb.is_headless))
+                                            .unwrap_or((true, false))
                                     };
                                     let not_in_sessions =
                                         !sessions.read().await.contains_key(coord_id);
-                                    channel_closed || not_in_sessions
+                                    channel_closed || not_in_sessions || coord_is_headless
                                 } else {
                                     true
                                 };
