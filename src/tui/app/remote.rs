@@ -18,6 +18,7 @@ pub(super) struct RemoteRunState {
     pub reconnect_attempts: u32,
     pub disconnect_msg_idx: Option<usize>,
     pub disconnect_start: Option<Instant>,
+    pub initial_server_start: bool,
 }
 
 pub(super) enum ConnectOutcome {
@@ -190,7 +191,7 @@ pub(super) async fn connect_with_retry(
 
             let is_initial_server_start = app.server_spawning && state.reconnect_attempts == 0;
             if app.server_spawning && state.reconnect_attempts == 0 {
-                state.reconnect_attempts = 1;
+                state.initial_server_start = true;
                 app.server_spawning = false;
             }
             state.reconnect_attempts += 1;
@@ -246,9 +247,14 @@ pub(super) async fn connect_with_retry(
             }
             terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
 
-            let backoff = if state.reconnect_attempts <= 2 {
+            let backoff = if state.initial_server_start && state.reconnect_attempts <= 20 {
+                Duration::from_millis(100)
+            } else if state.reconnect_attempts <= 2 {
                 Duration::from_millis(100)
             } else {
+                if state.initial_server_start {
+                    state.initial_server_start = false;
+                }
                 Duration::from_secs((1u64 << (state.reconnect_attempts - 2).min(5)).min(30))
             };
             let sleep = tokio::time::sleep(backoff);
@@ -447,6 +453,7 @@ pub(super) async fn handle_post_connect(
     }
 
     state.reconnect_attempts = 0;
+    state.initial_server_start = false;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     while !remote.has_loaded_history() {

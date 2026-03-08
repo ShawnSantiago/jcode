@@ -181,17 +181,15 @@ pub async fn run_canary_wrapper(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .stdin(std::process::Stdio::null());
+
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
+            let _child = server::spawn_server_notify(&mut cmd).await?;
         }
-        cmd.spawn()?;
+        #[cfg(not(unix))]
+        {
+            cmd.spawn()?;
+        }
 
         startup_profile::mark("canary_server_spawned");
         server_just_spawned = true;

@@ -261,6 +261,103 @@ pub fn set_socket_path(path: &str) {
     std::env::set_var("JCODE_SOCKET", path);
 }
 
+/// Spawn a server child process and wait until it signals readiness (socket bound).
+///
+/// Creates an anonymous pipe, passes the write-end fd to the child via
+/// `JCODE_READY_FD`, and awaits a single byte on the read end.  The server
+/// calls `signal_ready_fd()` after `Listener::bind()`, so the future resolves
+/// the instant the socket is accepting connections -- no polling needed.
+///
+/// Falls back to a short poll loop if the pipe read times out (e.g. server
+/// built without ready-fd support, or crash before bind).
+#[cfg(unix)]
+pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std::process::Child> {
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::process::CommandExt;
+
+    // Create a pipe: fds[0] = read end, fds[1] = write end.
+    // Use pipe2 with O_CLOEXEC on the read end (parent keeps it).
+    // The write end needs CLOEXEC cleared so it survives exec in the child.
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        anyhow::bail!("pipe() failed: {}", std::io::Error::last_os_error());
+    }
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    // Set CLOEXEC on the read end (parent only)
+    unsafe {
+        let flags = libc::fcntl(read_fd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(read_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
+
+    // Pass the write-end fd to the child and tell it the fd number.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Clear CLOEXEC on the write end so it survives exec
+            let flags = libc::fcntl(write_fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.env("JCODE_READY_FD", write_fd.to_string());
+
+    let mut child = cmd.spawn()?;
+
+    // Close our copy of the write end so we get EOF if the child dies.
+    unsafe { libc::close(write_fd) };
+
+    // Wait for the ready signal (or timeout / child death).
+    let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let mut async_file = tokio::fs::File::from_std(read_file);
+    let mut buf = [0u8; 1];
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read(&mut async_file, &mut buf),
+    )
+    .await
+    {
+        Ok(Ok(1)) => {
+            crate::logging::info("Server signalled ready via pipe");
+        }
+        Ok(Ok(_)) => {
+            if let Some(status) = child.try_wait()? {
+                anyhow::bail!("Server exited before signalling ready ({})", status);
+            }
+            crate::logging::info("Server closed ready pipe without signalling; falling back to poll");
+            poll_for_socket(&socket_path(), Duration::from_secs(5)).await;
+        }
+        Ok(Err(e)) => {
+            crate::logging::info(&format!("Ready pipe read error: {}; falling back to poll", e));
+            poll_for_socket(&socket_path(), Duration::from_secs(5)).await;
+        }
+        Err(_) => {
+            crate::logging::info("Timed out waiting for server ready signal; falling back to poll");
+            poll_for_socket(&socket_path(), Duration::from_secs(5)).await;
+        }
+    }
+
+    Ok(child)
+}
+
+/// Simple poll loop waiting for the socket file to become connectable.
+async fn poll_for_socket(path: &std::path::Path, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if crate::transport::is_socket_path(path) {
+            if Stream::connect(path).await.is_ok() {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Idle timeout for self-dev server (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
 
@@ -284,6 +381,26 @@ fn is_selfdev_env() -> bool {
         .ok()
         .map(|p| crate::build::is_jcode_repo(&p))
         .unwrap_or(false)
+}
+
+/// Write a single byte to the fd in `JCODE_READY_FD` and close it.
+/// Called after socket bind so the parent process knows the server is
+/// accepting connections.  The env var is cleared afterwards so child
+/// processes (e.g. tool subprocesses) don't inherit a stale fd.
+fn signal_ready_fd() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+
+        if let Ok(fd_str) = std::env::var("JCODE_READY_FD") {
+            std::env::remove_var("JCODE_READY_FD");
+            if let Ok(fd) = fd_str.parse::<i32>() {
+                let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+                let _ = std::io::Write::write_all(&mut file, b"R");
+                // file is dropped here which closes the fd
+            }
+        }
+    }
 }
 
 /// Reload signal payload sent via in-process channel (replaces filesystem-based rebuild-signal)
@@ -866,6 +983,12 @@ impl Server {
         // Restrict socket files to owner-only so other local users cannot connect.
         let _ = crate::platform::set_permissions_owner_only(&self.socket_path);
         let _ = crate::platform::set_permissions_owner_only(&self.debug_socket_path);
+
+        // Signal readiness to parent process via JCODE_READY_FD (if set).
+        // The parent creates a pipe and passes the write-end fd number so we
+        // can notify it the moment the socket is bound, avoiding poll-based
+        // startup detection.
+        signal_ready_fd();
 
         // Set logging context for this server
         crate::logging::set_server(&self.identity.name);
