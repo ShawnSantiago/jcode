@@ -2723,12 +2723,8 @@ impl App {
                     )
                 }
                 SendAction::Interleave => {
-                    let expanded = self.expand_paste_placeholders(&self.input.clone());
-                    self.pasted_contents.clear();
-                    self.pending_images.clear();
-                    self.input.clear();
-                    self.cursor_pos = 0;
-                    self.interleave_message = Some(expanded);
+                    let prepared = input::take_prepared_input(self);
+                    input::stage_local_interleave(self, prepared.expanded);
                     self.debug_trace
                         .record("message", format!("interleave:{}", msg));
                     format!("OK: interleave message '{}' (injecting now)", msg)
@@ -4376,14 +4372,8 @@ impl App {
                     SendAction::Submit => self.submit_input(),
                     SendAction::Queue => self.queue_message(),
                     SendAction::Interleave => {
-                        let raw_input = std::mem::take(&mut self.input);
-                        let expanded = self.expand_paste_placeholders(&raw_input);
-                        self.pasted_contents.clear();
-                        self.pending_images.clear();
-                        self.cursor_pos = 0;
-                        // Set interleave_message so streaming code can pick it up
-                        self.interleave_message = Some(expanded);
-                        self.set_status_notice("⏭ Sending now (interleave)");
+                        let prepared = input::take_prepared_input(self);
+                        input::stage_local_interleave(self, prepared.expanded);
                     }
                 }
             }
@@ -4415,14 +4405,8 @@ impl App {
                         SendAction::Submit => self.submit_input(),
                         SendAction::Queue => self.queue_message(),
                         SendAction::Interleave => {
-                            let raw_input = std::mem::take(&mut self.input);
-                            let expanded = self.expand_paste_placeholders(&raw_input);
-                            self.pasted_contents.clear();
-                            self.pending_images.clear();
-                            self.cursor_pos = 0;
-                            // Set interleave_message so streaming code can pick it up
-                            self.interleave_message = Some(expanded);
-                            self.set_status_notice("⏭ Sending now (interleave)");
+                            let prepared = input::take_prepared_input(self);
+                            input::stage_local_interleave(self, prepared.expanded);
                         }
                     }
                 }

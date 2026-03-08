@@ -1,5 +1,11 @@
 use super::{App, SendAction};
 
+pub(super) struct PreparedInput {
+    pub raw_input: String,
+    pub expanded: String,
+    pub images: Vec<(String, String)>,
+}
+
 pub(super) fn paste_image_from_clipboard(app: &mut App) {
     if let Some((media_type, base64_data)) = super::clipboard_image() {
         attach_image(app, media_type, base64_data);
@@ -76,12 +82,8 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
 }
 
 pub(super) fn queue_message(app: &mut App) {
-    let content = std::mem::take(&mut app.input);
-    let expanded = expand_paste_placeholders(app, &content);
-    app.pasted_contents.clear();
-    app.pending_images.clear();
-    app.cursor_pos = 0;
-    app.queued_messages.push(expanded);
+    let prepared = take_prepared_input(app);
+    app.queued_messages.push(prepared.expanded);
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -135,6 +137,24 @@ pub(super) fn send_action(app: &App, shift: bool) -> SendAction {
     } else {
         SendAction::Interleave
     }
+}
+
+pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
+    let raw_input = std::mem::take(&mut app.input);
+    let expanded = expand_paste_placeholders(app, &raw_input);
+    app.pasted_contents.clear();
+    let images = std::mem::take(&mut app.pending_images);
+    app.cursor_pos = 0;
+    PreparedInput {
+        raw_input,
+        expanded,
+        images,
+    }
+}
+
+pub(super) fn stage_local_interleave(app: &mut App, content: String) {
+    app.interleave_message = Some(content);
+    app.set_status_notice("⏭ Sending now (interleave)");
 }
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {

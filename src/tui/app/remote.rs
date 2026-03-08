@@ -1,5 +1,5 @@
 use super::{
-    ctrl_bracket_fallback_to_esc, parse_rate_limit_error, spawn_in_new_terminal, App,
+    ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error, spawn_in_new_terminal, App,
     DisplayMessage, ProcessingStatus, SendAction,
 };
 use crate::bus::BusEvent;
@@ -1738,29 +1738,27 @@ pub(super) async fn handle_remote_key(
 
     if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
         if !app.input.is_empty() {
-            let raw_input = std::mem::take(&mut app.input);
-            let expanded = app.expand_paste_placeholders(&raw_input);
-            app.pasted_contents.clear();
-            let images = std::mem::take(&mut app.pending_images);
-            app.cursor_pos = 0;
+            let prepared = input::take_prepared_input(app);
 
             match app.send_action(true) {
                 SendAction::Submit => {
                     app.push_display_message(DisplayMessage {
                         role: "user".to_string(),
-                        content: raw_input,
+                        content: prepared.raw_input,
                         tool_calls: vec![],
                         duration_secs: None,
                         title: None,
                         tool_data: None,
                     });
-                    let _ = app.begin_remote_send(remote, expanded, images, false).await;
+                    let _ = app
+                        .begin_remote_send(remote, prepared.expanded, prepared.images, false)
+                        .await;
                 }
                 SendAction::Queue => {
-                    app.queued_messages.push(expanded);
+                    app.queued_messages.push(prepared.expanded);
                 }
                 SendAction::Interleave => {
-                    app.send_interleave_now(expanded, remote).await;
+                    app.send_interleave_now(prepared.expanded, remote).await;
                 }
             }
         }
@@ -1826,12 +1824,8 @@ pub(super) async fn handle_remote_key(
                 return Ok(());
             }
             if !app.input.is_empty() {
-                let raw_input = std::mem::take(&mut app.input);
-                let expanded = app.expand_paste_placeholders(&raw_input);
-                app.pasted_contents.clear();
-                let images = std::mem::take(&mut app.pending_images);
-                app.cursor_pos = 0;
-                let trimmed = expanded.trim();
+                let prepared = input::take_prepared_input(app);
+                let trimmed = prepared.expanded.trim();
 
                 if let Some(topic) = trimmed
                     .strip_prefix("/help ")
@@ -2258,19 +2252,21 @@ pub(super) async fn handle_remote_key(
                     SendAction::Submit => {
                         app.push_display_message(DisplayMessage {
                             role: "user".to_string(),
-                            content: raw_input,
+                            content: prepared.raw_input,
                             tool_calls: vec![],
                             duration_secs: None,
                             title: None,
                             tool_data: None,
                         });
-                        let _ = app.begin_remote_send(remote, expanded, images, false).await;
+                        let _ = app
+                            .begin_remote_send(remote, prepared.expanded, prepared.images, false)
+                            .await;
                     }
                     SendAction::Queue => {
-                        app.queued_messages.push(expanded);
+                        app.queued_messages.push(prepared.expanded);
                     }
                     SendAction::Interleave => {
-                        app.send_interleave_now(expanded, remote).await;
+                        app.send_interleave_now(prepared.expanded, remote).await;
                     }
                 }
             }
