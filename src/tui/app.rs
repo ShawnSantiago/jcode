@@ -3,7 +3,7 @@
 use super::keybind::{CenteredToggleKeys, ModelSwitchKeys, ScrollKeys};
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
-use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
+use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
 use crate::compaction::CompactionEvent;
 use crate::config::config;
 use crate::id;
@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 
+mod local;
 mod remote;
 mod replay;
 
@@ -3838,133 +3839,14 @@ impl App {
                 // Wait for input or redraw tick
                 tokio::select! {
                     _ = redraw_interval.tick() => {
-                        // Flush stream buffer on timeout
-                        if self.stream_buffer.should_flush() {
-                            if let Some(chunk) = self.stream_buffer.flush() {
-                                self.streaming_text.push_str(&chunk);
-                            }
-                        }
-                        self.poll_compaction_completion();
-                        // Check for debug commands
-                        self.check_debug_command();
-                        // Check for new stable version (auto-migration)
-                        self.check_stable_version();
-                        // Execute pending migration if ready
-                        if self.pending_migration.is_some() && !self.is_processing {
-                            self.execute_migration();
-                        }
-                        // Check for rate limit expiry - auto-retry pending message
-                        if let Some(reset_time) = self.rate_limit_reset {
-                            if Instant::now() >= reset_time {
-                                self.rate_limit_reset = None;
-                                let queued_count = self.queued_messages.len();
-                                let msg = if queued_count > 0 {
-                                    format!("✓ Rate limit reset. Retrying... (+{} queued)", queued_count)
-                                } else {
-                                    "✓ Rate limit reset. Retrying...".to_string()
-                                };
-                                self.push_display_message(DisplayMessage::system(msg));
-                                self.pending_turn = true;
-                            }
-                        }
+                        local::handle_tick(&mut self);
                     }
                     event = event_stream.next() => {
-                        match event {
-                            Some(Ok(Event::Key(key))) => {
-                                if key.kind == KeyEventKind::Press {
-                                    self.handle_key(key.code, key.modifiers)?;
-                                }
-                            }
-                            Some(Ok(Event::Paste(text))) => {
-                                self.handle_paste(text);
-                            }
-                            Some(Ok(Event::Mouse(mouse))) => {
-                                self.handle_mouse_event(mouse);
-                            }
-                            Some(Ok(Event::Resize(_, _))) => {
-                                let _ = terminal.clear();
-                            }
-                            _ => {}
-                        }
-                        while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-                            if let Ok(ev) = crossterm::event::read() {
-                                match ev {
-                                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                                        self.handle_key(key.code, key.modifiers)?;
-                                    }
-                                    Event::Paste(text) => {
-                                        self.handle_paste(text);
-                                    }
-                                    Event::Mouse(mouse) => {
-                                        self.handle_mouse_event(mouse);
-                                    }
-                                    Event::Resize(_, _) => {
-                                        let _ = terminal.clear();
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
+                        local::handle_terminal_event(&mut self, &mut terminal, event)?;
                     }
                     // Handle background task completion notifications
                     bus_event = bus_receiver.recv() => {
-                        match bus_event {
-                            Ok(BusEvent::BackgroundTaskCompleted(task)) => {
-                            if task.notify && task.session_id == self.session.id {
-                                let status_str = match task.status {
-                                    BackgroundTaskStatus::Completed => "✓ completed",
-                                    BackgroundTaskStatus::Failed => "✗ failed",
-                                    BackgroundTaskStatus::Running => "running",
-                                };
-                                let notification = format!(
-                                    "[Background Task Completed]\n\
-                                     Task: {} ({})\n\
-                                     Status: {}\n\
-                                     Duration: {:.1}s\n\
-                                     Exit code: {}\n\n\
-                                     Output preview:\n{}\n\n\
-                                     Use `bg action=\"output\" task_id=\"{}\"` for full output.",
-                                    task.task_id,
-                                    task.tool_name,
-                                    status_str,
-                                    task.duration_secs,
-                                    task.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "N/A".to_string()),
-                                    task.output_preview,
-                                    task.task_id,
-                                );
-                                self.push_display_message(DisplayMessage::system(notification.clone()));
-                                // If not currently processing, inject as a message for the agent
-                                if !self.is_processing {
-                                    self.add_provider_message(Message {
-                                        role: Role::User,
-                                        content: vec![ContentBlock::Text {
-                                            text: notification,
-                                            cache_control: None,
-                                        }],
-                                        timestamp: Some(chrono::Utc::now()),
-                                    });
-                                    self.session.add_message(Role::User, vec![ContentBlock::Text {
-                                        text: format!("[Background task {} completed]", task.task_id),
-                                        cache_control: None,
-                                    }]);
-                                    let _ = self.session.save();
-                                }
-                            }
-                            }
-                            Ok(BusEvent::UsageReport(results)) => {
-                                self.handle_usage_report(results);
-                            }
-                            Ok(BusEvent::LoginCompleted(login)) => {
-                                self.handle_login_completed(login);
-                            }
-                            Ok(BusEvent::UpdateStatus(status)) => {
-                                self.handle_update_status(status);
-                            }
-                            Ok(BusEvent::CompactionFinished) => {
-                                self.poll_compaction_completion();
-                            }
-                            _ => {}
-                        }
+                        local::handle_bus_event(&mut self, bus_event);
                     }
                 }
             }
