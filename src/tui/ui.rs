@@ -12,10 +12,7 @@ use super::visual_debug::{
 };
 use super::{is_unexpected_cache_miss, DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
-use ratatui::{
-    prelude::*,
-    widgets::{Block, Borders, Paragraph},
-};
+use ratatui::{prelude::*, widgets::Paragraph};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,6 +21,8 @@ use std::time::{Duration, Instant};
 
 #[path = "ui_animations.rs"]
 mod animations;
+#[path = "ui_diagram_pane.rs"]
+mod diagram_pane;
 #[path = "ui_header.rs"]
 mod header;
 #[path = "ui_input.rs"]
@@ -33,6 +32,14 @@ mod overlays;
 #[path = "ui_tools.rs"]
 mod tools_ui;
 
+#[cfg(test)]
+use diagram_pane::{
+    div_ceil_u32, estimate_pinned_diagram_pane_width_with_font, is_diagram_poor_fit,
+    vcenter_fitted_image_with_font,
+};
+use diagram_pane::{
+    draw_pinned_diagram, estimate_pinned_diagram_pane_height, estimate_pinned_diagram_pane_width,
+};
 pub(crate) use header::capitalize;
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
@@ -1581,75 +1588,6 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "unknown panic payload".to_string()
     }
-}
-
-fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
-    if divisor == 0 {
-        return value;
-    }
-    value.saturating_add(divisor - 1) / divisor
-}
-
-fn estimate_pinned_diagram_pane_width_with_font(
-    diagram: &info_widget::DiagramInfo,
-    pane_height: u16,
-    min_width: u16,
-    font_size: Option<(u16, u16)>,
-) -> u16 {
-    const PANE_BORDER_WIDTH: u32 = 2;
-    let inner_height = pane_height.saturating_sub(PANE_BORDER_WIDTH as u16).max(1) as u32;
-    let (cell_w, cell_h) = font_size.unwrap_or((8, 16));
-    let cell_w = cell_w.max(1) as u32;
-    let cell_h = cell_h.max(1) as u32;
-
-    let image_w_cells = div_ceil_u32(diagram.width.max(1), cell_w);
-    let image_h_cells = div_ceil_u32(diagram.height.max(1), cell_h);
-    let fit_w_cells = if image_h_cells > inner_height {
-        div_ceil_u32(image_w_cells.saturating_mul(inner_height), image_h_cells)
-    } else {
-        image_w_cells
-    }
-    .max(1);
-
-    let pane_width = fit_w_cells.saturating_add(PANE_BORDER_WIDTH);
-    pane_width.max(min_width as u32).min(u16::MAX as u32) as u16
-}
-
-fn estimate_pinned_diagram_pane_width(
-    diagram: &info_widget::DiagramInfo,
-    pane_height: u16,
-    min_width: u16,
-) -> u16 {
-    estimate_pinned_diagram_pane_width_with_font(
-        diagram,
-        pane_height,
-        min_width,
-        super::mermaid::get_font_size(),
-    )
-}
-
-fn estimate_pinned_diagram_pane_height(
-    diagram: &info_widget::DiagramInfo,
-    pane_width: u16,
-    min_height: u16,
-) -> u16 {
-    const PANE_BORDER: u32 = 2;
-    let inner_width = pane_width.saturating_sub(PANE_BORDER as u16).max(1) as u32;
-    let (cell_w, cell_h) = super::mermaid::get_font_size().unwrap_or((8, 16));
-    let cell_w = cell_w.max(1) as u32;
-    let cell_h = cell_h.max(1) as u32;
-
-    let image_w_cells = div_ceil_u32(diagram.width.max(1), cell_w);
-    let image_h_cells = div_ceil_u32(diagram.height.max(1), cell_h);
-    let fit_h_cells = if image_w_cells > inner_width {
-        div_ceil_u32(image_h_cells.saturating_mul(inner_width), image_w_cells)
-    } else {
-        image_h_cells
-    }
-    .max(1);
-
-    let pane_height = fit_h_cells.saturating_add(PANE_BORDER);
-    pane_height.max(min_height as u32).min(u16::MAX as u32) as u16
 }
 
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
@@ -4264,224 +4202,6 @@ fn rect_within_bounds(rect: Rect, bounds: Rect) -> bool {
     let bounds_right = bounds.x.saturating_add(bounds.width);
     let bounds_bottom = bounds.y.saturating_add(bounds.height);
     rect.x >= bounds.x && rect.y >= bounds.y && right <= bounds_right && bottom <= bounds_bottom
-}
-
-/// Compute a centered sub-area for a fitted image.
-///
-/// Given the available terminal `area` and the source image pixel dimensions,
-/// this calculates the cell rect the image will occupy after aspect-ratio
-/// scaling and returns a `Rect` centered both horizontally and vertically.
-fn vcenter_fitted_image(area: Rect, img_w_px: u32, img_h_px: u32) -> Rect {
-    vcenter_fitted_image_with_font(area, img_w_px, img_h_px, super::mermaid::get_font_size())
-}
-
-fn vcenter_fitted_image_with_font(
-    area: Rect,
-    img_w_px: u32,
-    img_h_px: u32,
-    font_size: Option<(u16, u16)>,
-) -> Rect {
-    if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
-        return area;
-    }
-    let (font_w, font_h) = match font_size {
-        Some(fs) => (fs.0 as f64, fs.1 as f64),
-        None => return area,
-    };
-
-    let area_w_px = area.width as f64 * font_w;
-    let area_h_px = area.height as f64 * font_h;
-    let scale = (area_w_px / img_w_px as f64).min(area_h_px / img_h_px as f64);
-
-    let fitted_w_cells = ((img_w_px as f64 * scale) / font_w).ceil() as u16;
-    let fitted_h_cells = ((img_h_px as f64 * scale) / font_h).ceil() as u16;
-    let fitted_w_cells = fitted_w_cells.min(area.width);
-    let fitted_h_cells = fitted_h_cells.min(area.height);
-
-    let x_offset = (area.width - fitted_w_cells) / 2;
-    let y_offset = (area.height - fitted_h_cells) / 2;
-    Rect {
-        x: area.x + x_offset,
-        y: area.y + y_offset,
-        width: fitted_w_cells,
-        height: fitted_h_cells,
-    }
-}
-
-/// Check if a diagram is a poor fit for the current pane position.
-/// Returns true when the aspect ratio makes the diagram poorly utilized.
-fn is_diagram_poor_fit(
-    diagram: &info_widget::DiagramInfo,
-    area: Rect,
-    position: crate::config::DiagramPanePosition,
-) -> bool {
-    if diagram.width == 0 || diagram.height == 0 || area.width < 5 || area.height < 3 {
-        return false;
-    }
-    let (cell_w, cell_h) = super::mermaid::get_font_size().unwrap_or((8, 16));
-    let cell_w = cell_w.max(1) as f64;
-    let cell_h = cell_h.max(1) as f64;
-    let inner_w = area.width.saturating_sub(2).max(1) as f64 * cell_w;
-    let inner_h = area.height.saturating_sub(2).max(1) as f64 * cell_h;
-    let img_w = diagram.width as f64;
-    let img_h = diagram.height as f64;
-    let aspect = img_w / img_h.max(1.0);
-    let scale = (inner_w / img_w).min(inner_h / img_h);
-
-    if scale < 0.3 {
-        return true;
-    }
-
-    match position {
-        crate::config::DiagramPanePosition::Side => {
-            let used_w = img_w * scale;
-            let used_h = img_h * scale;
-            let utilization = (used_w * used_h) / (inner_w * inner_h);
-            aspect > 2.0 && utilization < 0.35
-        }
-        crate::config::DiagramPanePosition::Top => {
-            let used_w = img_w * scale;
-            let used_h = img_h * scale;
-            let utilization = (used_w * used_h) / (inner_w * inner_h);
-            aspect < 0.5 && utilization < 0.35
-        }
-    }
-}
-
-/// Draw a pinned diagram in a dedicated pane
-fn draw_pinned_diagram(
-    frame: &mut Frame,
-    diagram: &info_widget::DiagramInfo,
-    area: Rect,
-    index: usize,
-    total: usize,
-    focused: bool,
-    scroll_x: i32,
-    scroll_y: i32,
-    zoom_percent: u8,
-    pane_position: crate::config::DiagramPanePosition,
-    pane_animating: bool,
-) {
-    use ratatui::widgets::{BorderType, Paragraph, Wrap};
-
-    if area.width < 5 || area.height < 3 {
-        return;
-    }
-
-    let border_color = if focused { accent_color() } else { dim_color() };
-    let mut title_parts = vec![Span::styled(" pinned ", Style::default().fg(tool_color()))];
-    if total > 0 {
-        title_parts.push(Span::styled(
-            format!("{}/{}", index + 1, total),
-            Style::default().fg(tool_color()),
-        ));
-    }
-    let mode_label = if focused { " pan " } else { " fit " };
-    title_parts.push(Span::styled(
-        mode_label,
-        Style::default().fg(if focused { accent_color() } else { dim_color() }),
-    ));
-    if focused || zoom_percent != 100 {
-        title_parts.push(Span::styled(
-            format!(" zoom {}%", zoom_percent),
-            Style::default().fg(if focused { accent_color() } else { dim_color() }),
-        ));
-    }
-    if total > 1 {
-        title_parts.push(Span::styled(" Ctrl+←/→", Style::default().fg(dim_color())));
-    }
-    title_parts.push(Span::styled(
-        " Ctrl+H/L focus",
-        Style::default().fg(dim_color()),
-    ));
-    title_parts.push(Span::styled(
-        " Alt+M toggle",
-        Style::default().fg(dim_color()),
-    ));
-
-    let poor_fit = is_diagram_poor_fit(diagram, area, pane_position);
-    if poor_fit {
-        let hint = match pane_position {
-            crate::config::DiagramPanePosition::Side => " Alt+T \u{21c4} top",
-            crate::config::DiagramPanePosition::Top => " Alt+T \u{21c4} side",
-        };
-        title_parts.push(Span::styled(
-            hint,
-            Style::default()
-                .fg(accent_color())
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ));
-    }
-    if focused {
-        title_parts.push(Span::styled(
-            " o open",
-            Style::default().fg(if poor_fit {
-                accent_color()
-            } else {
-                dim_color()
-            }),
-        ));
-    } else if poor_fit {
-        title_parts.push(Span::styled(
-            " focus+o open",
-            Style::default()
-                .fg(accent_color())
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ));
-    }
-
-    // Draw border with title
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(Line::from(title_parts));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Render the diagram image inside the border
-    if inner.width > 0 && inner.height > 0 {
-        let mut rendered = 0u16;
-        if pane_animating {
-            clear_area(frame, inner);
-            let placeholder =
-                super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
-            let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
-            frame.render_widget(paragraph, inner);
-            rendered = inner.height;
-        } else if super::mermaid::protocol_type().is_some() {
-            if focused {
-                rendered = super::mermaid::render_image_widget_viewport(
-                    diagram.hash,
-                    inner,
-                    frame.buffer_mut(),
-                    scroll_x,
-                    scroll_y,
-                    zoom_percent,
-                    false,
-                );
-            } else {
-                let render_area = vcenter_fitted_image(inner, diagram.width, diagram.height);
-                rendered = super::mermaid::render_image_widget_scale(
-                    diagram.hash,
-                    render_area,
-                    frame.buffer_mut(),
-                    false,
-                );
-            }
-        }
-
-        if rendered > 0 && super::mermaid::is_video_export_mode() {
-            super::mermaid::write_video_export_marker(diagram.hash, inner, frame.buffer_mut());
-        } else if rendered == 0 {
-            clear_area(frame, inner);
-            let placeholder =
-                super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
-            let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
-            frame.render_widget(paragraph, inner);
-        }
-    }
 }
 
 fn draw_messages(
