@@ -93,7 +93,7 @@ pub(crate) fn vcenter_fitted_image_with_font(
         return area;
     }
     let (font_w, font_h) = match font_size {
-        Some(fs) => (fs.0 as f64, fs.1 as f64),
+        Some(fs) => (fs.0.max(1) as f64, fs.1.max(1) as f64),
         None => return area,
     };
 

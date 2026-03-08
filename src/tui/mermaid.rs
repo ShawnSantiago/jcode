@@ -1436,11 +1436,7 @@ impl MermaidCache {
             {
                 candidate.clone()
             } else {
-                candidates
-                    .iter()
-                    .max_by_key(|(_, w)| *w)
-                    .cloned()
-                    .unwrap_or_else(|| candidates[0].clone())
+                return None;
             }
         } else {
             candidates
@@ -1581,6 +1577,109 @@ fn calculate_render_size(
     (width, height)
 }
 
+fn extract_xml_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let pattern = format!(" {attr}=\"");
+    let start = tag.find(&pattern)? + pattern.len();
+    let end = tag[start..].find('"')? + start;
+    Some(&tag[start..end])
+}
+
+fn parse_svg_length(value: &str) -> Option<f32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.ends_with('%') {
+        return None;
+    }
+    let normalized = trimmed.strip_suffix("px").unwrap_or(trimmed);
+    let parsed = normalized.parse::<f32>().ok()?;
+    if parsed.is_finite() && parsed > 0.0 {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn parse_svg_viewbox_size(tag: &str) -> Option<(f32, f32)> {
+    let viewbox = extract_xml_attribute(tag, "viewBox")?;
+    let mut parts = viewbox.split_whitespace();
+    let _min_x = parts.next()?.parse::<f32>().ok()?;
+    let _min_y = parts.next()?.parse::<f32>().ok()?;
+    let width = parts.next()?.parse::<f32>().ok()?;
+    let height = parts.next()?.parse::<f32>().ok()?;
+    if width.is_finite() && width > 0.0 && height.is_finite() && height > 0.0 {
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
+fn parse_svg_explicit_size(tag: &str) -> Option<(f32, f32)> {
+    let width = parse_svg_length(extract_xml_attribute(tag, "width")?)?;
+    let height = parse_svg_length(extract_xml_attribute(tag, "height")?)?;
+    Some((width, height))
+}
+
+fn format_svg_length(value: f32) -> String {
+    let mut out = format!("{:.3}", value.max(1.0));
+    while out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    out
+}
+
+fn set_xml_attribute(tag: &str, attr: &str, value: &str) -> String {
+    let pattern = format!(" {attr}=\"");
+    if let Some(start) = tag.find(&pattern) {
+        let value_start = start + pattern.len();
+        if let Some(end_rel) = tag[value_start..].find('"') {
+            let value_end = value_start + end_rel;
+            let mut updated = String::with_capacity(tag.len() + value.len());
+            updated.push_str(&tag[..value_start]);
+            updated.push_str(value);
+            updated.push_str(&tag[value_end..]);
+            return updated;
+        }
+    }
+
+    let insert_pos = tag.rfind('>').unwrap_or(tag.len());
+    let mut updated = String::with_capacity(tag.len() + attr.len() + value.len() + 4);
+    updated.push_str(&tag[..insert_pos]);
+    updated.push_str(&format!(" {attr}=\"{value}\""));
+    updated.push_str(&tag[insert_pos..]);
+    updated
+}
+
+fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: f64) -> String {
+    let Some(start) = svg.find("<svg") else {
+        return svg.to_string();
+    };
+    let Some(end_rel) = svg[start..].find('>') else {
+        return svg.to_string();
+    };
+    let end = start + end_rel;
+    let root_tag = &svg[start..=end];
+
+    let (resolved_width, resolved_height) = parse_svg_viewbox_size(root_tag)
+        .or_else(|| parse_svg_explicit_size(root_tag))
+        .map(|(width, height)| {
+            let output_width = target_width.max(1.0) as f32;
+            let output_height = (output_width * (height / width)).max(1.0);
+            (output_width, output_height)
+        })
+        .unwrap_or_else(|| (target_width.max(1.0) as f32, target_height.max(1.0) as f32));
+
+    let root_tag = set_xml_attribute(root_tag, "width", &format_svg_length(resolved_width));
+    let root_tag = set_xml_attribute(&root_tag, "height", &format_svg_length(resolved_height));
+
+    let mut updated = String::with_capacity(svg.len() - (end + 1 - start) + root_tag.len());
+    updated.push_str(&svg[..start]);
+    updated.push_str(&root_tag);
+    updated.push_str(&svg[end + 1..]);
+    updated
+}
+
 /// Render a mermaid code block to PNG (cached)
 /// Now accepts optional terminal_width for adaptive sizing
 pub fn render_mermaid(content: &str) -> RenderResult {
@@ -1701,11 +1800,12 @@ fn render_mermaid_sized_internal(
 
         // Render to SVG
         let svg = render_svg(&layout, &theme, &layout_config);
+        let svg = retarget_svg_for_png(&svg, target_width, target_height);
 
         // Convert SVG to PNG with adaptive dimensions
         let render_config = RenderConfig {
-            width: DEFAULT_RENDER_WIDTH as f32,
-            height: DEFAULT_RENDER_HEIGHT as f32,
+            width: target_width as f32,
+            height: target_height as f32,
             background: theme.background.clone(),
         };
 
@@ -2751,6 +2851,21 @@ pub fn clear_image_state() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn write_test_png(path: &Path, width: u32, height: u32) {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+        img.save(path).expect("save test png");
+    }
+
+    fn mermaid_render_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn test_mermaid_detection() {
@@ -2880,6 +2995,64 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_path_includes_target_width() {
+        let cache = MermaidCache::new();
+        let path = cache.cache_path(0x0123_4567_89ab_cdef, 960);
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        assert_eq!(file_name, "0123456789abcdef_w960.png");
+    }
+
+    #[test]
+    fn test_discover_on_disk_prefers_smallest_variant_above_reuse_threshold() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hash = 0xfeed_face_cafe_beefu64;
+        let small = temp.path().join(format!("{:016x}_w900.png", hash));
+        let medium = temp.path().join(format!("{:016x}_w1000.png", hash));
+        let large = temp.path().join(format!("{:016x}_w1400.png", hash));
+        write_test_png(&small, 900, 600);
+        write_test_png(&medium, 1000, 700);
+        write_test_png(&large, 1400, 900);
+
+        let cache = MermaidCache {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            cache_dir: temp.path().to_path_buf(),
+        };
+
+        let found = cache
+            .discover_on_disk(hash, Some(1000))
+            .expect("expected discovered diagram");
+        assert_eq!(found.width, 900);
+        assert_eq!(found.height, 600);
+        assert_eq!(found.path, small);
+    }
+
+    #[test]
+    fn test_discover_on_disk_returns_none_when_threshold_not_met() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hash = 0x0bad_f00d_dead_beefu64;
+        let smaller = temp.path().join(format!("{:016x}_w500.png", hash));
+        let larger = temp.path().join(format!("{:016x}_w700.png", hash));
+        write_test_png(&smaller, 500, 300);
+        write_test_png(&larger, 700, 420);
+
+        let cache = MermaidCache {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            cache_dir: temp.path().to_path_buf(),
+        };
+
+        let found = cache.discover_on_disk(hash, Some(1000));
+        assert!(
+            found.is_none(),
+            "undersized cached variants should force a re-render"
+        );
+    }
+
+    #[test]
     fn test_active_diagrams_are_bounded() {
         clear_active_diagrams();
         for idx in 0..(ACTIVE_DIAGRAMS_MAX + 5) {
@@ -2892,6 +3065,24 @@ mod tests {
             snapshot.last().map(|d| d.hash),
             Some((ACTIVE_DIAGRAMS_MAX + 4) as u64)
         );
+        clear_active_diagrams();
+    }
+
+    #[test]
+    fn test_register_active_diagram_updates_existing_entry_without_duplication() {
+        clear_active_diagrams();
+        register_active_diagram(0xabc, 100, 80, Some("first".to_string()));
+        register_active_diagram(0xdef, 120, 90, None);
+        register_active_diagram(0xabc, 300, 200, Some("updated".to_string()));
+
+        let diagrams = get_active_diagrams();
+        assert_eq!(diagrams.len(), 2);
+        assert_eq!(diagrams[0].hash, 0xabc);
+        assert_eq!(diagrams[0].width, 300);
+        assert_eq!(diagrams[0].height, 200);
+        assert_eq!(diagrams[0].label.as_deref(), Some("updated"));
+        assert_eq!(diagrams[1].hash, 0xdef);
+
         clear_active_diagrams();
     }
 
@@ -2946,6 +3137,135 @@ mod tests {
     fn test_memory_benchmark_clamps_iterations() {
         let result = debug_memory_benchmark(0);
         assert_eq!(result.iterations, 1);
+    }
+
+    #[test]
+    fn test_memory_benchmark_upper_clamps_iterations() {
+        let result = debug_memory_benchmark(999);
+        assert_eq!(result.iterations, 256);
+    }
+
+    #[test]
+    fn test_register_external_image_round_trips_through_cache() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("external.png");
+        write_test_png(&path, 320, 180);
+
+        let hash = register_external_image(&path, 320, 180);
+        let cached = get_cached_png(hash).expect("cached png entry");
+        assert_eq!(cached.0, path);
+        assert_eq!(cached.1, 320);
+        assert_eq!(cached.2, 180);
+    }
+
+    #[test]
+    fn test_result_to_lines_uses_hash_placeholder_in_video_export_mode() {
+        set_video_export_mode(true);
+        let hash = 0x1234_5678_9abc_def0u64;
+        let lines = result_to_lines(
+            RenderResult::Image {
+                hash,
+                path: PathBuf::from("/tmp/placeholder.png"),
+                width: 640,
+                height: 480,
+            },
+            Some(80),
+        );
+        set_video_export_mode(false);
+
+        assert!(!lines.is_empty());
+        assert_eq!(parse_image_placeholder(&lines[0]), Some(hash));
+    }
+
+    #[test]
+    fn test_estimate_image_height_fallback_scales_and_caps() {
+        let short = estimate_image_height(800, 400, 80);
+        let tall = estimate_image_height(200, 1600, 80);
+        assert!(short > 0);
+        assert!(tall >= short);
+        assert!(
+            tall <= 30,
+            "fallback height should stay capped, got {}",
+            tall
+        );
+    }
+
+    #[test]
+    fn test_render_mermaid_sized_creates_distinct_cache_variants_for_widths() {
+        let _lock = mermaid_render_test_lock();
+        clear_cache().ok();
+
+        let content = "flowchart LR\n    A[Start] --> B[End]";
+        let small = render_mermaid_untracked(content, Some(60));
+        let large = render_mermaid_untracked(content, Some(200));
+
+        let (small_path, large_path) = match (small, large) {
+            (
+                RenderResult::Image {
+                    path: small_path, ..
+                },
+                RenderResult::Image {
+                    path: large_path, ..
+                },
+            ) => (small_path, large_path),
+            _ => panic!("expected successful mermaid renders"),
+        };
+
+        assert_ne!(
+            small_path, large_path,
+            "expected width-specific cache variants"
+        );
+        assert!(small_path.to_string_lossy().contains("_w400"));
+        assert!(large_path.to_string_lossy().contains("_w960"));
+    }
+
+    #[test]
+    fn test_render_mermaid_sized_honors_adaptive_output_dimensions() {
+        let _lock = mermaid_render_test_lock();
+        clear_cache().ok();
+
+        let content = "flowchart LR\n    A[Start] --> B[End]";
+        let small = render_mermaid_untracked(content, Some(60));
+        let large = render_mermaid_untracked(content, Some(200));
+
+        let (small_w, small_h, large_w, large_h) = match (small, large) {
+            (
+                RenderResult::Image {
+                    width: small_w,
+                    height: small_h,
+                    ..
+                },
+                RenderResult::Image {
+                    width: large_w,
+                    height: large_h,
+                    ..
+                },
+            ) => (small_w, small_h, large_w, large_h),
+            _ => panic!("expected successful mermaid renders"),
+        };
+
+        assert!(
+            small_w < large_w,
+            "expected adaptive widths: {} < {}",
+            small_w,
+            large_w
+        );
+        assert!(
+            small_h < large_h,
+            "expected adaptive heights: {} < {}",
+            small_h,
+            large_h
+        );
+        assert!(
+            small_w <= 450,
+            "small render should stay near narrow target width, got {}",
+            small_w
+        );
+        assert!(
+            large_w >= 900,
+            "large render should approach wide target width, got {}",
+            large_w
+        );
     }
 
     #[test]

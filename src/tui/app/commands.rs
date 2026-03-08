@@ -413,8 +413,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     let mut stored_count = 0;
 
                     for mem in extracted {
-                        let category =
-                            crate::memory::MemoryCategory::from_extracted(&mem.category);
+                        let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
 
                         let trust = match mem.trust.as_str() {
                             "high" => crate::memory::TrustLevel::High,
@@ -952,8 +951,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .filter(|m| m.role == "user")
             .count();
 
-        let session_duration =
-            chrono::Utc::now().signed_duration_since(app.session.created_at);
+        let session_duration = chrono::Utc::now().signed_duration_since(app.session.created_at);
         let duration_str = if session_duration.num_hours() > 0 {
             format!(
                 "{}h {}m",

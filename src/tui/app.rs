@@ -10629,6 +10629,122 @@ mod tests {
     }
 
     #[test]
+    fn test_pinned_side_diagram_layout_allocates_right_pane() {
+        let _render_lock = scroll_render_test_lock();
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+        app.diagram_pane_enabled = true;
+        app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
+        app.diagram_pane_ratio = 40;
+
+        crate::tui::mermaid::clear_active_diagrams();
+        crate::tui::mermaid::register_active_diagram(0x111, 900, 450, Some("side".to_string()));
+
+        crate::tui::visual_debug::enable();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, &app))
+            .expect("draw failed");
+
+        let frame = crate::tui::visual_debug::latest_frame().expect("frame capture");
+        let diagram = frame.layout.diagram_area.expect("diagram area");
+        let messages = frame.layout.messages_area.expect("messages area");
+
+        assert!(
+            diagram.width >= 24,
+            "diagram pane too narrow: {}",
+            diagram.width
+        );
+        assert_eq!(diagram.height, 40);
+        assert_eq!(diagram.x, messages.x + messages.width);
+        assert_eq!(diagram.y, 0);
+        assert!(
+            diagram.width < 120,
+            "diagram should not consume full terminal width"
+        );
+        assert!(frame
+            .render_order
+            .iter()
+            .any(|s| s == "draw_pinned_diagram"));
+
+        crate::tui::visual_debug::disable();
+        crate::tui::mermaid::clear_active_diagrams();
+    }
+
+    #[test]
+    fn test_pinned_top_diagram_layout_allocates_top_pane() {
+        let _render_lock = scroll_render_test_lock();
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+        app.diagram_pane_enabled = true;
+        app.diagram_pane_position = crate::config::DiagramPanePosition::Top;
+        app.diagram_pane_ratio = 35;
+
+        crate::tui::mermaid::clear_active_diagrams();
+        crate::tui::mermaid::register_active_diagram(0x222, 500, 900, Some("top".to_string()));
+
+        crate::tui::visual_debug::enable();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, &app))
+            .expect("draw failed");
+
+        let frame = crate::tui::visual_debug::latest_frame().expect("frame capture");
+        let diagram = frame.layout.diagram_area.expect("diagram area");
+        let messages = frame.layout.messages_area.expect("messages area");
+
+        assert_eq!(diagram.x, 0);
+        assert_eq!(diagram.width, 120);
+        assert!(
+            diagram.height >= 6,
+            "diagram pane too short: {}",
+            diagram.height
+        );
+        assert_eq!(messages.y, diagram.y + diagram.height);
+        assert!(frame
+            .render_order
+            .iter()
+            .any(|s| s == "draw_pinned_diagram"));
+
+        crate::tui::visual_debug::disable();
+        crate::tui::mermaid::clear_active_diagrams();
+    }
+
+    #[test]
+    fn test_pinned_diagram_not_shown_when_terminal_too_narrow() {
+        let _render_lock = scroll_render_test_lock();
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+        app.diagram_pane_enabled = true;
+        app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
+
+        crate::tui::mermaid::clear_active_diagrams();
+        crate::tui::mermaid::register_active_diagram(0x333, 900, 450, None);
+
+        crate::tui::visual_debug::enable();
+        let backend = ratatui::backend::TestBackend::new(30, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, &app))
+            .expect("draw failed");
+
+        let frame = crate::tui::visual_debug::latest_frame().expect("frame capture");
+        assert!(
+            frame.layout.diagram_area.is_none(),
+            "diagram pane should be suppressed on narrow terminal"
+        );
+        assert!(!frame
+            .render_order
+            .iter()
+            .any(|s| s == "draw_pinned_diagram"));
+
+        crate::tui::visual_debug::disable();
+        crate::tui::mermaid::clear_active_diagrams();
+    }
+
+    #[test]
     fn test_mouse_scroll_over_diff_pane_scrolls_side_panel() {
         let mut app = create_test_app();
         app.diff_mode = crate::config::DiffDisplayMode::File;

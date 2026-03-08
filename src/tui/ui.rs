@@ -4030,4 +4030,74 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_vcenter_fitted_image_preserves_aspect_ratio_close_to_source() {
+        let cases = [
+            (Rect::new(0, 0, 48, 38), 600, 300),
+            (Rect::new(0, 0, 48, 38), 300, 600),
+            (Rect::new(0, 0, 80, 20), 1200, 400),
+            (Rect::new(0, 0, 30, 40), 400, 1200),
+        ];
+
+        for (area, img_w, img_h) in cases {
+            let result = vcenter_fitted_image_with_font(area, img_w, img_h, TEST_FONT);
+            let src_aspect = img_w as f64 / img_h as f64;
+            let dst_aspect = (result.width as f64 * 8.0) / (result.height as f64 * 16.0);
+            let rel_err = (dst_aspect - src_aspect).abs() / src_aspect.max(0.0001);
+            assert!(
+                rel_err < 0.12,
+                "aspect ratio drift too large for {}x{} in {:?}: src={:.3}, dst={:.3}, err={:.3}",
+                img_w,
+                img_h,
+                area,
+                src_aspect,
+                dst_aspect,
+                rel_err,
+            );
+        }
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_with_zero_font_dimension_falls_back_safely() {
+        let area = Rect::new(4, 2, 50, 20);
+        let safe = vcenter_fitted_image_with_font(area, 800, 400, Some((0, 16)));
+        assert!(safe.width > 0);
+        assert!(safe.height > 0);
+        assert!(safe.x >= area.x && safe.y >= area.y);
+        assert!(safe.x + safe.width <= area.x + area.width);
+        assert!(safe.y + safe.height <= area.y + area.height);
+
+        let safe2 = vcenter_fitted_image_with_font(area, 800, 400, Some((8, 0)));
+        assert!(safe2.width > 0);
+        assert!(safe2.height > 0);
+        assert!(safe2.x + safe2.width <= area.x + area.width);
+        assert!(safe2.y + safe2.height <= area.y + area.height);
+    }
+
+    #[test]
+    fn test_side_panel_landscape_diagrams_fill_most_width_across_ratios() {
+        let pane = Rect::new(0, 0, 48, 38);
+        let diagrams = [
+            (600, 300, 0.80),
+            (800, 400, 0.80),
+            (1200, 300, 0.80),
+            (800, 600, 0.65),
+        ];
+
+        for (img_w, img_h, min_width_util) in diagrams {
+            let result = vcenter_fitted_image_with_font(pane, img_w, img_h, TEST_FONT);
+            let w_util = result.width as f64 / pane.width as f64;
+            assert!(
+                w_util >= min_width_util,
+                "{}x{} should use at least {:.0}% width, got {:.0}% ({}/{})",
+                img_w,
+                img_h,
+                min_width_util * 100.0,
+                w_util * 100.0,
+                result.width,
+                pane.width,
+            );
+        }
+    }
 }
