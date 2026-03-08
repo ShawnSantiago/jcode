@@ -4295,73 +4295,11 @@ impl App {
                     self.provider_session_id = None;
                     return Ok(());
                 }
-                KeyCode::Char('u') => {
-                    // Ctrl+U: kill to beginning of line
-                    self.input.drain(..self.cursor_pos);
-                    self.cursor_pos = 0;
-                    self.sync_model_picker_preview_from_input();
-                    return Ok(());
-                }
-                KeyCode::Char('a') => {
-                    // Ctrl+A: beginning of line
-                    self.cursor_pos = 0;
-                    return Ok(());
-                }
-                KeyCode::Char('e') => {
-                    // Ctrl+E: end of line
-                    self.cursor_pos = self.input.len();
-                    return Ok(());
-                }
-                KeyCode::Char('b') => {
-                    // Ctrl+B: back one char
-                    if self.cursor_pos > 0 {
-                        self.cursor_pos =
-                            super::core::prev_char_boundary(&self.input, self.cursor_pos);
+                _ => {
+                    if input::handle_control_key(self, code) {
+                        return Ok(());
                     }
-                    return Ok(());
                 }
-                KeyCode::Char('f') => {
-                    // Ctrl+F: forward one char
-                    if self.cursor_pos < self.input.len() {
-                        self.cursor_pos =
-                            super::core::next_char_boundary(&self.input, self.cursor_pos);
-                    }
-                    return Ok(());
-                }
-                KeyCode::Char('w') => {
-                    // Ctrl+W: delete word backward
-                    let start = self.find_word_boundary_back();
-                    self.input.drain(start..self.cursor_pos);
-                    self.cursor_pos = start;
-                    self.sync_model_picker_preview_from_input();
-                    return Ok(());
-                }
-                KeyCode::Char('s') => {
-                    self.toggle_input_stash();
-                    return Ok(());
-                }
-                KeyCode::Char('v') => {
-                    // Ctrl+V: paste from clipboard (try image first, then text)
-                    self.paste_image_from_clipboard();
-                    return Ok(());
-                }
-                KeyCode::Tab | KeyCode::Char('t') => {
-                    // Ctrl+Tab / Ctrl+T: toggle queue mode (immediate send vs wait until done)
-                    self.queue_mode = !self.queue_mode;
-                    let mode_str = if self.queue_mode {
-                        "Queue mode: messages wait until response completes"
-                    } else {
-                        "Immediate mode: messages send next (no interrupt)"
-                    };
-                    self.set_status_notice(mode_str);
-                    return Ok(());
-                }
-                KeyCode::Up => {
-                    // Ctrl+Up: retrieve all pending unsent messages for editing
-                    self.retrieve_pending_message_for_edit();
-                    return Ok(());
-                }
-                _ => {}
             }
         }
 

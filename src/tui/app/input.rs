@@ -154,6 +154,67 @@ pub(super) fn handle_shift_enter(app: &mut App) {
     }
 }
 
+pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char('u') => {
+            app.input.drain(..app.cursor_pos);
+            app.cursor_pos = 0;
+            app.sync_model_picker_preview_from_input();
+            true
+        }
+        KeyCode::Char('a') => {
+            app.cursor_pos = 0;
+            true
+        }
+        KeyCode::Char('e') => {
+            app.cursor_pos = app.input.len();
+            true
+        }
+        KeyCode::Char('b') => {
+            if app.cursor_pos > 0 {
+                app.cursor_pos = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+            }
+            true
+        }
+        KeyCode::Char('f') => {
+            if app.cursor_pos < app.input.len() {
+                app.cursor_pos = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+            }
+            true
+        }
+        KeyCode::Char('w') => {
+            let start = app.find_word_boundary_back();
+            app.input.drain(start..app.cursor_pos);
+            app.cursor_pos = start;
+            app.sync_model_picker_preview_from_input();
+            true
+        }
+        KeyCode::Char('s') => {
+            app.toggle_input_stash();
+            true
+        }
+        KeyCode::Char('v') => {
+            paste_image_from_clipboard(app);
+            true
+        }
+        KeyCode::Tab | KeyCode::Char('t') => {
+            app.queue_mode = !app.queue_mode;
+            let mode_str = if app.queue_mode {
+                "Queue mode: messages wait until response completes"
+            } else {
+                "Immediate mode: messages send next (no interrupt)"
+            };
+            app.set_status_notice(mode_str);
+            true
+        }
+        KeyCode::Up => {
+            retrieve_pending_message_for_edit(app);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn handle_enter(app: &mut App) -> bool {
     if app.activate_model_picker_from_preview() {
         return true;
