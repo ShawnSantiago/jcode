@@ -218,8 +218,7 @@ pub(super) async fn handle_comm_stop(
     let removed_agent = sessions_guard.remove(&target_session);
     drop(sessions_guard);
     if let Some(agent_arc) = removed_agent {
-        {
-            let agent = agent_arc.lock().await;
+        if let Ok(agent) = agent_arc.try_lock() {
             let memory_enabled = agent.memory_enabled();
             let transcript = if memory_enabled {
                 Some(agent.build_transcript_for_extraction())
@@ -255,11 +254,13 @@ pub(super) async fn handle_comm_stop(
             )
             .await;
             remove_plan_participant(swarm_id, &target_session, swarm_plans).await;
-            let mut swarms = swarms_by_id.write().await;
-            if let Some(swarm) = swarms.get_mut(swarm_id) {
-                swarm.remove(&target_session);
-                if swarm.is_empty() {
-                    swarms.remove(swarm_id);
+            {
+                let mut swarms = swarms_by_id.write().await;
+                if let Some(swarm) = swarms.get_mut(swarm_id) {
+                    swarm.remove(&target_session);
+                    if swarm.is_empty() {
+                        swarms.remove(swarm_id);
+                    }
                 }
             }
             let was_coordinator = {

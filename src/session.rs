@@ -538,6 +538,52 @@ pub struct RenderedMessage {
     pub tool_data: Option<ToolCall>,
 }
 
+pub fn summarize_tool_calls(
+    session: &Session,
+    limit: usize,
+) -> Vec<crate::protocol::ToolCallSummary> {
+    let mut calls: Vec<crate::protocol::ToolCallSummary> = Vec::new();
+
+    for msg in session.messages.iter().rev() {
+        if calls.len() >= limit {
+            break;
+        }
+
+        let text_summary = msg
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for block in &msg.content {
+            if calls.len() >= limit {
+                break;
+            }
+
+            if let ContentBlock::ToolUse { name, input, .. } = block {
+                let fallback = input.to_string();
+                let brief = if text_summary.trim().is_empty() {
+                    crate::util::truncate_str(&fallback, 200).to_string()
+                } else {
+                    crate::util::truncate_str(&text_summary, 200).to_string()
+                };
+                calls.push(crate::protocol::ToolCallSummary {
+                    tool_name: name.clone(),
+                    brief_output: brief,
+                    timestamp_secs: msg.timestamp.map(|ts| ts.timestamp().max(0) as u64),
+                });
+            }
+        }
+    }
+
+    calls.reverse();
+    calls
+}
+
 /// Convert stored session messages into renderable messages (including tool output).
 pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
@@ -858,6 +904,31 @@ mod tests {
             }
             _ => panic!("expected tool use block"),
         }
+    }
+
+    #[test]
+    fn test_summarize_tool_calls_includes_tool_only_assistant_messages() {
+        let mut session = Session::create_with_id(
+            "session_tool_summary_test".to_string(),
+            None,
+            Some("tool summary test".to_string()),
+        );
+
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({
+                    "command": "pwd"
+                }),
+            }],
+        );
+
+        let summaries = summarize_tool_calls(&session, 10);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].tool_name, "bash");
+        assert!(summaries[0].brief_output.contains("pwd"));
     }
 }
 

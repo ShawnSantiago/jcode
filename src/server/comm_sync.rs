@@ -1,9 +1,9 @@
 use super::{
-    broadcast_swarm_plan, record_swarm_event, truncate_detail, SwarmEvent, SwarmEventType,
-    SwarmMember, VersionedPlan,
+    broadcast_swarm_plan, record_swarm_event, SwarmEvent, SwarmEventType, SwarmMember,
+    VersionedPlan,
 };
 use crate::agent::Agent;
-use crate::protocol::{NotificationType, ServerEvent, ToolCallSummary};
+use crate::protocol::{NotificationType, ServerEvent};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -19,27 +19,7 @@ pub(super) async fn handle_comm_summary(
     let agent_sessions = sessions.read().await;
     if let Some(agent) = agent_sessions.get(&target_session) {
         let tool_calls = if let Ok(agent) = agent.try_lock() {
-            let history = agent.get_history();
-            let mut calls: Vec<ToolCallSummary> = Vec::new();
-            for msg in history.iter().rev() {
-                if calls.len() >= limit {
-                    break;
-                }
-                if let Some(tool_names) = &msg.tool_calls {
-                    for name in tool_names {
-                        calls.push(ToolCallSummary {
-                            tool_name: name.clone(),
-                            brief_output: truncate_detail(&msg.content, 200),
-                            timestamp_secs: None,
-                        });
-                        if calls.len() >= limit {
-                            break;
-                        }
-                    }
-                }
-            }
-            calls.reverse();
-            calls
+            agent.get_tool_call_summaries(limit)
         } else {
             Vec::new()
         };

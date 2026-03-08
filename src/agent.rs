@@ -1526,6 +1526,10 @@ impl Agent {
             .collect()
     }
 
+    pub fn get_tool_call_summaries(&self, limit: usize) -> Vec<crate::protocol::ToolCallSummary> {
+        crate::session::summarize_tool_calls(&self.session, limit)
+    }
+
     /// Start an interactive REPL
     pub async fn repl(&mut self) -> Result<()> {
         println!("J-Code - Coding Agent");
