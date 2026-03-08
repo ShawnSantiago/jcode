@@ -4080,48 +4080,7 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
-        // We need to run the turn logic step by step, checking for input between steps
-        // For now, run the turn but poll for input during streaming
-
-        match self.run_turn_interactive(terminal, event_stream).await {
-            Ok(()) => {
-                self.last_stream_error = None;
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if is_context_limit_error(&err_str) {
-                    if self
-                        .try_auto_compact_and_retry(terminal, event_stream)
-                        .await
-                    {
-                        // Successfully recovered
-                    } else {
-                        self.handle_turn_error(err_str);
-                    }
-                } else {
-                    self.handle_turn_error(err_str);
-                }
-            }
-        }
-
-        // Process any queued messages
-        self.process_queued_messages(terminal, event_stream).await;
-
-        // Accumulate turn tokens into session totals
-        self.total_input_tokens += self.streaming_input_tokens;
-        self.total_output_tokens += self.streaming_output_tokens;
-
-        // Calculate cost if using API-key provider (OpenRouter, direct API key)
-        self.update_cost_impl();
-
-        self.is_processing = false;
-        self.status = ProcessingStatus::Idle;
-        self.processing_started = None;
-        self.interleave_message = None;
-        self.pending_soft_interrupts.clear();
-        self.thought_line_inserted = false;
-        self.thinking_prefix_emitted = false;
-        self.thinking_buffer.clear();
+        local::process_turn_with_input(self, terminal, event_stream).await;
     }
 
     /// Handle a key event (wrapper for debug injection)

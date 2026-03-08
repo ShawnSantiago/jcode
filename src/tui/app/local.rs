@@ -1,10 +1,35 @@
-use super::{App, DisplayMessage};
+use super::{is_context_limit_error, App, DisplayMessage, ProcessingStatus};
 use crate::bus::{BackgroundTaskCompleted, BackgroundTaskStatus, BusEvent};
 use crate::message::{ContentBlock, Message, Role};
 use anyhow::Result;
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyEventKind};
 use ratatui::DefaultTerminal;
 use tokio::sync::broadcast::error::RecvError;
+
+pub(super) async fn process_turn_with_input(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    event_stream: &mut EventStream,
+) {
+    match app.run_turn_interactive(terminal, event_stream).await {
+        Ok(()) => {
+            app.last_stream_error = None;
+        }
+        Err(error) => {
+            let err_str = error.to_string();
+            if is_context_limit_error(&err_str) {
+                if !app.try_auto_compact_and_retry(terminal, event_stream).await {
+                    app.handle_turn_error(err_str);
+                }
+            } else {
+                app.handle_turn_error(err_str);
+            }
+        }
+    }
+
+    app.process_queued_messages(terminal, event_stream).await;
+    finish_turn(app);
+}
 
 pub(super) fn handle_tick(app: &mut App) {
     if app.stream_buffer.should_flush() {
@@ -143,4 +168,18 @@ fn format_background_task_notification(task: &BackgroundTaskCompleted) -> String
         task.output_preview,
         task.task_id,
     )
+}
+
+fn finish_turn(app: &mut App) {
+    app.total_input_tokens += app.streaming_input_tokens;
+    app.total_output_tokens += app.streaming_output_tokens;
+    app.update_cost_impl();
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.processing_started = None;
+    app.interleave_message = None;
+    app.pending_soft_interrupts.clear();
+    app.thought_line_inserted = false;
+    app.thinking_prefix_emitted = false;
+    app.thinking_buffer.clear();
 }
