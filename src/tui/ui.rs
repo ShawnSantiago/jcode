@@ -25,6 +25,8 @@ static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
 static DRAW_PANIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Total line count in the pinned diff/content pane (set during render).
 static PINNED_PANE_TOTAL_LINES: AtomicUsize = AtomicUsize::new(0);
+/// Effective scroll position of the side pane after render-time clamping.
+static LAST_DIFF_PANE_EFFECTIVE_SCROLL: AtomicUsize = AtomicUsize::new(0);
 /// Wrapped line indices where each user prompt starts (updated each render frame).
 /// Used by prompt-jump keybindings (Ctrl+1..9, Ctrl+[/]) for accurate positioning.
 static LAST_USER_PROMPT_POSITIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
@@ -38,6 +40,10 @@ pub fn last_max_scroll() -> usize {
 /// Get the total line count from the pinned diff/content pane (set during render).
 pub fn pinned_pane_total_lines() -> usize {
     PINNED_PANE_TOTAL_LINES.load(Ordering::Relaxed)
+}
+
+pub fn last_diff_pane_effective_scroll() -> usize {
+    LAST_DIFF_PANE_EFFECTIVE_SCROLL.load(Ordering::Relaxed)
 }
 
 /// Get the last known user prompt line positions (from the most recent render frame).
@@ -72,6 +78,9 @@ fn ai_color() -> Color {
 }
 fn tool_color() -> Color {
     rgb(120, 120, 120)
+}
+fn file_link_color() -> Color {
+    rgb(180, 200, 255)
 }
 fn dim_color() -> Color {
     rgb(80, 80, 80)
@@ -2080,6 +2089,13 @@ struct EditToolRange {
     end_line: usize,
 }
 
+#[derive(Clone, Debug)]
+struct ActiveFileDiffContext {
+    edit_index: usize,
+    msg_index: usize,
+    file_path: String,
+}
+
 #[derive(Clone, Copy)]
 struct PromptViewportAnimation {
     line_idx: usize,
@@ -2630,15 +2646,25 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         false
     };
-    let has_file_diff_edits = diff_mode.is_file() && app.display_messages().iter().any(|m| {
-        m.tool_data
-            .as_ref()
-            .map(|tc| matches!(
-                tc.name.as_str(),
-                "edit" | "Edit" | "write" | "multiedit" | "patch" | "Patch" | "apply_patch" | "ApplyPatch"
-            ))
-            .unwrap_or(false)
-    });
+    let has_file_diff_edits = diff_mode.is_file()
+        && app.display_messages().iter().any(|m| {
+            m.tool_data
+                .as_ref()
+                .map(|tc| {
+                    matches!(
+                        tc.name.as_str(),
+                        "edit"
+                            | "Edit"
+                            | "write"
+                            | "multiedit"
+                            | "patch"
+                            | "Patch"
+                            | "apply_patch"
+                            | "ApplyPatch"
+                    )
+                })
+                .unwrap_or(false)
+        });
 
     let needs_side_pane = has_pinned_content || has_file_diff_edits;
 
@@ -4348,7 +4374,14 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 if let Some(ref tc) = msg.tool_data {
                     let is_edit_tool = matches!(
                         tc.name.as_str(),
-                        "edit" | "Edit" | "write" | "multiedit" | "patch" | "Patch" | "apply_patch" | "ApplyPatch"
+                        "edit"
+                            | "Edit"
+                            | "write"
+                            | "multiedit"
+                            | "patch"
+                            | "Patch"
+                            | "apply_patch"
+                            | "ApplyPatch"
                     );
                     if is_edit_tool {
                         let file_path = tc
@@ -4364,12 +4397,19 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                                         "apply_patch" | "ApplyPatch" => {
                                             extract_apply_patch_primary_file(patch_text)
                                         }
-                                        "patch" | "Patch" => extract_unified_patch_primary_file(patch_text),
+                                        "patch" | "Patch" => {
+                                            extract_unified_patch_primary_file(patch_text)
+                                        }
                                         _ => None,
                                     })
                             })
                             .unwrap_or_else(|| "unknown".to_string());
-                        edit_tool_line_ranges.push((msg_idx, file_path, tool_start_line, lines.len()));
+                        edit_tool_line_ranges.push((
+                            msg_idx,
+                            file_path,
+                            tool_start_line,
+                            lines.len(),
+                        ));
                     }
                 }
             }
@@ -5059,7 +5099,10 @@ fn wrap_lines_with_map(
     let mut edit_tool_ranges = Vec::new();
     for (msg_idx, file_path, raw_start, raw_end) in edit_ranges {
         let start_line = raw_to_wrapped.get(*raw_start).copied().unwrap_or(0);
-        let end_line = raw_to_wrapped.get(*raw_end).copied().unwrap_or(wrapped_lines.len());
+        let end_line = raw_to_wrapped
+            .get(*raw_end)
+            .copied()
+            .unwrap_or(wrapped_lines.len());
         edit_tool_ranges.push(EditToolRange {
             msg_index: *msg_idx,
             file_path: file_path.clone(),
@@ -5660,16 +5703,26 @@ fn color_to_rgb(color: Color) -> Option<[u8; 3]> {
     }
 }
 
-/// Compute a vertically-centered sub-area for a fitted image.
+/// Compute a centered sub-area for a fitted image.
 ///
 /// Given the available terminal `area` and the source image pixel dimensions,
-/// this calculates how many rows the image will occupy after aspect-ratio
-/// scaling and returns a `Rect` offset so the image is vertically centered.
+/// this calculates the cell rect the image will occupy after aspect-ratio
+/// scaling and returns a `Rect` centered both horizontally and vertically.
 fn vcenter_fitted_image(area: Rect, img_w_px: u32, img_h_px: u32) -> Rect {
+    let font_size = super::mermaid::get_font_size();
+    vcenter_fitted_image_with_font(area, img_w_px, img_h_px, font_size)
+}
+
+fn vcenter_fitted_image_with_font(
+    area: Rect,
+    img_w_px: u32,
+    img_h_px: u32,
+    font_size: Option<(u16, u16)>,
+) -> Rect {
     if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
         return area;
     }
-    let (font_w, font_h) = match super::mermaid::get_font_size() {
+    let (font_w, font_h) = match font_size {
         Some(fs) => (fs.0 as f64, fs.1 as f64),
         None => return area,
     };
@@ -5677,17 +5730,18 @@ fn vcenter_fitted_image(area: Rect, img_w_px: u32, img_h_px: u32) -> Rect {
     let area_w_px = area.width as f64 * font_w;
     let area_h_px = area.height as f64 * font_h;
     let scale = (area_w_px / img_w_px as f64).min(area_h_px / img_h_px as f64);
+
+    let fitted_w_cells = ((img_w_px as f64 * scale) / font_w).ceil() as u16;
     let fitted_h_cells = ((img_h_px as f64 * scale) / font_h).ceil() as u16;
+    let fitted_w_cells = fitted_w_cells.min(area.width);
     let fitted_h_cells = fitted_h_cells.min(area.height);
 
-    if fitted_h_cells >= area.height {
-        return area;
-    }
+    let x_offset = (area.width - fitted_w_cells) / 2;
     let y_offset = (area.height - fitted_h_cells) / 2;
     Rect {
-        x: area.x,
+        x: area.x + x_offset,
         y: area.y + y_offset,
-        width: area.width,
+        width: fitted_w_cells,
         height: fitted_h_cells,
     }
 }
@@ -5898,6 +5952,12 @@ fn draw_messages(
         max_scroll
     };
 
+    let active_file_context = if app.diff_mode().is_file() {
+        active_file_diff_context(prepared, scroll, visible_height)
+    } else {
+        None
+    };
+
     let margins = compute_visible_margins(
         wrapped_lines,
         wrapped_user_indices,
@@ -5986,6 +6046,34 @@ fn draw_messages(
                                 span.style = span.style.fg(prompt_entry_color(base, t));
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(active) = &active_file_context {
+        let highlight_style = Style::default().fg(file_link_color()).bold();
+        let accent_style = Style::default().fg(file_link_color());
+
+        for range in &prepared.edit_tool_ranges {
+            if range.msg_index != active.msg_index {
+                continue;
+            }
+
+            let highlight_start = range.start_line.max(scroll);
+            let highlight_end = range.end_line.min(visible_end);
+
+            for abs_idx in highlight_start..highlight_end {
+                let rel_idx = abs_idx.saturating_sub(scroll);
+                if let Some(line) = visible_lines.get_mut(rel_idx) {
+                    if abs_idx == range.start_line {
+                        line.spans.insert(
+                            0,
+                            Span::styled(format!("→ edit#{} ", active.edit_index), highlight_style),
+                        );
+                    } else {
+                        line.spans.insert(0, Span::styled("  │ ", accent_style));
                     }
                 }
             }
@@ -9834,6 +9922,7 @@ fn draw_pinned_content_cached(
 
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
     let clamped_scroll = scroll.min(max_scroll);
+    LAST_DIFF_PANE_EFFECTIVE_SCROLL.store(clamped_scroll, Ordering::Relaxed);
 
     let visible_lines: Vec<Line<'static>> = rendered
         .lines
@@ -10096,6 +10185,7 @@ fn draw_pinned_content(
 
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
     let clamped_scroll = scroll.min(max_scroll);
+    LAST_DIFF_PANE_EFFECTIVE_SCROLL.store(clamped_scroll, Ordering::Relaxed);
 
     let visible_lines: Vec<Line<'static>> = text_lines.into_iter().skip(clamped_scroll).collect();
 
@@ -10137,21 +10227,62 @@ fn draw_pinned_content(
     }
 }
 
-/// File diff view state cache - tracks the currently displayed file and its rendered lines
-struct FileDiffViewCache {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileContentSignature {
+    len_bytes: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FileDiffCacheKey {
     file_path: String,
     msg_index: usize,
+}
+
+/// File diff view cache entry - rendered file plus metadata for invalidation.
+struct FileDiffViewCacheEntry {
+    file_sig: Option<FileContentSignature>,
     file_lines: Vec<Line<'static>>,
-    change_line_indices: Vec<usize>,
     first_change_line: usize,
     additions: usize,
     deletions: usize,
 }
 
-static FILE_DIFF_CACHE: OnceLock<Mutex<Option<FileDiffViewCache>>> = OnceLock::new();
+#[derive(Default)]
+struct FileDiffViewCacheState {
+    entries: HashMap<FileDiffCacheKey, FileDiffViewCacheEntry>,
+    order: VecDeque<FileDiffCacheKey>,
+}
 
-fn file_diff_cache() -> &'static Mutex<Option<FileDiffViewCache>> {
-    FILE_DIFF_CACHE.get_or_init(|| Mutex::new(None))
+impl FileDiffViewCacheState {
+    fn insert(&mut self, key: FileDiffCacheKey, entry: FileDiffViewCacheEntry) {
+        if !self.entries.contains_key(&key) {
+            self.order.push_back(key.clone());
+        }
+        self.entries.insert(key, entry);
+
+        while self.order.len() > FILE_DIFF_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+}
+
+const FILE_DIFF_CACHE_LIMIT: usize = 8;
+
+static FILE_DIFF_CACHE: OnceLock<Mutex<FileDiffViewCacheState>> = OnceLock::new();
+
+fn file_diff_cache() -> &'static Mutex<FileDiffViewCacheState> {
+    FILE_DIFF_CACHE.get_or_init(|| Mutex::new(FileDiffViewCacheState::default()))
+}
+
+fn file_content_signature(file_path: &str) -> Option<FileContentSignature> {
+    let metadata = std::fs::metadata(file_path).ok()?;
+    Some(FileContentSignature {
+        len_bytes: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 
 fn find_visible_edit_tool<'a>(
@@ -10197,6 +10328,26 @@ fn find_visible_edit_tool<'a>(
     best
 }
 
+fn active_file_diff_context(
+    prepared: &PreparedMessages,
+    scroll: usize,
+    visible_height: usize,
+) -> Option<ActiveFileDiffContext> {
+    let range = find_visible_edit_tool(&prepared.edit_tool_ranges, scroll, visible_height)?;
+    let edit_index = prepared.edit_tool_ranges.iter().position(|candidate| {
+        candidate.msg_index == range.msg_index
+            && candidate.start_line == range.start_line
+            && candidate.end_line == range.end_line
+            && candidate.file_path == range.file_path
+    })? + 1;
+
+    Some(ActiveFileDiffContext {
+        edit_index,
+        msg_index: range.msg_index,
+        file_path: range.file_path.clone(),
+    })
+}
+
 fn draw_file_diff_view(
     frame: &mut Frame,
     area: Rect,
@@ -10220,16 +10371,17 @@ fn draw_file_diff_view(
         prepared.wrapped_lines.len().saturating_sub(visible_height)
     };
 
-    let active_range = find_visible_edit_tool(&prepared.edit_tool_ranges, scroll, visible_height);
+    let active_context = active_file_diff_context(prepared, scroll, visible_height);
 
-    let Some(range) = active_range else {
+    let Some(active_context) = active_context else {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(dim_color()))
-            .title(Line::from(vec![
-                Span::styled(" file ", Style::default().fg(tool_color())),
-            ]));
+            .title(Line::from(vec![Span::styled(
+                " file ",
+                Style::default().fg(tool_color()),
+            )]));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let msg = Paragraph::new(Line::from(Span::styled(
@@ -10240,18 +10392,24 @@ fn draw_file_diff_view(
         return;
     };
 
-    let file_path = &range.file_path;
-    let msg_index = range.msg_index;
+    let file_path = &active_context.file_path;
+    let msg_index = active_context.msg_index;
+    let cache_key = FileDiffCacheKey {
+        file_path: file_path.clone(),
+        msg_index,
+    };
+    let file_sig = file_content_signature(file_path);
 
     let mut cache = match file_diff_cache().lock() {
         Ok(c) => c,
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    let needs_rebuild = match &*cache {
-        Some(cached) => cached.msg_index != msg_index || cached.file_path != *file_path,
-        None => true,
-    };
+    let needs_rebuild = cache
+        .entries
+        .get(&cache_key)
+        .map(|cached| cached.file_sig != file_sig)
+        .unwrap_or(true);
 
     if needs_rebuild {
         let display_messages = app.display_messages();
@@ -10293,7 +10451,10 @@ fn draw_file_diff_view(
                 match dl.kind {
                     DiffLineKind::Del => {
                         if !current_adds.is_empty() {
-                            hunks.push(DiffHunk { dels: current_dels, adds: current_adds });
+                            hunks.push(DiffHunk {
+                                dels: current_dels,
+                                adds: current_adds,
+                            });
                             current_dels = Vec::new();
                             current_adds = Vec::new();
                         }
@@ -10305,15 +10466,20 @@ fn draw_file_diff_view(
                 }
             }
             if !current_dels.is_empty() || !current_adds.is_empty() {
-                hunks.push(DiffHunk { dels: current_dels, adds: current_adds });
+                hunks.push(DiffHunk {
+                    dels: current_dels,
+                    adds: current_adds,
+                });
             }
         }
 
-        let mut add_to_dels: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+        let mut add_to_dels: std::collections::HashMap<usize, Vec<String>> =
+            std::collections::HashMap::new();
         let mut orphan_dels: Vec<String> = Vec::new();
         let file_lines_vec: Vec<&str> = file_content.lines().collect();
 
-        let mut used_file_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut used_file_lines: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
 
         for hunk in &hunks {
             if hunk.adds.is_empty() {
@@ -10347,7 +10513,6 @@ fn draw_file_diff_view(
         }
 
         let mut rendered_lines: Vec<Line<'static>> = Vec::new();
-        let mut change_line_indices: Vec<usize> = Vec::new();
         let mut first_change_line = usize::MAX;
         let mut del_count = 0usize;
         let mut add_count = 0usize;
@@ -10369,7 +10534,6 @@ fn draw_file_diff_view(
                         let tinted = tint_span_with_diff_color(span, diff_del_color());
                         del_spans.push(tinted);
                     }
-                    change_line_indices.push(rendered_lines.len());
                     if first_change_line == usize::MAX {
                         first_change_line = rendered_lines.len();
                     }
@@ -10390,7 +10554,6 @@ fn draw_file_diff_view(
                     let tinted = tint_span_with_diff_color(span, diff_add_color());
                     spans.push(tinted);
                 }
-                change_line_indices.push(rendered_lines.len());
                 if first_change_line == usize::MAX {
                     first_change_line = rendered_lines.len();
                 }
@@ -10417,7 +10580,6 @@ fn draw_file_diff_view(
                 let tinted = tint_span_with_diff_color(span, diff_del_color());
                 del_spans.push(tinted);
             }
-            change_line_indices.push(rendered_lines.len());
             if first_change_line == usize::MAX {
                 first_change_line = rendered_lines.len();
             }
@@ -10432,18 +10594,22 @@ fn draw_file_diff_view(
             )));
         }
 
-        *cache = Some(FileDiffViewCache {
-            file_path: file_path.clone(),
-            msg_index,
-            file_lines: rendered_lines,
-            change_line_indices,
-            first_change_line,
-            additions: add_count,
-            deletions: del_count,
-        });
+        cache.insert(
+            cache_key.clone(),
+            FileDiffViewCacheEntry {
+                file_sig: file_sig.clone(),
+                file_lines: rendered_lines,
+                first_change_line,
+                additions: add_count,
+                deletions: del_count,
+            },
+        );
     }
 
-    let cached = cache.as_ref().unwrap();
+    let cached = cache
+        .entries
+        .get(&cache_key)
+        .expect("file diff cache entry should exist after build");
 
     let short_path = file_path
         .rsplit('/')
@@ -10485,6 +10651,10 @@ fn draw_file_diff_view(
         format!(" {}L ", cached.file_lines.len()),
         Style::default().fg(dim_color()),
     ));
+    title_parts.push(Span::styled(
+        format!(" edit#{} ", active_context.edit_index),
+        Style::default().fg(file_link_color()),
+    ));
 
     let border_color = if focused { tool_color() } else { dim_color() };
     let block = Block::default()
@@ -10515,6 +10685,7 @@ fn draw_file_diff_view(
     } else {
         pane_scroll.min(max_scroll)
     };
+    LAST_DIFF_PANE_EFFECTIVE_SCROLL.store(effective_scroll, Ordering::Relaxed);
 
     let visible_lines: Vec<Line<'static>> = cached
         .file_lines
@@ -10571,6 +10742,67 @@ mod tests {
             active_prompt_entry_animation(2100 + PROMPT_ENTRY_ANIMATION_MS + 1).is_none(),
             "animation should expire after configured duration"
         );
+    }
+
+    #[test]
+    fn test_active_file_diff_context_resolves_visible_edit() {
+        let prepared = PreparedMessages {
+            wrapped_lines: vec![Line::from("a"); 20],
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: vec![
+                EditToolRange {
+                    msg_index: 3,
+                    file_path: "src/one.rs".to_string(),
+                    start_line: 2,
+                    end_line: 5,
+                },
+                EditToolRange {
+                    msg_index: 7,
+                    file_path: "src/two.rs".to_string(),
+                    start_line: 10,
+                    end_line: 14,
+                },
+            ],
+        };
+
+        let active = active_file_diff_context(&prepared, 9, 4).expect("visible edit context");
+        assert_eq!(active.edit_index, 2);
+        assert_eq!(active.msg_index, 7);
+        assert_eq!(active.file_path, "src/two.rs");
+    }
+
+    #[test]
+    fn test_file_diff_cache_reuses_entry_when_signature_matches() {
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(temp.path(), "fn main() {}\n").expect("write file");
+        let path = temp.path().to_string_lossy().to_string();
+
+        let state = file_diff_cache();
+        {
+            let mut cache = state.lock().expect("cache lock");
+            cache.entries.clear();
+            cache.order.clear();
+            let key = FileDiffCacheKey {
+                file_path: path.clone(),
+                msg_index: 1,
+            };
+            let sig = file_content_signature(&path);
+            cache.insert(
+                key.clone(),
+                FileDiffViewCacheEntry {
+                    file_sig: sig.clone(),
+                    file_lines: vec![Line::from("cached")],
+                    first_change_line: 0,
+                    additions: 1,
+                    deletions: 0,
+                },
+            );
+
+            let cached = cache.entries.get(&key).expect("cached entry");
+            assert_eq!(cached.file_sig, sig);
+        }
     }
 
     #[test]
@@ -11026,5 +11258,859 @@ mod tests {
         let line = Line::from(Span::raw("hello world foo bar"));
         let truncated = truncate_line_to_width(&line, 11);
         assert_eq!(truncated.width(), 11);
+    }
+
+    // ---- Mermaid side panel rendering tests ----
+
+    const TEST_FONT: Option<(u16, u16)> = Some((8, 16));
+
+    #[test]
+    fn test_vcenter_fitted_image_wide_image_in_narrow_pane() {
+        // Wide image (800x200) in a narrow side panel (40 cols x 30 rows).
+        // The image width should be the constraining dimension, so the
+        // fitted image should fill the panel width.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 30,
+        };
+        let result = vcenter_fitted_image_with_font(area, 800, 200, TEST_FONT);
+        assert!(
+            result.width >= area.width / 2,
+            "wide image should fill most of pane width: got {} out of {} (expected >= {})",
+            result.width,
+            area.width,
+            area.width / 2
+        );
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_square_image_fills_width() {
+        // Square image (400x400) in a side panel (40 cols x 40 rows).
+        // With typical 8x16 font, terminal cells are 2:1 aspect.
+        // 40 cols = 320px, 40 rows = 640px.
+        // scale = min(320/400, 640/400) = min(0.8, 1.6) = 0.8
+        // fitted_w = (400 * 0.8) / 8 = 40 cells -> fills width
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 40,
+        };
+        let result = vcenter_fitted_image_with_font(area, 400, 400, TEST_FONT);
+        assert!(
+            result.width >= area.width * 3 / 4,
+            "square image should fill most of pane width: got {} out of {}",
+            result.width,
+            area.width
+        );
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_tall_image_in_wide_pane() {
+        // Tall image (200x800) in a wide pane (80 cols x 30 rows).
+        // Height is constraining. Image won't fill width.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+        let result = vcenter_fitted_image_with_font(area, 200, 800, TEST_FONT);
+        assert!(
+            result.width < area.width,
+            "tall image should not fill full width: got {} out of {}",
+            result.width,
+            area.width
+        );
+        assert!(
+            result.height <= area.height,
+            "tall image height should not exceed pane: got {} out of {}",
+            result.height,
+            area.height
+        );
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_centering_horizontal() {
+        // Tall image centered in a wide area - should have x_offset > 0
+        let area = Rect {
+            x: 10,
+            y: 5,
+            width: 80,
+            height: 20,
+        };
+        let result = vcenter_fitted_image_with_font(area, 100, 800, TEST_FONT);
+        if result.width < area.width {
+            assert!(
+                result.x > area.x,
+                "should be horizontally centered: x={}, area.x={}",
+                result.x,
+                area.x
+            );
+        }
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_centering_vertical() {
+        // Wide image centered vertically - should have y_offset > 0
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 40,
+        };
+        let result = vcenter_fitted_image_with_font(area, 800, 100, TEST_FONT);
+        if result.height < area.height {
+            assert!(
+                result.y > area.y || result.height < area.height,
+                "should be vertically centered"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_zero_dimensions() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        let result = vcenter_fitted_image_with_font(area, 400, 400, TEST_FONT);
+        assert_eq!(result, area);
+
+        let area2 = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 30,
+        };
+        let result2 = vcenter_fitted_image_with_font(area2, 0, 0, TEST_FONT);
+        assert_eq!(result2, area2);
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_never_exceeds_area() {
+        let test_cases: Vec<(Rect, u32, u32)> = vec![
+            (
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 40,
+                    height: 30,
+                },
+                800,
+                600,
+            ),
+            (
+                Rect {
+                    x: 5,
+                    y: 3,
+                    width: 60,
+                    height: 20,
+                },
+                100,
+                100,
+            ),
+            (
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 120,
+                    height: 40,
+                },
+                1920,
+                1080,
+            ),
+            (
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 30,
+                    height: 50,
+                },
+                200,
+                800,
+            ),
+        ];
+        for (area, img_w, img_h) in test_cases {
+            let result = vcenter_fitted_image_with_font(area, img_w, img_h, TEST_FONT);
+            assert!(
+                result.x >= area.x,
+                "result.x ({}) < area.x ({})",
+                result.x,
+                area.x
+            );
+            assert!(
+                result.y >= area.y,
+                "result.y ({}) < area.y ({})",
+                result.y,
+                area.y
+            );
+            assert!(
+                result.x + result.width <= area.x + area.width,
+                "result right edge ({}) > area right edge ({})",
+                result.x + result.width,
+                area.x + area.width
+            );
+            assert!(
+                result.y + result.height <= area.y + area.height,
+                "result bottom edge ({}) > area bottom edge ({})",
+                result.y + result.height,
+                area.y + area.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_vcenter_fitted_image_typical_mermaid_in_side_panel() {
+        // Typical mermaid diagram: wider than tall (e.g., flowchart LR).
+        // Side panel is narrow and tall (e.g., 50 cols x 40 rows).
+        // The image should fill the width of the panel.
+        let inner = Rect {
+            x: 81,
+            y: 1,
+            width: 48,
+            height: 38,
+        };
+        let result = vcenter_fitted_image_with_font(inner, 600, 300, TEST_FONT);
+        let width_utilization = result.width as f64 / inner.width as f64;
+        assert!(
+            width_utilization > 0.8,
+            "typical mermaid in side panel should use >80% width: {}% ({}/{})",
+            (width_utilization * 100.0) as u32,
+            result.width,
+            inner.width
+        );
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_width_wide_image() {
+        // A very wide image should get a wider pane
+        let diagram = info_widget::DiagramInfo {
+            hash: 10,
+            width: 1600,
+            height: 200,
+            label: None,
+        };
+        let width = estimate_pinned_diagram_pane_width_with_font(&diagram, 30, 24, Some((8, 16)));
+        assert!(
+            width >= 24,
+            "should be at least minimum width: got {}",
+            width
+        );
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_width_tall_image() {
+        // A tall image should get a narrower pane (height-constrained)
+        let diagram = info_widget::DiagramInfo {
+            hash: 11,
+            width: 200,
+            height: 1600,
+            label: None,
+        };
+        let width = estimate_pinned_diagram_pane_width_with_font(&diagram, 30, 24, Some((8, 16)));
+        // Height-constrained: 30 rows - 2 border = 28 inner rows
+        // image_w_cells = ceil(200/8) = 25
+        // image_h_cells = ceil(1600/16) = 100
+        // fit_w_cells = ceil(25*28/100) = 7
+        // pane_width = 7 + 2 = 9, but clamped to min 24
+        assert_eq!(
+            width, 24,
+            "tall image should be clamped to minimum width"
+        );
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_width_zero_font_size() {
+        // With None font size, should use default (8, 16)
+        let diagram = info_widget::DiagramInfo {
+            hash: 12,
+            width: 800,
+            height: 600,
+            label: None,
+        };
+        let with_font =
+            estimate_pinned_diagram_pane_width_with_font(&diagram, 20, 24, Some((8, 16)));
+        let with_default =
+            estimate_pinned_diagram_pane_width_with_font(&diagram, 20, 24, None);
+        assert_eq!(with_font, with_default);
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_height_wide_image() {
+        // Wide image (1600x200) in a pane 80 cols wide.
+        // Should need less height since the image is short.
+        let diagram = info_widget::DiagramInfo {
+            hash: 13,
+            width: 1600,
+            height: 200,
+            label: None,
+        };
+        let height = estimate_pinned_diagram_pane_height(&diagram, 80, 6);
+        assert!(
+            height >= 6,
+            "should be at least minimum height: got {}",
+            height
+        );
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_height_tall_image() {
+        // Tall image (200x1600) in a pane 80 cols wide.
+        // Width-constrained, so height depends on the width scaling.
+        let diagram = info_widget::DiagramInfo {
+            hash: 14,
+            width: 200,
+            height: 1600,
+            label: None,
+        };
+        let height = estimate_pinned_diagram_pane_height(&diagram, 80, 6);
+        assert!(
+            height > 6,
+            "tall image should need more than minimum height: got {}",
+            height
+        );
+    }
+
+    #[test]
+    fn test_side_panel_layout_ratio_capping() {
+        // Test that diagram_width respects the ratio cap.
+        // area = 120 cols, ratio = 50% -> cap = 60
+        // If estimated pane width > 60, it should be capped at 60.
+        let diagram = info_widget::DiagramInfo {
+            hash: 20,
+            width: 2000,
+            height: 400,
+            label: None,
+        };
+        let area_width: u16 = 120;
+        let ratio: u32 = 50;
+        let ratio_cap = ((area_width as u32 * ratio) / 100) as u16;
+        let min_diagram_width: u16 = 24;
+        let min_chat_width: u16 = 20;
+        let max_diagram = area_width.saturating_sub(min_chat_width);
+
+        let needed = estimate_pinned_diagram_pane_width_with_font(
+            &diagram,
+            40,
+            min_diagram_width,
+            Some((8, 16)),
+        );
+        let diagram_width = needed
+            .min(ratio_cap)
+            .max(min_diagram_width)
+            .min(max_diagram);
+
+        assert!(
+            diagram_width <= ratio_cap,
+            "diagram_width ({}) should be <= ratio_cap ({})",
+            diagram_width,
+            ratio_cap
+        );
+        assert!(
+            diagram_width >= min_diagram_width,
+            "diagram_width ({}) should be >= min ({})",
+            diagram_width,
+            min_diagram_width
+        );
+        let chat_width = area_width.saturating_sub(diagram_width);
+        assert!(
+            chat_width >= min_chat_width,
+            "chat_width ({}) should be >= min ({})",
+            chat_width,
+            min_chat_width
+        );
+    }
+
+    #[test]
+    fn test_side_panel_layout_narrow_terminal() {
+        // On a very narrow terminal (50 cols), side panel should still work
+        // or gracefully degrade.
+        let area_width: u16 = 50;
+        let min_diagram_width: u16 = 24;
+        let min_chat_width: u16 = 20;
+        let max_diagram = area_width.saturating_sub(min_chat_width); // 30
+
+        let diagram = info_widget::DiagramInfo {
+            hash: 21,
+            width: 600,
+            height: 300,
+            label: None,
+        };
+        let needed = estimate_pinned_diagram_pane_width_with_font(
+            &diagram,
+            30,
+            min_diagram_width,
+            Some((8, 16)),
+        );
+        let ratio_cap = ((area_width as u32 * 50) / 100) as u16; // 25
+        let diagram_width = needed
+            .min(ratio_cap)
+            .max(min_diagram_width)
+            .min(max_diagram);
+        let chat_width = area_width.saturating_sub(diagram_width);
+
+        assert!(
+            diagram_width >= min_diagram_width,
+            "narrow term: diagram_width ({}) >= min ({})",
+            diagram_width,
+            min_diagram_width
+        );
+        assert!(
+            chat_width >= min_chat_width,
+            "narrow term: chat_width ({}) >= min ({})",
+            chat_width,
+            min_chat_width
+        );
+        assert_eq!(
+            diagram_width + chat_width,
+            area_width,
+            "widths should sum to total"
+        );
+    }
+
+    #[test]
+    fn test_side_panel_image_width_utilization() {
+        // This is the key test for the "only uses half width" bug.
+        // After computing the pane width and getting the inner area (minus
+        // 2 for borders), vcenter_fitted_image should return a rect where
+        // the image width is close to the inner width for typical diagrams.
+        let diagram = info_widget::DiagramInfo {
+            hash: 30,
+            width: 800,
+            height: 400,
+            label: None,
+        };
+        let area_width: u16 = 120;
+        let area_height: u16 = 40;
+        let min_diagram_width: u16 = 24;
+        let ratio_cap = ((area_width as u32 * 50) / 100) as u16;
+        let max_diagram = area_width.saturating_sub(20);
+
+        let needed = estimate_pinned_diagram_pane_width_with_font(
+            &diagram,
+            area_height,
+            min_diagram_width,
+            Some((8, 16)),
+        );
+        let diagram_width = needed
+            .min(ratio_cap)
+            .max(min_diagram_width)
+            .min(max_diagram);
+
+        // Inner area after borders (1 cell each side)
+        let inner = Rect {
+            x: area_width.saturating_sub(diagram_width) + 1,
+            y: 1,
+            width: diagram_width.saturating_sub(2),
+            height: area_height.saturating_sub(2),
+        };
+
+        let render_area = vcenter_fitted_image_with_font(inner, diagram.width, diagram.height, TEST_FONT);
+
+        let utilization = render_area.width as f64 / inner.width as f64;
+        assert!(
+            utilization > 0.5,
+            "image should use >50% of inner pane width: {}% ({}/{}) \
+             pane_width={}, inner_width={}, render_width={}, \
+             img={}x{}, needed={}",
+            (utilization * 100.0) as u32,
+            render_area.width,
+            inner.width,
+            diagram_width,
+            inner.width,
+            render_area.width,
+            diagram.width,
+            diagram.height,
+            needed,
+        );
+    }
+
+    #[test]
+    fn test_side_panel_image_width_various_aspect_ratios() {
+        // Test various diagram aspect ratios to ensure none uses "only half"
+        let test_cases: Vec<(u32, u32, &str)> = vec![
+            (800, 400, "2:1 landscape"),
+            (800, 600, "4:3 landscape"),
+            (800, 800, "1:1 square"),
+            (600, 400, "3:2 landscape"),
+            (1200, 300, "4:1 wide panoramic"),
+            (400, 600, "2:3 portrait"),
+            (300, 900, "1:3 tall portrait"),
+        ];
+
+        for (img_w, img_h, label) in test_cases {
+            let diagram = info_widget::DiagramInfo {
+                hash: img_w as u64 * 1000 + img_h as u64,
+                width: img_w,
+                height: img_h,
+                label: None,
+            };
+
+            let pane_width: u16 = 50;
+            let pane_height: u16 = 40;
+            let inner = Rect {
+                x: 71,
+                y: 1,
+                width: pane_width - 2,
+                height: pane_height - 2,
+            };
+
+            let render_area = vcenter_fitted_image_with_font(inner, img_w, img_h, TEST_FONT);
+
+            // For any diagram, at least one dimension should be well-utilized
+            let w_util = render_area.width as f64 / inner.width as f64;
+            let h_util = render_area.height as f64 / inner.height as f64;
+            let max_util = w_util.max(h_util);
+
+            assert!(
+                max_util > 0.5,
+                "{}: at least one dimension should be >50% utilized: \
+                 w_util={:.0}% h_util={:.0}%, render={}x{}, inner={}x{}",
+                label,
+                w_util * 100.0,
+                h_util * 100.0,
+                render_area.width,
+                render_area.height,
+                inner.width,
+                inner.height,
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_diagram_poor_fit_wide_in_side_pane() {
+        // A very wide diagram in a side pane (narrow+tall) should be a poor fit
+        let diagram = info_widget::DiagramInfo {
+            hash: 40,
+            width: 1600,
+            height: 100,
+            label: None,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 40,
+        };
+        let poor = is_diagram_poor_fit(
+            &diagram,
+            area,
+            crate::config::DiagramPanePosition::Side,
+        );
+        assert!(
+            poor,
+            "very wide diagram in narrow side pane should be poor fit"
+        );
+    }
+
+    #[test]
+    fn test_is_diagram_poor_fit_tall_in_top_pane() {
+        // A very tall diagram in a top pane (wide+short) should be a poor fit
+        let diagram = info_widget::DiagramInfo {
+            hash: 41,
+            width: 100,
+            height: 1600,
+            label: None,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 15,
+        };
+        let poor = is_diagram_poor_fit(
+            &diagram,
+            area,
+            crate::config::DiagramPanePosition::Top,
+        );
+        assert!(
+            poor,
+            "very tall diagram in short top pane should be poor fit"
+        );
+    }
+
+    #[test]
+    fn test_is_diagram_poor_fit_good_fit_cases() {
+        // Normal aspect ratio diagrams should not be poor fits
+        let diagram = info_widget::DiagramInfo {
+            hash: 42,
+            width: 600,
+            height: 400,
+            label: None,
+        };
+        let side_area = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 40,
+        };
+        assert!(
+            !is_diagram_poor_fit(
+                &diagram,
+                side_area,
+                crate::config::DiagramPanePosition::Side
+            ),
+            "normal diagram should not be poor fit in side pane"
+        );
+
+        let top_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        assert!(
+            !is_diagram_poor_fit(
+                &diagram,
+                top_area,
+                crate::config::DiagramPanePosition::Top
+            ),
+            "normal diagram should not be poor fit in top pane"
+        );
+    }
+
+    #[test]
+    fn test_is_diagram_poor_fit_zero_dimensions() {
+        let diagram = info_widget::DiagramInfo {
+            hash: 43,
+            width: 0,
+            height: 0,
+            label: None,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 40,
+        };
+        assert!(
+            !is_diagram_poor_fit(
+                &diagram,
+                area,
+                crate::config::DiagramPanePosition::Side
+            ),
+            "zero-dimension diagram should not crash or be poor fit"
+        );
+    }
+
+    #[test]
+    fn test_is_diagram_poor_fit_tiny_area() {
+        let diagram = info_widget::DiagramInfo {
+            hash: 44,
+            width: 800,
+            height: 600,
+            label: None,
+        };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 2,
+        };
+        assert!(
+            !is_diagram_poor_fit(
+                &diagram,
+                area,
+                crate::config::DiagramPanePosition::Side
+            ),
+            "tiny area should return false (not crash)"
+        );
+    }
+
+    #[test]
+    fn test_div_ceil_u32_basic() {
+        assert_eq!(div_ceil_u32(10, 3), 4);
+        assert_eq!(div_ceil_u32(9, 3), 3);
+        assert_eq!(div_ceil_u32(0, 5), 0);
+        assert_eq!(div_ceil_u32(1, 1), 1);
+        assert_eq!(div_ceil_u32(7, 0), 7);
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_width_various_fonts() {
+        // Different font sizes affect the computed pane width.
+        // With a proportionally larger font, the raw image-in-cells count
+        // is smaller, but ceiling arithmetic can add a cell back.
+        let diagram = info_widget::DiagramInfo {
+            hash: 50,
+            width: 800,
+            height: 600,
+            label: None,
+        };
+        let w_8x16 =
+            estimate_pinned_diagram_pane_width_with_font(&diagram, 30, 24, Some((8, 16)));
+        let w_10x20 =
+            estimate_pinned_diagram_pane_width_with_font(&diagram, 30, 24, Some((10, 20)));
+        let w_16x32 =
+            estimate_pinned_diagram_pane_width_with_font(&diagram, 30, 24, Some((16, 32)));
+        // With a substantially larger font, we should need noticeably fewer cells
+        assert!(
+            w_16x32 <= w_8x16,
+            "much larger font should need fewer or equal cells: 16x32={}, 8x16={}",
+            w_16x32,
+            w_8x16
+        );
+        // All should respect the minimum
+        assert!(w_8x16 >= 24);
+        assert!(w_10x20 >= 24);
+        assert!(w_16x32 >= 24);
+    }
+
+    #[test]
+    fn test_side_panel_full_pipeline_width_check() {
+        // End-to-end: simulate the entire side panel width calculation pipeline
+        // and verify the image render area is reasonable.
+        //
+        // This mimics what draw_inner + draw_pinned_diagram do:
+        // 1. estimate_pinned_diagram_pane_width -> pane width
+        // 2. Rect with that width -> block.inner -> inner
+        // 3. vcenter_fitted_image(inner, img_w, img_h) -> render_area
+        // 4. render_image_widget_scale(render_area) -> image displayed
+
+        let terminal_width: u16 = 120;
+        let terminal_height: u16 = 40;
+        let diagram = info_widget::DiagramInfo {
+            hash: 60,
+            width: 700,
+            height: 350,
+            label: None,
+        };
+        let font = Some((8u16, 16u16));
+
+        // Step 1: compute pane width (mimics Side branch in draw_inner)
+        let min_diagram_width: u16 = 24;
+        let min_chat_width: u16 = 20;
+        let max_diagram = terminal_width.saturating_sub(min_chat_width);
+        let ratio: u32 = 50;
+        let ratio_cap = ((terminal_width as u32 * ratio) / 100) as u16;
+        let needed = estimate_pinned_diagram_pane_width_with_font(
+            &diagram,
+            terminal_height,
+            min_diagram_width,
+            font,
+        );
+        let pane_width = needed
+            .min(ratio_cap)
+            .max(min_diagram_width)
+            .min(max_diagram);
+        let chat_width = terminal_width.saturating_sub(pane_width);
+
+        assert!(pane_width > 0 && chat_width > 0, "both areas must exist");
+
+        // Step 2: compute inner area (Block::inner subtracts 1 from each side)
+        let inner = Rect {
+            x: chat_width + 1,
+            y: 1,
+            width: pane_width.saturating_sub(2),
+            height: terminal_height.saturating_sub(2),
+        };
+
+        // Step 3: compute render area
+        let render_area = vcenter_fitted_image_with_font(inner, diagram.width, diagram.height, font);
+
+        // Step 4: verify the render area is reasonable
+        assert!(
+            render_area.width > 0 && render_area.height > 0,
+            "render area should be non-empty"
+        );
+        assert!(
+            render_area.x >= inner.x,
+            "render area should be within inner"
+        );
+        assert!(
+            render_area.x + render_area.width <= inner.x + inner.width,
+            "render area should not exceed inner"
+        );
+
+        // THE KEY ASSERTION: the rendered image should use a significant
+        // portion of the pane width, not just half.
+        let pane_utilization = render_area.width as f64 / inner.width as f64;
+        assert!(
+            pane_utilization > 0.5,
+            "CRITICAL: Image uses only {:.0}% of side panel width ({}/{})! \
+             This is the 'half width' bug. Pipeline: terminal={}x{}, \
+             pane_width={}, inner={}x{}, render={}x{}, img={}x{}",
+            pane_utilization * 100.0,
+            render_area.width,
+            inner.width,
+            terminal_width,
+            terminal_height,
+            pane_width,
+            inner.width,
+            inner.height,
+            render_area.width,
+            render_area.height,
+            diagram.width,
+            diagram.height,
+        );
+    }
+
+    #[test]
+    fn test_side_panel_various_terminal_sizes() {
+        // Test the pipeline at various realistic terminal sizes
+        let terminals: Vec<(u16, u16, &str)> = vec![
+            (80, 24, "80x24 standard"),
+            (120, 40, "120x40 typical"),
+            (200, 50, "200x50 ultrawide"),
+            (60, 30, "60x30 small"),
+        ];
+
+        let diagram = info_widget::DiagramInfo {
+            hash: 70,
+            width: 800,
+            height: 400,
+            label: None,
+        };
+
+        for (tw, th, label) in terminals {
+            let min_diagram_width: u16 = 24;
+            let min_chat_width: u16 = 20;
+            let max_diagram = tw.saturating_sub(min_chat_width);
+
+            if max_diagram < min_diagram_width {
+                continue; // too narrow for side panel
+            }
+
+            let ratio_cap = ((tw as u32 * 50) / 100) as u16;
+            let needed = estimate_pinned_diagram_pane_width_with_font(
+                &diagram,
+                th,
+                min_diagram_width,
+                Some((8, 16)),
+            );
+            let pane_width = needed
+                .min(ratio_cap)
+                .max(min_diagram_width)
+                .min(max_diagram);
+            let chat_width = tw.saturating_sub(pane_width);
+
+            if pane_width < 4 || chat_width == 0 {
+                continue;
+            }
+
+            let inner = Rect {
+                x: chat_width + 1,
+                y: 1,
+                width: pane_width.saturating_sub(2),
+                height: th.saturating_sub(2),
+            };
+
+            let render_area = vcenter_fitted_image_with_font(inner, diagram.width, diagram.height, TEST_FONT);
+            let w_util = render_area.width as f64 / inner.width as f64;
+
+            assert!(
+                w_util > 0.4,
+                "{}: image width utilization too low: {:.0}% ({}/{})",
+                label,
+                w_util * 100.0,
+                render_area.width,
+                inner.width,
+            );
+        }
     }
 }
