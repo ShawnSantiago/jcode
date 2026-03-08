@@ -1,12 +1,13 @@
-use super::debug_jobs::{
-    maybe_handle_job_command, maybe_start_async_debug_job, DebugJob,
+use super::debug_events::{
+    maybe_handle_event_query_command, maybe_handle_event_subscription_command,
 };
+use super::debug_jobs::{maybe_handle_job_command, maybe_start_async_debug_job, DebugJob};
 use super::debug_server_state::maybe_handle_server_state_command;
 use super::debug_testers::execute_tester_command;
 use super::{
     broadcast_swarm_status, create_headless_session, debug_control_allowed, git_common_dir_for,
     record_swarm_event, swarm_id_for_dir, FileAccess, ServerIdentity, SharedContext, SwarmEvent,
-    SwarmEventType, SwarmMember, VersionedPlan, MAX_EVENT_HISTORY,
+    SwarmEventType, SwarmMember, VersionedPlan,
 };
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
@@ -2552,168 +2553,19 @@ pub(super) async fn handle_debug_client(
   ambient:start               - Start/restart ambient mode
   ambient:stop                - Stop ambient mode"#
                                 .to_string())
-                        } else if cmd == "events:subscribe" || cmd.starts_with("events:subscribe:")
+                        } else if maybe_handle_event_subscription_command(
+                            id,
+                            cmd,
+                            &swarm_event_tx,
+                            &mut writer,
+                        )
+                        .await?
                         {
-                            let type_filter: Option<Vec<String>> = cmd
-                                .strip_prefix("events:subscribe:")
-                                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
-
-                            let ack = ServerEvent::DebugResponse {
-                                id,
-                                ok: true,
-                                output: serde_json::json!({
-                                    "subscribed": true,
-                                    "filter": type_filter.as_ref().map(|f| f.join(",")),
-                                })
-                                .to_string(),
-                            };
-                            let json = encode_event(&ack);
-                            writer.write_all(json.as_bytes()).await?;
-
-                            let mut rx = swarm_event_tx.subscribe();
-                            loop {
-                                match rx.recv().await {
-                                    Ok(event) => {
-                                        let event_type = match &event.event {
-                                            SwarmEventType::FileTouch { .. } => "file_touch",
-                                            SwarmEventType::Notification { .. } => "notification",
-                                            SwarmEventType::PlanUpdate { .. } => "plan_update",
-                                            SwarmEventType::PlanProposal { .. } => "plan_proposal",
-                                            SwarmEventType::ContextUpdate { .. } => {
-                                                "context_update"
-                                            }
-                                            SwarmEventType::StatusChange { .. } => "status_change",
-                                            SwarmEventType::MemberChange { .. } => "member_change",
-                                        };
-                                        if let Some(ref filter) = type_filter {
-                                            if !filter.iter().any(|f| f == event_type) {
-                                                continue;
-                                            }
-                                        }
-                                        let timestamp_unix = event
-                                            .absolute_time
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0);
-                                        let event_json = serde_json::json!({
-                                            "type": "event",
-                                            "id": event.id,
-                                            "session_id": event.session_id,
-                                            "session_name": event.session_name,
-                                            "swarm_id": event.swarm_id,
-                                            "event": event.event,
-                                            "timestamp_unix": timestamp_unix,
-                                        });
-                                        let mut line =
-                                            serde_json::to_string(&event_json).unwrap_or_default();
-                                        line.push('\n');
-                                        if writer.write_all(line.as_bytes()).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        let lag_json = serde_json::json!({
-                                            "type": "lag",
-                                            "missed": n,
-                                        });
-                                        let mut line =
-                                            serde_json::to_string(&lag_json).unwrap_or_default();
-                                        line.push('\n');
-                                        if writer.write_all(line.as_bytes()).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => {
-                                        break;
-                                    }
-                                }
-                            }
                             return Ok(());
-                        } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
-                            // Get recent events (default 50, or specify count)
-                            let count: usize = cmd
-                                .strip_prefix("events:recent:")
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(50);
-
-                            let history = event_history.read().await;
-                            let events: Vec<serde_json::Value> = history
-                                .iter()
-                                .rev()
-                                .take(count)
-                                .map(|e| {
-                                    let timestamp_unix = e
-                                        .absolute_time
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs())
-                                        .unwrap_or(0);
-                                    serde_json::json!({
-                                        "id": e.id,
-                                        "session_id": e.session_id,
-                                        "session_name": e.session_name,
-                                        "swarm_id": e.swarm_id,
-                                        "event": e.event,
-                                        "age_secs": e.timestamp.elapsed().as_secs(),
-                                        "timestamp_unix": timestamp_unix,
-                                    })
-                                })
-                                .collect();
-                            Ok(serde_json::to_string_pretty(&events)
-                                .unwrap_or_else(|_| "[]".to_string()))
-                        } else if cmd.starts_with("events:since:") {
-                            // Get events since a specific event ID
-                            let since_id: u64 = cmd
-                                .strip_prefix("events:since:")
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0);
-
-                            let history = event_history.read().await;
-                            let events: Vec<serde_json::Value> = history
-                                .iter()
-                                .filter(|e| e.id > since_id)
-                                .map(|e| {
-                                    let timestamp_unix = e
-                                        .absolute_time
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs())
-                                        .unwrap_or(0);
-                                    serde_json::json!({
-                                        "id": e.id,
-                                        "session_id": e.session_id,
-                                        "session_name": e.session_name,
-                                        "swarm_id": e.swarm_id,
-                                        "event": e.event,
-                                        "age_secs": e.timestamp.elapsed().as_secs(),
-                                        "timestamp_unix": timestamp_unix,
-                                    })
-                                })
-                                .collect();
-                            Ok(serde_json::to_string_pretty(&events)
-                                .unwrap_or_else(|_| "[]".to_string()))
-                        } else if cmd == "events:types" {
-                            // List available event types
-                            Ok(serde_json::json!({
-                                "types": [
-                                    "file_touch",
-                                    "notification",
-                                    "plan_update",
-                                    "plan_proposal",
-                                    "context_update",
-                                    "status_change",
-                                    "member_change"
-                                ],
-                                "description": "Use events:recent, events:since:<id>, or events:subscribe to get events"
-                            }).to_string())
-                        } else if cmd == "events:count" {
-                            // Get current event count and latest ID
-                            let history = event_history.read().await;
-                            let latest_id = history.last().map(|e| e.id).unwrap_or(0);
-                            Ok(serde_json::json!({
-                                "count": history.len(),
-                                "latest_id": latest_id,
-                                "max_history": MAX_EVENT_HISTORY,
-                            })
-                            .to_string())
+                        } else if let Some(output) =
+                            maybe_handle_event_query_command(cmd, &event_history).await
+                        {
+                            Ok(output)
                         } else if cmd == "swarm:help" {
                             Ok(swarm_debug_help_text())
                         } else if cmd == "help" {

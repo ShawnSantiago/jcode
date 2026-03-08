@@ -10,6 +10,7 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod debug;
+mod debug_events;
 mod debug_jobs;
 mod debug_server_state;
 mod debug_testers;
