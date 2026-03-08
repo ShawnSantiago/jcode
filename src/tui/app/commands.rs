@@ -1,7 +1,6 @@
 use super::{App, DisplayMessage};
 use crate::message::Role;
 use crate::session::Session;
-use std::io::Write;
 
 pub(super) fn reset_current_session(app: &mut App) {
     app.clear_provider_messages();
@@ -270,7 +269,194 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
-pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
+pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
+    use crate::bus::{Bus, BusEvent};
+
+    if trimmed == "/compact" {
+        if !app.provider.supports_compaction() {
+            app.push_display_message(DisplayMessage::system(
+                "Manual compaction is not available for this provider.".to_string(),
+            ));
+            return true;
+        }
+        let compaction = app.registry.compaction();
+        match compaction.try_write() {
+            Ok(mut manager) => {
+                let stats = manager.stats_with(&app.messages);
+                let status_msg = format!(
+                    "**Context Status:**\n\
+                    • Messages: {} (active), {} (total history)\n\
+                    • Token usage: ~{}k (estimate ~{}k) / {}k ({:.1}%)\n\
+                    • Has summary: {}\n\
+                    • Compacting: {}",
+                    stats.active_messages,
+                    stats.total_turns,
+                    stats.effective_tokens / 1000,
+                    stats.token_estimate / 1000,
+                    manager.token_budget() / 1000,
+                    stats.context_usage * 100.0,
+                    if stats.has_summary { "yes" } else { "no" },
+                    if stats.is_compacting {
+                        "in progress..."
+                    } else {
+                        "no"
+                    }
+                );
+
+                match manager.force_compact_with(&app.messages, app.provider.clone()) {
+                    Ok(()) => {
+                        app.push_display_message(DisplayMessage {
+                            role: "system".to_string(),
+                            content: format!(
+                                "{}\n\n✓ **Compaction started** - summarizing older messages in background.\n\
+                                The summary will be applied automatically when ready.\n\
+                                Use `/help compact` for details.",
+                                status_msg
+                            ),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                    Err(reason) => {
+                        app.push_display_message(DisplayMessage {
+                            role: "system".to_string(),
+                            content: format!(
+                                "{}\n\n⚠ **Cannot compact:** {}\n\
+                                Try `/fix` for emergency recovery.",
+                                status_msg, reason
+                            ),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                }
+            }
+            Err(_) => {
+                app.push_display_message(DisplayMessage {
+                    role: "system".to_string(),
+                    content: "⚠ Cannot access compaction manager (lock held)".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
+        }
+        return true;
+    }
+
+    if trimmed == "/fix" {
+        app.run_fix_command();
+        return true;
+    }
+
+    if trimmed == "/usage" {
+        app.push_display_message(DisplayMessage::system(
+            "Fetching usage limits from all providers...".to_string(),
+        ));
+        tokio::spawn(async move {
+            let results = crate::usage::fetch_all_provider_usage().await;
+            Bus::global().publish(BusEvent::UsageReport(results));
+        });
+        return true;
+    }
+
+    if trimmed == "/remember" {
+        if !app.memory_enabled {
+            app.push_display_message(DisplayMessage::system(
+                "Memory feature is disabled. Use `/memory on` to enable it.".to_string(),
+            ));
+            return true;
+        }
+
+        use crate::tui::info_widget::{MemoryEventKind, MemoryState};
+
+        let context = crate::memory::format_context_for_relevance(&app.messages);
+        if context.len() < 100 {
+            app.push_display_message(DisplayMessage {
+                role: "system".to_string(),
+                content: "Not enough conversation to extract memories from.".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return true;
+        }
+
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: "🧠 Extracting memories from conversation...".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+
+        crate::memory::set_state(MemoryState::Extracting {
+            reason: "manual".to_string(),
+        });
+        crate::memory::add_event(MemoryEventKind::ExtractionStarted {
+            reason: "/remember command".to_string(),
+        });
+
+        let context_owned = context.clone();
+        tokio::spawn(async move {
+            let sidecar = crate::sidecar::Sidecar::new();
+            match sidecar.extract_memories(&context_owned).await {
+                Ok(extracted) if !extracted.is_empty() => {
+                    let manager = crate::memory::MemoryManager::new();
+                    let mut stored_count = 0;
+
+                    for mem in extracted {
+                        let category =
+                            crate::memory::MemoryCategory::from_extracted(&mem.category);
+
+                        let trust = match mem.trust.as_str() {
+                            "high" => crate::memory::TrustLevel::High,
+                            "low" => crate::memory::TrustLevel::Low,
+                            _ => crate::memory::TrustLevel::Medium,
+                        };
+
+                        let entry = crate::memory::MemoryEntry::new(category, &mem.content)
+                            .with_source("manual")
+                            .with_trust(trust);
+
+                        if manager.remember_project(entry).is_ok() {
+                            stored_count += 1;
+                        }
+                    }
+
+                    crate::logging::info(&format!(
+                        "/remember: extracted {} memories",
+                        stored_count
+                    ));
+                    crate::memory::add_event(MemoryEventKind::ExtractionComplete {
+                        count: stored_count,
+                    });
+                    crate::memory::set_state(MemoryState::Idle);
+                }
+                Ok(_) => {
+                    crate::logging::info("/remember: no memories extracted");
+                    crate::memory::set_state(MemoryState::Idle);
+                }
+                Err(e) => {
+                    crate::logging::error(&format!("/remember failed: {}", e));
+                    crate::memory::add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
+                    crate::memory::set_state(MemoryState::Idle);
+                }
+            }
+        });
+
+        return true;
+    }
+
     if trimmed == "/config" {
         use crate::config::config;
         app.push_display_message(DisplayMessage {
@@ -350,8 +536,20 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed.starts_with("/config ") {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: `/config` (show), `/config init` (create), `/config edit` (open in editor)"
+                .to_string(),
+        ));
+        return true;
+    }
+
+    false
+}
+
+pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/debug-visual" || trimmed == "/debug-visual on" {
-        use super::super::visual_debug;
+        use crate::tui::visual_debug;
         visual_debug::enable();
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),
@@ -369,7 +567,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/debug-visual off" {
-        use super::super::visual_debug;
+        use crate::tui::visual_debug;
         visual_debug::disable();
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),
@@ -384,7 +582,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/debug-visual dump" {
-        use super::super::visual_debug;
+        use crate::tui::visual_debug;
         match visual_debug::dump_to_file() {
             Ok(path) => {
                 app.push_display_message(DisplayMessage {
@@ -418,8 +616,15 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed.starts_with("/debug-visual ") {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: `/debug-visual` (on), `/debug-visual off`, `/debug-visual dump`".to_string(),
+        ));
+        return true;
+    }
+
     if trimmed == "/screenshot-mode" || trimmed == "/screenshot-mode on" {
-        use super::super::screenshot;
+        use crate::tui::screenshot;
         screenshot::enable();
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),
@@ -440,7 +645,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/screenshot-mode off" {
-        use super::super::screenshot;
+        use crate::tui::screenshot;
         screenshot::disable();
         screenshot::clear_all_signals();
         app.push_display_message(DisplayMessage {
@@ -455,7 +660,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed.starts_with("/screenshot ") {
-        use super::super::screenshot;
+        use crate::tui::screenshot;
         let state_name = trimmed.strip_prefix("/screenshot ").unwrap_or("").trim();
         if !state_name.is_empty() {
             screenshot::signal_ready(
@@ -477,7 +682,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/record" || trimmed == "/record start" {
-        use super::super::test_harness;
+        use crate::tui::test_harness;
         test_harness::start_recording();
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),
@@ -495,7 +700,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/record stop" {
-        use super::super::test_harness;
+        use crate::tui::test_harness;
         test_harness::stop_recording();
         let json = test_harness::get_recorded_events_json();
         let event_count = json.matches("\"type\"").count();
@@ -514,6 +719,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
         let filepath = recording_dir.join(&filename);
 
         if let Ok(mut file) = std::fs::File::create(&filepath) {
+            use std::io::Write;
             let _ = file.write_all(json.as_bytes());
         }
 
@@ -540,7 +746,7 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if trimmed == "/record cancel" {
-        use super::super::test_harness;
+        use crate::tui::test_harness;
         test_harness::stop_recording();
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),
@@ -550,6 +756,487 @@ pub(super) fn handle_utility_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
         });
+        return true;
+    }
+
+    if trimmed.starts_with("/record ") {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: `/record` (start), `/record stop`, `/record cancel`".to_string(),
+        ));
+        return true;
+    }
+
+    false
+}
+
+pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/model" || trimmed == "/models" {
+        app.open_model_picker();
+        return true;
+    }
+
+    if let Some(model_name) = trimmed.strip_prefix("/model ") {
+        let model_name = model_name.trim();
+        match app.provider.set_model(model_name) {
+            Ok(()) => {
+                app.provider_session_id = None;
+                app.session.provider_session_id = None;
+                app.upstream_provider = None;
+                app.connection_type = None;
+                let active_model = app.provider.model();
+                app.update_context_limit_for_model(&active_model);
+                app.session.model = Some(active_model.clone());
+                let _ = app.session.save();
+                app.push_display_message(DisplayMessage {
+                    role: "system".to_string(),
+                    content: format!("✓ Switched to model: {}", active_model),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                app.set_status_notice(format!("Model → {}", model_name));
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage {
+                    role: "error".to_string(),
+                    content: format!("Failed to switch model: {}", e),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                app.set_status_notice("Model switch failed");
+            }
+        }
+        return true;
+    }
+
+    if trimmed == "/effort" {
+        let current = app.provider.reasoning_effort();
+        let efforts = app.provider.available_efforts();
+        if efforts.is_empty() {
+            app.push_display_message(DisplayMessage::system(
+                "Reasoning effort not available for this provider.".to_string(),
+            ));
+        } else {
+            let current_label = current
+                .as_deref()
+                .map(super::effort_display_label)
+                .unwrap_or("default");
+            let list: Vec<String> = efforts
+                .iter()
+                .map(|e| {
+                    if Some(e.to_string()) == current {
+                        format!("**{}** ← current", super::effort_display_label(e))
+                    } else {
+                        super::effort_display_label(e).to_string()
+                    }
+                })
+                .collect();
+            app.push_display_message(DisplayMessage::system(format!(
+                "Reasoning effort: {}\nAvailable: {}\nUse `/effort <level>` or Alt+←/→ to change.",
+                current_label,
+                list.join(" · ")
+            )));
+        }
+        return true;
+    }
+
+    if let Some(level) = trimmed.strip_prefix("/effort ") {
+        let level = level.trim();
+        match app.provider.set_reasoning_effort(level) {
+            Ok(()) => {
+                let new_effort = app.provider.reasoning_effort();
+                let label = new_effort
+                    .as_deref()
+                    .map(super::effort_display_label)
+                    .unwrap_or("default");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Reasoning effort → {}",
+                    label
+                )));
+                let efforts = app.provider.available_efforts();
+                let idx = new_effort
+                    .as_ref()
+                    .and_then(|e| efforts.iter().position(|x| *x == e.as_str()))
+                    .unwrap_or(0);
+                let bar = super::effort_bar(idx, efforts.len());
+                app.set_status_notice(format!("Effort: {} {}", label, bar));
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set effort: {}",
+                    e
+                )));
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
+pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/version" {
+        let version = env!("JCODE_VERSION");
+        let is_canary = if app.session.is_canary {
+            " (canary/self-dev)"
+        } else {
+            ""
+        };
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: format!("jcode {}{}", version, is_canary),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        return true;
+    }
+
+    if trimmed == "/changelog" {
+        app.changelog_scroll = Some(0);
+        return true;
+    }
+
+    if trimmed == "/cache" || trimmed.starts_with("/cache ") {
+        let arg = trimmed.strip_prefix("/cache").unwrap_or("").trim();
+        match arg {
+            "1h" | "1hour" | "extended" => {
+                crate::provider::anthropic::set_cache_ttl_1h(true);
+                app.push_display_message(DisplayMessage::system(
+                    "Cache TTL set to 1 hour. Cache writes cost 2x base input tokens.".to_string(),
+                ));
+            }
+            "5m" | "5min" | "default" | "reset" => {
+                crate::provider::anthropic::set_cache_ttl_1h(false);
+                app.push_display_message(DisplayMessage::system(
+                    "Cache TTL set to 5 minutes (default).".to_string(),
+                ));
+            }
+            "" => {
+                let current = crate::provider::anthropic::is_cache_ttl_1h();
+                let new_state = !current;
+                crate::provider::anthropic::set_cache_ttl_1h(new_state);
+                let msg = if new_state {
+                    "Cache TTL toggled to 1 hour. Cache writes cost 2x base input tokens.\nUse `/cache 5m` to revert."
+                } else {
+                    "Cache TTL toggled to 5 minutes (default).\nUse `/cache 1h` to extend."
+                };
+                app.push_display_message(DisplayMessage::system(msg.to_string()));
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: `/cache` (toggle), `/cache 1h` (1 hour), `/cache 5m` (default)"
+                        .to_string(),
+                ));
+            }
+        }
+        return true;
+    }
+
+    if trimmed == "/info" {
+        let version = env!("JCODE_VERSION");
+        let terminal_size = crossterm::terminal::size()
+            .map(|(w, h)| format!("{}x{}", w, h))
+            .unwrap_or_else(|_| "unknown".to_string());
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let turn_count = app
+            .display_messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .count();
+
+        let session_duration =
+            chrono::Utc::now().signed_duration_since(app.session.created_at);
+        let duration_str = if session_duration.num_hours() > 0 {
+            format!(
+                "{}h {}m",
+                session_duration.num_hours(),
+                session_duration.num_minutes() % 60
+            )
+        } else if session_duration.num_minutes() > 0 {
+            format!("{}m", session_duration.num_minutes())
+        } else {
+            format!("{}s", session_duration.num_seconds())
+        };
+
+        let mut info = String::new();
+        info.push_str(&format!("**Version:** {}\n", version));
+        info.push_str(&format!(
+            "**Session:** {} ({})\n",
+            app.session.short_name.as_deref().unwrap_or("unnamed"),
+            &app.session.id[..8]
+        ));
+        info.push_str(&format!(
+            "**Duration:** {} ({} turns)\n",
+            duration_str, turn_count
+        ));
+        info.push_str(&format!(
+            "**Tokens:** ↑{} ↓{}\n",
+            app.total_input_tokens, app.total_output_tokens
+        ));
+        info.push_str(&format!("**Terminal:** {}\n", terminal_size));
+        info.push_str(&format!("**CWD:** {}\n", cwd));
+        info.push_str(&format!(
+            "**Features:** memory={}, swarm={}\n",
+            if app.memory_enabled { "on" } else { "off" },
+            if app.swarm_enabled { "on" } else { "off" }
+        ));
+
+        if let Some(ref model) = app.remote_provider_model {
+            info.push_str(&format!("**Model:** {}\n", model));
+        }
+        if let Some(ref provider_id) = app.provider_session_id {
+            info.push_str(&format!(
+                "**Provider Session:** {}...\n",
+                &provider_id[..provider_id.len().min(16)]
+            ));
+        }
+
+        if app.session.is_canary {
+            info.push_str("\n**Self-Dev Mode:** enabled\n");
+            if let Some(ref build) = app.session.testing_build {
+                info.push_str(&format!("**Testing Build:** {}\n", build));
+            }
+        }
+
+        if app.is_remote {
+            info.push_str(&format!("\n**Remote Mode:** connected\n"));
+            if let Some(count) = app.remote_client_count {
+                info.push_str(&format!("**Connected Clients:** {}\n", count));
+            }
+        }
+
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: info,
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        return true;
+    }
+
+    false
+}
+
+pub(super) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/auth" {
+        app.show_auth_status();
+        return true;
+    }
+
+    if trimmed == "/login" {
+        app.show_interactive_login();
+        return true;
+    }
+
+    if let Some(provider) = trimmed
+        .strip_prefix("/login ")
+        .or_else(|| trimmed.strip_prefix("/auth "))
+    {
+        let providers = crate::provider_catalog::tui_login_providers();
+        if let Some(provider) =
+            crate::provider_catalog::resolve_login_selection(provider, &providers)
+        {
+            app.start_login_provider(provider);
+        } else {
+            let valid = providers
+                .iter()
+                .map(|provider| provider.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            app.push_display_message(DisplayMessage::error(format!(
+                "Unknown provider '{}'. Use: {}",
+                provider.trim(),
+                valid
+            )));
+        }
+        return true;
+    }
+
+    if trimmed == "/account" || trimmed == "/accounts" {
+        app.show_accounts();
+        return true;
+    }
+
+    if let Some(sub) = trimmed.strip_prefix("/account ") {
+        let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
+        match parts[0] {
+            "list" | "ls" => app.show_accounts(),
+            "switch" | "use" => {
+                if let Some(label) = parts.get(1) {
+                    app.switch_account(label.trim());
+                } else {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: `/account switch <label>`".to_string(),
+                    ));
+                }
+            }
+            "add" | "login" => {
+                let label = parts.get(1).map(|s| s.trim()).unwrap_or("default");
+                app.start_claude_login_for_account(label);
+            }
+            "remove" | "rm" | "delete" => {
+                if let Some(label) = parts.get(1) {
+                    app.remove_account(label.trim());
+                } else {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: `/account remove <label>`".to_string(),
+                    ));
+                }
+            }
+            other => {
+                let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+                if accounts.iter().any(|a| a.label == other) {
+                    app.switch_account(other);
+                } else {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Unknown subcommand '{}'. Use: list, switch, add, remove",
+                        other
+                    )));
+                }
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
+pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/reload" {
+        if !app.has_newer_binary() {
+            app.push_display_message(DisplayMessage {
+                role: "system".to_string(),
+                content: "No newer binary found. Nothing to reload.\nUse /rebuild to build a new version.".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return true;
+        }
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: "Reloading with newer binary...".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        app.session.provider_session_id = app.provider_session_id.clone();
+        app.session
+            .set_status(crate::session::SessionStatus::Reloaded);
+        let _ = app.session.save();
+        app.save_input_for_reload(&app.session.id.clone());
+        app.reload_requested = Some(app.session.id.clone());
+        app.should_quit = true;
+        return true;
+    }
+
+    if trimmed == "/rebuild" {
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: "Rebuilding jcode (git pull + cargo build + tests)...".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        app.session.provider_session_id = app.provider_session_id.clone();
+        app.session
+            .set_status(crate::session::SessionStatus::Reloaded);
+        let _ = app.session.save();
+        app.rebuild_requested = Some(app.session.id.clone());
+        app.should_quit = true;
+        return true;
+    }
+
+    if trimmed == "/update" {
+        app.push_display_message(DisplayMessage::system(
+            "Checking for updates...".to_string(),
+        ));
+        app.session.provider_session_id = app.provider_session_id.clone();
+        app.session
+            .set_status(crate::session::SessionStatus::Reloaded);
+        let _ = app.session.save();
+        app.update_requested = Some(app.session.id.clone());
+        app.should_quit = true;
+        return true;
+    }
+
+    if trimmed == "/z" || trimmed == "/zz" || trimmed == "/zzz" || trimmed == "/zstatus" {
+        use crate::provider::copilot::PremiumMode;
+        let current = app.provider.premium_mode();
+
+        if trimmed == "/zstatus" {
+            let label = match current {
+                PremiumMode::Normal => "normal",
+                PremiumMode::OnePerSession => "one premium per session",
+                PremiumMode::Zero => "zero premium requests",
+            };
+            let env = std::env::var("JCODE_COPILOT_PREMIUM").ok();
+            let env_label = match env.as_deref() {
+                Some("0") => "0 (zero)",
+                Some("1") => "1 (one per session)",
+                _ => "unset (normal)",
+            };
+            app.push_display_message(DisplayMessage::system(format!(
+                "Premium mode: **{}**\nEnv JCODE_COPILOT_PREMIUM: {}",
+                label, env_label,
+            )));
+            return true;
+        }
+
+        if trimmed == "/z" {
+            app.provider.set_premium_mode(PremiumMode::Normal);
+            let _ = crate::config::Config::set_copilot_premium(None);
+            app.set_status_notice("Premium: normal");
+            app.push_display_message(DisplayMessage::system(
+                "Premium request mode reset to normal. (saved to config)".to_string(),
+            ));
+            return true;
+        }
+
+        let mode = if trimmed == "/zzz" {
+            PremiumMode::Zero
+        } else {
+            PremiumMode::OnePerSession
+        };
+        if current == mode {
+            app.provider.set_premium_mode(PremiumMode::Normal);
+            let _ = crate::config::Config::set_copilot_premium(None);
+            app.set_status_notice("Premium: normal");
+            app.push_display_message(DisplayMessage::system(
+                "Premium request mode reset to normal. (saved to config)".to_string(),
+            ));
+        } else {
+            app.provider.set_premium_mode(mode);
+            let config_val = match mode {
+                PremiumMode::Zero => "zero",
+                PremiumMode::OnePerSession => "one",
+                PremiumMode::Normal => "normal",
+            };
+            let _ = crate::config::Config::set_copilot_premium(Some(config_val));
+            let label = match mode {
+                PremiumMode::OnePerSession => "one premium per session",
+                PremiumMode::Zero => "zero premium requests",
+                PremiumMode::Normal => "normal",
+            };
+            app.set_status_notice(&format!("Premium: {}", label));
+            app.push_display_message(DisplayMessage::system(format!(
+                "Premium mode: **{}**. Toggle off with `/z`. (saved to config)",
+                label,
+            )));
+        }
         return true;
     }
 
