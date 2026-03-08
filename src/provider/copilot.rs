@@ -25,6 +25,8 @@ const FALLBACK_MODELS: &[&str] = &[
     "claude-opus-4.5",
     "claude-sonnet-4",
     "gemini-3-pro-preview",
+    "gpt-5.4",
+    "gpt-5.4-pro",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
     "gpt-5.2",
@@ -605,7 +607,10 @@ impl CopilotApiProvider {
                 Err(e) => {
                     let error_str = e.to_string().to_lowercase();
                     if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                        crate::logging::info(&format!("Transient Copilot error, will retry: {}", e));
+                        crate::logging::info(&format!(
+                            "Transient Copilot error, will retry: {}",
+                            e
+                        ));
                         last_error = Some(anyhow::anyhow!("Copilot API request failed: {}", e));
                         continue;
                     }
@@ -629,10 +634,15 @@ impl CopilotApiProvider {
 
             if !status.is_success() {
                 let body_text = resp.text().await.unwrap_or_default();
-                let error_str = format!("Copilot API error (HTTP {}): {}", status, body_text).to_lowercase();
+                let error_str =
+                    format!("Copilot API error (HTTP {}): {}", status, body_text).to_lowercase();
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     crate::logging::info(&format!("Retryable Copilot HTTP error: {}", error_str));
-                    last_error = Some(anyhow::anyhow!("Copilot API error (HTTP {}): {}", status, body_text));
+                    last_error = Some(anyhow::anyhow!(
+                        "Copilot API error (HTTP {}): {}",
+                        status,
+                        body_text
+                    ));
                     continue;
                 }
                 let _ = tx
@@ -660,7 +670,9 @@ impl CopilotApiProvider {
                     if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                         crate::logging::info(&format!(
                             "Copilot stream failed (attempt {}/{}), will retry: {}",
-                            attempt + 1, MAX_RETRIES, e
+                            attempt + 1,
+                            MAX_RETRIES,
+                            e
                         ));
                         last_error = Some(e);
                         continue;
@@ -1091,6 +1103,8 @@ mod tests {
         assert_eq!(copilot_context_window("claude-opus-4.6-fast"), 200_000);
         assert_eq!(copilot_context_window("claude-sonnet-4.6"), 128_000);
         assert_eq!(copilot_context_window("claude-sonnet-4-6"), 128_000);
+        assert_eq!(copilot_context_window("gpt-5.4"), 128_000);
+        assert_eq!(copilot_context_window("gpt-5.4-pro"), 128_000);
         assert_eq!(copilot_context_window("gpt-5.3-codex"), 128_000);
         assert_eq!(copilot_context_window("gemini-3-pro-preview"), 1_000_000);
         assert_eq!(copilot_context_window("gemini-2.5-pro"), 1_000_000);
@@ -1539,7 +1553,10 @@ mod tests {
 
         let built = CopilotApiProvider::build_messages("", &messages);
 
-        assert_eq!(built[1]["tool_calls"][0]["id"], "toolu_01XFDUDYJgAACzvnptvVer6u");
+        assert_eq!(
+            built[1]["tool_calls"][0]["id"],
+            "toolu_01XFDUDYJgAACzvnptvVer6u"
+        );
         assert_eq!(built[2]["tool_call_id"], "toolu_01XFDUDYJgAACzvnptvVer6u");
     }
 
