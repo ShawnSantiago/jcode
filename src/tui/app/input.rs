@@ -1,5 +1,4 @@
-use super::{App, SendAction};
-use crate::session::Session;
+use super::{commands, App, SendAction};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -407,16 +406,7 @@ pub(super) fn handle_global_control_shortcuts(
         KeyCode::Char('l')
             if !app.is_processing && !diagram_available && !app.diff_pane_visible() =>
         {
-            app.clear_provider_messages();
-            app.clear_display_messages();
-            app.queued_messages.clear();
-            app.pasted_contents.clear();
-            app.pending_images.clear();
-            app.active_skill = None;
-            let mut session = Session::create(None, None);
-            session.model = Some(app.provider.model());
-            app.session = session;
-            app.provider_session_id = None;
+            commands::reset_current_session(app);
             true
         }
         _ => handle_control_key(app, code),
