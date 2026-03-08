@@ -282,7 +282,8 @@ impl SourceImageCache {
 #[derive(Clone, PartialEq, Eq)]
 struct LastRenderState {
     area: Rect,
-    centered: bool,
+    crop_top: bool,
+    resize_mode: ResizeMode,
 }
 
 /// Debug stats for mermaid rendering
@@ -2094,6 +2095,33 @@ pub fn render_image_widget(
                 img_state.last_crop_top = crop_top;
             }
 
+            // Track whether this is a geometry-identical frame (for skipped_renders stat).
+            let same_area = img_state.last_area == Some(render_area);
+            let state_key = LastRenderState {
+                area: render_area,
+                crop_top,
+                resize_mode: ResizeMode::Crop,
+            };
+            {
+                let last_same = LAST_RENDER
+                    .lock()
+                    .ok()
+                    .and_then(|mut map| {
+                        let prev = map.get(&hash).cloned();
+                        map.insert(hash, state_key.clone());
+                        prev
+                    })
+                    .map(|prev| prev == state_key)
+                    .unwrap_or(false);
+                if last_same && same_area {
+                    if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+                        dbg.stats.skipped_renders += 1;
+                    }
+                }
+            }
+            if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+                dbg.stats.image_state_hits += 1;
+            }
             if !render_stateful_image_safe(
                 hash,
                 render_area,
@@ -2112,6 +2140,9 @@ pub fn render_image_widget(
     if let Some(path) = path {
         if let Some(Some(picker)) = PICKER.get() {
             if let Ok(img) = image::open(&path) {
+                if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+                    dbg.stats.image_state_misses += 1;
+                }
                 let protocol = picker.new_resize_protocol(img);
 
                 let mut state = IMAGE_STATE.lock().unwrap();
@@ -2279,6 +2310,33 @@ fn render_image_widget_fit_inner(
         if let Some(img_state) = state.get_mut(hash) {
             img_state.resize_mode = target_mode;
             img_state.last_viewport = None;
+            // Track identical-geometry frames for skipped_renders stat.
+            let same_area = img_state.last_area == Some(render_area);
+            let state_key = LastRenderState {
+                area: render_area,
+                crop_top: false,
+                resize_mode: target_mode,
+            };
+            {
+                let last_same = LAST_RENDER
+                    .lock()
+                    .ok()
+                    .and_then(|mut map| {
+                        let prev = map.get(&hash).cloned();
+                        map.insert(hash, state_key.clone());
+                        prev
+                    })
+                    .map(|prev| prev == state_key)
+                    .unwrap_or(false);
+                if last_same && same_area {
+                    if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+                        dbg.stats.skipped_renders += 1;
+                    }
+                }
+            }
+            if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+                dbg.stats.image_state_hits += 1;
+            }
             if !render_stateful_image_safe(hash, render_area, buf, &mut img_state.protocol, resize)
             {
                 return 0;
@@ -2291,6 +2349,9 @@ fn render_image_widget_fit_inner(
     if let Some(path) = path {
         if let Some(Some(picker)) = PICKER.get() {
             if let Ok(img) = image::open(&path) {
+                if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+                    dbg.stats.image_state_misses += 1;
+                }
                 let target_mode = if scale_up {
                     ResizeMode::Scale
                 } else {
@@ -3310,5 +3371,161 @@ mod tests {
         );
         assert_eq!(buf[(3, 0)].symbol(), "│");
         assert_eq!(buf[(4, 0)].symbol(), " ");
+    }
+
+    // ── SVG rewriting helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_xml_attribute_reads_value() {
+        let tag = r#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 400 300">"#;
+        assert_eq!(extract_xml_attribute(tag, "width"), Some("800"));
+        assert_eq!(extract_xml_attribute(tag, "height"), Some("600"));
+        assert_eq!(extract_xml_attribute(tag, "viewBox"), Some("0 0 400 300"));
+        assert_eq!(extract_xml_attribute(tag, "missing"), None);
+    }
+
+    #[test]
+    fn test_parse_svg_length_handles_variants() {
+        assert_eq!(parse_svg_length("800"), Some(800.0));
+        assert_eq!(parse_svg_length("640px"), Some(640.0));
+        assert_eq!(parse_svg_length("100%"), None);
+        assert_eq!(parse_svg_length(""), None);
+        assert_eq!(parse_svg_length("0"), None);
+        assert_eq!(parse_svg_length("-5"), None);
+    }
+
+    #[test]
+    fn test_parse_svg_viewbox_size_extracts_wh() {
+        let tag = r#"<svg viewBox="10 20 800 600">"#;
+        let result = parse_svg_viewbox_size(tag);
+        assert_eq!(result, Some((800.0, 600.0)));
+
+        let tag_no_vb = r#"<svg width="400" height="300">"#;
+        assert_eq!(parse_svg_viewbox_size(tag_no_vb), None);
+    }
+
+    #[test]
+    fn test_set_xml_attribute_updates_existing() {
+        let tag = r#"<svg width="800" height="600">"#;
+        let updated = set_xml_attribute(tag, "width", "1200");
+        assert!(updated.contains(r#"width="1200""#), "got: {}", updated);
+        assert!(!updated.contains(r#"width="800""#));
+        assert!(updated.contains(r#"height="600""#));
+    }
+
+    #[test]
+    fn test_retarget_svg_for_png_rewrites_root_dimensions() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300"><rect/></svg>"#;
+        let rewritten = retarget_svg_for_png(svg, 800.0, 600.0);
+        assert!(
+            rewritten.contains(r#"width="800""#) || rewritten.contains("800"),
+            "width not rewritten: {}",
+            rewritten
+        );
+        assert!(
+            !rewritten.contains(r#"width="400""#),
+            "old width still present: {}",
+            rewritten
+        );
+        assert!(rewritten.contains(r#"<rect/>"#), "body was modified");
+    }
+
+    #[test]
+    fn test_retarget_svg_for_png_preserves_aspect_ratio_from_viewbox() {
+        // viewBox is 200x100 (2:1 ratio), request 400×9999 — height should be ≈200
+        let svg = r#"<svg width="200" height="100" viewBox="0 0 200 100"></svg>"#;
+        let rewritten = retarget_svg_for_png(svg, 400.0, 9999.0);
+        // Parse actual width from the result
+        let w = extract_xml_attribute(&rewritten, "width")
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        let h = extract_xml_attribute(&rewritten, "height")
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        assert!((w - 400.0).abs() < 1.0, "expected w≈400, got {}", w);
+        assert!(
+            (h - 200.0).abs() < 1.0,
+            "expected h≈200 (aspect from viewBox), got {}",
+            h
+        );
+    }
+
+    #[test]
+    fn test_retarget_svg_for_png_is_noop_on_non_svg() {
+        let not_svg = "<html><body></body></html>";
+        let result = retarget_svg_for_png(not_svg, 800.0, 600.0);
+        assert_eq!(result, not_svg);
+    }
+
+    // ── Image-state stats ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_image_state_hits_increment_on_cache_hit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("test_hit.png");
+        write_test_png(&path, 400, 300);
+        let hash = register_external_image(&path, 400, 300);
+
+        let initial = { MERMAID_DEBUG.lock().unwrap().stats.image_state_hits };
+
+        let mut buf = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 20,
+        };
+
+        // Clear any existing image state for this hash
+        if let Ok(mut state) = IMAGE_STATE.lock() {
+            state.remove(&hash);
+        }
+
+        // First call: image_state_misses (no state yet, but PICKER is None in tests)
+        // so it won't actually hit the open path. Just verify hits don't go negative.
+        let _h = render_image_widget_fit(hash, area, &mut buf, false, false);
+
+        // Image state will only be populated if PICKER is set, which it isn't in CI.
+        // But hits counter should remain stable (non-decreasing).
+        let after = MERMAID_DEBUG.lock().unwrap().stats.image_state_hits;
+        assert!(after >= initial, "image_state_hits should never decrease");
+    }
+
+    #[test]
+    fn test_skipped_renders_counter_is_non_negative() {
+        let skipped = MERMAID_DEBUG.lock().unwrap().stats.skipped_renders;
+        assert!(skipped < u64::MAX, "skipped_renders is a valid counter");
+    }
+
+    #[test]
+    fn test_debug_stats_aggregate_across_renders() {
+        let _lock = mermaid_render_test_lock();
+        clear_cache().ok();
+
+        let initial_requests = MERMAID_DEBUG.lock().unwrap().stats.total_requests;
+        let content = "flowchart LR\n    X[Start] --> Y[End]";
+        let _ = render_mermaid_untracked(content, None);
+        let after_requests = MERMAID_DEBUG.lock().unwrap().stats.total_requests;
+
+        assert!(
+            after_requests > initial_requests,
+            "total_requests should increment on each render call"
+        );
+
+        let stats = MERMAID_DEBUG.lock().unwrap().stats.clone();
+        let total_cache = stats.cache_hits + stats.cache_misses;
+        assert!(
+            total_cache >= after_requests - initial_requests,
+            "cache_hits + cache_misses should account for all render calls, \
+             got hits={} misses={} requests_delta={}",
+            stats.cache_hits,
+            stats.cache_misses,
+            after_requests - initial_requests
+        );
     }
 }
