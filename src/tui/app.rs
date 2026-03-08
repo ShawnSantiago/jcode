@@ -33,6 +33,7 @@ use tokio::sync::RwLock;
 use tokio::time::interval;
 
 mod remote;
+mod replay;
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
@@ -4076,170 +4077,12 @@ impl App {
 
     /// Run the TUI in replay mode, playing back a timeline of events.
     pub async fn run_replay(
-        mut self,
-        mut terminal: DefaultTerminal,
+        self,
+        terminal: DefaultTerminal,
         timeline: Vec<crate::replay::TimelineEvent>,
         speed: f64,
     ) -> Result<RunResult> {
-        use super::backend::RemoteConnection;
-        use crate::replay::ReplayEvent;
-
-        let mut event_stream = EventStream::new();
-        let mut redraw_period = super::redraw_interval(&self);
-        let mut redraw_interval = interval(redraw_period);
-        let mut remote = RemoteConnection::dummy();
-
-        let replay_events = crate::replay::timeline_to_replay_events(&timeline);
-
-        let mut event_index: usize = 0;
-        let mut paused = false;
-        let mut replay_speed = speed;
-        let mut next_event_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now());
-        let mut replay_turn_id: u64 = 0;
-
-        loop {
-            let desired_redraw = super::redraw_interval(&self);
-            if desired_redraw != redraw_period {
-                redraw_period = desired_redraw;
-                redraw_interval = interval(redraw_period);
-            }
-
-            terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
-
-            if self.should_quit {
-                break;
-            }
-
-            let replay_done = event_index >= replay_events.len();
-
-            tokio::select! {
-                _ = redraw_interval.tick() => {
-                    if self.stream_buffer.should_flush() {
-                        if let Some(chunk) = self.stream_buffer.flush() {
-                            self.streaming_text.push_str(&chunk);
-                        }
-                    }
-                }
-                event = event_stream.next() => {
-                    if let Some(Ok(event)) = event {
-                        match event {
-                            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                                match key.code {
-                                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                        self.should_quit = true;
-                                    }
-                                    KeyCode::Char('q') | KeyCode::Esc => {
-                                        self.should_quit = true;
-                                    }
-                                    KeyCode::Char(' ') => {
-                                        paused = !paused;
-                                        if !paused && !replay_done {
-                                            next_event_at = Some(tokio::time::Instant::now());
-                                        }
-                                    }
-                                    KeyCode::Char('+') | KeyCode::Char('=') => {
-                                        replay_speed = (replay_speed * 1.5).min(20.0);
-                                    }
-                                    KeyCode::Char('-') => {
-                                        replay_speed = (replay_speed / 1.5).max(0.1);
-                                    }
-                                    _ => {
-                                        if let Some(amount) = self
-                                            .scroll_keys
-                                            .scroll_amount(key.code.clone(), key.modifiers)
-                                        {
-                                            if amount < 0 {
-                                                self.scroll_up((-amount) as usize);
-                                            } else {
-                                                self.scroll_down(amount as usize);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Event::Mouse(mouse) => {
-                                self.handle_mouse_event(mouse);
-                            }
-                            Event::Resize(_, _) => {
-                                let _ = terminal.clear();
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ = async {
-                    if let Some(target) = next_event_at {
-                        tokio::time::sleep_until(target).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                }, if !paused && !replay_done => {
-                    if event_index < replay_events.len() {
-                        let replay_event = replay_events[event_index].1.clone();
-
-                        match replay_event {
-                            ReplayEvent::UserMessage { text } => {
-                                self.push_display_message(DisplayMessage {
-                                    role: "user".to_string(),
-                                    content: text,
-                                    tool_calls: vec![],
-                                    duration_secs: None,
-                                    title: None,
-                                    tool_data: None,
-                                });
-                            }
-                            ReplayEvent::StartProcessing => {
-                                replay_turn_id += 1;
-                                self.current_message_id = Some(replay_turn_id);
-                                self.is_processing = true;
-                                self.processing_started = Some(Instant::now());
-                                self.status = ProcessingStatus::Thinking(Instant::now());
-                                self.streaming_tps_start = Some(Instant::now());
-                                self.streaming_tps_elapsed = std::time::Duration::ZERO;
-                                self.streaming_total_output_tokens = 0;
-                            }
-                            ReplayEvent::Server(server_event) => {
-                                if let crate::protocol::ServerEvent::TextDelta { ref text } = server_event {
-                                    if !text.is_empty() {
-                                        self.streaming_text.push_str(text);
-                                        if matches!(self.status, ProcessingStatus::Thinking(_)) {
-                                            self.status = ProcessingStatus::Streaming;
-                                        }
-                                        self.last_stream_activity = Some(Instant::now());
-                                    }
-                                } else {
-                                    self.handle_server_event(server_event, &mut remote);
-                                }
-                            }
-                        }
-
-                        event_index += 1;
-
-                        if event_index < replay_events.len() {
-                            let next_delay = replay_events[event_index].0;
-                            let adjusted = (next_delay as f64 / replay_speed) as u64;
-                            next_event_at = Some(tokio::time::Instant::now() + Duration::from_millis(adjusted));
-                        } else {
-                            next_event_at = None;
-                            self.is_processing = false;
-                            self.status = ProcessingStatus::Idle;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(RunResult {
-            reload_session: None,
-            rebuild_session: None,
-            update_session: None,
-            exit_code: None,
-            session_id: if self.is_remote {
-                self.remote_session_id.clone()
-            } else {
-                Some(self.session.id.clone())
-            },
-        })
+        replay::run_replay(self, terminal, timeline, speed).await
     }
 
     /// Run replay headlessly, rendering each frame to an in-memory buffer.
@@ -4294,48 +4137,18 @@ impl App {
                 && event_schedule[event_cursor].0 <= sim_time_ms
             {
                 let (_t, event) = event_schedule[event_cursor];
-                match event {
-                    ReplayEvent::UserMessage { text } => {
-                        self.push_display_message(DisplayMessage {
-                            role: "user".to_string(),
-                            content: text.clone(),
-                            tool_calls: vec![],
-                            duration_secs: None,
-                            title: None,
-                            tool_data: None,
-                        });
-                    }
-                    ReplayEvent::StartProcessing => {
-                        replay_turn_id += 1;
-                        self.current_message_id = Some(replay_turn_id);
-                        self.is_processing = true;
-                        self.processing_started = Some(Instant::now());
-                        self.status = ProcessingStatus::Thinking(Instant::now());
-                        self.replay_processing_started_ms = Some(sim_time_ms);
-                    }
-                    ReplayEvent::Server(server_event) => {
-                        if let crate::protocol::ServerEvent::TextDelta { ref text } = server_event {
-                            if !text.is_empty() {
-                                self.streaming_text.push_str(text);
-                                if matches!(self.status, ProcessingStatus::Thinking(_)) {
-                                    self.status = ProcessingStatus::Streaming;
-                                }
-                            }
-                        } else {
-                            self.handle_server_event(server_event.clone(), &mut remote);
-                        }
-                    }
-                }
+                replay::apply_replay_event(
+                    &mut self,
+                    &mut remote,
+                    event,
+                    &mut replay_turn_id,
+                    Some(sim_time_ms),
+                );
                 event_cursor += 1;
             }
 
             if sim_time_ms >= next_frame_at {
-                if let Some(start_ms) = self.replay_processing_started_ms {
-                    let elapsed_ms = (sim_time_ms - start_ms).max(0.0);
-                    self.replay_elapsed_override = Some(Duration::from_millis(elapsed_ms as u64));
-                } else {
-                    self.replay_elapsed_override = None;
-                }
+                replay::update_replay_elapsed_override(&mut self, sim_time_ms);
                 terminal.draw(|f| crate::tui::render_frame(f, &self))?;
                 frames.push((sim_time_ms / 1000.0, terminal.backend().buffer().clone()));
                 next_frame_at = sim_time_ms + frame_duration_ms;
