@@ -1,6 +1,11 @@
-use super::{commands, App, SendAction};
+use super::{
+    commands, ctrl_bracket_fallback_to_esc, is_context_limit_error, remote, App, ContentBlock,
+    DisplayMessage, Message, ProcessingStatus, Role, SendAction, SkillRegistry,
+};
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{EventStream, KeyCode, KeyModifiers};
+use ratatui::DefaultTerminal;
+use std::time::{Duration, Instant};
 
 pub(super) struct PreparedInput {
     pub raw_input: String,
@@ -173,13 +178,13 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('b') => {
             if app.cursor_pos > 0 {
-                app.cursor_pos = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
             }
             true
         }
         KeyCode::Char('f') => {
             if app.cursor_pos < app.input.len() {
-                app.cursor_pos = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.cursor_pos = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
             }
             true
         }
@@ -463,7 +468,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
-                let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+                let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.input.drain(prev..app.cursor_pos);
                 app.cursor_pos = prev;
                 app.reset_tab_completion();
@@ -473,7 +478,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
-                let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.input.drain(app.cursor_pos..next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
@@ -482,13 +487,13 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Left => {
             if app.cursor_pos > 0 {
-                app.cursor_pos = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
             }
             true
         }
         KeyCode::Right => {
             if app.cursor_pos < app.input.len() {
-                app.cursor_pos = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.cursor_pos = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
             }
             true
         }
@@ -575,4 +580,439 @@ fn paste_placeholder(content: &str) -> String {
         line_count,
         if line_count == 1 { "" } else { "s" }
     )
+}
+
+impl App {
+    pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        // Record the event if recording is active
+        use crate::tui::test_harness::{record_event, TestEvent};
+        let modifiers: Vec<String> = {
+            let mut mods = vec![];
+            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                mods.push("ctrl".to_string());
+            }
+            if event.modifiers.contains(KeyModifiers::ALT) {
+                mods.push("alt".to_string());
+            }
+            if event.modifiers.contains(KeyModifiers::SHIFT) {
+                mods.push("shift".to_string());
+            }
+            mods
+        };
+        let code_str = format!("{:?}", event.code);
+        record_event(TestEvent::Key {
+            code: code_str,
+            modifiers,
+        });
+
+        let _ = self.handle_key(event.code, event.modifiers);
+    }
+
+    pub(super) fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let mut code = code;
+        let mut modifiers = modifiers;
+        ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+        if handle_modal_key(self, code.clone(), modifiers)? {
+            return Ok(());
+        }
+
+        if handle_pre_control_shortcuts(self, code.clone(), modifiers) {
+            return Ok(());
+        }
+
+        self.normalize_diagram_state();
+        let diagram_available = self.diagram_available();
+
+        // Handle ctrl combos regardless of processing state
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && handle_global_control_shortcuts(self, code, diagram_available)
+        {
+            return Ok(());
+        }
+
+        // Shift+Enter: does opposite of queue_mode during processing
+        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+            handle_shift_enter(self);
+            return Ok(());
+        }
+
+        // When the model picker preview is visible, arrow keys navigate the picker list
+        if self
+            .picker_state
+            .as_ref()
+            .map(|p| p.preview)
+            .unwrap_or(false)
+        {
+            match code {
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                    return self.handle_picker_key(code, modifiers);
+                }
+                _ => {}
+            }
+        }
+
+        if code == KeyCode::Enter {
+            handle_enter(self);
+            return Ok(());
+        }
+
+        if handle_basic_key(self, code) {
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn redraw_now(&self, terminal: &mut DefaultTerminal) -> Result<()> {
+        terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+        Ok(())
+    }
+
+    /// Try to paste an image from the clipboard. Checks native image data first,
+    /// then falls back to HTML clipboard for <img> URLs, then arboard text.
+    /// Used by both Ctrl+V and Alt+V handlers in both local and remote mode.
+    pub(super) fn paste_image_from_clipboard(&mut self) {
+        paste_image_from_clipboard(self);
+    }
+
+    /// Queue a message to be sent later
+    /// Handle bracketed paste: store text content (image URLs are still detected inline)
+    pub(super) fn handle_paste(&mut self, text: String) {
+        handle_paste(self, text);
+    }
+
+    /// Expand paste placeholders in input with actual content
+    pub(super) fn expand_paste_placeholders(&mut self, input: &str) -> String {
+        expand_paste_placeholders(self, input)
+    }
+
+    pub(super) fn queue_message(&mut self) {
+        queue_message(self);
+    }
+
+    /// Send an interleave message immediately to the server as a soft interrupt.
+    /// Skips the intermediate buffer stage - goes directly to pending_soft_interrupts.
+    pub(super) async fn send_interleave_now(
+        &mut self,
+        content: String,
+        remote: &mut crate::tui::backend::RemoteConnection,
+    ) {
+        remote::send_interleave_now(self, content, remote).await;
+    }
+
+    /// Retrieve all pending unsent messages into the input for editing.
+    /// Priority: pending soft interrupts first, then interleave, then queued.
+    /// Returns true if pending soft interrupts were retrieved (caller should cancel on server).
+    pub(super) fn retrieve_pending_message_for_edit(&mut self) -> bool {
+        retrieve_pending_message_for_edit(self)
+    }
+
+    pub(super) fn send_action(&self, shift: bool) -> SendAction {
+        send_action(self, shift)
+    }
+
+    pub(super) fn insert_thought_line(&mut self, line: String) {
+        if self.thought_line_inserted || line.is_empty() {
+            return;
+        }
+        self.thought_line_inserted = true;
+        let mut prefix = line;
+        if !prefix.ends_with('\n') {
+            prefix.push('\n');
+        }
+        prefix.push('\n');
+        if self.streaming_text.is_empty() {
+            self.streaming_text = prefix;
+        } else {
+            self.streaming_text = format!("{}{}", prefix, self.streaming_text);
+        }
+    }
+
+    pub(super) fn clear_streaming_render_state(&mut self) {
+        self.streaming_text.clear();
+        self.streaming_md_renderer.borrow_mut().reset();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
+    }
+
+    pub(super) fn take_streaming_text(&mut self) -> String {
+        let content = std::mem::take(&mut self.streaming_text);
+        self.streaming_md_renderer.borrow_mut().reset();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
+        content
+    }
+
+    pub(super) fn accumulate_streaming_output_tokens(
+        &mut self,
+        output_tokens: u64,
+        call_output_tokens_seen: &mut u64,
+    ) {
+        let delta = if output_tokens >= *call_output_tokens_seen {
+            output_tokens - *call_output_tokens_seen
+        } else {
+            // Usage snapshots should be monotonic within one API call. If they are not,
+            // treat this as a reset and count the full value once.
+            output_tokens
+        };
+        self.streaming_total_output_tokens += delta;
+        *call_output_tokens_seen = output_tokens;
+    }
+
+    pub(super) fn command_help(&self, topic: &str) -> Option<String> {
+        let topic = topic.trim().trim_start_matches('/').to_lowercase();
+        let help = match topic.as_str() {
+            "help" | "commands" => {
+                "`/help`\nShow general command list and keyboard shortcuts.\n\n`/help <command>`\nShow detailed help for one command."
+            }
+            "compact" => {
+                "`/compact`\nForce context compaction now.\nStarts background summarization and applies it automatically when ready."
+            }
+            "fix" => {
+                "`/fix`\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."
+            }
+            "rewind" => {
+                "`/rewind`\nShow numbered conversation history.\n\n`/rewind N`\nRewind to message N (drops everything after it and resets provider session)."
+            }
+            "clear" => {
+                "`/clear`\nClear current conversation, queue, and display; starts a fresh session."
+            }
+            "model" => {
+                "`/model`\nOpen model picker.\n\n`/model <name>`\nSwitch model.\n\n`/model <name>@<provider>`\nPin OpenRouter routing (`@auto` clears pin)."
+            }
+            "effort" => {
+                "`/effort`\nShow current reasoning effort.\n\n`/effort <level>`\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: Alt+←/→ to cycle."
+            }
+            "memory" => "`/memory [on|off|status]`\nToggle memory features for this session.",
+            "remember" => {
+                "`/remember`\nExtract memories from current conversation and store them."
+            }
+            "swarm" => "`/swarm [on|off|status]`\nToggle swarm features for this session.",
+            "poke" => {
+                "`/poke`\nPoke the model to resume when it has stopped with incomplete todos.\n\
+                Injects a reminder listing all pending/in-progress tasks and prompts the model to either\n\
+                finish the work, update the todo list to reflect what is done, or ask for user input if genuinely blocked."
+            }
+            "reload" => "`/reload`\nReload to a newer binary if one is available.",
+            "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
+            "split" => "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point.",
+            "resume" | "sessions" => "`/resume`\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and open any session in a new terminal window.\n\nPress `Esc` to return to your current session.",
+            "info" => "`/info`\nShow session metadata and token usage.",
+            "usage" => "`/usage`\nFetch and display subscription usage limits for all connected OAuth providers (Anthropic, OpenAI/ChatGPT).\nShows 5-hour and 7-day windows, reset times, and extra usage status.",
+            "version" => "`/version`\nShow jcode version/build details.",
+            "changelog" => "`/changelog`\nShow recent changes embedded in this build.",
+            "quit" => "`/quit`\nExit jcode.",
+            "config" => {
+                "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
+            }
+            "auth" | "login" => {
+                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly for any provider shown by `/login` or the `/login ` completions."
+            }
+            "account" | "accounts" => {
+                "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
+            }
+            "save" => {
+                "`/save`\nBookmark the current session so it appears at the top of `/resume`.\n\n`/save <label>`\nBookmark with a custom label for easy identification.\n\nSaved sessions are shown in a dedicated \"Saved\" section in the session picker."
+            }
+            "unsave" => {
+                "`/unsave`\nRemove the bookmark from the current session."
+            }
+            "client-reload" if self.is_remote => {
+                "`/client-reload`\nForce client binary reload in remote mode."
+            }
+            "server-reload" if self.is_remote => {
+                "`/server-reload`\nForce server binary reload in remote mode."
+            }
+            _ => return None,
+        };
+        Some(help.to_string())
+    }
+
+    /// Submit input - just sets up message and flags, processing happens in next loop iteration
+    pub(super) fn submit_input(&mut self) {
+        if self.activate_model_picker_from_preview() {
+            return;
+        }
+
+        let raw_input = std::mem::take(&mut self.input);
+        let input = self.expand_paste_placeholders(&raw_input);
+        self.pasted_contents.clear();
+        self.cursor_pos = 0;
+        self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
+
+        if let Some(pending) = self.pending_login.take() {
+            self.handle_login_input(pending, input);
+            return;
+        }
+
+        let trimmed = input.trim();
+        if commands::handle_help_command(self, trimmed)
+            || commands::handle_session_command(self, trimmed)
+            || commands::handle_config_command(self, trimmed)
+            || commands::handle_debug_command(self, trimmed)
+            || commands::handle_model_command(self, trimmed)
+            || commands::handle_info_command(self, trimmed)
+            || commands::handle_auth_command(self, trimmed)
+            || commands::handle_dev_command(self, trimmed)
+        {
+            return;
+        }
+
+        // Check for skill invocation
+        if let Some(skill_name) = SkillRegistry::parse_invocation(&input) {
+            if let Some(skill) = self.skills.get(skill_name) {
+                self.active_skill = Some(skill_name.to_string());
+                self.push_display_message(DisplayMessage {
+                    role: "system".to_string(),
+                    content: format!("Activated skill: {} - {}", skill.name, skill.description),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            } else {
+                self.push_display_message(DisplayMessage {
+                    role: "error".to_string(),
+                    content: format!("Unknown skill: /{}", skill_name),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
+            return;
+        }
+
+        // Add user message to display (show placeholder to user, not full paste)
+        self.push_display_message(DisplayMessage {
+            role: "user".to_string(),
+            content: raw_input, // Show placeholder to user (condensed view)
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        // Send expanded content (with actual pasted text) to model
+        let images = std::mem::take(&mut self.pending_images);
+        if !images.is_empty() {
+            crate::logging::info(&format!(
+                "Submitting with {} image(s): {}",
+                images.len(),
+                images
+                    .iter()
+                    .map(|(t, d)| format!("{} ({}KB)", t, d.len() / 1024))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if images.is_empty() {
+            self.add_provider_message(Message::user(&input));
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: input.clone(),
+                    cache_control: None,
+                }],
+            );
+        } else {
+            self.add_provider_message(Message::user_with_images(&input, images.clone()));
+            let mut blocks: Vec<ContentBlock> = images
+                .into_iter()
+                .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+                .collect();
+            blocks.push(ContentBlock::Text {
+                text: input.clone(),
+                cache_control: None,
+            });
+            self.session.add_message(Role::User, blocks);
+        }
+        let _ = self.session.save();
+
+        // Set up processing state - actual processing happens after UI redraws
+        self.is_processing = true;
+        self.status = ProcessingStatus::Sending;
+        self.clear_streaming_render_state();
+        self.stream_buffer.clear();
+        self.thought_line_inserted = false;
+        self.thinking_prefix_emitted = false;
+        self.thinking_buffer.clear();
+        self.streaming_tool_calls.clear();
+        self.streaming_input_tokens = 0;
+        self.streaming_output_tokens = 0;
+        self.streaming_cache_read_tokens = None;
+        self.streaming_cache_creation_tokens = None;
+        self.upstream_provider = None;
+        self.streaming_tps_start = None;
+        self.streaming_tps_elapsed = Duration::ZERO;
+        self.streaming_total_output_tokens = 0;
+        self.processing_started = Some(Instant::now());
+        self.pending_turn = true;
+    }
+
+    /// Process all queued messages (combined into a single request)
+    /// Loops until queue is empty (in case more messages are queued during processing)
+    pub(super) async fn process_queued_messages(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+    ) {
+        while !self.queued_messages.is_empty() {
+            // Combine all currently queued messages into one
+            let messages = std::mem::take(&mut self.queued_messages);
+            let combined = messages.join("\n\n");
+
+            // Display each queued message as its own user prompt
+            for msg in &messages {
+                self.push_display_message(DisplayMessage::user(msg.clone()));
+            }
+
+            self.add_provider_message(Message::user(&combined));
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: combined,
+                    cache_control: None,
+                }],
+            );
+            let _ = self.session.save();
+            self.clear_streaming_render_state();
+            self.stream_buffer.clear();
+            self.thought_line_inserted = false;
+            self.thinking_prefix_emitted = false;
+            self.thinking_buffer.clear();
+            self.streaming_tool_calls.clear();
+            self.streaming_input_tokens = 0;
+            self.streaming_output_tokens = 0;
+            self.streaming_cache_read_tokens = None;
+            self.streaming_cache_creation_tokens = None;
+            self.upstream_provider = None;
+            self.streaming_tps_start = None;
+            self.streaming_tps_elapsed = Duration::ZERO;
+            self.streaming_total_output_tokens = 0;
+            self.processing_started = Some(Instant::now());
+            self.is_processing = true;
+            self.status = ProcessingStatus::Sending;
+
+            match self.run_turn_interactive(terminal, event_stream).await {
+                Ok(()) => {
+                    self.last_stream_error = None;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if is_context_limit_error(&err_str) {
+                        if self
+                            .try_auto_compact_and_retry(terminal, event_stream)
+                            .await
+                        {
+                            // Successfully recovered
+                        } else {
+                            self.handle_turn_error(err_str);
+                        }
+                    } else {
+                        self.handle_turn_error(err_str);
+                    }
+                }
+            }
+            // Loop will check if more messages were queued during this turn
+        }
+    }
 }

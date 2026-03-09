@@ -1,0 +1,954 @@
+use super::*;
+use crate::tui::{backend, core, is_unexpected_cache_miss, ui};
+
+impl App {
+    pub fn display_messages(&self) -> &[DisplayMessage] {
+        &self.display_messages
+    }
+
+    pub(super) fn bump_display_messages_version(&mut self) {
+        self.display_messages_version = self.display_messages_version.wrapping_add(1);
+    }
+
+    pub(super) fn push_display_message(&mut self, message: DisplayMessage) {
+        let is_tool = message.role == "tool";
+        self.display_messages.push(message);
+        self.bump_display_messages_version();
+        if is_tool && self.diff_mode.has_side_pane() && self.diff_pane_auto_scroll {
+            self.diff_pane_scroll = usize::MAX;
+        }
+    }
+
+    pub(super) fn append_reload_message(&mut self, line: &str) {
+        if let Some(idx) = self
+            .display_messages
+            .iter()
+            .rposition(Self::is_reload_message)
+        {
+            let msg = &mut self.display_messages[idx];
+            if !msg.content.is_empty() {
+                msg.content.push('\n');
+            }
+            msg.content.push_str(line);
+            msg.title = Some("Reload".to_string());
+            self.bump_display_messages_version();
+        } else {
+            self.push_display_message(
+                DisplayMessage::system(line.to_string()).with_title("Reload"),
+            );
+        }
+    }
+
+    pub(super) fn is_reload_message(message: &DisplayMessage) -> bool {
+        message.role == "system"
+            && message
+                .title
+                .as_deref()
+                .is_some_and(|title| title == "Reload" || title.starts_with("Reload: "))
+    }
+
+    pub(super) fn clear_display_messages(&mut self) {
+        if !self.display_messages.is_empty() {
+            self.display_messages.clear();
+            self.bump_display_messages_version();
+        }
+    }
+
+    /// Find word boundary going backward (for Ctrl+W, Alt+B)
+    pub(super) fn find_word_boundary_back(&self) -> usize {
+        if self.cursor_pos == 0 {
+            return 0;
+        }
+        let mut pos = self.cursor_pos;
+
+        // Move back one char
+        pos = core::prev_char_boundary(&self.input, pos);
+
+        // Skip trailing whitespace
+        while pos > 0 {
+            let ch = self.input[pos..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = core::prev_char_boundary(&self.input, pos);
+        }
+
+        // Skip word characters
+        while pos > 0 {
+            let prev = core::prev_char_boundary(&self.input, pos);
+            let ch = self.input[prev..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            pos = prev;
+        }
+
+        pos
+    }
+
+    /// Find word boundary going forward (for Alt+F, Alt+D)
+    pub(super) fn find_word_boundary_forward(&self) -> usize {
+        let len = self.input.len();
+        if self.cursor_pos >= len {
+            return len;
+        }
+        let mut pos = self.cursor_pos;
+
+        // Skip current word
+        while pos < len {
+            let ch = self.input[pos..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            pos = core::next_char_boundary(&self.input, pos);
+        }
+
+        // Skip whitespace
+        while pos < len {
+            let ch = self.input[pos..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = core::next_char_boundary(&self.input, pos);
+        }
+
+        pos
+    }
+
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    pub(super) fn fuzzy_score(needle: &str, haystack: &str) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        // Both needle and haystack should start with '/', match from char 1 onward
+        let n = needle.strip_prefix('/').unwrap_or(needle);
+        let h = haystack.strip_prefix('/').unwrap_or(haystack);
+        if n.is_empty() {
+            return Some(0);
+        }
+        // First char of the command (after /) must match
+        if !h.starts_with(&n[..n.chars().next().unwrap().len_utf8()]) {
+            return None;
+        }
+        let mut score = 0usize;
+        let mut pos = 0usize;
+        for ch in n.chars() {
+            let Some(idx) = h[pos..].find(ch) else {
+                return None;
+            };
+            score += idx;
+            pos += idx + ch.len_utf8();
+        }
+        // Penalize large gaps - reject if average gap is too big
+        if n.len() > 1 && score > n.len() * 3 {
+            return None;
+        }
+        Some(score)
+    }
+
+    pub(super) fn rank_suggestions(
+        &self,
+        needle: &str,
+        candidates: Vec<(String, &'static str)>,
+    ) -> Vec<(String, &'static str)> {
+        let needle = needle.to_lowercase();
+        let mut scored: Vec<(bool, usize, String, &'static str)> = Vec::new();
+        for (cmd, help) in candidates {
+            let lower = cmd.to_lowercase();
+            if lower.starts_with(&needle) {
+                scored.push((true, 0, cmd, help));
+            } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
+                scored.push((false, score, cmd, help));
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.len().cmp(&b.2.len()))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored
+            .into_iter()
+            .map(|(_, _, cmd, help)| (cmd, help))
+            .collect()
+    }
+
+    /// Get command suggestions based on current input (or base input for cycling)
+    pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+        let input = input.trim();
+
+        // Only show suggestions when input starts with /
+        if !input.starts_with('/') {
+            return vec![];
+        }
+
+        let prefix = input.to_lowercase();
+
+        // /model opens the interactive picker — don't list individual models in autocomplete
+        if prefix == "/model" || prefix.starts_with("/model ") || prefix.starts_with("/models") {
+            return vec![("/model".into(), "Open model picker")];
+        }
+
+        if prefix.starts_with("/effort ") {
+            let efforts = ["none", "low", "medium", "high", "xhigh"];
+            return efforts
+                .iter()
+                .map(|e| (format!("/effort {}", e), effort_display_label(e)))
+                .collect();
+        }
+
+        if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
+            return crate::provider_catalog::tui_login_providers()
+                .iter()
+                .map(|provider| (format!("/login {}", provider.id), provider.menu_detail))
+                .collect();
+        }
+
+        if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
+            let mut suggestions = vec![
+                ("/account list".into(), "List all Anthropic accounts"),
+                (
+                    "/account add".into(),
+                    "Add a new account (start OAuth login)",
+                ),
+                ("/account switch".into(), "Switch active account"),
+                ("/account remove".into(), "Remove an account"),
+            ];
+            if let Ok(accounts) = crate::auth::claude::list_accounts() {
+                for account in accounts {
+                    suggestions.push((
+                        format!("/account switch {}", account.label),
+                        "Switch to this account",
+                    ));
+                }
+            }
+            return suggestions;
+        }
+
+        // Built-in commands
+        let mut commands: Vec<(String, &'static str)> = vec![
+            ("/help".into(), "Show help and keyboard shortcuts"),
+            ("/commands".into(), "Alias for /help"),
+            ("/model".into(), "List or switch models"),
+            ("/effort".into(), "Show/change reasoning effort (Alt+←/→)"),
+            ("/clear".into(), "Clear conversation history"),
+            ("/rewind".into(), "Rewind conversation to previous message"),
+            ("/poke".into(), "Poke model to resume with incomplete todos"),
+            (
+                "/compact".into(),
+                "Compact context (summarize old messages)",
+            ),
+            ("/fix".into(), "Recover when the model cannot continue"),
+            (
+                "/remember".into(),
+                "Extract and save memories from conversation",
+            ),
+            ("/memory".into(), "Toggle memory feature (on/off/status)"),
+            ("/swarm".into(), "Toggle swarm feature (on/off/status)"),
+            ("/version".into(), "Show current version"),
+            ("/changelog".into(), "Show recent changes in this build"),
+            ("/info".into(), "Show session info and tokens"),
+            ("/usage".into(), "Show subscription usage limits"),
+            ("/reload".into(), "Smart reload (if newer binary exists)"),
+            ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
+            ("/update".into(), "Check for and install latest release"),
+            ("/resume".into(), "Open session picker"),
+            ("/save".into(), "Bookmark session for easy access"),
+            ("/unsave".into(), "Remove bookmark from session"),
+            ("/split".into(), "Split session into a new window"),
+            ("/quit".into(), "Exit jcode"),
+            ("/auth".into(), "Show authentication status"),
+            ("/cache".into(), "Toggle cache TTL between 5min and 1h"),
+            (
+                "/login".into(),
+                "Login to a provider (use `/login <provider>` for the full list)",
+            ),
+            (
+                "/account".into(),
+                "Manage Anthropic accounts (list/add/switch/remove)",
+            ),
+        ];
+
+        // Add client-reload and server-reload commands in remote mode
+        if self.is_remote {
+            commands.push(("/client-reload".into(), "Force reload client binary"));
+            commands.push(("/server-reload".into(), "Force reload server binary"));
+        }
+
+        // Add skills as commands
+        let skills = self.skills.list();
+        for skill in skills {
+            commands.push((format!("/{}", skill.name), "Activate skill"));
+        }
+
+        // Filter by prefix match
+        self.rank_suggestions(&prefix, commands)
+    }
+
+    /// Get command suggestions based on current input
+    pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        self.get_suggestions_for(&self.input)
+    }
+
+    /// Get suggestion prompts for new users on the initial empty screen.
+    /// Returns (label, prompt_text) pairs. Empty once user is experienced or not authenticated.
+    pub fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        let is_canary = if self.is_remote {
+            self.remote_is_canary.unwrap_or(self.session.is_canary)
+        } else {
+            self.session.is_canary
+        };
+        if is_canary {
+            return Vec::new();
+        }
+
+        let auth = crate::auth::AuthStatus::check();
+        if !auth.has_any_available() {
+            return vec![("Log in to get started".to_string(), "/login".to_string())];
+        }
+
+        if !self.display_messages.is_empty() || self.is_processing {
+            return Vec::new();
+        }
+
+        let is_new_user = crate::storage::jcode_dir()
+            .ok()
+            .and_then(|dir| {
+                let path = dir.join("setup_hints.json");
+                std::fs::read_to_string(&path).ok()
+            })
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|v| v.get("launch_count")?.as_u64())
+            .map(|count| count <= 5)
+            .unwrap_or(true);
+
+        if !is_new_user {
+            return Vec::new();
+        }
+
+        vec![
+            (
+                "Customize my terminal theme".to_string(),
+                "Find what terminal I'm using, then change its background color to pitch black and make it slightly transparent. Apply the changes for me.".to_string(),
+            ),
+            (
+                "Review something I've been working on".to_string(),
+                "Find a recent file or project I've been working on, read through it, and give me concrete suggestions on how I could improve it.".to_string(),
+            ),
+            (
+                "Find my social media and roast me".to_string(),
+                "Find a social media platform I use, look around at my profile and posts, then give me a brutally honest roast based on what you see.".to_string(),
+            ),
+        ]
+    }
+
+    /// Autocomplete current input - cycles through suggestions on repeated Tab
+    pub fn autocomplete(&mut self) -> bool {
+        // Get suggestions for current input
+        let current_suggestions = self.get_suggestions_for(&self.input);
+
+        // Check if we're continuing a tab cycle from a previous base
+        if let Some((ref base, idx)) = self.tab_completion_state.clone() {
+            let base_suggestions = self.get_suggestions_for(&base);
+
+            // If current input is in base suggestions AND there are multiple options, continue cycling
+            if base_suggestions.len() > 1
+                && base_suggestions.iter().any(|(cmd, _)| cmd == &self.input)
+            {
+                let next_index = (idx + 1) % base_suggestions.len();
+                let (cmd, _) = &base_suggestions[next_index];
+                self.input = cmd.clone();
+                self.cursor_pos = self.input.len();
+                self.tab_completion_state = Some((base.clone(), next_index));
+                return true;
+            }
+            // Otherwise, fall through to start a new cycle with current input
+        }
+
+        // Start fresh cycle with current input
+        if current_suggestions.is_empty() {
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        // If only one suggestion and it matches exactly, add trailing space for commands
+        // that accept arguments, then we're done
+        if current_suggestions.len() == 1 && current_suggestions[0].0 == self.input {
+            if !self.input.ends_with(' ') && Self::command_accepts_args(&self.input) {
+                self.input.push(' ');
+                self.cursor_pos = self.input.len();
+                return true;
+            }
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        // Apply first suggestion and start tracking the cycle
+        let (cmd, _) = &current_suggestions[0];
+        let base = self.input.clone();
+        self.input = cmd.clone();
+        // If unique match, add trailing space for arg-accepting commands
+        if current_suggestions.len() == 1 && Self::command_accepts_args(&self.input) {
+            self.input.push(' ');
+        }
+        self.cursor_pos = self.input.len();
+        self.tab_completion_state = Some((base, 0));
+        true
+    }
+
+    /// Reset tab completion state (call when user types/modifies input)
+    pub fn reset_tab_completion(&mut self) {
+        self.tab_completion_state = None;
+    }
+
+    pub(super) fn command_accepts_args(cmd: &str) -> bool {
+        matches!(
+            cmd.trim(),
+            "/help"
+                | "/model"
+                | "/effort"
+                | "/login"
+                | "/auth"
+                | "/account"
+                | "/memory"
+                | "/swarm"
+                | "/rewind"
+                | "/config"
+                | "/save"
+                | "/cache"
+        )
+    }
+
+    pub fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn is_processing(&self) -> bool {
+        self.is_processing
+    }
+
+    pub fn streaming_text(&self) -> &str {
+        &self.streaming_text
+    }
+
+    pub fn active_skill(&self) -> Option<&str> {
+        self.active_skill.as_deref()
+    }
+
+    pub fn available_skills(&self) -> Vec<&str> {
+        self.skills.list().iter().map(|s| s.name.as_str()).collect()
+    }
+
+    pub fn queued_count(&self) -> usize {
+        self.queued_messages.len()
+    }
+
+    pub fn queued_messages(&self) -> &[String] {
+        &self.queued_messages
+    }
+
+    pub fn streaming_tokens(&self) -> (u64, u64) {
+        (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    pub(super) fn build_turn_footer(&self, duration: Option<f32>) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(secs) = duration {
+            parts.push(format!("{:.1}s", secs));
+        }
+        if let Some(tps) = self.compute_streaming_tps() {
+            parts.push(format!("{:.1} tps", tps));
+        }
+        if self.streaming_input_tokens > 0 || self.streaming_output_tokens > 0 {
+            parts.push(format!(
+                "↑{} ↓{}",
+                format_tokens(self.streaming_input_tokens),
+                format_tokens(self.streaming_output_tokens)
+            ));
+        }
+        if let Some(cache) = format_cache_footer(
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        ) {
+            parts.push(cache);
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    pub(super) fn push_turn_footer(&mut self, duration: Option<f32>) {
+        self.log_cache_miss_if_unexpected();
+
+        self.last_api_completed = Some(Instant::now());
+        self.last_turn_input_tokens = {
+            let input = self.streaming_input_tokens;
+            if input > 0 {
+                Some(input)
+            } else {
+                None
+            }
+        };
+
+        if let Some(footer) = self.build_turn_footer(duration) {
+            self.push_display_message(DisplayMessage {
+                role: "meta".to_string(),
+                content: footer,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+        }
+    }
+
+    /// Log detailed info when an unexpected cache miss occurs (cache write on turn 3+)
+    pub(super) fn log_cache_miss_if_unexpected(&self) {
+        let user_turn_count = self
+            .display_messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .count();
+
+        // Unexpected cache miss: on turn 3+, we should no longer be in cache warm-up
+        let is_unexpected = is_unexpected_cache_miss(
+            user_turn_count,
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        );
+
+        if is_unexpected {
+            // Collect context for debugging
+            let session_id = self.session_id().to_string();
+            let provider = self.provider.name().to_string();
+            let model = self.provider.model();
+            let input_tokens = self.streaming_input_tokens;
+            let output_tokens = self.streaming_output_tokens;
+
+            // Format as Option to distinguish None vs Some(0)
+            let cache_creation_dbg = format!("{:?}", self.streaming_cache_creation_tokens);
+            let cache_read_dbg = format!("{:?}", self.streaming_cache_read_tokens);
+
+            // Count message types in conversation
+            let mut user_msgs = 0;
+            let mut assistant_msgs = 0;
+            let mut tool_msgs = 0;
+            let mut other_msgs = 0;
+            for msg in &self.display_messages {
+                match msg.role.as_str() {
+                    "user" => user_msgs += 1,
+                    "assistant" => assistant_msgs += 1,
+                    "tool_result" | "tool_use" => tool_msgs += 1,
+                    _ => other_msgs += 1,
+                }
+            }
+
+            crate::logging::warn(&format!(
+                "CACHE_MISS: unexpected cache miss on turn {} | \
+                 cache_creation={} cache_read={} | \
+                 input={} output={} | \
+                 session={} provider={} model={} | \
+                 msgs: user={} assistant={} tool={} other={}",
+                user_turn_count,
+                cache_creation_dbg,
+                cache_read_dbg,
+                input_tokens,
+                output_tokens,
+                session_id,
+                provider,
+                model,
+                user_msgs,
+                assistant_msgs,
+                tool_msgs,
+                other_msgs
+            ));
+        }
+    }
+
+    /// Check if approaching context limit and show warning
+    pub(super) fn check_context_warning(&mut self, input_tokens: u64) {
+        let usage_percent = (input_tokens as f64 / self.context_limit as f64) * 100.0;
+
+        // Warn at 70%, 80%, 90%
+        if !self.context_warning_shown && usage_percent >= 70.0 {
+            let warning = format!(
+                "\n⚠️  Context usage: {:.0}% ({}/{}k tokens) - compaction approaching\n\n",
+                usage_percent,
+                input_tokens / 1000,
+                self.context_limit / 1000
+            );
+            self.streaming_text.push_str(&warning);
+            self.context_warning_shown = true;
+        } else if self.context_warning_shown && usage_percent >= 80.0 {
+            // Reset to show 80% warning
+            if usage_percent < 85.0 {
+                let warning = format!(
+                    "\n⚠️  Context usage: {:.0}% - compaction imminent\n\n",
+                    usage_percent
+                );
+                self.streaming_text.push_str(&warning);
+            }
+        }
+    }
+
+    /// Get context usage as percentage
+    pub fn context_usage_percent(&self) -> f64 {
+        self.current_stream_context_tokens()
+            .map(|tokens| (tokens as f64 / self.context_limit as f64) * 100.0)
+            .unwrap_or(0.0)
+    }
+
+    /// Time since last streaming event (for detecting stale connections)
+    pub fn time_since_activity(&self) -> Option<Duration> {
+        self.last_stream_activity.map(|t| t.elapsed())
+    }
+
+    pub fn streaming_tool_calls(&self) -> &[ToolCall] {
+        &self.streaming_tool_calls
+    }
+
+    pub fn status(&self) -> &ProcessingStatus {
+        &self.status
+    }
+
+    pub fn subagent_status(&self) -> Option<&str> {
+        self.subagent_status.as_deref()
+    }
+
+    pub fn elapsed(&self) -> Option<Duration> {
+        if let Some(d) = self.replay_elapsed_override {
+            return Some(d);
+        }
+        self.processing_started.map(|t| t.elapsed())
+    }
+
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
+    }
+
+    pub fn provider_model(&self) -> String {
+        self.provider.model()
+    }
+
+    /// Get the upstream provider (e.g., which provider OpenRouter routed to)
+    pub fn upstream_provider(&self) -> Option<&str> {
+        self.upstream_provider.as_deref()
+    }
+
+    pub fn mcp_servers(&self) -> Vec<(String, usize)> {
+        self.mcp_server_names.clone()
+    }
+
+    /// Scroll to the previous user prompt (scroll up - earlier in conversation)
+    pub fn scroll_to_prev_prompt(&mut self) {
+        let positions = ui::last_user_prompt_positions();
+        if positions.is_empty() {
+            return;
+        }
+
+        let current = self.scroll_offset;
+
+        // positions are in document order (top to bottom).
+        // Find the last position that is strictly less than current (i.e. earlier/above).
+        // If we're at the bottom (!auto_scroll_paused), treat current as past-the-end.
+        if !self.auto_scroll_paused {
+            // Jump to the most recent (last) prompt
+            if let Some(&pos) = positions.last() {
+                self.scroll_offset = pos;
+                self.auto_scroll_paused = true;
+            }
+            return;
+        }
+
+        let mut target = None;
+        for &pos in positions.iter().rev() {
+            if pos < current {
+                target = Some(pos);
+                break;
+            }
+        }
+
+        if let Some(pos) = target {
+            self.scroll_offset = pos;
+        }
+        // If no prompt above, stay where we are
+    }
+
+    /// Scroll to the next user prompt (scroll down - later in conversation)
+    pub fn scroll_to_next_prompt(&mut self) {
+        let positions = ui::last_user_prompt_positions();
+        if positions.is_empty() || !self.auto_scroll_paused {
+            return;
+        }
+
+        let current = self.scroll_offset;
+
+        // Find the first position strictly greater than current (i.e. later/below).
+        for &pos in &positions {
+            if pos > current {
+                self.scroll_offset = pos;
+                return;
+            }
+        }
+
+        // No more prompts below - go to bottom
+        self.follow_chat_bottom();
+    }
+
+    /// Scroll to Nth most-recent user prompt (1 = most recent, 2 = second most recent, etc.).
+    /// Uses actual wrapped line positions from the last render frame for accurate placement,
+    /// positioning the prompt at the top of the viewport.
+    pub(super) fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
+        let rank = rank.max(1);
+        let positions = ui::last_user_prompt_positions();
+        let max_scroll = ui::last_max_scroll();
+
+        if positions.is_empty() {
+            return;
+        }
+
+        // positions are in document order (top to bottom), we want most-recent first
+        let target_idx = positions.len().saturating_sub(rank);
+        let target_line = positions[target_idx];
+        self.set_status_notice(format!(
+            "Ctrl+{}: idx={}/{} line={} max={}",
+            rank,
+            target_idx,
+            positions.len(),
+            target_line,
+            max_scroll
+        ));
+        self.scroll_offset = target_line;
+        self.auto_scroll_paused = true;
+    }
+
+    pub(super) fn toggle_input_stash(&mut self) {
+        if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
+            let current_input = std::mem::replace(&mut self.input, stashed);
+            let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
+            if current_input.is_empty() {
+                self.set_status_notice("📋 Input restored from stash");
+            } else {
+                self.stashed_input = Some((current_input, current_cursor));
+                self.set_status_notice("📋 Swapped input with stash");
+            }
+        } else if !self.input.is_empty() {
+            let input = std::mem::take(&mut self.input);
+            let cursor = std::mem::replace(&mut self.cursor_pos, 0);
+            self.stashed_input = Some((input, cursor));
+            self.set_status_notice("📋 Input stashed");
+        }
+    }
+
+    pub(super) fn save_input_for_reload(&self, session_id: &str) {
+        if self.input.is_empty() {
+            return;
+        }
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            let path = jcode_dir.join(format!("client-input-{}", session_id));
+            let data = format!("{}\n{}", self.cursor_pos, self.input);
+            let _ = std::fs::write(&path, &data);
+        }
+    }
+
+    pub(super) fn restore_input_from_reload(session_id: &str) -> Option<(String, usize)> {
+        let jcode_dir = crate::storage::jcode_dir().ok()?;
+        let path = jcode_dir.join(format!("client-input-{}", session_id));
+        if !path.exists() {
+            return None;
+        }
+        let data = std::fs::read_to_string(&path).ok()?;
+        let _ = std::fs::remove_file(&path);
+        let (cursor_str, input) = data.split_once('\n')?;
+        let cursor = cursor_str.parse::<usize>().unwrap_or(0);
+        let cursor = cursor.min(input.len());
+        Some((input.to_string(), cursor))
+    }
+
+    /// Toggle scroll bookmark: stash current position and jump to bottom,
+    /// or restore stashed position if already at bottom.
+    pub(super) fn toggle_scroll_bookmark(&mut self) {
+        if let Some(saved) = self.scroll_bookmark.take() {
+            // We have a bookmark — teleport back to it
+            self.scroll_offset = saved;
+            self.auto_scroll_paused = saved > 0;
+            self.set_status_notice("📌 Returned to bookmark");
+        } else if self.auto_scroll_paused && self.scroll_offset > 0 {
+            // We're scrolled up — save position and jump to bottom
+            self.scroll_bookmark = Some(self.scroll_offset);
+            self.follow_chat_bottom();
+            self.set_status_notice("📌 Bookmark set — press again to return");
+        }
+        // If already at bottom with no bookmark, do nothing
+    }
+
+    pub(super) fn toggle_centered_mode(&mut self) {
+        self.centered = !self.centered;
+        let mode = if self.centered {
+            "Centered"
+        } else {
+            "Left-aligned"
+        };
+        self.set_status_notice(format!("Layout: {}", mode));
+    }
+
+    pub fn set_centered(&mut self, centered: bool) {
+        self.centered = centered;
+    }
+
+    // ==================== Debug Socket Methods ====================
+
+    /// Enable debug socket and return the broadcast receiver
+    /// Call this before run() to enable debug event broadcasting
+    pub fn enable_debug_socket(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<backend::DebugEvent> {
+        let (tx, rx) = tokio::sync::broadcast::channel(256);
+        self.debug_tx = Some(tx);
+        rx
+    }
+
+    /// Broadcast a debug event to connected clients (if debug socket enabled)
+    pub(super) fn broadcast_debug(&self, event: backend::DebugEvent) {
+        if let Some(ref tx) = self.debug_tx {
+            let _ = tx.send(event); // Ignore errors (no receivers)
+        }
+    }
+
+    /// Create a full state snapshot for debug socket
+    pub fn create_debug_snapshot(&self) -> backend::DebugEvent {
+        use backend::{DebugEvent, DebugMessage};
+
+        DebugEvent::StateSnapshot {
+            display_messages: self
+                .display_messages
+                .iter()
+                .map(|m| DebugMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    tool_calls: m.tool_calls.clone(),
+                    duration_secs: m.duration_secs,
+                    title: m.title.clone(),
+                    tool_data: m.tool_data.clone(),
+                })
+                .collect(),
+            streaming_text: self.streaming_text.clone(),
+            streaming_tool_calls: self.streaming_tool_calls.clone(),
+            input: self.input.clone(),
+            cursor_pos: self.cursor_pos,
+            is_processing: self.is_processing,
+            scroll_offset: self.scroll_offset,
+            status: format!("{:?}", self.status),
+            provider_name: self.provider.name().to_string(),
+            provider_model: self.provider.model().to_string(),
+            mcp_servers: self
+                .mcp_server_names
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+            skills: self.skills.list().iter().map(|s| s.name.clone()).collect(),
+            session_id: self.provider_session_id.clone(),
+            input_tokens: self.streaming_input_tokens,
+            output_tokens: self.streaming_output_tokens,
+            cache_read_input_tokens: self.streaming_cache_read_tokens,
+            cache_creation_input_tokens: self.streaming_cache_creation_tokens,
+            queued_messages: self.queued_messages.clone(),
+        }
+    }
+
+    /// Start debug socket listener task
+    /// Returns a JoinHandle for the listener task
+    pub fn start_debug_socket_listener(
+        &self,
+        mut rx: tokio::sync::broadcast::Receiver<backend::DebugEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        use crate::transport::Listener;
+        use tokio::io::AsyncWriteExt;
+
+        let socket_path = Self::debug_socket_path();
+        let initial_snapshot = self.create_debug_snapshot();
+
+        tokio::spawn(async move {
+            // Clean up old socket
+            let _ = std::fs::remove_file(&socket_path);
+
+            let mut listener = match Listener::bind(&socket_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    crate::logging::error(&format!("Failed to bind debug socket: {}", e));
+                    return;
+                }
+            };
+
+            // Restrict TUI debug socket to owner-only.
+            let _ = crate::platform::set_permissions_owner_only(&socket_path);
+
+            // Accept connections and forward events
+            let clients: std::sync::Arc<tokio::sync::Mutex<Vec<crate::transport::WriteHalf>>> =
+                std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+            let clients_clone = clients.clone();
+
+            // Spawn event broadcaster
+            let broadcast_handle = tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    let json = match serde_json::to_string(&event) {
+                        Ok(j) => j + "\n",
+                        Err(_) => continue,
+                    };
+                    let bytes = json.as_bytes();
+
+                    let mut clients = clients_clone.lock().await;
+                    let mut to_remove = Vec::new();
+
+                    for (i, writer) in clients.iter_mut().enumerate() {
+                        if writer.write_all(bytes).await.is_err() {
+                            to_remove.push(i);
+                        }
+                    }
+
+                    // Remove disconnected clients (reverse order to preserve indices)
+                    for i in to_remove.into_iter().rev() {
+                        clients.swap_remove(i);
+                    }
+                }
+            });
+
+            // Accept new connections
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let (_, writer) = stream.into_split();
+                        let mut writer = writer;
+
+                        // Send initial snapshot
+                        let snapshot_json =
+                            serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
+                        if writer.write_all(snapshot_json.as_bytes()).await.is_ok() {
+                            clients.lock().await.push(writer);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            broadcast_handle.abort();
+            let _ = std::fs::remove_file(&socket_path);
+        })
+    }
+
+    /// Get the debug socket path
+    pub fn debug_socket_path() -> std::path::PathBuf {
+        crate::storage::runtime_dir().join("jcode-debug.sock")
+    }
+}
