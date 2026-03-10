@@ -1091,7 +1091,7 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
 
             // Check border was rendered (first column should have │)
             if area.x < buf.area().width && area.y < buf.area().height {
-                let cell = buf.get(area.x, area.y);
+                let cell = &buf[(area.x, area.y)];
                 if cell.symbol() != "│" {
                     border_ok = false;
                 }
@@ -1936,7 +1936,7 @@ fn set_cell_if_visible(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Option
     if !rect_contains_point(bounds, x, y) {
         return;
     }
-    let cell = buf.get_mut(x, y);
+    let cell = &mut buf[(x, y)];
     cell.set_char(ch);
     if let Some(style) = style {
         cell.set_style(style);

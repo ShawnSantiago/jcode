@@ -380,10 +380,11 @@ impl App {
         true
     }
 
-    pub(super) fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+    /// Returns true if this was a scroll-only event (safe to defer redraw during streaming)
+    pub(super) fn handle_mouse_event(&mut self, mouse: MouseEvent) -> bool {
         if let Some(ref picker_cell) = self.session_picker_overlay {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
-            return;
+            return false;
         }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
@@ -477,7 +478,7 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return false;
         }
 
         let mut handled_scroll = false;
@@ -554,7 +555,7 @@ impl App {
         }
 
         if handled_scroll {
-            return;
+            return true;
         }
 
         match mouse.kind {
@@ -566,8 +567,11 @@ impl App {
                 let amt = self.mouse_scroll_amount();
                 self.scroll_down(amt);
             }
-            _ => {}
+            _ => {
+                return false;
+            }
         }
+        true
     }
 
     pub(super) fn mouse_scroll_amount(&mut self) -> usize {

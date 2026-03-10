@@ -123,6 +123,10 @@ impl crate::tui::TuiState for App {
         self.subagent_status.clone()
     }
 
+    fn batch_progress(&self) -> Option<(usize, usize, Option<String>)> {
+        self.batch_progress.as_ref().map(|p| (p.completed, p.total, p.last_completed.clone()))
+    }
+
     fn time_since_activity(&self) -> Option<std::time::Duration> {
         self.last_stream_activity.map(|t| t.elapsed())
     }

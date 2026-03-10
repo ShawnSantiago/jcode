@@ -2743,7 +2743,7 @@ fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
 
         if !priority_marker.0.is_empty() {
             spans.push(Span::styled(
-                priority_marker.0.clone(),
+                priority_marker.0,
                 Style::default().fg(priority_marker.1),
             ));
         }

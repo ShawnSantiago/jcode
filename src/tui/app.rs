@@ -181,6 +181,8 @@ pub struct App {
     status: ProcessingStatus,
     // Subagent status (shown during Task tool execution)
     subagent_status: Option<String>,
+    // Batch progress (shown during batch tool execution)
+    batch_progress: Option<crate::bus::BatchProgress>,
     processing_started: Option<Instant>,
     // When the last API response completed (for cache TTL tracking)
     last_api_completed: Option<Instant>,

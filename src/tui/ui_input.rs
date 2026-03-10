@@ -186,10 +186,15 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
             }
             ProcessingStatus::Connecting(ref phase) => {
                 let label = format!(" {}… {}", phase, format_elapsed(elapsed));
-                let label_color = if elapsed > 15.0 {
-                    rgb(255, 193, 7)
-                } else {
-                    dim_color()
+                let label_color = match phase {
+                    crate::message::ConnectionPhase::Retrying { .. } => rgb(255, 193, 7),
+                    crate::message::ConnectionPhase::Authenticating if elapsed > 10.0 => {
+                        rgb(255, 193, 7)
+                    }
+                    crate::message::ConnectionPhase::Connecting if elapsed > 10.0 => {
+                        rgb(255, 193, 7)
+                    }
+                    _ => dim_color(),
                 };
                 let mut spans = vec![
                     Span::styled(spinner, Style::default().fg(ai_color())),
@@ -275,11 +280,16 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     .collect();
 
                 let anim_color = animated_tool_color(elapsed);
-                let tool_detail = app
-                    .streaming_tool_calls()
-                    .last()
-                    .map(get_tool_summary)
-                    .filter(|s| !s.is_empty());
+                let batch_prog = app.batch_progress();
+                let is_batch = name == "batch";
+                let tool_detail = if is_batch && batch_prog.is_some() {
+                    None
+                } else {
+                    app.streaming_tool_calls()
+                        .last()
+                        .map(get_tool_summary)
+                        .filter(|s| !s.is_empty())
+                };
                 let subagent = app.subagent_status();
 
                 let mut spans = vec![
@@ -290,12 +300,30 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     Span::styled(right_bar, Style::default().fg(anim_color)),
                 ];
 
-                if let Some(detail) = tool_detail {
+                // For batch tool: show "completed/total · last_tool" progress
+                if let Some((completed, total, last_tool)) = batch_prog.filter(|_| is_batch) {
+                    let progress_color = if completed == total {
+                        rgb(100, 200, 100)
+                    } else {
+                        rgb(100, 180, 255)
+                    };
+                    spans.push(Span::styled(
+                        format!(" · {}/{}", completed, total),
+                        Style::default().fg(progress_color).bold(),
+                    ));
+                    if let Some(tool_name) = last_tool.filter(|_| completed < total) {
+                        spans.push(Span::styled(
+                            format!(" · {}", tool_name),
+                            Style::default().fg(dim_color()),
+                        ));
+                    }
+                } else if let Some(detail) = tool_detail {
                     spans.push(Span::styled(
                         format!(" · {}", detail),
                         Style::default().fg(dim_color()),
                     ));
                 }
+
                 if let Some(status) = subagent {
                     spans.push(Span::styled(
                         format!(" ({})", status),

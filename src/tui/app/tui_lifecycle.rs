@@ -145,6 +145,7 @@ impl App {
             streaming_total_output_tokens: 0,
             status: ProcessingStatus::default(),
             subagent_status: None,
+            batch_progress: None,
             processing_started: None,
             last_api_completed: None,
             last_turn_input_tokens: None,

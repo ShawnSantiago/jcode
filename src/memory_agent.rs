@@ -287,7 +287,7 @@ impl MemoryAgent {
                                 session_id, ss.turns_since_extraction
                             ));
                             ss.turns_since_extraction = 0;
-                            drop(ss);
+                            let _ = ss;
                             self.extract_from_context(&prev_context, "topic change")
                                 .await;
                             let ss = self.session_state(session_id);
@@ -323,7 +323,7 @@ impl MemoryAgent {
                         session_id, ss.turns_since_extraction, extraction_ctx.len()
                     ));
                     ss.turns_since_extraction = 0;
-                    drop(ss);
+                    let _ = ss;
                     self.extract_from_context(&extraction_ctx, "periodic").await;
                 }
             }

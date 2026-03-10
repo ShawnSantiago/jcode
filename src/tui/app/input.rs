@@ -308,6 +308,82 @@ pub(super) fn handle_navigation_shortcuts(
     false
 }
 
+pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    let mut code = code;
+    let mut modifiers = modifiers;
+    ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+    if app.scroll_keys.scroll_amount(code, modifiers).is_some()
+        || app.scroll_keys.prompt_jump(code, modifiers).is_some()
+        || App::ctrl_prompt_rank(&code, modifiers).is_some()
+        || app.scroll_keys.is_bookmark(code, modifiers)
+        || code == KeyCode::BackTab
+    {
+        return true;
+    }
+
+    if app.diff_pane_focus && !modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('j')
+            | KeyCode::Down
+            | KeyCode::Char('k')
+            | KeyCode::Up
+            | KeyCode::Char('d')
+            | KeyCode::PageDown
+            | KeyCode::Char('u')
+            | KeyCode::PageUp
+            | KeyCode::Char('g')
+            | KeyCode::Home
+            | KeyCode::Char('G')
+            | KeyCode::End
+            | KeyCode::Esc => return true,
+            _ => {}
+        }
+    }
+
+    let diagram_available = app.diagram_available();
+    if diagram_available && app.diagram_focus && !modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('h')
+            | KeyCode::Left
+            | KeyCode::Char('l')
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Up
+            | KeyCode::Char('j')
+            | KeyCode::Down
+            | KeyCode::Char('+')
+            | KeyCode::Char('=')
+            | KeyCode::Char('-')
+            | KeyCode::Char('_')
+            | KeyCode::Char(']')
+            | KeyCode::Char('[')
+            | KeyCode::Char('o')
+            | KeyCode::Esc => return true,
+            _ => {}
+        }
+    }
+
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        if diagram_available {
+            match code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if app.diff_pane_visible() {
+            match code {
+                KeyCode::Char('h') | KeyCode::Char('l') => return true,
+                _ => {}
+            }
+        }
+    }
+
+    false
+}
+
 pub(super) fn handle_pre_control_shortcuts(
     app: &mut App,
     code: KeyCode,

@@ -60,6 +60,20 @@ pub struct SubagentStatus {
     pub model: Option<String>,
 }
 
+/// Progress update from a running batch tool call
+#[derive(Clone, Debug)]
+pub struct BatchProgress {
+    pub session_id: String,
+    /// Parent tool_call_id of the batch call
+    pub tool_call_id: String,
+    /// Total number of sub-calls in this batch
+    pub total: usize,
+    /// Number of sub-calls that have completed (success or error)
+    pub completed: usize,
+    /// Name of the sub-call that just completed
+    pub last_completed: Option<String>,
+}
+
 /// Type of file operation for swarm awareness
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileOp {
@@ -133,6 +147,7 @@ pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
     SubagentStatus(SubagentStatus),
+    BatchProgress(BatchProgress),
     /// File was touched by an agent (for swarm conflict detection)
     FileTouch(FileTouch),
     /// Background task completed

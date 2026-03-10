@@ -1247,6 +1247,12 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
             format!("Streaming (↑{} ↓{})", input, output)
         }
         ProcessingStatus::RunningTool(ref name) => {
+            if name == "batch" {
+                if let Some((completed, total, last)) = app.batch_progress() {
+                    let last_str = last.map(|l| format!(", last: {}", l)).unwrap_or_default();
+                    return format!("Running batch: {}/{}{}", completed, total, last_str);
+                }
+            }
             format!("Running tool: {}", name)
         }
     }
@@ -1676,7 +1682,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
 
     // Compute layout depending on pane position (Side = right column, Top = above chat).
-    let mut has_pinned_area = false;
     let (chat_area, diagram_area) = if let Some(diagram) = pinned_diagram.as_ref() {
         match pane_position {
             crate::config::DiagramPanePosition::Side => {
@@ -1693,8 +1698,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                         .max(MIN_DIAGRAM_WIDTH)
                         .min(max_diagram);
                     let chat_width = area.width.saturating_sub(diagram_width);
-                    has_pinned_area = diagram_width > 0 && chat_width > 0;
-                    if has_pinned_area {
+                    if diagram_width > 0 && chat_width > 0 {
                         let chat = Rect {
                             x: area.x,
                             y: area.y,
@@ -1732,8 +1736,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                         .max(MIN_DIAGRAM_HEIGHT)
                         .min(max_diagram);
                     let chat_height = area.height.saturating_sub(diagram_height);
-                    has_pinned_area = diagram_height > 0 && chat_height > 0;
-                    if has_pinned_area {
+                    if diagram_height > 0 && chat_height > 0 {
                         let diag = Rect {
                             x: area.x,
                             y: area.y,

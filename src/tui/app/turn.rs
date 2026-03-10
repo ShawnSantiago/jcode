@@ -79,11 +79,11 @@ impl App {
                 self.poll_compaction_completion();
 
                 if first_event {
-                    self.status = ProcessingStatus::Streaming;
                     first_event = false;
                 }
                 match event? {
                     StreamEvent::TextDelta(text) => {
+                        self.status = ProcessingStatus::Streaming;
                         text_content.push_str(&text);
                         if self.streaming_tps_start.is_none() {
                             self.streaming_tps_start = Some(Instant::now());
@@ -93,6 +93,7 @@ impl App {
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        self.status = ProcessingStatus::Streaming;
                         if self.streaming_tps_start.is_none() {
                             self.streaming_tps_start = Some(Instant::now());
                         }
@@ -618,6 +619,7 @@ impl App {
                         match event {
                             Some(Ok(Event::Key(key))) => {
                                 if key.kind == KeyEventKind::Press {
+                                    let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key(key.code, key.modifiers);
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
@@ -629,7 +631,9 @@ impl App {
                                         self.push_display_message(DisplayMessage::system("Interrupted"));
                                         return Ok(());
                                     }
-                                    self.redraw_now(terminal)?;
+                                    if !scroll_only {
+                                        self.redraw_now(terminal)?;
+                                    }
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
@@ -637,8 +641,10 @@ impl App {
                                 self.redraw_now(terminal)?;
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
-                                self.handle_mouse_event(mouse);
-                                self.redraw_now(terminal)?;
+                                let scroll_only = self.handle_mouse_event(mouse);
+                                if !scroll_only {
+                                    self.redraw_now(terminal)?;
+                                }
                             }
                             Some(Ok(Event::Resize(_, _))) => {
                                 let _ = terminal.clear();
@@ -697,6 +703,7 @@ impl App {
                         match event {
                             Some(Ok(Event::Key(key))) => {
                                 if key.kind == KeyEventKind::Press {
+                                    let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key(key.code, key.modifiers);
                                     // Check for cancel request
                                     if self.cancel_requested {
@@ -828,7 +835,9 @@ impl App {
                                         break;
                                     }
 
-                                    self.redraw_now(terminal)?;
+                                    if !scroll_only {
+                                        self.redraw_now(terminal)?;
+                                    }
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
@@ -836,8 +845,10 @@ impl App {
                                 self.redraw_now(terminal)?;
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
-                                self.handle_mouse_event(mouse);
-                                self.redraw_now(terminal)?;
+                                let scroll_only = self.handle_mouse_event(mouse);
+                                if !scroll_only {
+                                    self.redraw_now(terminal)?;
+                                }
                             }
                             Some(Ok(Event::Resize(_, _))) => {
                                 let _ = terminal.clear();
@@ -854,11 +865,11 @@ impl App {
                                 self.last_stream_activity = Some(Instant::now());
 
                                 if first_event {
-                                    self.status = ProcessingStatus::Streaming;
                                     first_event = false;
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        self.status = ProcessingStatus::Streaming;
                                         text_content.push_str(&text);
                                         if self.streaming_tps_start.is_none() {
                                             self.streaming_tps_start = Some(Instant::now());
@@ -1319,6 +1330,7 @@ impl App {
                 // Subscribe to bus for subagent status updates
                 let mut bus_receiver = Bus::global().subscribe();
                 self.subagent_status = None; // Clear previous status
+                self.batch_progress = None; // Clear previous batch progress
 
                 let result = loop {
                     tokio::select! {
@@ -1328,6 +1340,7 @@ impl App {
                             match event {
                                 Some(Ok(Event::Key(key))) => {
                                     if key.kind == KeyEventKind::Press {
+                                        let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                         let _ = self.handle_key(key.code, key.modifiers);
                                         if self.cancel_requested {
                                             self.cancel_requested = false;
@@ -1357,7 +1370,9 @@ impl App {
                                             return Ok(());
                                         }
 
-                                        self.redraw_now(terminal)?;
+                                        if !scroll_only {
+                                            self.redraw_now(terminal)?;
+                                        }
                                     }
                                 }
                                 Some(Ok(Event::Paste(text))) => {
@@ -1365,8 +1380,10 @@ impl App {
                                     self.redraw_now(terminal)?;
                                 }
                                 Some(Ok(Event::Mouse(mouse))) => {
-                                    self.handle_mouse_event(mouse);
-                                    self.redraw_now(terminal)?;
+                                    let scroll_only = self.handle_mouse_event(mouse);
+                                    if !scroll_only {
+                                        self.redraw_now(terminal)?;
+                                    }
                                 }
                                 Some(Ok(Event::Resize(_, _))) => {
                                     let _ = terminal.clear();
@@ -1375,18 +1392,25 @@ impl App {
                                 _ => {}
                             }
                         }
-                        // Listen for subagent status updates
+                        // Listen for subagent/batch status updates
                         bus_event = bus_receiver.recv() => {
-                            if let Ok(BusEvent::SubagentStatus(status)) = bus_event {
-                                if status.session_id != self.session.id {
-                                    continue;
+                            match bus_event {
+                                Ok(BusEvent::SubagentStatus(status)) => {
+                                    if status.session_id == self.session.id {
+                                        let display = if let Some(model) = &status.model {
+                                            format!("{} · {}", status.status, model)
+                                        } else {
+                                            status.status
+                                        };
+                                        self.subagent_status = Some(display);
+                                    }
                                 }
-                                let display = if let Some(model) = &status.model {
-                                    format!("{} · {}", status.status, model)
-                                } else {
-                                    status.status
-                                };
-                                self.subagent_status = Some(display);
+                                Ok(BusEvent::BatchProgress(progress)) => {
+                                    if progress.session_id == self.session.id {
+                                        self.batch_progress = Some(progress);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         // Redraw periodically
@@ -1401,6 +1425,7 @@ impl App {
                 };
 
                 self.subagent_status = None; // Clear status after tool completes
+                self.batch_progress = None; // Clear batch progress after tool completes
                 let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {

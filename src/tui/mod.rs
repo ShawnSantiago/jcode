@@ -85,6 +85,8 @@ pub trait TuiState {
     fn command_suggestions(&self) -> Vec<(String, &'static str)>;
     fn active_skill(&self) -> Option<String>;
     fn subagent_status(&self) -> Option<String>;
+    /// Progress of a currently-running batch tool call (completed, total, last tool name)
+    fn batch_progress(&self) -> Option<(usize, usize, Option<String>)>;
     fn time_since_activity(&self) -> Option<Duration>;
     /// Total session token usage (input, output) - used for high usage warnings
     fn total_session_tokens(&self) -> Option<(u64, u64)>;

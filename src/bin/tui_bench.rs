@@ -288,6 +288,10 @@ impl TuiState for BenchState {
         None
     }
 
+    fn batch_progress(&self) -> Option<(usize, usize, Option<String>)> {
+        None
+    }
+
     fn time_since_activity(&self) -> Option<Duration> {
         None
     }

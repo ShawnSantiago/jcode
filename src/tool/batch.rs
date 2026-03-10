@@ -136,9 +136,10 @@ impl Tool for BatchTool {
             }
         }
 
-        // Execute all tools in parallel
+        // Execute all tools in parallel, emitting progress events as each completes
         let num_tools = params.tool_calls.len();
-        let futures: Vec<_> = params
+        use futures::StreamExt;
+        let mut stream: futures::stream::FuturesUnordered<_> = params
             .tool_calls
             .into_iter()
             .enumerate()
@@ -153,7 +154,23 @@ impl Tool for BatchTool {
             })
             .collect();
 
-        let results = futures::future::join_all(futures).await;
+        let mut results: Vec<(usize, String, Result<ToolOutput>)> = Vec::with_capacity(num_tools);
+        let mut completed_count = 0usize;
+        while let Some((i, tool_name, result)) = stream.next().await {
+            completed_count += 1;
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::BatchProgress(
+                crate::bus::BatchProgress {
+                    session_id: ctx.session_id.clone(),
+                    tool_call_id: ctx.tool_call_id.clone(),
+                    total: num_tools,
+                    completed: completed_count,
+                    last_completed: Some(tool_name.clone()),
+                },
+            ));
+            results.push((i, tool_name, result));
+        }
+        // Restore original order
+        results.sort_by_key(|(i, _, _)| *i);
 
         // Format results
         let mut output = String::new();
