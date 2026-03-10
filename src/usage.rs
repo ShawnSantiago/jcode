@@ -199,8 +199,172 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, (Instant, ProviderUsage)>>,
 > = std::sync::OnceLock::new();
 
+/// Shared Anthropic usage cache used by the info widget, `/usage`, and
+/// multi-account fallback logic so they don't hammer the same endpoint through
+/// separate code paths.
+static ANTHROPIC_USAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, UsageData>>> =
+    std::sync::OnceLock::new();
+
 /// Minimum interval between /usage command fetches (per provider).
 const PROVIDER_USAGE_CACHE_TTL: Duration = Duration::from_secs(120);
+
+fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageData>> {
+    ANTHROPIC_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
+    if let Some(label) = account_label.map(str::trim).filter(|label| !label.is_empty()) {
+        return format!("label:{}", label);
+    }
+
+    let prefix = access_token
+        .get(..20)
+        .unwrap_or(access_token)
+        .trim()
+        .to_string();
+    format!("token:{}", prefix)
+}
+
+fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
+    let cache = anthropic_usage_cache();
+    let map = cache.lock().ok()?;
+    let cached = map.get(cache_key)?.clone();
+    (!cached.is_stale()).then_some(cached)
+}
+
+fn store_anthropic_usage(cache_key: String, data: UsageData) {
+    if let Ok(mut map) = anthropic_usage_cache().lock() {
+        map.insert(cache_key, data);
+    }
+}
+
+fn anthropic_usage_error(err_msg: String) -> UsageData {
+    UsageData {
+        fetched_at: Some(Instant::now()),
+        last_error: Some(err_msg),
+        ..Default::default()
+    }
+}
+
+fn provider_report_from_usage_data(display_name: String, data: &UsageData) -> ProviderUsage {
+    if let Some(error) = &data.last_error {
+        return ProviderUsage {
+            provider_name: display_name,
+            error: Some(error.clone()),
+            ..Default::default()
+        };
+    }
+
+    let mut limits = Vec::new();
+    limits.push(UsageLimit {
+        name: "5-hour window".to_string(),
+        usage_percent: data.five_hour * 100.0,
+        resets_at: data.five_hour_resets_at.clone(),
+    });
+    limits.push(UsageLimit {
+        name: "7-day window".to_string(),
+        usage_percent: data.seven_day * 100.0,
+        resets_at: data.seven_day_resets_at.clone(),
+    });
+    if let Some(opus) = data.seven_day_opus {
+        limits.push(UsageLimit {
+            name: "7-day Opus window".to_string(),
+            usage_percent: opus * 100.0,
+            resets_at: data.seven_day_resets_at.clone(),
+        });
+    }
+
+    let mut extra_info = Vec::new();
+    extra_info.push((
+        "Extra usage (long context)".to_string(),
+        if data.extra_usage_enabled {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
+    ));
+
+    ProviderUsage {
+        provider_name: display_name,
+        limits,
+        extra_info,
+        error: None,
+    }
+}
+
+async fn fetch_anthropic_usage_data(
+    access_token: String,
+    cache_key: String,
+) -> Result<UsageData> {
+    if let Some(cached) = cached_anthropic_usage(&cache_key) {
+        return Ok(cached);
+    }
+
+    let client = crate::provider::shared_http_client();
+    let response = client
+        .get(USAGE_URL)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "claude-cli/1.0.0")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+        .send()
+        .await;
+
+    let response = match response {
+        Ok(response) => response,
+        Err(e) => {
+            let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
+            store_anthropic_usage(cache_key, err.clone());
+            anyhow::bail!(err.last_error.unwrap_or_else(|| "Failed to fetch usage data".into()));
+        }
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        let err = anthropic_usage_error(format!("Usage API error ({}): {}", status, error_text));
+        store_anthropic_usage(cache_key, err.clone());
+        anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
+    }
+
+    let data: UsageResponse = response
+        .json()
+        .await
+        .context("Failed to parse usage response")?;
+
+    let usage = UsageData {
+        five_hour: data
+            .five_hour
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0)
+            .unwrap_or(0.0),
+        five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
+        seven_day: data
+            .seven_day
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0)
+            .unwrap_or(0.0),
+        seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
+        seven_day_opus: data
+            .seven_day_opus
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0),
+        extra_usage_enabled: data
+            .extra_usage
+            .as_ref()
+            .and_then(|e| e.is_enabled)
+            .unwrap_or(false),
+        fetched_at: Some(Instant::now()),
+        last_error: None,
+    };
+
+    store_anthropic_usage(cache_key, usage.clone());
+    Ok(usage)
+}
 
 /// Fetch usage from all connected providers with OAuth credentials.
 /// Returns a list of ProviderUsage, one per provider that has credentials.

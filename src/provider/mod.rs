@@ -646,6 +646,20 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    fn transport(&self) -> Option<String> {
+        None
+    }
+
+    fn set_transport(&self, _transport: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "This provider does not support transport switching"
+        ))
+    }
+
+    fn available_transports(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
     /// Returns true if the provider executes tools internally (e.g., Claude Code CLI).
     /// When true, jcode should NOT execute tools locally - just record the tool calls.
     fn handles_tools_internally(&self) -> bool {
@@ -3123,6 +3137,37 @@ impl Provider for MultiProvider {
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
             ActiveProvider::Copilot => vec![],
+            _ => vec![],
+        }
+    }
+
+    fn transport(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self.openai.as_ref().and_then(|o| o.transport()),
+            _ => None,
+        }
+    }
+
+    fn set_transport(&self, transport: &str) -> Result<()> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
+                .set_transport(transport),
+            _ => Err(anyhow::anyhow!(
+                "Transport switching is only supported for OpenAI models"
+            )),
+        }
+    }
+
+    fn available_transports(&self) -> Vec<&'static str> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|o| o.available_transports())
+                .unwrap_or_default(),
             _ => vec![],
         }
     }

@@ -464,7 +464,10 @@ fn test_mouse_scroll_events_are_classified_as_scroll_only() {
         modifiers: KeyModifiers::empty(),
     });
 
-    assert!(scroll_only, "scroll wheel events should be deferrable during streaming");
+    assert!(
+        scroll_only,
+        "scroll wheel events should be deferrable during streaming"
+    );
 
     let non_scroll = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -599,8 +602,7 @@ fn test_fuzzy_command_suggestions() {
 fn configure_test_remote_models(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.3-codex".to_string());
-    app.remote_available_models =
-        vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()];
+    app.remote_available_models = vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()];
 }
 
 fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
@@ -1568,6 +1570,39 @@ fn test_reload_requests_exit_when_newer_binary() {
 }
 
 #[test]
+fn test_save_and_restore_reload_state_preserves_queued_messages() {
+    let mut app = create_test_app();
+    let session_id = format!("test-reload-{}", std::process::id());
+
+    app.input = "draft".to_string();
+    app.cursor_pos = 3;
+    app.queued_messages.push("queued one".to_string());
+    app.queued_messages.push("queued two".to_string());
+    app.save_input_for_reload(&session_id);
+
+    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+    assert_eq!(restored.0, "draft");
+    assert_eq!(restored.1, 3);
+    assert_eq!(restored.2, vec!["queued one", "queued two"]);
+
+    assert!(App::restore_input_for_reload(&session_id).is_none());
+}
+
+#[test]
+fn test_restore_reload_state_supports_legacy_input_format() {
+    let session_id = format!("test-reload-legacy-{}", std::process::id());
+    let jcode_dir = crate::storage::jcode_dir().unwrap();
+    let path = jcode_dir.join(format!("client-input-{}", session_id));
+    std::fs::write(&path, "2\nhello").unwrap();
+
+    let restored =
+        App::restore_input_for_reload(&session_id).expect("legacy reload state should restore");
+    assert_eq!(restored.0, "hello");
+    assert_eq!(restored.1, 2);
+    assert!(restored.2.is_empty());
+}
+
+#[test]
 fn test_reload_progress_coalesces_into_single_message() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1725,7 +1760,7 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
     app.streaming_text = "partial response being streamed".to_string();
 
     let mut state = remote::RemoteRunState::default();
-    remote::handle_disconnect(&mut app, &mut state);
+    remote::handle_disconnect(&mut app, &mut state, None);
 
     assert!(!app.is_processing);
     assert!(matches!(app.status, ProcessingStatus::Idle));
@@ -1748,7 +1783,8 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
         .last()
         .expect("missing reconnect status message");
     assert_eq!(last.role, "system");
-    assert_eq!(last.content, "⚡ Connection lost — reconnecting…");
+    assert!(last.content.contains("⚡ Connection lost — retrying"));
+    assert!(last.content.contains("Cause: connection to server dropped"));
 }
 
 #[test]
@@ -1767,7 +1803,7 @@ fn test_handle_remote_disconnect_retryable_pending_schedules_retry() {
     });
 
     let mut state = remote::RemoteRunState::default();
-    remote::handle_disconnect(&mut app, &mut state);
+    remote::handle_disconnect(&mut app, &mut state, None);
 
     let pending = app
         .rate_limit_pending_message
@@ -1872,6 +1908,60 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
         .display_messages()
         .iter()
         .any(|m| m.content.contains("interrupted")));
+}
+
+#[test]
+fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.remote_session_id = Some("ses_fast_path".to_string());
+    app.push_display_message(DisplayMessage::assistant(
+        "local restored state".to_string(),
+    ));
+    remote.mark_history_loaded();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_fast_path".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "assistant".to_string(),
+                content: "server history replay".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: Some(true),
+            upstream_provider: None,
+            reasoning_effort: None,
+        },
+        &mut remote,
+    );
+
+    let assistant_messages: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].content, "local restored state");
+    assert!(app.queued_messages().is_empty());
 }
 
 #[test]

@@ -572,8 +572,6 @@ pub enum TrustLevel {
     Low,
 }
 
-
-
 /// A reinforcement breadcrumb tracking when/where a memory was reinforced
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reinforcement {
@@ -1332,9 +1330,7 @@ impl MemoryManager {
         for entry in graph.active_memories() {
             if let Some(ref emb) = entry.embedding {
                 let sim = crate::embedding::cosine_similarity(query_emb, emb);
-                if sim >= threshold
-                    && best.as_ref().map(|(_, s)| sim > *s).unwrap_or(true)
-                {
+                if sim >= threshold && best.as_ref().map(|(_, s)| sim > *s).unwrap_or(true) {
                     best = Some((entry.id.clone(), sim));
                 }
             }

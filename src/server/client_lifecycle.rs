@@ -21,7 +21,7 @@ use super::comm_session::{handle_comm_spawn, handle_comm_stop};
 use super::comm_sync::{handle_comm_read_context, handle_comm_resync_plan, handle_comm_summary};
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_set_model, handle_set_premium_mode,
-    handle_set_reasoning_effort, handle_switch_anthropic_account,
+    handle_set_reasoning_effort, handle_set_transport, handle_switch_anthropic_account,
 };
 use super::{
     broadcast_swarm_status, record_swarm_event, swarm_id_for_dir, truncate_detail,
@@ -705,6 +705,10 @@ pub(super) async fn handle_client(
 
             Request::SetReasoningEffort { id, effort } => {
                 handle_set_reasoning_effort(id, effort, &agent, &client_event_tx).await;
+            }
+
+            Request::SetTransport { id, transport } => {
+                handle_set_transport(id, transport, &agent, &client_event_tx).await;
             }
 
             Request::NotifyAuthChanged { id } => {

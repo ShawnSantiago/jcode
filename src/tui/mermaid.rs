@@ -1596,8 +1596,8 @@ fn calculate_render_size(
         _ => 1.1,
     };
 
-    let width =
-        (base_width * complexity_factor * RENDER_SUPERSAMPLE).clamp(400.0, DEFAULT_RENDER_WIDTH as f64);
+    let width = (base_width * complexity_factor * RENDER_SUPERSAMPLE)
+        .clamp(400.0, DEFAULT_RENDER_WIDTH as f64);
     let height = (width * 0.75).clamp(300.0, DEFAULT_RENDER_HEIGHT as f64);
 
     (width, height)

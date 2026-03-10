@@ -160,7 +160,10 @@ pub(super) fn parse_clock_time_to_duration(time_str: &str) -> Option<Duration> {
     }
 }
 
-pub(super) fn format_cache_footer(read_tokens: Option<u64>, write_tokens: Option<u64>) -> Option<String> {
+pub(super) fn format_cache_footer(
+    read_tokens: Option<u64>,
+    write_tokens: Option<u64>,
+) -> Option<String> {
     let _ = (read_tokens, write_tokens);
     None
 }
@@ -591,7 +594,11 @@ fn gather_git_info_inner() -> Option<GitInfo> {
         .and_then(|o| {
             if o.status.success() {
                 let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if b.is_empty() { None } else { Some(b) }
+                if b.is_empty() {
+                    None
+                } else {
+                    Some(b)
+                }
             } else {
                 None
             }

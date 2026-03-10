@@ -1,7 +1,6 @@
 use super::*;
 
 impl App {
-
     async fn run_turn(&mut self) -> Result<()> {
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -1700,5 +1699,4 @@ impl App {
             }
         }
     }
-
 }

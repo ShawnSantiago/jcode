@@ -246,7 +246,11 @@ impl Registry {
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
         let mut tools = base.clone();
         // SkillTool needs the skills registry reference (shared across sessions)
-        Self::insert_tool(&mut tools, "skill_manage", skill::SkillTool::new(skills.clone()));
+        Self::insert_tool(
+            &mut tools,
+            "skill_manage",
+            skill::SkillTool::new(skills.clone()),
+        );
         tools
     }
 
@@ -267,7 +271,11 @@ impl Registry {
             "subagent",
             task::SubagentTool::new(provider, registry.clone()),
         );
-        Self::insert_tool(&mut tools_map, "batch", batch::BatchTool::new(registry.clone()));
+        Self::insert_tool(
+            &mut tools_map,
+            "batch",
+            batch::BatchTool::new(registry.clone()),
+        );
         Self::insert_tool(
             &mut tools_map,
             "conversation_search",

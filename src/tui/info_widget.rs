@@ -631,7 +631,6 @@ pub enum MemoryState {
     ToolAction { action: String, detail: String },
 }
 
-
 /// A memory system event
 #[derive(Debug, Clone)]
 pub struct MemoryEvent {
@@ -963,8 +962,6 @@ struct SingleWidgetState {
     /// Last time the page advanced
     last_page_switch: Option<Instant>,
 }
-
-
 
 /// Global state for all widgets
 #[derive(Debug, Clone)]

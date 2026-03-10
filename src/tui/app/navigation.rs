@@ -399,10 +399,10 @@ impl App {
         if let Some(layout) = layout {
             current_messages_area = Some(layout.messages_area);
             current_diagram_area = layout.diagram_area;
-            terminal_width = layout.messages_area.width
-                + layout.diagram_area.map(|a| a.width).unwrap_or(0);
-            terminal_height = layout.messages_area.height
-                + layout.diagram_area.map(|a| a.height).unwrap_or(0);
+            terminal_width =
+                layout.messages_area.width + layout.diagram_area.map(|a| a.width).unwrap_or(0);
+            terminal_height =
+                layout.messages_area.height + layout.diagram_area.map(|a| a.height).unwrap_or(0);
             if let Some(diagram_area) = layout.diagram_area {
                 over_diagram = super::super::layout_utils::point_in_rect(
                     mouse.column,
@@ -450,8 +450,7 @@ impl App {
                             if let (Some(messages_area), Some(diagram_area)) =
                                 (current_messages_area, current_diagram_area)
                             {
-                                let right_edge =
-                                    diagram_area.x.saturating_add(diagram_area.width);
+                                let right_edge = diagram_area.x.saturating_add(diagram_area.width);
                                 let total_width = right_edge.saturating_sub(messages_area.x);
                                 let desired_width = right_edge.saturating_sub(mouse.column);
                                 if desired_width == diagram_area.width || total_width == 0 {

@@ -16,7 +16,13 @@ pub const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
 fn should_replace_stale_selfdev_server(server_hash: &str, current_hash: &str) -> bool {
     let server_hash = server_hash.trim();
     let current_hash = current_hash.trim();
-    !server_hash.is_empty() && !current_hash.is_empty() && server_hash != current_hash
+    std::env::var("JCODE_SELFDEV_REPLACE_STALE_SERVER")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+        && !server_hash.is_empty()
+        && !current_hash.is_empty()
+        && server_hash != current_hash
 }
 
 pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
@@ -153,6 +159,13 @@ pub async fn run_canary_wrapper(
             let _ = std::fs::remove_file(&hash_path);
             let _ = std::fs::remove_file(server::debug_socket_path());
             server_alive = false;
+        } else if !server_hash.trim().is_empty() && server_hash.trim() != current_hash.trim() {
+            startup_msg!(
+                "Existing self-dev server ({}) is running on {}. Leaving it in place to avoid interrupting other clients. Use /reload when ready to switch the shared server to build {}.",
+                server_hash.trim(),
+                socket_path,
+                current_hash
+            );
         }
     }
 
@@ -558,9 +571,14 @@ mod tests {
 
     #[test]
     fn test_should_replace_stale_selfdev_server() {
+        std::env::remove_var("JCODE_SELFDEV_REPLACE_STALE_SERVER");
+        assert!(!should_replace_stale_selfdev_server("abc123", "def456"));
+
+        std::env::set_var("JCODE_SELFDEV_REPLACE_STALE_SERVER", "1");
         assert!(should_replace_stale_selfdev_server("abc123", "def456"));
         assert!(!should_replace_stale_selfdev_server("abc123", "abc123"));
         assert!(!should_replace_stale_selfdev_server("", "def456"));
         assert!(!should_replace_stale_selfdev_server("abc123", ""));
+        std::env::remove_var("JCODE_SELFDEV_REPLACE_STALE_SERVER");
     }
 }

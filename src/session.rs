@@ -10,8 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Session exit status - why the session ended
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum SessionStatus {
     /// Session is currently active/running
     #[default]
@@ -29,8 +28,6 @@ pub enum SessionStatus {
     /// Session ended due to an error
     Error { message: String },
 }
-
-
 
 impl SessionStatus {
     /// Get a short display string for the status

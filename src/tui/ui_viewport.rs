@@ -1,6 +1,10 @@
 use super::*;
 use std::collections::HashSet;
 
+fn lower_bound(values: &[usize], target: usize) -> usize {
+    values.partition_point(|&v| v < target)
+}
+
 pub(super) fn compute_visible_margins(
     lines: &[Line],
     user_line_indices: &[usize],
@@ -71,6 +75,7 @@ pub(super) fn draw_messages(
     let wrapped_lines = &prepared.wrapped_lines;
     let wrapped_user_indices = &prepared.wrapped_user_indices;
     let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
+    let user_prompt_texts = &prepared.user_prompt_texts;
 
     let total_lines = wrapped_lines.len();
     let visible_height = area.height as usize;
@@ -101,7 +106,12 @@ pub(super) fn draw_messages(
     );
 
     let prompt_preview_lines = if crate::config::config().display.prompt_preview && scroll > 0 {
-        compute_prompt_preview_line_count(wrapped_user_prompt_starts, scroll, app, area.width)
+        compute_prompt_preview_line_count(
+            wrapped_user_prompt_starts,
+            user_prompt_texts,
+            scroll,
+            area.width,
+        )
     } else {
         0u16
     };
@@ -133,6 +143,9 @@ pub(super) fn draw_messages(
         None
     };
 
+    let visible_user_start = lower_bound(wrapped_user_indices, scroll);
+    let visible_user_end = lower_bound(wrapped_user_indices, visible_end);
+
     let mut visible_lines = if scroll < visible_end {
         wrapped_lines[scroll..visible_end].to_vec()
     } else {
@@ -161,7 +174,11 @@ pub(super) fn draw_messages(
             );
 
         for abs_idx in anim.line_idx..prompt_end {
-            if abs_idx >= scroll && abs_idx < visible_end && wrapped_user_indices.contains(&abs_idx)
+            if abs_idx >= scroll
+                && abs_idx < visible_end
+                && wrapped_user_indices[visible_user_start..visible_user_end]
+                    .binary_search(&abs_idx)
+                    .is_ok()
             {
                 let rel_idx = abs_idx - scroll;
                 if let Some(line) = visible_lines.get_mut(rel_idx) {
@@ -277,7 +294,7 @@ pub(super) fn draw_messages(
     }
 
     let right_x = area.x + area.width.saturating_sub(1);
-    for &line_idx in wrapped_user_indices {
+    for &line_idx in &wrapped_user_indices[visible_user_start..visible_user_end] {
         if line_idx >= scroll && line_idx < scroll + visible_height {
             let screen_y = area.y + (line_idx - scroll) as u16;
             let bar_area = Rect {
@@ -314,14 +331,7 @@ pub(super) fn draw_messages(
             .rposition(|&start| start < scroll);
 
         if let Some(prompt_order) = last_offscreen_prompt_idx {
-            let user_messages: Vec<&str> = app
-                .display_messages()
-                .iter()
-                .filter(|m| m.role == "user")
-                .map(|m| m.content.as_str())
-                .collect();
-
-            if let Some(prompt_text) = user_messages.get(prompt_order) {
+            if let Some(prompt_text) = user_prompt_texts.get(prompt_order) {
                 let prompt_text = prompt_text.trim();
                 if !prompt_text.is_empty() {
                     let prompt_num = prompt_order + 1;
@@ -412,8 +422,8 @@ pub(super) fn draw_messages(
 
 fn compute_prompt_preview_line_count(
     wrapped_user_prompt_starts: &[usize],
+    user_prompt_texts: &[String],
     scroll: usize,
-    app: &dyn TuiState,
     area_width: u16,
 ) -> u16 {
     let last_offscreen = wrapped_user_prompt_starts
@@ -422,13 +432,7 @@ fn compute_prompt_preview_line_count(
     let Some(prompt_order) = last_offscreen else {
         return 0;
     };
-    let user_messages: Vec<&str> = app
-        .display_messages()
-        .iter()
-        .filter(|m| m.role == "user")
-        .map(|m| m.content.as_str())
-        .collect();
-    let Some(prompt_text) = user_messages.get(prompt_order) else {
+    let Some(prompt_text) = user_prompt_texts.get(prompt_order) else {
         return 0;
     };
     let prompt_text = prompt_text.trim();

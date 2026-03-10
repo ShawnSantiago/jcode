@@ -71,7 +71,11 @@ impl crate::tui::TuiState for App {
     }
 
     fn available_skills(&self) -> Vec<String> {
-        self.skills.list().iter().map(|s| s.name.clone()).collect()
+        if self.is_remote && !self.remote_skills.is_empty() {
+            self.remote_skills.clone()
+        } else {
+            self.skills.list().iter().map(|s| s.name.clone()).collect()
+        }
     }
 
     fn streaming_tokens(&self) -> (u64, u64) {
@@ -124,7 +128,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn batch_progress(&self) -> Option<(usize, usize, Option<String>)> {
-        self.batch_progress.as_ref().map(|p| (p.completed, p.total, p.last_completed.clone()))
+        self.batch_progress
+            .as_ref()
+            .map(|p| (p.completed, p.total, p.last_completed.clone()))
     }
 
     fn time_since_activity(&self) -> Option<std::time::Duration> {
@@ -914,7 +920,9 @@ impl crate::tui::TuiState for App {
         self.help_scroll
     }
 
-    fn session_picker_overlay(&self) -> Option<&RefCell<crate::tui::session_picker::SessionPicker>> {
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&RefCell<crate::tui::session_picker::SessionPicker>> {
         self.session_picker_overlay.as_ref()
     }
 

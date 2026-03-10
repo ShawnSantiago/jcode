@@ -190,6 +190,35 @@ pub(super) async fn handle_set_reasoning_effort(
     }
 }
 
+pub(super) async fn handle_set_transport(
+    id: u64,
+    transport: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let provider = {
+        let agent_guard = agent.lock().await;
+        agent_guard.provider_handle()
+    };
+
+    match provider.set_transport(&transport) {
+        Ok(()) => {
+            let _ = client_event_tx.send(ServerEvent::TransportChanged {
+                id,
+                transport: provider.transport(),
+                error: None,
+            });
+        }
+        Err(e) => {
+            let _ = client_event_tx.send(ServerEvent::TransportChanged {
+                id,
+                transport: None,
+                error: Some(e.to_string()),
+            });
+        }
+    }
+}
+
 pub(super) async fn handle_notify_auth_changed(
     id: u64,
     provider: &Arc<dyn Provider>,

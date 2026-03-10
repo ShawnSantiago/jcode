@@ -170,6 +170,7 @@ impl App {
             remote_provider_name: None,
             remote_provider_model: None,
             remote_reasoning_effort: None,
+            remote_transport: None,
             remote_available_models: Vec::new(),
             remote_model_routes: Vec::new(),
             remote_mcp_servers: Vec::new(),
@@ -296,9 +297,12 @@ impl App {
             if let Ok(session) = Session::load(session_id) {
                 app.session = session;
             }
-            if let Some((input, cursor)) = Self::restore_input_from_reload(session_id) {
+            if let Some((input, cursor, queued_messages)) =
+                Self::restore_input_for_reload(session_id)
+            {
                 app.input = input;
                 app.cursor_pos = cursor;
+                app.queued_messages = queued_messages;
             }
         }
 
@@ -499,9 +503,10 @@ impl App {
 
     /// Restore a previous session (for hot-reload)
     pub fn restore_session(&mut self, session_id: &str) {
-        if let Some((input, cursor)) = Self::restore_input_from_reload(session_id) {
+        if let Some((input, cursor, queued_messages)) = Self::restore_input_for_reload(session_id) {
             self.input = input;
             self.cursor_pos = cursor;
+            self.queued_messages = queued_messages;
         }
         if let Ok(session) = Session::load(session_id) {
             // Count stats before restoring

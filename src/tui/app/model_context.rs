@@ -68,10 +68,10 @@ impl App {
                 current_index + 1
             }
         } else if current_index == 0 {
-                0 // already at min
-            } else {
-                current_index - 1
-            };
+            0 // already at min
+        } else {
+            current_index - 1
+        };
 
         let next_effort = efforts[next_index];
         if Some(next_effort.to_string()) == current {
@@ -765,6 +765,58 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
             Err(e) => {
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set effort: {}",
+                    e
+                )));
+            }
+        }
+        return true;
+    }
+
+    if trimmed == "/transport" {
+        let current = app.provider.transport();
+        let transports = app.provider.available_transports();
+        if transports.is_empty() {
+            app.push_display_message(DisplayMessage::system(
+                "Transport switching is not available for this provider.".to_string(),
+            ));
+        } else {
+            let current_label = current.as_deref().unwrap_or("unknown");
+            let list: Vec<String> = transports
+                .iter()
+                .map(|t| {
+                    if Some(*t) == current.as_deref() {
+                        format!("**{}** ← current", t)
+                    } else {
+                        t.to_string()
+                    }
+                })
+                .collect();
+            app.push_display_message(DisplayMessage::system(format!(
+                "Transport: {}\nAvailable: {}\nUse `/transport <mode>` to change.",
+                current_label,
+                list.join(" · ")
+            )));
+        }
+        return true;
+    }
+
+    if let Some(mode) = trimmed.strip_prefix("/transport ") {
+        let mode = mode.trim();
+        match app.provider.set_transport(mode) {
+            Ok(()) => {
+                let new_transport = app
+                    .provider
+                    .transport()
+                    .unwrap_or_else(|| mode.to_string());
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Transport → {}",
+                    new_transport
+                )));
+                app.set_status_notice(format!("Transport → {}", new_transport));
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set transport: {}",
                     e
                 )));
             }

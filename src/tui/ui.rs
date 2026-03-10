@@ -1275,6 +1275,9 @@ struct PreparedMessages {
     wrapped_user_indices: Vec<usize>,
     /// Wrapped line indices where a user prompt line starts
     wrapped_user_prompt_starts: Vec<usize>,
+    /// Flattened user prompt text in display order, used by prompt preview without
+    /// scanning display_messages on every frame.
+    user_prompt_texts: Vec<String>,
     /// Pre-scanned image regions (computed once, not every frame)
     image_regions: Vec<ImageRegion>,
     /// Line ranges for edit tool messages: (msg_index, start_line, end_line)
@@ -1284,6 +1287,7 @@ struct PreparedMessages {
 
 #[derive(Clone, Debug)]
 struct EditToolRange {
+    edit_index: usize,
     msg_index: usize,
     file_path: String,
     start_line: usize,
@@ -1295,6 +1299,8 @@ struct ActiveFileDiffContext {
     edit_index: usize,
     msg_index: usize,
     file_path: String,
+    start_line: usize,
+    end_line: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -2741,15 +2747,18 @@ mod tests {
             wrapped_lines: vec![Line::from("a"); 20],
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: vec![
                 EditToolRange {
+                    edit_index: 0,
                     msg_index: 3,
                     file_path: "src/one.rs".to_string(),
                     start_line: 2,
                     end_line: 5,
                 },
                 EditToolRange {
+                    edit_index: 1,
                     msg_index: 7,
                     file_path: "src/two.rs".to_string(),
                     start_line: 10,
@@ -2782,6 +2791,7 @@ mod tests {
             wrapped_lines: vec![Line::from("a")],
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
         });
@@ -2789,6 +2799,7 @@ mod tests {
             wrapped_lines: vec![Line::from("b")],
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
         });
@@ -2797,8 +2808,12 @@ mod tests {
         cache.insert(key_a.clone(), prepared_a.clone(), 3);
         cache.insert(key_b.clone(), prepared_b.clone(), 3);
 
-        let hit_a = cache.get_exact(&key_a).expect("expected width 40 cache hit");
-        let hit_b = cache.get_exact(&key_b).expect("expected width 41 cache hit");
+        let hit_a = cache
+            .get_exact(&key_a)
+            .expect("expected width 40 cache hit");
+        let hit_b = cache
+            .get_exact(&key_b)
+            .expect("expected width 41 cache hit");
 
         assert!(Arc::ptr_eq(&hit_a, &prepared_a));
         assert!(Arc::ptr_eq(&hit_b, &prepared_b));
@@ -2821,6 +2836,7 @@ mod tests {
                 wrapped_lines: vec![Line::from(format!("{idx}"))],
                 wrapped_user_indices: Vec::new(),
                 wrapped_user_prompt_starts: Vec::new(),
+                user_prompt_texts: Vec::new(),
                 image_regions: Vec::new(),
                 edit_tool_ranges: Vec::new(),
             });
@@ -2828,10 +2844,10 @@ mod tests {
         }
 
         assert_eq!(cache.entries.len(), BODY_CACHE_MAX_ENTRIES);
-        assert!(cache
-            .entries
-            .iter()
-            .all(|entry| entry.key.width >= 42), "oldest widths should be evicted");
+        assert!(
+            cache.entries.iter().all(|entry| entry.key.width >= 42),
+            "oldest widths should be evicted"
+        );
     }
 
     #[test]

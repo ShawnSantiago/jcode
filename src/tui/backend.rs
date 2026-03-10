@@ -195,6 +195,19 @@ pub enum BackendEvent {
     Disconnected,
 }
 
+#[derive(Debug, Clone)]
+pub enum RemoteDisconnectReason {
+    PeerClosed,
+    Io(String),
+    Protocol(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteRead {
+    Event(ServerEvent),
+    Disconnected(RemoteDisconnectReason),
+}
+
 /// Information about the backend's provider
 #[derive(Debug, Clone)]
 pub struct BackendInfo {
@@ -375,6 +388,16 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Set connection transport on the server (for OpenAI models)
+    pub async fn set_transport(&mut self, transport: &str) -> Result<()> {
+        let request = Request::SetTransport {
+            id: self.next_request_id,
+            transport: transport.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Toggle a runtime feature on the server for this session
     pub async fn set_feature(&mut self, feature: FeatureToggle, enabled: bool) -> Result<()> {
         let request = Request::SetFeature {
@@ -477,13 +500,18 @@ impl RemoteConnection {
             .await
     }
 
-    /// Read the next event from the server (returns None on disconnect)
-    pub async fn next_event(&mut self) -> Option<ServerEvent> {
+    /// Read the next event from the server.
+    pub async fn next_event(&mut self) -> RemoteRead {
         self.line_buffer.clear();
         match self.reader.read_line(&mut self.line_buffer).await {
-            Ok(0) => None,
-            Ok(_) => serde_json::from_str(&self.line_buffer).ok(),
-            Err(_) => None,
+            Ok(0) => RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed),
+            Ok(_) => match serde_json::from_str(&self.line_buffer) {
+                Ok(event) => RemoteRead::Event(event),
+                Err(error) => RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
+                    error.to_string(),
+                )),
+            },
+            Err(error) => RemoteRead::Disconnected(RemoteDisconnectReason::Io(error.to_string())),
         }
     }
 

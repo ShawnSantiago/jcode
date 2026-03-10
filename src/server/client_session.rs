@@ -6,6 +6,7 @@ use super::{
     ClientConnectionInfo, SwarmEvent, SwarmMember, VersionedPlan,
 };
 use crate::agent::Agent;
+use crate::message::ContentBlock;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::tool::Registry;
@@ -16,6 +17,27 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+
+fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
+    let messages = agent.messages();
+    let Some(last) = messages.last() else {
+        return false;
+    };
+
+    last.content.iter().any(|block| match block {
+        ContentBlock::Text { text, .. } => {
+            text.ends_with("[generation interrupted - server reloading]")
+        }
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
+            is_error.unwrap_or(false)
+                && (content.contains("interrupted by server reload")
+                    || content.contains("Skipped - server reloading"))
+        }
+        _ => false,
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear_session(
@@ -362,14 +384,7 @@ pub(super) async fn handle_resume_session(
                     .as_ref()
                     .map(|role| *role == crate::message::Role::User)
                     .unwrap_or(false);
-                let last_is_reload_interrupted = last_role
-                    .as_ref()
-                    .map(|role| *role == crate::message::Role::Assistant)
-                    .unwrap_or(false)
-                    && agent_guard
-                        .last_message_text()
-                        .map(|text| text.ends_with("[generation interrupted - server reloading]"))
-                        .unwrap_or(false);
+                let last_is_reload_interrupted = session_was_interrupted_by_reload(&agent_guard);
                 if last_is_user {
                     crate::logging::info(&format!(
                         "Session {} was Active with pending user message - treating as interrupted",
@@ -490,4 +505,123 @@ pub(super) async fn handle_resume_session(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_was_interrupted_by_reload;
+    use crate::agent::Agent;
+    use crate::message::ContentBlock;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::tool::Registry;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(MockProvider)
+        }
+    }
+
+    fn test_agent(messages: Vec<crate::session::StoredMessage>) -> Agent {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let registry = rt.block_on(Registry::new(provider.clone()));
+        let mut session =
+            crate::session::Session::create_with_id("session_test_reload".to_string(), None, None);
+        session.model = Some("mock".to_string());
+        session.messages = messages;
+        Agent::new_with_session(provider, registry, session, None)
+    }
+
+    #[test]
+    fn detects_reload_interrupted_generation_text() {
+        let agent = test_agent(vec![crate::session::StoredMessage {
+            id: "msg_1".to_string(),
+            role: crate::message::Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "partial\n\n[generation interrupted - server reloading]".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }]);
+
+        assert!(session_was_interrupted_by_reload(&agent));
+    }
+
+    #[test]
+    fn detects_reload_interrupted_tool_result() {
+        let agent = test_agent(vec![crate::session::StoredMessage {
+            id: "msg_2".to_string(),
+            role: crate::message::Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_1".to_string(),
+                content: "[Tool 'bash' interrupted by server reload after 0.2s]".to_string(),
+                is_error: Some(true),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }]);
+
+        assert!(session_was_interrupted_by_reload(&agent));
+    }
+
+    #[test]
+    fn detects_reload_skipped_tool_result() {
+        let agent = test_agent(vec![crate::session::StoredMessage {
+            id: "msg_3".to_string(),
+            role: crate::message::Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_2".to_string(),
+                content: "[Skipped - server reloading]".to_string(),
+                is_error: Some(true),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }]);
+
+        assert!(session_was_interrupted_by_reload(&agent));
+    }
+
+    #[test]
+    fn ignores_normal_tool_errors() {
+        let agent = test_agent(vec![crate::session::StoredMessage {
+            id: "msg_4".to_string(),
+            role: crate::message::Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_3".to_string(),
+                content: "Error: file not found".to_string(),
+                is_error: Some(true),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }]);
+
+        assert!(!session_was_interrupted_by_reload(&agent));
+    }
 }

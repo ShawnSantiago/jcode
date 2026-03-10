@@ -130,6 +130,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/effort <level>",
         "Set reasoning effort (none|low|medium|high|xhigh)",
     ));
+    lines.push(help_entry(
+        "/transport <mode>",
+        "Set connection transport (auto|https|websocket)",
+    ));
     lines.push(help_entry("/config", "Show active configuration"));
     lines.push(help_entry("/config init", "Create default config file"));
     lines.push(help_entry("/config edit", "Open config in $EDITOR"));
@@ -205,7 +209,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(Line::from(Span::styled("  System", section_style)));
     lines.push(Line::from(""));
     lines.push(help_entry("/reload", "Reload to newer binary if available"));
-    lines.push(help_entry("/restart", "Restart with current binary (no build)"));
+    lines.push(help_entry(
+        "/restart",
+        "Restart with current binary (no build)",
+    ));
     lines.push(help_entry(
         "/rebuild",
         "Full update (git pull + build + tests)",

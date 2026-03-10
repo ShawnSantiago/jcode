@@ -46,18 +46,21 @@ impl VisibleCycleContext {
 }
 
 /// Ambient mode status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum AmbientStatus {
     #[default]
     Idle,
-    Running { detail: String },
-    Scheduled { next_wake: DateTime<Utc> },
-    Paused { reason: String },
+    Running {
+        detail: String,
+    },
+    Scheduled {
+        next_wake: DateTime<Utc>,
+    },
+    Paused {
+        reason: String,
+    },
     Disabled,
 }
-
-
 
 /// Priority for scheduled items
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

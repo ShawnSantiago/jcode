@@ -167,7 +167,7 @@ pub struct OpenAIProvider {
     prompt_cache_retention: Option<String>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
-    transport_mode: OpenAITransportMode,
+    transport_mode: Arc<RwLock<OpenAITransportMode>>,
     websocket_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
     /// Persistent WebSocket connection for incremental continuation
@@ -227,7 +227,7 @@ impl OpenAIProvider {
             prompt_cache_retention,
             max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(reasoning_effort)),
-            transport_mode,
+            transport_mode: Arc::new(RwLock::new(transport_mode)),
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
             persistent_ws: Arc::new(Mutex::new(None)),
@@ -1614,7 +1614,8 @@ impl Provider for OpenAIProvider {
         // Try to reuse an existing WebSocket connection with previous_response_id
         // to send only incremental input items instead of the full conversation.
         let persistent_ws = Arc::clone(&self.persistent_ws);
-        let use_websocket_transport = match self.transport_mode {
+        let transport_mode_snapshot = *self.transport_mode.blocking_read();
+        let use_websocket_transport = match transport_mode_snapshot {
             OpenAITransportMode::HTTPS => false,
             OpenAITransportMode::WebSocket => true,
             OpenAITransportMode::Auto => Self::should_prefer_websocket(&model_id),
@@ -1623,7 +1624,7 @@ impl Provider for OpenAIProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         let credentials = Arc::clone(&self.credentials);
-        let transport_mode = self.transport_mode;
+        let transport_mode = transport_mode_snapshot;
         let websocket_cooldowns = Arc::clone(&self.websocket_cooldowns);
         let websocket_failure_streaks = Arc::clone(&self.websocket_failure_streaks);
         let model_for_transport = model_id.clone();
@@ -1887,6 +1888,28 @@ impl Provider for OpenAIProvider {
         vec!["none", "low", "medium", "high", "xhigh"]
     }
 
+    fn transport(&self) -> Option<String> {
+        Some(self.transport_mode.blocking_read().as_str().to_string())
+    }
+
+    fn set_transport(&self, transport: &str) -> Result<()> {
+        let mode = match transport.trim().to_ascii_lowercase().as_str() {
+            "auto" => OpenAITransportMode::Auto,
+            "https" | "http" | "sse" => OpenAITransportMode::HTTPS,
+            "websocket" | "ws" | "wss" => OpenAITransportMode::WebSocket,
+            other => anyhow::bail!(
+                "Unknown transport '{}'. Use: auto, https, or websocket.",
+                other
+            ),
+        };
+        *self.transport_mode.blocking_write() = mode;
+        Ok(())
+    }
+
+    fn available_transports(&self) -> Vec<&'static str> {
+        vec!["auto", "https", "websocket"]
+    }
+
     fn supports_compaction(&self) -> bool {
         true
     }
@@ -1907,7 +1930,7 @@ impl Provider for OpenAIProvider {
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
-            transport_mode: self.transport_mode,
+            transport_mode: Arc::clone(&self.transport_mode),
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
             persistent_ws: Arc::new(Mutex::new(None)),

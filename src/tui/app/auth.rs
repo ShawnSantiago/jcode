@@ -94,7 +94,10 @@ impl App {
         self.pending_login = Some(PendingLogin::ProviderSelection);
     }
 
-    pub(super) fn start_login_provider(&mut self, provider: crate::provider_catalog::LoginProviderDescriptor) {
+    pub(super) fn start_login_provider(
+        &mut self,
+        provider: crate::provider_catalog::LoginProviderDescriptor,
+    ) {
         match provider.target {
             crate::provider_catalog::LoginProviderTarget::Claude => self.start_claude_login(),
             crate::provider_catalog::LoginProviderTarget::OpenAi => self.start_openai_login(),
@@ -1202,7 +1205,6 @@ impl App {
         std::env::set_var(key_name, key);
         Ok(())
     }
-
 }
 
 pub(super) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {

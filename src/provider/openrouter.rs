@@ -1519,8 +1519,7 @@ impl Provider for OpenRouterProvider {
                             } else {
                                 reasoning_content
                             };
-                        assistant_msg["reasoning_content"] =
-                            serde_json::json!(reasoning_payload);
+                        assistant_msg["reasoning_content"] = serde_json::json!(reasoning_payload);
                     }
 
                     if !text_content.is_empty() || !tool_calls.is_empty() {

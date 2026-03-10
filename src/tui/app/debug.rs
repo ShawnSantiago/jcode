@@ -343,7 +343,8 @@ impl App {
             None => (None, false, format!("{:?}", self.diagram_mode)),
         };
 
-        let diagram_area_rect = diagram_area_capture.map(crate::tui::layout_utils::rect_from_capture);
+        let diagram_area_rect =
+            diagram_area_capture.map(crate::tui::layout_utils::rect_from_capture);
         let diagram_area_json = diagram_area_capture.map(|rect| {
             serde_json::json!({
                 "x": rect.x,
@@ -1930,8 +1931,7 @@ impl App {
             let _ = std::fs::remove_file(&cmd_path);
             let cmd = cmd.trim();
 
-            self.debug_trace
-                .record("cmd", cmd.to_string());
+            self.debug_trace.record("cmd", cmd.to_string());
 
             let response = self.handle_debug_command(cmd);
 

@@ -17,13 +17,13 @@ use crate::skill::SkillRegistry;
 use crate::tool::selfdev::ReloadContext;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
+use auth::PendingLogin;
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use futures::StreamExt;
-use auth::PendingLogin;
 use debug::DebugTrace;
+use futures::StreamExt;
 use helpers::*;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
@@ -43,14 +43,14 @@ mod helpers;
 mod input;
 mod local;
 mod misc_ui;
-mod tui_lifecycle;
 mod model_context;
 mod navigation;
 mod picker;
-mod run_shell;
 mod remote;
 mod replay;
+mod run_shell;
 mod state_ui;
+mod tui_lifecycle;
 mod tui_state;
 mod turn;
 
@@ -118,7 +118,6 @@ enum SendAction {
     Queue,
     Interleave,
 }
-
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 
@@ -228,6 +227,7 @@ pub struct App {
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
     remote_reasoning_effort: Option<String>,
+    remote_transport: Option<String>,
     remote_available_models: Vec<String>,
     remote_model_routes: Vec<crate::provider::ModelRoute>,
     // Remote MCP servers and skills (set from server in remote mode)
@@ -379,7 +379,6 @@ pub struct App {
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
 }
 
-
 /// A placeholder provider for remote mode (never actually called)
 struct NullProvider;
 
@@ -412,9 +411,6 @@ impl Provider for NullProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
-
-
-
 }
 
 #[cfg(test)]

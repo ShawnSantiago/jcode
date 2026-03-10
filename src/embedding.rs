@@ -61,8 +61,6 @@ struct EmbedderCache {
     cache_hits: u64,
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct EmbedderStats {
     pub loaded: bool,

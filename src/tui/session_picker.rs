@@ -1200,9 +1200,9 @@ impl SessionPicker {
                         self.search_query.clear();
                         self.rebuild_items();
                     } else if let Some(s) = self.selected_session() {
-                            return Ok(OverlayAction::Selected(PickerResult::Selected(
-                                s.id.clone(),
-                            )));
+                        return Ok(OverlayAction::Selected(PickerResult::Selected(
+                            s.id.clone(),
+                        )));
                     }
                 }
                 KeyCode::Backspace => {

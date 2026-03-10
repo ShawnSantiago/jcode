@@ -125,10 +125,7 @@ fn handle_replay_input(
                 *replay_speed = (*replay_speed / 1.5).max(0.1);
             }
             _ => {
-                if let Some(amount) = app
-                    .scroll_keys
-                    .scroll_amount(key.code, key.modifiers)
-                {
+                if let Some(amount) = app.scroll_keys.scroll_amount(key.code, key.modifiers) {
                     if amount < 0 {
                         app.scroll_up((-amount) as usize);
                     } else {

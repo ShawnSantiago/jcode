@@ -332,7 +332,8 @@ pub fn import_session_from_file(path: &PathBuf, session_id: &str) -> Result<Sess
     let roots: Vec<&ClaudeCodeEntry> = message_entries
         .iter()
         .filter(|e| {
-            e.parent_uuid.is_none() || !uuid_to_entry.contains_key(e.parent_uuid.as_deref().unwrap_or_default())
+            e.parent_uuid.is_none()
+                || !uuid_to_entry.contains_key(e.parent_uuid.as_deref().unwrap_or_default())
         })
         .copied()
         .collect();

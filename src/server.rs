@@ -376,9 +376,7 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
 async fn poll_for_socket(path: &std::path::Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if crate::transport::is_socket_path(path)
-            && Stream::connect(path).await.is_ok()
-        {
+        if crate::transport::is_socket_path(path) && Stream::connect(path).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

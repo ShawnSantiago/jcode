@@ -6,7 +6,7 @@ use crate::bus::BusEvent;
 use crate::message::ToolCall;
 use crate::protocol::ServerEvent;
 use crate::tool::selfdev::ReloadContext;
-use crate::tui::backend::{RemoteConnection, RemoteRead};
+use crate::tui::backend::{RemoteConnection, RemoteDisconnectReason, RemoteRead};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
 use futures::StreamExt;
@@ -19,6 +19,64 @@ pub(super) struct RemoteRunState {
     pub disconnect_msg_idx: Option<usize>,
     pub disconnect_start: Option<Instant>,
     pub initial_server_start: bool,
+    pub last_disconnect_reason: Option<String>,
+    pub server_reload_in_progress: bool,
+}
+
+fn format_disconnect_reason(reason: &RemoteDisconnectReason) -> String {
+    match reason {
+        RemoteDisconnectReason::PeerClosed => "server closed the connection".to_string(),
+        RemoteDisconnectReason::Io(err) => {
+            let lowered = err.to_lowercase();
+            if lowered.contains("connection reset") {
+                "connection reset by server".to_string()
+            } else if lowered.contains("broken pipe") {
+                "broken pipe while talking to server".to_string()
+            } else if lowered.contains("timed out") {
+                "connection timed out".to_string()
+            } else {
+                err.clone()
+            }
+        }
+        RemoteDisconnectReason::Protocol(err) => {
+            format!("protocol error while reading server event: {}", err)
+        }
+    }
+}
+
+fn reconnect_status_message(app: &App, state: &RemoteRunState, detail: &str) -> String {
+    let elapsed = state
+        .disconnect_start
+        .map(|start| start.elapsed())
+        .unwrap_or_default();
+    let elapsed_str = if elapsed.as_secs() < 60 {
+        format!("{}s", elapsed.as_secs())
+    } else {
+        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+    };
+
+    let session_name = app
+        .remote_session_id
+        .as_ref()
+        .and_then(|id| crate::id::extract_session_name(id))
+        .or_else(|| {
+            app.resume_session_id
+                .as_ref()
+                .and_then(|id| crate::id::extract_session_name(id))
+        });
+    let resume_hint = if let Some(name) = &session_name {
+        format!("\n  Resume later: jcode --resume {}", name)
+    } else {
+        String::new()
+    };
+
+    format!(
+        "⚡ Connection lost — retrying (attempt {}, {})\n  Cause: {}{}",
+        state.reconnect_attempts.max(1),
+        elapsed_str,
+        detail,
+        resume_hint,
+    )
 }
 
 pub(super) enum ConnectOutcome {
@@ -202,6 +260,8 @@ pub(super) async fn connect_with_retry(
                 }
             }
             state.disconnect_start = None;
+            state.last_disconnect_reason = None;
+            state.server_reload_in_progress = false;
             Ok(ConnectOutcome::Connected(remote))
         }
         Err(e) => {
@@ -218,38 +278,19 @@ pub(super) async fn connect_with_retry(
                 app.server_spawning = false;
             }
             state.reconnect_attempts += 1;
-
-            let elapsed = state
-                .disconnect_start
-                .get_or_insert_with(Instant::now)
-                .elapsed();
-            let elapsed_str = if elapsed.as_secs() < 60 {
-                format!("{}s", elapsed.as_secs())
-            } else {
-                format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
-            };
-
-            let session_name = app
-                .remote_session_id
-                .as_ref()
-                .and_then(|id| crate::id::extract_session_name(id))
-                .or_else(|| {
-                    app.resume_session_id
-                        .as_ref()
-                        .and_then(|id| crate::id::extract_session_name(id))
-                });
-            let resume_hint = if let Some(name) = &session_name {
-                format!("  Resume later: jcode --resume {}", name)
-            } else {
-                String::new()
-            };
+            state.disconnect_start.get_or_insert_with(Instant::now);
 
             let msg_content = if is_initial_server_start {
                 "⏳ Starting server...".to_string()
             } else {
-                format!(
-                    "⚡ Connection lost — retrying ({})\n  {}\n{}",
-                    elapsed_str, e, resume_hint,
+                let fallback_reason = e.root_cause().to_string();
+                reconnect_status_message(
+                    app,
+                    state,
+                    state
+                        .last_disconnect_reason
+                        .as_deref()
+                        .unwrap_or(fallback_reason.as_str()),
                 )
             };
 
@@ -546,10 +587,18 @@ pub(super) async fn handle_remote_event(
     event: RemoteRead,
 ) -> Result<RemoteEventOutcome> {
     match event {
-        RemoteRead::Disconnected(_) => {
-            handle_disconnect(app, state);
+        RemoteRead::Disconnected(reason) => {
+            handle_disconnect(app, state, Some(reason));
             terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
             Ok(RemoteEventOutcome::Reconnect)
+        }
+        RemoteRead::Event(ServerEvent::Reloading { new_socket }) => {
+            let _ = new_socket;
+            state.server_reload_in_progress = true;
+            state.last_disconnect_reason = Some("server reload in progress".to_string());
+            let _ = handle_server_event(app, ServerEvent::Reloading { new_socket: None }, remote);
+            process_remote_followups(app, remote).await;
+            Ok(RemoteEventOutcome::Continue)
         }
         RemoteRead::Event(ServerEvent::ClientDebugRequest { id, command }) => {
             let output = handle_debug_command(app, &command, remote).await;
@@ -565,8 +614,22 @@ pub(super) async fn handle_remote_event(
     }
 }
 
-pub(super) fn handle_disconnect(app: &mut App, state: &mut RemoteRunState) {
-    let scheduled_retry = app.schedule_pending_remote_retry("⚡ Connection lost.");
+pub(super) fn handle_disconnect(
+    app: &mut App,
+    state: &mut RemoteRunState,
+    reason: Option<RemoteDisconnectReason>,
+) {
+    let detail = if state.server_reload_in_progress {
+        "server reload in progress".to_string()
+    } else if let Some(reason) = reason.as_ref() {
+        format_disconnect_reason(reason)
+    } else {
+        "connection to server dropped".to_string()
+    };
+    state.last_disconnect_reason = Some(detail.clone());
+
+    let scheduled_retry =
+        app.schedule_pending_remote_retry(&format!("⚡ Connection lost ({detail})."));
     if !scheduled_retry {
         app.clear_pending_remote_retry();
     }
@@ -597,9 +660,10 @@ pub(super) fn handle_disconnect(app: &mut App, state: &mut RemoteRunState) {
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
     state.disconnect_start = Some(Instant::now());
+    state.reconnect_attempts = state.reconnect_attempts.max(1);
     app.push_display_message(DisplayMessage {
         role: "system".to_string(),
-        content: "⚡ Connection lost — reconnecting…".to_string(),
+        content: reconnect_status_message(app, state, &detail),
         tool_calls: Vec::new(),
         duration_secs: None,
         title: None,
@@ -612,8 +676,10 @@ pub(super) fn handle_disconnect(app: &mut App, state: &mut RemoteRunState) {
 async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
     if app.pending_server_reload && !app.is_processing {
         app.pending_server_reload = false;
-        app.append_reload_message("Reloading server with newer binary...");
-        let _ = remote.reload().await;
+        app.push_display_message(DisplayMessage::system(
+            "ℹ Newer server binary detected. Automatic reload is disabled to avoid interrupting other attached clients. Use `/reload` manually when you're ready.".to_string(),
+        ));
+        app.set_status_notice("Server update available — manual /reload recommended");
     }
 
     if app.is_processing {
@@ -1316,7 +1382,7 @@ pub(super) fn handle_server_event(
 
             if server_has_update == Some(true) && !app.pending_server_reload {
                 app.pending_server_reload = true;
-                app.set_status_notice("Server update available, reloading...");
+                app.set_status_notice("Server update available");
             }
             app.remote_server_short_name = server_name;
             if let Some(icon) = server_icon {
@@ -1480,6 +1546,25 @@ pub(super) fn handle_server_event(
                     label
                 )));
                 app.set_status_notice(format!("Effort: {}", label));
+            }
+            false
+        }
+        ServerEvent::TransportChanged {
+            transport, error, ..
+        } => {
+            if let Some(err) = error {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set transport: {}",
+                    err
+                )));
+            } else {
+                app.remote_transport = transport.clone();
+                let label = transport.as_deref().unwrap_or("unknown");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Transport → {}",
+                    label
+                )));
+                app.set_status_notice(format!("Transport: {}", label));
             }
             false
         }
@@ -2243,6 +2328,39 @@ pub(super) async fn handle_remote_key(
                         return Ok(());
                     }
                     remote.set_reasoning_effort(level).await?;
+                    return Ok(());
+                }
+
+                if trimmed == "/transport" {
+                    let current = app.remote_transport.as_deref().unwrap_or("unknown");
+                    let transports = ["auto", "https", "websocket"];
+                    let list: Vec<String> = transports
+                        .iter()
+                        .map(|t| {
+                            if Some(*t) == app.remote_transport.as_deref() {
+                                format!("**{}** ← current", t)
+                            } else {
+                                t.to_string()
+                            }
+                        })
+                        .collect();
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Transport: {}\nAvailable: {}\nUse `/transport <mode>` to change.",
+                        current,
+                        list.join(" · ")
+                    )));
+                    return Ok(());
+                }
+
+                if let Some(mode) = trimmed.strip_prefix("/transport ") {
+                    let mode = mode.trim();
+                    if mode.is_empty() {
+                        app.push_display_message(DisplayMessage::error(
+                            "Usage: /transport <mode>",
+                        ));
+                        return Ok(());
+                    }
+                    remote.set_transport(mode).await?;
                     return Ok(());
                 }
 

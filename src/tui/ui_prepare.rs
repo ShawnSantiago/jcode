@@ -56,10 +56,11 @@ fn prepare_messages_inner(
 ) -> PreparedMessages {
     let mut all_header_lines = header::build_persistent_header(app, width);
     all_header_lines.extend(build_header_lines(app, width));
-    let header_prepared = wrap_lines(all_header_lines, &[], width);
+    let header_prepared = wrap_lines(all_header_lines, &[], &[], width);
     let startup_prepared = if startup_active {
         wrap_lines(
             animations::build_startup_animation_lines(app, width),
+            &[],
             &[],
             width,
         )
@@ -68,6 +69,7 @@ fn prepare_messages_inner(
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
         }
@@ -83,6 +85,7 @@ fn prepare_messages_inner(
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
         }
@@ -91,6 +94,7 @@ fn prepare_messages_inner(
     let mut wrapped_lines: Vec<Line<'static>>;
     let wrapped_user_indices;
     let wrapped_user_prompt_starts;
+    let user_prompt_texts;
     let mut image_regions;
     let edit_tool_ranges;
 
@@ -131,6 +135,7 @@ fn prepare_messages_inner(
         wrapped_lines.extend(content_lines);
         wrapped_user_indices = Vec::new();
         wrapped_user_prompt_starts = Vec::new();
+        user_prompt_texts = Vec::new();
         image_regions = Vec::new();
         edit_tool_ranges = Vec::new();
     } else {
@@ -225,6 +230,8 @@ fn prepare_messages_inner(
             .map(|idx| idx + body_offset)
             .collect();
 
+        user_prompt_texts = body_prepared.user_prompt_texts.clone();
+
         image_regions = Vec::with_capacity(
             body_prepared.image_regions.len() + streaming_prepared.image_regions.len(),
         );
@@ -243,6 +250,7 @@ fn prepare_messages_inner(
             .edit_tool_ranges
             .iter()
             .map(|r| EditToolRange {
+                edit_index: r.edit_index,
                 msg_index: r.msg_index,
                 file_path: r.file_path.clone(),
                 start_line: r.start_line + body_offset,
@@ -255,6 +263,7 @@ fn prepare_messages_inner(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        user_prompt_texts,
         image_regions,
         edit_tool_ranges,
     }
@@ -332,10 +341,12 @@ fn prepare_body_incremental(
 
     let mut new_lines: Vec<Line> = Vec::new();
     let mut new_user_line_indices: Vec<usize> = Vec::new();
+    let mut new_user_prompt_texts: Vec<String> = Vec::new();
+    let mut new_edit_tool_line_ranges: Vec<(usize, String, usize, usize)> = Vec::new();
 
     let body_has_content = !prev.wrapped_lines.is_empty();
 
-    for msg in new_messages {
+    for (new_msg_offset, msg) in new_messages.iter().enumerate() {
         if (body_has_content || !new_lines.is_empty()) && msg.role != "tool" && msg.role != "meta" {
             new_lines.push(Line::from(""));
         }
@@ -344,6 +355,7 @@ fn prepare_body_incremental(
             "user" => {
                 prompt_num += 1;
                 new_user_line_indices.push(new_lines.len());
+                new_user_prompt_texts.push(msg.content.clone());
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 new_lines.push(
@@ -377,10 +389,52 @@ fn prepare_body_incremental(
                 );
             }
             "tool" => {
+                let tool_start_line = new_lines.len();
                 let cached =
                     get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
+                }
+                if let Some(ref tc) = msg.tool_data {
+                    let is_edit_tool = matches!(
+                        tc.name.as_str(),
+                        "edit"
+                            | "Edit"
+                            | "write"
+                            | "multiedit"
+                            | "patch"
+                            | "Patch"
+                            | "apply_patch"
+                            | "ApplyPatch"
+                    );
+                    if is_edit_tool {
+                        let file_path = tc
+                            .input
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                tc.input
+                                    .get("patch_text")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|patch_text| match tc.name.as_str() {
+                                        "apply_patch" | "ApplyPatch" => {
+                                            tools_ui::extract_apply_patch_primary_file(patch_text)
+                                        }
+                                        "patch" | "Patch" => {
+                                            tools_ui::extract_unified_patch_primary_file(patch_text)
+                                        }
+                                        _ => None,
+                                    })
+                            })
+                            .unwrap_or_else(|| "unknown".to_string());
+                        new_edit_tool_line_ranges.push((
+                            prev_msg_count + new_msg_offset,
+                            file_path,
+                            tool_start_line,
+                            new_lines.len(),
+                        ));
+                    }
                 }
             }
             "system" => {
@@ -498,7 +552,13 @@ fn prepare_body_incremental(
         }
     }
 
-    let new_wrapped = wrap_lines(new_lines, &new_user_line_indices, width);
+    let new_wrapped = wrap_lines_with_map(
+        new_lines,
+        &new_user_line_indices,
+        &new_user_prompt_texts,
+        width,
+        &new_edit_tool_line_ranges,
+    );
 
     let prev_len = prev.wrapped_lines.len();
     let mut wrapped_lines = Vec::with_capacity(prev_len + new_wrapped.wrapped_lines.len());
@@ -515,6 +575,9 @@ fn prepare_body_incremental(
         wrapped_user_prompt_starts.push(idx + prev_len);
     }
 
+    let mut user_prompt_texts = prev.user_prompt_texts.clone();
+    user_prompt_texts.extend(new_user_prompt_texts);
+
     let mut image_regions = prev.image_regions.clone();
     for region in new_wrapped.image_regions {
         image_regions.push(ImageRegion {
@@ -526,6 +589,7 @@ fn prepare_body_incremental(
     let mut edit_tool_ranges = prev.edit_tool_ranges.clone();
     for r in new_wrapped.edit_tool_ranges {
         edit_tool_ranges.push(EditToolRange {
+            edit_index: prev.edit_tool_ranges.len() + r.edit_index,
             msg_index: r.msg_index,
             file_path: r.file_path,
             start_line: r.start_line + prev_len,
@@ -537,6 +601,7 @@ fn prepare_body_incremental(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        user_prompt_texts,
         image_regions,
         edit_tool_ranges,
     })
@@ -553,6 +618,7 @@ fn prepare_streaming_cached(
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
         };
@@ -577,12 +643,13 @@ fn prepare_streaming_cached(
         lines.push(align_if_unset(line, align));
     }
 
-    wrap_lines(lines, &[], width)
+    wrap_lines(lines, &[], &[], width)
 }
 
 fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> PreparedMessages {
     let mut lines: Vec<Line> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new();
+    let mut user_prompt_texts: Vec<String> = Vec::new();
     let mut edit_tool_line_ranges: Vec<(usize, String, usize, usize)> = Vec::new();
     let centered = app.centered_mode();
     markdown::set_center_code_blocks(centered);
@@ -609,6 +676,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             "user" => {
                 prompt_num += 1;
                 user_line_indices.push(lines.len());
+                user_prompt_texts.push(msg.content.clone());
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 lines.push(
@@ -817,12 +885,19 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
         }
     }
 
-    wrap_lines_with_map(lines, &user_line_indices, width, &edit_tool_line_ranges)
+    wrap_lines_with_map(
+        lines,
+        &user_line_indices,
+        &user_prompt_texts,
+        width,
+        &edit_tool_line_ranges,
+    )
 }
 
 fn wrap_lines(
     lines: Vec<Line<'static>>,
     user_line_indices: &[usize],
+    user_prompt_texts: &[String],
     width: u16,
 ) -> PreparedMessages {
     let full_width = width.saturating_sub(1) as usize;
@@ -880,6 +955,7 @@ fn wrap_lines(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        user_prompt_texts: user_prompt_texts.to_vec(),
         image_regions,
         edit_tool_ranges: Vec::new(),
     }
@@ -888,6 +964,7 @@ fn wrap_lines(
 fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     user_line_indices: &[usize],
+    user_prompt_texts: &[String],
     width: u16,
     edit_ranges: &[(usize, String, usize, usize)],
 ) -> PreparedMessages {
@@ -954,6 +1031,7 @@ fn wrap_lines_with_map(
             .copied()
             .unwrap_or(wrapped_lines.len());
         edit_tool_ranges.push(EditToolRange {
+            edit_index: edit_tool_ranges.len(),
             msg_index: *msg_idx,
             file_path: file_path.clone(),
             start_line,
@@ -965,6 +1043,7 @@ fn wrap_lines_with_map(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        user_prompt_texts: user_prompt_texts.to_vec(),
         image_regions,
         edit_tool_ranges,
     }

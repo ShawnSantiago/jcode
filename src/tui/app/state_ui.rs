@@ -202,6 +202,14 @@ impl App {
                 .collect();
         }
 
+        if prefix.starts_with("/transport ") {
+            let transports = ["auto", "https", "websocket"];
+            return transports
+                .iter()
+                .map(|t| (format!("/transport {}", t), *t))
+                .collect();
+        }
+
         if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
             return crate::provider_catalog::tui_login_providers()
                 .iter()
@@ -236,6 +244,7 @@ impl App {
             ("/commands".into(), "Alias for /help"),
             ("/model".into(), "List or switch models"),
             ("/effort".into(), "Show/change reasoning effort (Alt+←/→)"),
+            ("/transport".into(), "Show/change connection transport (auto/https/websocket)"),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
             ("/poke".into(), "Poke model to resume with incomplete todos"),
@@ -413,6 +422,7 @@ impl App {
             "/help"
                 | "/model"
                 | "/effort"
+                | "/transport"
                 | "/login"
                 | "/auth"
                 | "/account"
@@ -754,17 +764,23 @@ impl App {
     }
 
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
-        if self.input.is_empty() {
+        if self.input.is_empty() && self.queued_messages.is_empty() {
             return;
         }
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let path = jcode_dir.join(format!("client-input-{}", session_id));
-            let data = format!("{}\n{}", self.cursor_pos, self.input);
-            let _ = std::fs::write(&path, &data);
+            let data = serde_json::json!({
+                "cursor": self.cursor_pos,
+                "input": self.input,
+                "queued_messages": self.queued_messages,
+            });
+            let _ = std::fs::write(&path, data.to_string());
         }
     }
 
-    pub(super) fn restore_input_from_reload(session_id: &str) -> Option<(String, usize)> {
+    pub(super) fn restore_input_for_reload(
+        session_id: &str,
+    ) -> Option<(String, usize, Vec<String>)> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
         if !path.exists() {
@@ -772,10 +788,32 @@ impl App {
         }
         let data = std::fs::read_to_string(&path).ok()?;
         let _ = std::fs::remove_file(&path);
+
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            let input = value
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let cursor = value.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let queued_messages = value
+                .get("queued_messages")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let cursor = cursor.min(input.len());
+            return Some((input, cursor, queued_messages));
+        }
+
         let (cursor_str, input) = data.split_once('\n')?;
         let cursor = cursor_str.parse::<usize>().unwrap_or(0);
         let cursor = cursor.min(input.len());
-        Some((input.to_string(), cursor))
+        Some((input.to_string(), cursor, Vec::new()))
     }
 
     /// Toggle scroll bookmark: stash current position and jump to bottom,
@@ -813,9 +851,7 @@ impl App {
 
     /// Enable debug socket and return the broadcast receiver
     /// Call this before run() to enable debug event broadcasting
-    pub fn enable_debug_socket(
-        &mut self,
-    ) -> tokio::sync::broadcast::Receiver<backend::DebugEvent> {
+    pub fn enable_debug_socket(&mut self) -> tokio::sync::broadcast::Receiver<backend::DebugEvent> {
         let (tx, rx) = tokio::sync::broadcast::channel(256);
         self.debug_tx = Some(tx);
         rx

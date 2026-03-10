@@ -125,6 +125,10 @@ pub enum Request {
     #[serde(rename = "set_reasoning_effort")]
     SetReasoningEffort { id: u64, effort: String },
 
+    /// Set connection transport for OpenAI models (auto|https|websocket)
+    #[serde(rename = "set_transport")]
+    SetTransport { id: u64, transport: String },
+
     /// Set Copilot premium request conservation mode (0=normal, 1=one-per-session, 2=zero)
     #[serde(rename = "set_premium_mode")]
     SetPremiumMode { id: u64, mode: u8 },
@@ -636,6 +640,16 @@ pub enum ServerEvent {
         error: Option<String>,
     },
 
+    /// Transport changed (response to set_transport)
+    #[serde(rename = "transport_changed")]
+    TransportChanged {
+        id: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transport: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
     AvailableModelsUpdated {
@@ -853,6 +867,7 @@ impl Request {
             Request::CycleModel { id, .. } => *id,
             Request::SetModel { id, .. } => *id,
             Request::SetReasoningEffort { id, .. } => *id,
+            Request::SetTransport { id, .. } => *id,
             Request::SetPremiumMode { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,
             Request::Split { id } => *id,

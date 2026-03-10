@@ -94,8 +94,6 @@ struct PinnedImagePlacement {
     rows: u16,
 }
 
-
-
 static PINNED_CACHE: OnceLock<Mutex<PinnedCacheState>> = OnceLock::new();
 
 fn pinned_cache() -> &'static Mutex<PinnedCacheState> {

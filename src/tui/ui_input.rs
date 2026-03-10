@@ -5,6 +5,7 @@ use super::{
     accent_color, ai_color, animated_tool_color, asap_color, dim_color, is_unexpected_cache_miss,
     pending_color, queued_color, rainbow_prompt_color, user_color, ProcessingStatus, TuiState,
 };
+use crate::message::ConnectionPhase;
 use crate::tui::color_support::rgb;
 use ratatui::{prelude::*, widgets::Paragraph};
 
@@ -109,6 +110,32 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
     frame.render_widget(paragraph, area);
 }
 
+fn format_stream_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.0}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn connection_phase_label(phase: &ConnectionPhase) -> String {
+    match phase {
+        ConnectionPhase::Authenticating => "refreshing auth".to_string(),
+        ConnectionPhase::Connecting => "connecting".to_string(),
+        ConnectionPhase::WaitingForResponse => "waiting for first token".to_string(),
+        ConnectionPhase::Streaming => "streaming".to_string(),
+        ConnectionPhase::Retrying { attempt, max } => format!("retrying {}/{}", attempt, max),
+    }
+}
+
+fn append_stream_route(status_text: &mut String, app: &dyn TuiState) {
+    if let Some(upstream) = app.upstream_provider() {
+        status_text.push_str(&format!(" · via {}", upstream));
+    }
+}
+
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
@@ -185,10 +212,15 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 Line::from(spans)
             }
             ProcessingStatus::Connecting(ref phase) => {
-                let mut label = format!(" {}… {}", phase, format_elapsed(elapsed));
+                let mut label = format!(
+                    " {}… {}",
+                    connection_phase_label(phase),
+                    format_elapsed(elapsed)
+                );
                 if let Some(conn) = app.connection_type() {
                     label.push_str(&format!(" · {}", conn));
                 }
+                append_stream_route(&mut label, app);
                 let label_color = match phase {
                     crate::message::ConnectionPhase::Retrying { .. } => rgb(255, 193, 7),
                     crate::message::ConnectionPhase::Authenticating if elapsed > 10.0 => {
@@ -239,8 +271,14 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     status_text = format!("{} · {:.1} tps", status_text, tps);
                 }
                 if input_tokens > 0 || output_tokens > 0 {
-                    status_text = format!("{} · ↑{} ↓{}", status_text, input_tokens, output_tokens);
+                    status_text = format!(
+                        "{} · ↑{} ↓{}",
+                        status_text,
+                        format_stream_tokens(input_tokens),
+                        format_stream_tokens(output_tokens)
+                    );
                 }
+                append_stream_route(&mut status_text, app);
                 if unexpected_cache_miss {
                     let miss_tokens = cache_creation.unwrap_or(0);
                     let miss_str = if miss_tokens >= 1000 {

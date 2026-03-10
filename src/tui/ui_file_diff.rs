@@ -362,17 +362,12 @@ pub(super) fn active_file_diff_context(
     visible_height: usize,
 ) -> Option<ActiveFileDiffContext> {
     let range = find_visible_edit_tool(&prepared.edit_tool_ranges, scroll, visible_height)?;
-    let edit_index = prepared.edit_tool_ranges.iter().position(|candidate| {
-        candidate.msg_index == range.msg_index
-            && candidate.start_line == range.start_line
-            && candidate.end_line == range.end_line
-            && candidate.file_path == range.file_path
-    })? + 1;
-
     Some(ActiveFileDiffContext {
-        edit_index,
+        edit_index: range.edit_index + 1,
         msg_index: range.msg_index,
         file_path: range.file_path.clone(),
+        start_line: range.start_line,
+        end_line: range.end_line,
     })
 }
 
