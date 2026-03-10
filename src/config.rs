@@ -973,6 +973,7 @@ prompt_entry_animation = true
 # performance = "auto"
 
 # Animation FPS (startup animation, idle donut): 1-120 (default: 60)
+# Startup animation is skipped entirely if animation_fps < 20 (shows nothing instead of low-FPS jank)
 # animation_fps = 60
 
 # Active redraw FPS (processing, streaming, spinners): 1-120 (default: 30)

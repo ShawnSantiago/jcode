@@ -276,10 +276,14 @@ pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(1000);
 const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const STARTUP_ANIMATION_WINDOW: Duration = Duration::from_millis(3000);
 
+const STARTUP_ANIMATION_MIN_FPS: u32 = 20;
+
 pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
     let tier = crate::perf::profile().tier;
+    let cfg = &crate::config::config().display;
     crate::config::config().display.startup_animation
         && tier.startup_animation_enabled()
+        && cfg.animation_fps >= STARTUP_ANIMATION_MIN_FPS
         && state.animation_elapsed() < STARTUP_ANIMATION_WINDOW.as_secs_f32()
         && !state.is_processing()
         && state.display_messages().is_empty()
