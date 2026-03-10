@@ -286,25 +286,12 @@ pub(super) async fn connect_with_retry(
                 tokio::select! {
                     _ = &mut sleep => break,
                     event = event_stream.next() => {
-                        if let Some(Ok(Event::Key(key))) = event {
-                            if key.kind == KeyEventKind::Press {
-                                if key.code == KeyCode::Char('c')
-                                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                                {
-                                    return Ok(ConnectOutcome::Quit);
-                                }
-                                if let Some(amount) = app
-                                    .scroll_keys
-                                    .scroll_amount(key.code, key.modifiers)
-                                {
-                                    if amount < 0 {
-                                        app.scroll_up((-amount) as usize);
-                                    } else {
-                                        app.scroll_down(amount as usize);
-                                    }
-                                    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
-                                }
-                            }
+                        if handle_terminal_event_while_disconnected(
+                            app,
+                            terminal,
+                            event,
+                        )? {
+                            return Ok(ConnectOutcome::Quit);
                         }
                     }
                 }
@@ -313,6 +300,40 @@ pub(super) async fn connect_with_retry(
             Ok(ConnectOutcome::Retry)
         }
     }
+}
+
+fn handle_terminal_event_while_disconnected(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    event: Option<std::result::Result<Event, std::io::Error>>,
+) -> Result<bool> {
+    let mut needs_redraw = false;
+
+    match event {
+        Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+            handle_disconnected_key(app, key.code, key.modifiers)?;
+            needs_redraw = true;
+        }
+        Some(Ok(Event::Paste(text))) => {
+            app.handle_paste(text);
+            needs_redraw = true;
+        }
+        Some(Ok(Event::Mouse(mouse))) => {
+            handle_mouse_event(app, mouse);
+            needs_redraw = true;
+        }
+        Some(Ok(Event::Resize(_, _))) => {
+            let _ = terminal.clear();
+            needs_redraw = true;
+        }
+        _ => {}
+    }
+
+    if needs_redraw {
+        terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+    }
+
+    Ok(app.should_quit)
 }
 
 pub(super) async fn handle_post_connect(
@@ -546,6 +567,7 @@ pub(super) fn handle_disconnect(app: &mut App, state: &mut RemoteRunState) {
     }
     app.clear_streaming_render_state();
     app.streaming_tool_calls.clear();
+    app.batch_progress = None;
     app.thought_line_inserted = false;
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
@@ -951,6 +973,14 @@ pub(super) fn handle_server_event(
                 "connecting" => crate::message::ConnectionPhase::Connecting,
                 "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
                 "streaming" => crate::message::ConnectionPhase::Streaming,
+                _ if phase.starts_with("retrying (") && phase.ends_with(')') => {
+                    let inner = &phase[10..phase.len() - 1];
+                    let (attempt, max) = inner
+                        .split_once('/')
+                        .and_then(|(a, m)| Some((a.parse::<u32>().ok()?, m.parse::<u32>().ok()?)))
+                        .unwrap_or((1, 1));
+                    crate::message::ConnectionPhase::Retrying { attempt, max }
+                }
                 _ => crate::message::ConnectionPhase::Connecting,
             };
             app.status = ProcessingStatus::Connecting(cp);
@@ -1554,6 +1584,120 @@ pub(super) fn handle_remote_char_input(app: &mut App, c: char) {
     app.follow_chat_bottom();
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
+}
+
+fn queue_message_for_reconnect(app: &mut App) {
+    if app.input.trim().is_empty() {
+        return;
+    }
+
+    let prepared = input::take_prepared_input(app);
+    app.queued_messages.push(prepared.expanded);
+
+    let queued_count = app.queued_messages.len();
+    app.set_status_notice(format!(
+        "Queued for send after reconnect ({} message{})",
+        queued_count,
+        if queued_count == 1 { "" } else { "s" }
+    ));
+}
+
+pub(super) fn handle_disconnected_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Result<()> {
+    let mut code = code;
+    let mut modifiers = modifiers;
+    ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+    if input::handle_navigation_shortcuts(app, code, modifiers) {
+        return Ok(());
+    }
+
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('c') | KeyCode::Char('d') => {
+                app.handle_quit_request();
+                return Ok(());
+            }
+            KeyCode::Char('l') if !app.diff_pane_visible() => {
+                app.clear_display_messages();
+                app.queued_messages.clear();
+                return Ok(());
+            }
+            _ => {
+                if input::handle_control_key(app, code) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    if modifiers.contains(KeyModifiers::ALT) && input::handle_alt_key(app, code) {
+        return Ok(());
+    }
+
+    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+        queue_message_for_reconnect(app);
+        return Ok(());
+    }
+
+    match code {
+        KeyCode::Char(c) => handle_remote_char_input(app, c),
+        KeyCode::Backspace => {
+            if app.cursor_pos > 0 {
+                let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.input.drain(prev..app.cursor_pos);
+                app.cursor_pos = prev;
+                app.reset_tab_completion();
+                app.sync_model_picker_preview_from_input();
+            }
+        }
+        KeyCode::Delete => {
+            if app.cursor_pos < app.input.len() {
+                let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.input.drain(app.cursor_pos..next);
+                app.reset_tab_completion();
+                app.sync_model_picker_preview_from_input();
+            }
+        }
+        KeyCode::Left => {
+            if app.cursor_pos > 0 {
+                app.cursor_pos = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+            }
+        }
+        KeyCode::Right => {
+            if app.cursor_pos < app.input.len() {
+                app.cursor_pos = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+            }
+        }
+        KeyCode::Home => app.cursor_pos = 0,
+        KeyCode::End => app.cursor_pos = app.input.len(),
+        KeyCode::Tab => {
+            app.autocomplete();
+        }
+        KeyCode::Enter => {
+            queue_message_for_reconnect(app);
+        }
+        KeyCode::Up | KeyCode::PageUp => {
+            let inc = if code == KeyCode::PageUp { 10 } else { 1 };
+            app.scroll_up(inc);
+        }
+        KeyCode::Down | KeyCode::PageDown => {
+            let dec = if code == KeyCode::PageDown { 10 } else { 1 };
+            app.scroll_down(dec);
+        }
+        KeyCode::Esc => {
+            app.follow_chat_bottom();
+            app.input.clear();
+            app.cursor_pos = 0;
+            app.sync_model_picker_preview_from_input();
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 pub(super) async fn send_interleave_now(

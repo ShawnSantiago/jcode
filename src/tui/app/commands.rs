@@ -337,6 +337,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         app.thinking_prefix_emitted = false;
         app.thinking_buffer.clear();
         app.streaming_tool_calls.clear();
+        app.batch_progress = None;
         app.streaming_input_tokens = 0;
         app.streaming_output_tokens = 0;
         app.streaming_cache_read_tokens = None;
