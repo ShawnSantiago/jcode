@@ -1,5 +1,14 @@
 # Unified Self-Dev / Normal Server Plan
 
+> Status: **Implemented.**
+>
+> This document is preserved as a historical design/rollout plan. The current
+> architecture uses a single shared server, with self-dev handled as a
+> session-local canary capability rather than a separate dedicated daemon/socket.
+> Any references below to `/tmp/jcode-selfdev.sock`, `canary-wrapper`, or
+> `JCODE_SELFDEV_MODE` describe the pre-merge architecture or transition steps,
+> not the current runtime design.
+
 ## Goal
 
 Reduce RAM usage by removing the dedicated self-dev daemon/socket pair and treating self-dev as a **session capability** on the normal shared server.

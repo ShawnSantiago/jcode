@@ -1,6 +1,6 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode and what providers/models are popular. This data helps prioritize development.
+jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, and whether sessions are succeeding or crashing. This data helps prioritize development without collecting prompts or code.
 
 ## What We Collect
 
@@ -14,43 +14,65 @@ jcode collects **anonymous, minimal usage statistics** to help understand how ma
 | `os` | `"linux"` | Operating system |
 | `arch` | `"x86_64"` | CPU architecture |
 
-### Session End Event (sent when you close jcode)
+### Session Start Event
 
 | Field | Example | Purpose |
 |-------|---------|----------|
 | `id` | `a1b2c3d4-...` | Same random UUID |
-| `event` | `"session_end"` | Event type |
+| `event` | `"session_start"` | Event type |
 | `version` | `"0.6.0"` | jcode version |
 | `os` | `"linux"` | Operating system |
 | `arch` | `"x86_64"` | CPU architecture |
-| `provider_start` | `"claude"` | Provider when session started |
-| `provider_end` | `"claude"` | Provider when session ended |
-| `model_start` | `"claude-sonnet-4-20250514"` | Model when session started |
-| `model_end` | `"claude-sonnet-4-20250514"` | Model when session ended |
+| `provider_start` | `"OpenAI"` | Provider when session started |
+| `model_start` | `"gpt-5.4"` | Model when session started |
+| `resumed_session` | `false` | Whether this was a resumed session |
+
+### Session End / Crash Event
+
+| Field | Example | Purpose |
+|-------|---------|----------|
+| `id` | `a1b2c3d4-...` | Same random UUID |
+| `event` | `"session_end"` / `"session_crash"` | Event type |
+| `version` | `"0.6.0"` | jcode version |
+| `os` | `"linux"` | Operating system |
+| `arch` | `"x86_64"` | CPU architecture |
+| `provider_start` | `"OpenAI"` | Provider when session started |
+| `provider_end` | `"OpenAI"` | Provider when session ended |
+| `model_start` | `"gpt-5.4"` | Model when session started |
+| `model_end` | `"gpt-5.4"` | Model when session ended |
 | `provider_switches` | `0` | How many times you switched providers |
 | `model_switches` | `1` | How many times you switched models |
 | `duration_mins` | `45` | Session length in minutes |
-| `turns` | `23` | Number of messages you sent |
+| `turns` | `23` | Number of user prompts sent |
+| `had_user_prompt` | `true` | Whether any real prompt was submitted |
+| `had_assistant_response` | `true` | Whether the assistant produced a response |
+| `assistant_responses` | `6` | Number of assistant responses |
+| `tool_calls` | `8` | Number of tool executions |
+| `tool_failures` | `1` | Number of tool execution failures |
+| `resumed_session` | `false` | Whether this session was resumed |
+| `end_reason` | `"normal_exit"` | Coarse end reason |
 | `errors` | `{"provider_timeout": 0, ...}` | Count of errors by category |
 
 ## What We Do NOT Collect
 
 - No file paths, project names, or directory structures
 - No code, prompts, or LLM responses
-- No tool names or tool outputs
+- No tool inputs or tool outputs
 - No MCP server names or configurations
 - No IP addresses (Cloudflare Workers don't log these by default)
 - No personal information of any kind
-- No error messages (only category counts like "2 timeouts")
+- No error messages or stack traces in telemetry (only coarse categories and end reasons)
 
 The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id`. It is not derived from your machine, username, email, or any identifiable information.
 
 ## How It Works
 
 1. On first launch, jcode generates a random UUID and sends an `install` event
-2. When you close a session, jcode sends a `session_end` event with session metrics
-3. Both requests are fire-and-forget HTTP POSTs that don't block startup or shutdown
-4. If the request fails (offline, firewall, etc.), jcode silently continues - no retries, no queuing
+2. When a session begins, jcode sends a `session_start` event
+3. When a session ends normally, jcode sends a `session_end` event with coarse session metrics
+4. On best-effort crash/signal handling, jcode sends a `session_crash` event
+5. Requests are fire-and-forget HTTP POSTs that don't block startup or shutdown
+6. If a request fails (offline, firewall, etc.), jcode silently continues - no retries, no queuing
 
 The telemetry endpoint is a Cloudflare Worker that stores events in a D1 database. The source code for the worker is in [`telemetry-worker/`](./telemetry-worker/).
 
@@ -77,4 +99,4 @@ This is open source. The entire telemetry implementation is in [`src/telemetry.r
 
 ## Data Retention
 
-Telemetry data is used in aggregate only (total installs, active users per week, provider distribution). Individual event records are retained for up to 12 months and then deleted.
+Telemetry data is used in aggregate only (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
