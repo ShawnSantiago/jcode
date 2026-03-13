@@ -321,19 +321,23 @@ pub async fn exchange_callback_input(
     expected_state: Option<&str>,
     redirect_uri: &str,
 ) -> Result<GeminiTokens> {
-    let code = if let Some(expected_state) = expected_state {
+    let (code, verifier) = if let Some(expected_state) = expected_state {
         let (code, callback_state) = crate::auth::oauth::parse_callback_input_with_state(input)?;
         if callback_state != expected_state {
             anyhow::bail!(
                 "OAuth state mismatch. Start Gemini login again and use the latest callback URL."
             );
         }
-        code
+        (code, None)
     } else {
-        input.trim().to_string()
+        (input.trim().to_string(), Some(verifier))
     };
 
-    exchange_authorization_code(&code, Some(verifier), redirect_uri).await
+    exchange_authorization_code(&code, verifier, redirect_uri).await
+}
+
+pub async fn exchange_callback_code(code: &str, redirect_uri: &str) -> Result<GeminiTokens> {
+    exchange_authorization_code(code, None, redirect_uri).await
 }
 
 async fn exchange_authorization_code(
