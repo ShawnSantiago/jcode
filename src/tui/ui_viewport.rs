@@ -281,7 +281,11 @@ pub(super) fn draw_messages(
                 } else {
                     Style::default().fg(Color::Red).bold()
                 };
-                let feedback_text = if success { " ✓ Copied!" } else { " ✗ Copy failed" };
+                let feedback_text = if success {
+                    " ✓ Copied!"
+                } else {
+                    " ✗ Copy failed"
+                };
                 line.spans.push(Span::styled(feedback_text, feedback_style));
                 line.spans.push(Span::raw(" "));
             }

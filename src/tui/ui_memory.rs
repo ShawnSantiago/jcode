@@ -254,7 +254,7 @@ pub(super) fn render_memory_tiles(
     let min_box_inner = 16usize;
     let min_box_width = min_box_inner + 4;
     let gap = 2usize;
-    let row_gap = 1usize;
+    let row_gap = 0usize;
     let usable_width = total_width.max(min_box_width);
 
     #[derive(Clone)]
@@ -351,6 +351,25 @@ pub(super) fn render_memory_tiles(
             - column_heights.iter().copied().min().unwrap_or(0);
         let used_width = column_count * column_width + gap * column_count.saturating_sub(1);
         let leftover_width = usable_width.saturating_sub(used_width);
+
+        // Vertical centering: if this column arrangement has imbalanced columns,
+        // center shorter columns' tiles vertically within the available space.
+        let max_col_height = *column_heights.iter().max().unwrap_or(&0);
+        for (col_idx, col_height) in column_heights.iter().enumerate() {
+            if *col_height < max_col_height {
+                let extra = max_col_height - col_height;
+                let offset = extra / 2;
+                if offset > 0 {
+                    for placed in placements.iter_mut() {
+                        let start_col = placed.x / (column_width + gap);
+                        if start_col == col_idx {
+                            placed.y += offset;
+                        }
+                    }
+                }
+            }
+        }
+
         let layout_score = total_height * 100 + imbalance * 3 + leftover_width;
 
         match &best_layout {

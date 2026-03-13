@@ -107,9 +107,7 @@ pub(crate) fn render_system_message(
     let mut lines = markdown::render_markdown_with_width(&msg.content, Some(width as usize));
     for line in &mut lines {
         for span in &mut line.spans {
-            if span.style.fg.is_none() {
-                span.style.fg = Some(system_message_color());
-            }
+            span.style.fg = Some(system_message_color());
         }
     }
     lines
@@ -542,6 +540,25 @@ pub(crate) fn render_tool_message(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_system_message_forces_system_color_on_all_spans() {
+        let msg = DisplayMessage::system("**Reload complete** — continuing.");
+
+        let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+
+        assert!(!lines.is_empty(), "expected rendered system message lines");
+        for line in lines {
+            for span in line.spans {
+                assert_eq!(span.style.fg, Some(system_message_color()));
+            }
+        }
+    }
 }
 
 fn hash_display_message(msg: &DisplayMessage) -> u64 {

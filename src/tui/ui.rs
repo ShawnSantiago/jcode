@@ -29,10 +29,10 @@ mod file_diff_ui;
 mod header;
 #[path = "ui_input.rs"]
 mod input_ui;
-#[path = "ui_messages.rs"]
-mod messages;
 #[path = "ui_memory.rs"]
 mod memory_ui;
+#[path = "ui_messages.rs"]
+mod messages;
 #[path = "ui_overlays.rs"]
 mod overlays;
 #[path = "ui_picker.rs"]
@@ -61,13 +61,13 @@ use file_diff_ui::{
     file_content_signature, file_diff_cache, FileDiffCacheKey, FileDiffViewCacheEntry,
 };
 pub(crate) use header::capitalize;
+#[cfg(test)]
+use memory_ui::{choose_memory_tile_span, plan_memory_tile};
 use memory_ui::{group_into_tiles, render_memory_tiles, split_by_display_width};
 use messages::get_cached_message_lines;
 pub(crate) use messages::{
     render_assistant_message, render_swarm_message, render_system_message, render_tool_message,
 };
-#[cfg(test)]
-use memory_ui::{choose_memory_tile_span, plan_memory_tile};
 use picker_ui::draw_picker_line;
 use pinned_ui::{collect_pinned_content_cached, draw_pinned_content_cached};
 use tools_ui::get_tool_summary;
@@ -3341,15 +3341,9 @@ mod tests {
         let preference = tiles.remove(0);
         let fact = tiles.remove(0);
 
-        let preference_plan = choose_memory_tile_span(
-            &preference,
-            20,
-            2,
-            2,
-            border_style,
-            text_style,
-        )
-        .expect("preference span plan");
+        let preference_plan =
+            choose_memory_tile_span(&preference, 20, 2, 2, border_style, text_style)
+                .expect("preference span plan");
         let fact_plan = choose_memory_tile_span(&fact, 20, 2, 2, border_style, text_style)
             .expect("fact span plan");
         let preference_width = preference_plan.0.width;
