@@ -16,14 +16,41 @@
       <div class="chat-stream">
         <div class="line line-system">Connected over Tailscale</div>
         <div class="line line-user">Summarize the reload path and check build status.</div>
-        <div class="line line-ai">Checked the server reload flow and verified selfdev hooks. Tightening the handoff next.</div>
-        <div class="line line-tool mono"><span class="tool-indicator">●</span> selfdev <span class="tool-meta">{"action":"status"}</span></div>
-        <div class="line line-tool-out mono">v0.4.2-dev (a3a5f32) canary=active</div>
-        <div class="line line-ai">Build is current. Prepared a mobile-first concept for the iOS client handoff.</div>
-        <div class="line line-user">Make the chat view more compact, like a markdown doc.</div>
-        <div class="line line-ai">Done. Stripped bubbles, using color-coded lines with no wasted space.</div>
-        <div class="line line-tool mono"><span class="tool-indicator">●</span> file_write <span class="tool-meta">chat.html</span></div>
-        <div class="line line-tool-out mono">created 40 lines</div>
+        <div class="line line-ai">Checked the server reload flow and verified selfdev hooks.</div>
+
+        <!-- Completed tool chain - collapsed -->
+        <details class="tool-chain">
+          <summary class="tool-chain-summary mono"><span class="tool-indicator">●</span> selfdev, file_read, grep <span class="tool-count">3 tools</span></summary>
+          <div class="tool-chain-detail mono">
+            <div class="tool-detail-line"><span class="tool-indicator">●</span> selfdev <span class="tool-meta">{"action":"status"}</span></div>
+            <div class="tool-detail-out">v0.4.2-dev (a3a5f32) canary=active</div>
+            <div class="tool-detail-line"><span class="tool-indicator">●</span> file_read <span class="tool-meta">src/server/reload.rs</span></div>
+            <div class="tool-detail-out">245 lines</div>
+            <div class="tool-detail-line"><span class="tool-indicator">●</span> grep <span class="tool-meta">"reload" src/server/</span></div>
+            <div class="tool-detail-out">12 matches</div>
+          </div>
+        </details>
+
+        <div class="line line-ai">Build is current. Prepared a mobile concept for the iOS handoff.</div>
+        <div class="line line-user">Make the chat view more compact.</div>
+        <div class="line line-ai">Done. Tool chains now collapse to one line after finishing.</div>
+
+        <!-- Completed single tool - collapsed -->
+        <details class="tool-chain">
+          <summary class="tool-chain-summary mono"><span class="tool-indicator">●</span> file_write <span class="tool-count">1 tool</span></summary>
+          <div class="tool-chain-detail mono">
+            <div class="tool-detail-line"><span class="tool-indicator">●</span> file_write <span class="tool-meta">chat.html</span></div>
+            <div class="tool-detail-out">created 35 lines</div>
+          </div>
+        </details>
+
+        <div class="line line-ai">Updated the chat view.</div>
+
+        <!-- Currently running tool - expanded, live -->
+        <div class="tool-live mono">
+          <div class="tool-detail-line"><span class="tool-indicator-live">◉</span> bash <span class="tool-meta">cargo build --release</span></div>
+          <div class="tool-detail-out">Compiling jcode v0.4.2…</div>
+        </div>
       </div>
       <div class="composer-bar">
         <div class="compose-field">Message…</div>

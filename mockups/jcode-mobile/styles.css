@@ -212,7 +212,40 @@ body.gallery { padding: 48px 32px 80px; }
 .line-tool { color: var(--text-3); font-size: 12px; }
 .line-tool-out { color: var(--text-3); font-size: 11px; padding-left: 14px; }
 .tool-indicator { color: var(--green); text-shadow: 0 0 6px var(--green); font-size: 8px; vertical-align: middle; }
+.tool-indicator-live { color: var(--amber); text-shadow: 0 0 8px var(--amber); font-size: 10px; vertical-align: middle; }
 .tool-meta { color: var(--text-3); }
+.tool-count { color: var(--text-3); margin-left: 4px; }
+
+.tool-chain {
+  padding: 0;
+}
+
+.tool-chain-summary {
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+  padding: 2px 0;
+}
+
+.tool-chain-summary::-webkit-details-marker { display: none; }
+
+.tool-chain-detail {
+  padding: 4px 0 4px 14px;
+  border-left: 1px solid rgba(255,255,255,0.04);
+  margin-left: 3px;
+  margin-top: 2px;
+}
+
+.tool-detail-line { color: var(--text-3); font-size: 12px; padding: 1px 0; }
+.tool-detail-out { color: var(--text-3); font-size: 11px; padding-left: 14px; opacity: 0.6; }
+
+.tool-live {
+  padding: 4px 0;
+  border-left: 1px solid rgba(255,171,0,0.2);
+  padding-left: 10px;
+  margin-left: 3px;
+}
 
 .composer-bar {
   padding: 10px 16px 28px;
