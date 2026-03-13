@@ -5,15 +5,25 @@ use std::io::{self, IsTerminal, Write};
 const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
-const GEMINI_OAUTH_CLIENT_ID: &str =
-    "set-gemini-client-id-in-env.apps.googleusercontent.com";
-const GEMINI_OAUTH_CLIENT_SECRET: &str = "set-gemini-client-secret-in-env";
 const GEMINI_MANUAL_REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
 const GEMINI_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ];
+
+const GEMINI_OAUTH_CLIENT_ID: &str =
+    "set-gemini-client-id-in-env.apps.googleusercontent.com";
+const GEMINI_OAUTH_CLIENT_SECRET: &str = "set-gemini-client-secret-in-env";
+
+fn gemini_client_id() -> String {
+    std::env::var("GEMINI_CLIENT_ID").unwrap_or_else(|_| GEMINI_OAUTH_CLIENT_ID.to_string())
+}
+
+fn gemini_client_secret() -> String {
+    std::env::var("GEMINI_CLIENT_SECRET")
+        .unwrap_or_else(|_| GEMINI_OAUTH_CLIENT_SECRET.to_string())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeminiCliCommand {
@@ -123,8 +133,12 @@ pub fn load_tokens() -> Result<GeminiTokens> {
             .with_context(|| format!("Failed to read {}", cli_path.display()))?;
         let imported: GeminiCliOAuthCredentials = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse {}", cli_path.display()))?;
-        let refresh_token = imported.refresh_token.filter(|value| !value.trim().is_empty());
-        let access_token = imported.access_token.filter(|value| !value.trim().is_empty());
+        let refresh_token = imported
+            .refresh_token
+            .filter(|value| !value.trim().is_empty());
+        let access_token = imported
+            .access_token
+            .filter(|value| !value.trim().is_empty());
         if let (Some(refresh_token), Some(access_token)) = (refresh_token, access_token) {
             let expires_at = imported
                 .expiry_date
@@ -176,8 +190,8 @@ pub async fn refresh_tokens(tokens: &GeminiTokens) -> Result<GeminiTokens> {
         .post(GOOGLE_TOKEN_URL)
         .form(&[
             ("grant_type", "refresh_token"),
-            ("client_id", GEMINI_OAUTH_CLIENT_ID),
-            ("client_secret", GEMINI_OAUTH_CLIENT_SECRET),
+            ("client_id", &gemini_client_id()),
+            ("client_secret", &gemini_client_secret()),
             ("refresh_token", tokens.refresh_token.as_str()),
         ])
         .send()
@@ -286,9 +300,7 @@ async fn manual_login(verifier: &str, challenge: &str, state: &str) -> Result<Ge
     if !browser_suppressed() {
         let _ = open::that(&auth_url);
     }
-    eprintln!(
-        "After approving access, Google will show an authorization code. Paste it below.\n"
-    );
+    eprintln!("After approving access, Google will show an authorization code. Paste it below.\n");
     eprint!("Authorization code: ");
     io::stdout().flush()?;
     let code = crate::cli::login::read_secret_line()?;
@@ -313,8 +325,8 @@ async fn exchange_authorization_code(
         .post(GOOGLE_TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
-            ("client_id", GEMINI_OAUTH_CLIENT_ID),
-            ("client_secret", GEMINI_OAUTH_CLIENT_SECRET),
+            ("client_id", &gemini_client_id()),
+            ("client_secret", &gemini_client_secret()),
             ("code", code.trim()),
             ("code_verifier", verifier),
             ("redirect_uri", redirect_uri),
@@ -374,10 +386,11 @@ pub async fn fetch_email(access_token: &str) -> Result<String> {
 
 fn build_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
     let scope = GEMINI_SCOPES.join(" ");
+    let client_id = gemini_client_id();
     format!(
         "{base}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scope}&code_challenge={challenge}&code_challenge_method=S256&state={state}&access_type=offline&prompt=consent",
         base = GOOGLE_AUTHORIZE_URL,
-        client_id = urlencoding::encode(GEMINI_OAUTH_CLIENT_ID),
+        client_id = urlencoding::encode(&client_id),
         redirect_uri = urlencoding::encode(redirect_uri),
         scope = urlencoding::encode(&scope),
         challenge = urlencoding::encode(challenge),
@@ -485,9 +498,7 @@ mod tests {
     #[test]
     fn parses_env_command_with_args() {
         let resolved =
-            resolve_gemini_cli_command_with(Some("npx @google/gemini-cli --proxy test"), |_| {
-                false
-            });
+            resolve_gemini_cli_command_with(Some("npx @google/gemini-cli --proxy test"), |_| false);
         assert_eq!(
             resolved,
             GeminiCliCommand {
@@ -526,11 +537,7 @@ mod tests {
 
     #[test]
     fn build_auth_url_contains_expected_redirect_uri() {
-        let url = build_auth_url(
-            GEMINI_MANUAL_REDIRECT_URI,
-            "challenge-123",
-            "state-123",
-        );
+        let url = build_auth_url(GEMINI_MANUAL_REDIRECT_URI, "challenge-123", "state-123");
         assert!(url.contains("codeassist.google.com%2Fauthcode"));
         assert!(url.contains("code_challenge=challenge-123"));
         assert!(url.contains("state=state-123"));
