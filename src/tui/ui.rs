@@ -879,40 +879,37 @@ fn plan_memory_tile(
     })
 }
 
-fn choose_memory_tile_width(
+fn choose_memory_tile_span(
     tile: &MemoryTile,
-    min_box_width: usize,
-    max_box_width: usize,
+    column_width: usize,
+    gap: usize,
+    max_span: usize,
     border_style: Style,
     text_style: Style,
-) -> usize {
-    let mut best_width = min_box_width;
-    let mut best_score = usize::MAX;
+) -> Option<(MemoryTilePlan, usize)> {
+    let single = plan_memory_tile(tile, column_width, border_style, text_style)?;
+    let mut best_plan = single.clone();
+    let mut best_span = 1usize;
 
-    let mut candidates = vec![min_box_width.min(max_box_width), max_box_width];
-    let mid = (min_box_width + max_box_width) / 2;
-    candidates.push(mid);
-    if max_box_width > min_box_width {
-        candidates.push((min_box_width + max_box_width * 2) / 3);
-    }
-    candidates.sort_unstable();
-    candidates.dedup();
+    for span in 2..=max_span.max(1) {
+        let width = column_width * span + gap * span.saturating_sub(1);
+        let Some(plan) = plan_memory_tile(tile, width, border_style, text_style) else {
+            continue;
+        };
 
-    for width in candidates
-        .into_iter()
-        .filter(|w| *w >= min_box_width && *w <= max_box_width)
-    {
-        if let Some(plan) = plan_memory_tile(tile, width, border_style, text_style) {
-            let whitespace = width * plan.height;
-            let score = whitespace.saturating_sub(plan.score * 2);
-            if score < best_score {
-                best_score = score;
-                best_width = width;
-            }
+        let single_area = single.width * single.height;
+        let span_area = plan.width * plan.height;
+        let height_gain = single.height.saturating_sub(plan.height);
+        let area_gain = single_area.saturating_sub(span_area);
+
+        if height_gain >= 2 || (height_gain >= 1 && area_gain > column_width) {
+            best_plan = plan;
+            best_span = span;
+            break;
         }
     }
 
-    best_width
+    Some((best_plan, best_span))
 }
 
 fn render_memory_tiles(
@@ -935,34 +932,8 @@ fn render_memory_tiles(
     let min_box_inner = 16usize;
     let min_box_width = min_box_inner + 4;
     let gap = 2usize;
+    let row_gap = 1usize;
     let usable_width = total_width.max(min_box_width);
-    let max_box_width = usable_width.min(96).max(min_box_width);
-
-    let mut planned: Vec<MemoryTilePlan> = tiles
-        .iter()
-        .filter_map(|tile| {
-            let width = choose_memory_tile_width(
-                tile,
-                min_box_width.min(usable_width),
-                max_box_width,
-                border_style,
-                text_style,
-            )
-            .min(usable_width);
-            plan_memory_tile(tile, width, border_style, text_style)
-        })
-        .collect();
-
-    if planned.is_empty() {
-        return all_lines;
-    }
-
-    planned.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| b.height.cmp(&a.height))
-            .then_with(|| b.width.cmp(&a.width))
-    });
 
     #[derive(Clone)]
     struct Placement {
@@ -971,67 +942,106 @@ fn render_memory_tiles(
         plan: MemoryTilePlan,
     }
 
-    let mut placements: Vec<Placement> = Vec::new();
-
-    for plan in planned {
-        let mut candidate_xs = vec![0usize];
-        for placed in &placements {
-            candidate_xs.push(placed.x);
-            candidate_xs.push((placed.x + placed.plan.width + gap).min(usable_width));
-        }
-        candidate_xs.sort_unstable();
-        candidate_xs.dedup();
-
-        let mut best_x = 0usize;
-        let mut best_y = usize::MAX;
-
-        for x in candidate_xs {
-            if x + plan.width > usable_width {
-                continue;
-            }
-
-            let y = placements
-                .iter()
-                .filter(|placed| {
-                    let left = x;
-                    let right = x + plan.width;
-                    let placed_left = placed.x;
-                    let placed_right = placed.x + placed.plan.width;
-                    left < placed_right && placed_left < right
-                })
-                .map(|placed| placed.y + placed.plan.height + 1)
-                .max()
-                .unwrap_or(0);
-
-            if y < best_y || (y == best_y && x < best_x) {
-                best_x = x;
-                best_y = y;
-            }
-        }
-
-        if best_y == usize::MAX {
-            best_x = 0;
-            best_y = placements
-                .iter()
-                .map(|placed| placed.y + placed.plan.height + 1)
-                .max()
-                .unwrap_or(0);
-        }
-
-        placements.push(Placement {
-            x: best_x,
-            y: best_y,
-            plan,
-        });
+    #[derive(Clone)]
+    struct PlannedTile {
+        span: usize,
+        plan: MemoryTilePlan,
     }
 
-    let total_height = placements
-        .iter()
-        .map(|placed| placed.y + placed.plan.height)
-        .max()
-        .unwrap_or(0);
+    let max_cols = ((usable_width + gap) / (min_box_width + gap)).clamp(1, 4);
+    let mut best_layout: Option<(Vec<Placement>, usize, usize)> = None;
 
-    placements.sort_by(|a, b| a.x.cmp(&b.x));
+    for column_count in 1..=max_cols {
+        let column_width = (usable_width.saturating_sub((column_count - 1) * gap)) / column_count;
+        if column_width < min_box_width {
+            continue;
+        }
+
+        let max_span = if column_count >= 2 { 2 } else { 1 };
+        let mut planned: Vec<PlannedTile> = tiles
+            .iter()
+            .filter_map(|tile| {
+                let (plan, span) = choose_memory_tile_span(
+                    tile,
+                    column_width,
+                    gap,
+                    max_span,
+                    border_style,
+                    text_style,
+                )?;
+                Some(PlannedTile { span, plan })
+            })
+            .collect();
+
+        if planned.is_empty() {
+            continue;
+        }
+
+        planned.sort_by(|a, b| {
+            b.plan
+                .score
+                .cmp(&a.plan.score)
+                .then_with(|| b.span.cmp(&a.span))
+                .then_with(|| b.plan.height.cmp(&a.plan.height))
+                .then_with(|| b.plan.width.cmp(&a.plan.width))
+        });
+
+        let mut column_heights = vec![0usize; column_count];
+        let mut placements: Vec<Placement> = Vec::with_capacity(planned.len());
+
+        for planned_tile in planned {
+            let mut best_start = 0usize;
+            let mut best_y = usize::MAX;
+
+            for start_col in 0..=column_count.saturating_sub(planned_tile.span) {
+                let y = column_heights[start_col..start_col + planned_tile.span]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+
+                if y < best_y || (y == best_y && start_col < best_start) {
+                    best_start = start_col;
+                    best_y = y;
+                }
+            }
+
+            let x = best_start * (column_width + gap);
+            let next_height = best_y + planned_tile.plan.height + row_gap;
+            for height in &mut column_heights[best_start..best_start + planned_tile.span] {
+                *height = next_height;
+            }
+
+            placements.push(Placement {
+                x,
+                y: best_y,
+                plan: planned_tile.plan,
+            });
+        }
+
+        let total_height = column_heights
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(row_gap);
+        let imbalance = column_heights.iter().copied().max().unwrap_or(0)
+            - column_heights.iter().copied().min().unwrap_or(0);
+        let used_width = column_count * column_width + gap * column_count.saturating_sub(1);
+        let leftover_width = usable_width.saturating_sub(used_width);
+        let layout_score = total_height * 100 + imbalance * 3 + leftover_width;
+
+        match &best_layout {
+            Some((_, _, best_score)) if *best_score <= layout_score => {}
+            _ => best_layout = Some((placements, total_height, layout_score)),
+        }
+    }
+
+    let Some((mut placements, total_height, _)) = best_layout else {
+        return all_lines;
+    };
+
+    placements.sort_by(|a, b| a.x.cmp(&b.x).then_with(|| a.y.cmp(&b.y)));
 
     for y in 0..total_height {
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1049,6 +1059,9 @@ fn render_memory_tiles(
             row_has_content = true;
         }
         if row_has_content {
+            if cursor < usable_width {
+                spans.push(Span::raw(" ".repeat(usable_width - cursor)));
+            }
             all_lines.push(Line::from(spans));
         }
     }
@@ -3714,14 +3727,22 @@ mod tests {
         let preference = tiles.remove(0);
         let fact = tiles.remove(0);
 
-        let preference_width =
-            choose_memory_tile_width(&preference, 20, 96, border_style, text_style);
-        let fact_width = choose_memory_tile_width(&fact, 20, 96, border_style, text_style);
+        let preference_plan = choose_memory_tile_span(
+            &preference,
+            20,
+            2,
+            2,
+            border_style,
+            text_style,
+        )
+        .expect("preference span plan");
+        let fact_plan = choose_memory_tile_span(&fact, 20, 2, 2, border_style, text_style)
+            .expect("fact span plan");
+        let preference_width = preference_plan.0.width;
+        let fact_width = fact_plan.0.width;
         let narrow_preference = plan_memory_tile(&preference, 20, border_style, text_style)
             .expect("narrow preference plan");
-        let chosen_preference =
-            plan_memory_tile(&preference, preference_width, border_style, text_style)
-                .expect("chosen preference plan");
+        let chosen_preference = preference_plan.0;
 
         assert!(
             chosen_preference.height <= narrow_preference.height,
@@ -3786,6 +3807,41 @@ mod tests {
                 .skip(1)
                 .any(|line| line.contains(" correction ")),
             "expected at least one box to appear on a later visual row: {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_render_memory_tiles_uses_full_row_width_for_stable_alignment() {
+        let tiles = group_into_tiles(vec![
+            (
+                "fact".to_string(),
+                "home.html has a new \"Final Oral Test\" link under Scripts · Memorization"
+                    .to_string(),
+            ),
+            (
+                "preference".to_string(),
+                "User wants unprofessional demo/chat messages removed or replaced with professional wording for demos."
+                    .to_string(),
+            ),
+            ("entity".to_string(), "User account name is `jeremy`.".to_string()),
+            ("note".to_string(), "The number 42".to_string()),
+        ]);
+
+        let lines = render_memory_tiles(
+            &tiles,
+            96,
+            Style::default(),
+            Style::default(),
+            Some(Line::from("🧠 recalled 4 memories")),
+        );
+        let rendered: Vec<String> = lines.iter().skip(1).map(extract_line_text).collect();
+
+        assert!(
+            rendered
+                .iter()
+                .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) == 96),
+            "expected each rendered memory row to fill full layout width for stable centering: {:?}",
             rendered
         );
     }
