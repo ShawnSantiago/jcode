@@ -201,6 +201,7 @@ impl App {
                     }
                     StreamEvent::ConnectionType { connection } => {
                         self.connection_type = Some(connection);
+                        self.update_terminal_title();
                     }
                     StreamEvent::ConnectionPhase { phase } => {
                         self.status = ProcessingStatus::Connecting(phase);
@@ -1026,6 +1027,7 @@ impl App {
                                     }
                                     StreamEvent::ConnectionType { connection } => {
                                         self.connection_type = Some(connection);
+                                        self.update_terminal_title();
                                     }
                                     StreamEvent::ConnectionPhase { phase } => {
                                         self.status = ProcessingStatus::Connecting(phase);

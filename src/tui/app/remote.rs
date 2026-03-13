@@ -1490,6 +1490,7 @@ pub(super) fn handle_server_event(
         }
         ServerEvent::ConnectionType { connection } => {
             app.connection_type = Some(connection);
+            app.update_terminal_title();
             false
         }
         ServerEvent::Pong { .. } => false,
@@ -1770,6 +1771,7 @@ pub(super) fn handle_server_event(
             if session_changed {
                 app.rate_limit_pending_message = None;
                 app.rate_limit_reset = None;
+                app.connection_type = None;
                 app.clear_display_messages();
                 app.clear_streaming_render_state();
                 app.streaming_tool_calls.clear();
@@ -1812,7 +1814,7 @@ pub(super) fn handle_server_event(
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
-            if connection_type.is_some() {
+            if session_changed || connection_type.is_some() {
                 app.connection_type = connection_type;
             }
             app.remote_reasoning_effort = reasoning_effort;

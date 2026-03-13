@@ -1816,6 +1816,90 @@ fn test_handle_server_event_updates_connection_type() {
 }
 
 #[test]
+fn test_handle_server_event_history_clears_connection_type_on_session_change_when_missing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.remote_session_id = Some("session_old".to_string());
+    app.connection_type = Some("websocket".to_string());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "session_new".to_string(),
+            messages: vec![],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            connection_type: None,
+            upstream_provider: None,
+            reasoning_effort: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_session_id.as_deref(), Some("session_new"));
+    assert_eq!(app.connection_type, None);
+}
+
+#[test]
+fn test_handle_server_event_history_preserves_connection_type_for_same_session_when_missing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.remote_session_id = Some("session_same".to_string());
+    app.connection_type = Some("websocket".to_string());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "session_same".to_string(),
+            messages: vec![],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            connection_type: None,
+            upstream_provider: None,
+            reasoning_effort: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_session_id.as_deref(), Some("session_same"));
+    assert_eq!(app.connection_type.as_deref(), Some("websocket"));
+}
+
+#[test]
 fn test_handle_server_event_token_usage_uses_per_call_deltas() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
