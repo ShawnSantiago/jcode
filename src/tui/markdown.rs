@@ -1361,7 +1361,7 @@ fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'sta
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if i < col_widths.len() {
-                col_widths[i] = col_widths[i].max(cell.len());
+                col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
             }
         }
     }
@@ -1391,17 +1391,28 @@ fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'sta
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         for (i, cell) in row.iter().enumerate() {
-            let char_count = cell.chars().count();
-            let width = col_widths.get(i).copied().unwrap_or(char_count);
+            let display_width = UnicodeWidthStr::width(cell.as_str());
+            let col_width = col_widths.get(i).copied().unwrap_or(display_width);
 
-            // Truncate cell content if needed (use char boundaries, not bytes)
-            let display_text = if char_count > width {
-                let truncated: String = cell.chars().take(width.saturating_sub(1)).collect();
-                format!("{}…", truncated)
+            let display_text = if display_width > col_width {
+                let mut truncated = String::new();
+                let mut w = 0;
+                for ch in cell.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if w + cw + 1 > col_width {
+                        break;
+                    }
+                    truncated.push(ch);
+                    w += cw;
+                }
+                truncated.push('…');
+                truncated
             } else {
                 cell.clone()
             };
-            let padded = format!("{:<width$}", display_text, width = width);
+            let text_width = UnicodeWidthStr::width(display_text.as_str());
+            let pad = col_width.saturating_sub(text_width);
+            let padded = format!("{}{}", display_text, " ".repeat(pad));
 
             // Header row gets bold styling
             let style = if row_idx == 0 {
@@ -2389,6 +2400,40 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(max_len <= 20);
+    }
+
+    #[test]
+    fn test_table_cjk_alignment() {
+        let md = "| Issue | You wrote |\n| - | - |\n| 政策 pronunciation | zhēn cí |";
+        let lines = render_markdown(md);
+        let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+        let non_empty: Vec<&String> = rendered.iter().filter(|l| !l.is_empty()).collect();
+        assert!(
+            non_empty.len() >= 3,
+            "Expected at least 3 non-empty lines, got {}: {:?}",
+            non_empty.len(),
+            non_empty
+        );
+
+        let header = non_empty[0];
+        let separator = non_empty[1];
+        let data_row = non_empty[2];
+
+        let header_width = UnicodeWidthStr::width(header.as_str());
+        let sep_width = UnicodeWidthStr::width(separator.as_str());
+        let data_width = UnicodeWidthStr::width(data_row.as_str());
+
+        assert_eq!(
+            header_width, sep_width,
+            "Header and separator should have same display width: header='{}' ({}) sep='{}' ({})",
+            header, header_width, separator, sep_width
+        );
+        assert_eq!(
+            header_width, data_width,
+            "Header and data row should have same display width: header='{}' ({}) data='{}' ({})",
+            header, header_width, data_row, data_width
+        );
     }
 
     #[test]
