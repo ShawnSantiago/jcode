@@ -105,6 +105,31 @@ const RELOAD_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(250);
 const RELOAD_RECOVERY_SPAWN_AFTER: Duration = Duration::from_secs(5);
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 
+fn persist_replay_display_message(app: &mut App, role: &str, title: Option<String>, content: &str) {
+    app.session
+        .record_replay_display_message(role.to_string(), title, content.to_string());
+    let _ = app.session.save();
+}
+
+fn persist_swarm_status_snapshot(app: &mut App) {
+    app.session
+        .record_swarm_status_event(app.remote_swarm_members.clone());
+    let _ = app.session.save();
+}
+
+fn persist_swarm_plan_snapshot(
+    app: &mut App,
+    swarm_id: String,
+    version: u64,
+    items: Vec<crate::plan::PlanItem>,
+    participants: Vec<String>,
+    reason: Option<String>,
+) {
+    app.session
+        .record_swarm_plan_event(swarm_id, version, items, participants, reason);
+    let _ = app.session.save();
+}
+
 fn reload_marker_active() -> bool {
     crate::server::reload_marker_active(RELOAD_MARKER_MAX_AGE)
 }
@@ -1862,6 +1887,7 @@ pub(super) fn handle_server_event(
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 app.remote_swarm_members = members;
+                persist_swarm_status_snapshot(app);
             } else {
                 app.remote_swarm_members.clear();
             }
@@ -1871,11 +1897,13 @@ pub(super) fn handle_server_event(
             swarm_id,
             version,
             items,
-            ..
+            participants,
+            reason,
         } => {
-            app.swarm_plan_swarm_id = Some(swarm_id);
+            app.swarm_plan_swarm_id = Some(swarm_id.clone());
             app.swarm_plan_version = Some(version);
-            app.swarm_plan_items = items;
+            app.swarm_plan_items = items.clone();
+            persist_swarm_plan_snapshot(app, swarm_id, version, items, participants, reason);
             app.set_status_notice(format!(
                 "Swarm plan synced (v{}, {} items)",
                 version,
@@ -1892,10 +1920,12 @@ pub(super) fn handle_server_event(
         } => {
             let proposer =
                 proposer_name.unwrap_or_else(|| proposer_session.chars().take(8).collect());
-            app.push_display_message(DisplayMessage::system(format!(
+            let message = format!(
                 "Plan proposal received in swarm {}\nFrom: {}\nSummary: {}",
                 swarm_id, proposer, summary
-            )));
+            );
+            app.push_display_message(DisplayMessage::system(message.clone()));
+            persist_replay_display_message(app, "system", None, &message);
             app.set_status_notice("Plan proposal received");
             false
         }
@@ -2103,7 +2133,8 @@ pub(super) fn handle_server_event(
                 ),
             };
 
-            app.push_display_message(DisplayMessage::swarm(title, message));
+            app.push_display_message(DisplayMessage::swarm(title.clone(), message.clone()));
+            persist_replay_display_message(app, "swarm", Some(title), &message);
             app.set_status_notice(status_notice);
             false
         }

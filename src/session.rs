@@ -85,6 +85,43 @@ pub struct StoredMemoryInjection {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Extra non-conversation UI/state events persisted for replay fidelity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredReplayEvent {
+    pub timestamp: DateTime<Utc>,
+    #[serde(flatten)]
+    pub kind: StoredReplayEventKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "event")]
+pub enum StoredReplayEventKind {
+    /// A non-provider display message shown in the UI (e.g. swarm/system notice).
+    #[serde(rename = "display_message")]
+    DisplayMessage {
+        role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        content: String,
+    },
+    /// Historical swarm member status snapshot.
+    #[serde(rename = "swarm_status")]
+    SwarmStatus {
+        members: Vec<crate::protocol::SwarmMemberStatus>,
+    },
+    /// Historical swarm plan snapshot.
+    #[serde(rename = "swarm_plan")]
+    SwarmPlan {
+        swarm_id: String,
+        version: u64,
+        items: Vec<crate::plan::PlanItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        participants: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: String,
@@ -206,6 +243,9 @@ pub struct Session {
     /// Memory injection events (for replay visualization)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_injections: Vec<StoredMemoryInjection>,
+    /// Non-conversation UI/state events persisted for higher-fidelity replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replay_events: Vec<StoredReplayEvent>,
 }
 
 /// Max number of environment snapshots to retain per session
@@ -289,6 +329,7 @@ impl Session {
             save_label: None,
             env_snapshots: Vec::new(),
             memory_injections: Vec::new(),
+            replay_events: Vec::new(),
         }
     }
 
@@ -320,6 +361,7 @@ impl Session {
             save_label: None,
             env_snapshots: Vec::new(),
             memory_injections: Vec::new(),
+            replay_events: Vec::new(),
         }
     }
 
@@ -494,6 +536,31 @@ impl Session {
                 }
             }
         }
+        for event in &mut redacted.replay_events {
+            match &mut event.kind {
+                StoredReplayEventKind::DisplayMessage { title, content, .. } => {
+                    if let Some(title) = title.as_mut() {
+                        *title = crate::message::redact_secrets(title);
+                    }
+                    *content = crate::message::redact_secrets(content);
+                }
+                StoredReplayEventKind::SwarmStatus { members } => {
+                    for member in members {
+                        if let Some(detail) = member.detail.as_mut() {
+                            *detail = crate::message::redact_secrets(detail);
+                        }
+                    }
+                }
+                StoredReplayEventKind::SwarmPlan { items, reason, .. } => {
+                    if let Some(reason) = reason.as_mut() {
+                        *reason = crate::message::redact_secrets(reason);
+                    }
+                    for item in items {
+                        item.content = crate::message::redact_secrets(&item.content);
+                    }
+                }
+            }
+        }
         redacted
     }
 
@@ -544,6 +611,68 @@ impl Session {
             age_ms: Some(age_ms),
             before_message: Some(self.messages.len()),
             timestamp: Utc::now(),
+        });
+    }
+
+    pub fn record_replay_display_message(
+        &mut self,
+        role: impl Into<String>,
+        title: Option<String>,
+        content: impl Into<String>,
+    ) {
+        self.replay_events.push(StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind: StoredReplayEventKind::DisplayMessage {
+                role: role.into(),
+                title,
+                content: content.into(),
+            },
+        });
+    }
+
+    pub fn record_swarm_status_event(
+        &mut self,
+        members: Vec<crate::protocol::SwarmMemberStatus>,
+    ) {
+        let kind = StoredReplayEventKind::SwarmStatus { members };
+        if self
+            .replay_events
+            .last()
+            .is_some_and(|last| last.kind == kind)
+        {
+            return;
+        }
+        self.replay_events.push(StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind,
+        });
+    }
+
+    pub fn record_swarm_plan_event(
+        &mut self,
+        swarm_id: String,
+        version: u64,
+        items: Vec<crate::plan::PlanItem>,
+        participants: Vec<String>,
+        reason: Option<String>,
+    ) {
+        let kind = StoredReplayEventKind::SwarmPlan {
+            swarm_id,
+            version,
+            items,
+            participants,
+            reason,
+        };
+        if self
+            .replay_events
+            .last()
+            .is_some_and(|last| last.kind == kind)
+        {
+            return;
+        }
+        self.replay_events.push(StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind,
         });
     }
 
@@ -983,6 +1112,80 @@ mod tests {
                 assert!(!input_str.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
             }
             _ => panic!("expected tool use block"),
+        }
+    }
+
+    #[test]
+    fn test_redacted_for_export_redacts_replay_events() {
+        let mut session = Session::create_with_id(
+            "session_redacted_replay_events_test".to_string(),
+            None,
+            Some("redacted replay events".to_string()),
+        );
+
+        session.record_replay_display_message(
+            "swarm",
+            Some("DM from fox".to_string()),
+            "OPENROUTER_API_KEY=sk-or-v1-secret-value",
+        );
+        session.record_swarm_status_event(vec![crate::protocol::SwarmMemberStatus {
+            session_id: "session_fox".to_string(),
+            friendly_name: Some("fox".to_string()),
+            status: "running".to_string(),
+            detail: Some("ANTHROPIC_API_KEY=sk-ant-secret-value".to_string()),
+            role: Some("agent".to_string()),
+        }]);
+        session.record_swarm_plan_event(
+            "swarm_test".to_string(),
+            1,
+            vec![crate::plan::PlanItem {
+                content:
+                    "OPENROUTER_API_KEY=sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                id: "task-1".to_string(),
+                blocked_by: vec![],
+                assigned_to: None,
+            }],
+            vec![],
+            Some("ANTHROPIC_API_KEY=sk-ant-secret-value".to_string()),
+        );
+
+        let redacted = session.redacted_for_export();
+        assert_eq!(redacted.replay_events.len(), 3);
+
+        match &redacted.replay_events[0].kind {
+            StoredReplayEventKind::DisplayMessage { content, .. } => {
+                assert!(content.contains("OPENROUTER_API_KEY=[REDACTED_SECRET]"));
+                assert!(!content.contains("sk-or-v1-secret-value"));
+            }
+            other => panic!("expected display message replay event, got {other:?}"),
+        }
+
+        match &redacted.replay_events[1].kind {
+            StoredReplayEventKind::SwarmStatus { members } => {
+                let detail = members[0].detail.as_deref().unwrap_or_default();
+                assert!(detail.contains("ANTHROPIC_API_KEY=[REDACTED_SECRET]"));
+                assert!(!detail.contains("sk-ant-secret-value"));
+            }
+            other => panic!("expected swarm status replay event, got {other:?}"),
+        }
+
+        match &redacted.replay_events[2].kind {
+            StoredReplayEventKind::SwarmPlan { items, reason, .. } => {
+                assert!(items[0]
+                    .content
+                    .contains("OPENROUTER_API_KEY=[REDACTED_SECRET]"));
+                assert!(
+                    !items[0]
+                        .content
+                        .contains("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789")
+                );
+                let reason = reason.as_deref().unwrap_or_default();
+                assert!(reason.contains("ANTHROPIC_API_KEY=[REDACTED_SECRET]"));
+                assert!(!reason.contains("sk-ant-secret-value"));
+            }
+            other => panic!("expected swarm plan replay event, got {other:?}"),
         }
     }
 

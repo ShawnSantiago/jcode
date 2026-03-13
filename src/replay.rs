@@ -1,6 +1,6 @@
 use crate::message::{ContentBlock, Role};
 use crate::protocol::ServerEvent;
-use crate::session::Session;
+use crate::session::{Session, StoredReplayEventKind};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -79,6 +79,30 @@ pub enum TimelineEventKind {
         summary: String,
         content: String,
         count: u32,
+    },
+    /// A persisted non-provider display message.
+    #[serde(rename = "display_message")]
+    DisplayMessage {
+        role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        content: String,
+    },
+    /// Historical swarm status snapshot.
+    #[serde(rename = "swarm_status")]
+    SwarmStatus {
+        members: Vec<crate::protocol::SwarmMemberStatus>,
+    },
+    /// Historical swarm plan snapshot.
+    #[serde(rename = "swarm_plan")]
+    SwarmPlan {
+        swarm_id: String,
+        version: u64,
+        items: Vec<crate::plan::PlanItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        participants: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 
@@ -273,6 +297,44 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
         }
     }
 
+    for replay_event in &session.replay_events {
+        let offset = replay_event
+            .timestamp
+            .signed_duration_since(session_start)
+            .num_milliseconds()
+            .max(0) as u64;
+        let kind = match &replay_event.kind {
+            StoredReplayEventKind::DisplayMessage {
+                role,
+                title,
+                content,
+            } => TimelineEventKind::DisplayMessage {
+                role: role.clone(),
+                title: title.clone(),
+                content: content.clone(),
+            },
+            StoredReplayEventKind::SwarmStatus { members } => TimelineEventKind::SwarmStatus {
+                members: members.clone(),
+            },
+            StoredReplayEventKind::SwarmPlan {
+                swarm_id,
+                version,
+                items,
+                participants,
+                reason,
+            } => TimelineEventKind::SwarmPlan {
+                swarm_id: swarm_id.clone(),
+                version: *version,
+                items: items.clone(),
+                participants: participants.clone(),
+                reason: reason.clone(),
+            },
+        };
+        events.push(TimelineEvent { t: offset, kind });
+    }
+
+    events.sort_by_key(|event| event.t);
+
     events
 }
 
@@ -291,6 +353,22 @@ pub enum ReplayEvent {
         summary: String,
         content: String,
         count: u32,
+    },
+    /// Persisted non-provider display message.
+    DisplayMessage {
+        role: String,
+        title: Option<String>,
+        content: String,
+    },
+    /// Historical swarm status snapshot.
+    SwarmStatus {
+        members: Vec<crate::protocol::SwarmMemberStatus>,
+    },
+    /// Historical swarm plan snapshot.
+    SwarmPlan {
+        swarm_id: String,
+        version: u64,
+        items: Vec<crate::plan::PlanItem>,
     },
 }
 
@@ -419,6 +497,43 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                         summary: summary.clone(),
                         content: content.clone(),
                         count: *count,
+                    },
+                ));
+            }
+            TimelineEventKind::DisplayMessage {
+                role,
+                title,
+                content,
+            } => {
+                out.push((
+                    delay,
+                    ReplayEvent::DisplayMessage {
+                        role: role.clone(),
+                        title: title.clone(),
+                        content: content.clone(),
+                    },
+                ));
+            }
+            TimelineEventKind::SwarmStatus { members } => {
+                out.push((
+                    delay,
+                    ReplayEvent::SwarmStatus {
+                        members: members.clone(),
+                    },
+                ));
+            }
+            TimelineEventKind::SwarmPlan {
+                swarm_id,
+                version,
+                items,
+                ..
+            } => {
+                out.push((
+                    delay,
+                    ReplayEvent::SwarmPlan {
+                        swarm_id: swarm_id.clone(),
+                        version: *version,
+                        items: items.clone(),
                     },
                 ));
             }
@@ -616,6 +731,10 @@ fn truncate_for_timeline(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::PlanItem;
+    use crate::protocol::SwarmMemberStatus;
+    use crate::session::{StoredReplayEvent, StoredReplayEventKind};
+    use chrono::{Duration, Utc};
 
     #[test]
     fn test_timeline_roundtrip() {
@@ -764,6 +883,134 @@ mod tests {
             &replay_events[2].1,
             ReplayEvent::Server(ServerEvent::TextDelta { .. })
         ));
+    }
+
+    #[test]
+    fn test_export_timeline_includes_persisted_swarm_replay_events() {
+        let base = Utc::now();
+        let mut session = Session::create_with_id("session_replay_swarm_test".to_string(), None, None);
+        session.created_at = base;
+        session.updated_at = base;
+        session.replay_events = vec![
+            StoredReplayEvent {
+                timestamp: base + Duration::milliseconds(100),
+                kind: StoredReplayEventKind::DisplayMessage {
+                    role: "swarm".to_string(),
+                    title: Some("DM from fox".to_string()),
+                    content: "Take parser tests".to_string(),
+                },
+            },
+            StoredReplayEvent {
+                timestamp: base + Duration::milliseconds(200),
+                kind: StoredReplayEventKind::SwarmStatus {
+                    members: vec![SwarmMemberStatus {
+                        session_id: "session_fox".to_string(),
+                        friendly_name: Some("fox".to_string()),
+                        status: "running".to_string(),
+                        detail: Some("parser tests".to_string()),
+                        role: Some("agent".to_string()),
+                    }],
+                },
+            },
+            StoredReplayEvent {
+                timestamp: base + Duration::milliseconds(300),
+                kind: StoredReplayEventKind::SwarmPlan {
+                    swarm_id: "swarm_123".to_string(),
+                    version: 2,
+                    items: vec![PlanItem {
+                        content: "Run parser tests".to_string(),
+                        status: "running".to_string(),
+                        priority: "high".to_string(),
+                        id: "task-1".to_string(),
+                        blocked_by: vec![],
+                        assigned_to: Some("session_fox".to_string()),
+                    }],
+                    participants: vec!["session_fox".to_string()],
+                    reason: Some("proposal approved".to_string()),
+                },
+            },
+        ];
+
+        let timeline = export_timeline(&session);
+        assert!(timeline.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::DisplayMessage { role, title, content }
+                if role == "swarm"
+                    && title.as_deref() == Some("DM from fox")
+                    && content == "Take parser tests"
+        )));
+        assert!(timeline.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::SwarmStatus { members }
+                if members.len() == 1 && members[0].status == "running"
+        )));
+        assert!(timeline.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::SwarmPlan { swarm_id, version, items, .. }
+                if swarm_id == "swarm_123" && *version == 2 && items.len() == 1
+        )));
+    }
+
+    #[test]
+    fn test_timeline_to_replay_events_converts_swarm_replay_events() {
+        let timeline = vec![
+            TimelineEvent {
+                t: 100,
+                kind: TimelineEventKind::DisplayMessage {
+                    role: "swarm".to_string(),
+                    title: Some("Broadcast · oak".to_string()),
+                    content: "Plan updated".to_string(),
+                },
+            },
+            TimelineEvent {
+                t: 200,
+                kind: TimelineEventKind::SwarmStatus {
+                    members: vec![SwarmMemberStatus {
+                        session_id: "session_oak".to_string(),
+                        friendly_name: Some("oak".to_string()),
+                        status: "completed".to_string(),
+                        detail: None,
+                        role: Some("agent".to_string()),
+                    }],
+                },
+            },
+            TimelineEvent {
+                t: 300,
+                kind: TimelineEventKind::SwarmPlan {
+                    swarm_id: "swarm_abc".to_string(),
+                    version: 7,
+                    items: vec![PlanItem {
+                        content: "Integrate results".to_string(),
+                        status: "pending".to_string(),
+                        priority: "high".to_string(),
+                        id: "task-7".to_string(),
+                        blocked_by: vec![],
+                        assigned_to: None,
+                    }],
+                    participants: vec![],
+                    reason: None,
+                },
+            },
+        ];
+
+        let replay_events = timeline_to_replay_events(&timeline);
+        assert!(replay_events.iter().any(|(_, event)| matches!(
+            event,
+            ReplayEvent::DisplayMessage { role, title, content }
+                if role == "swarm"
+                    && title.as_deref() == Some("Broadcast · oak")
+                    && content == "Plan updated"
+        )));
+        assert!(replay_events.iter().any(|(_, event)| matches!(
+            event,
+            ReplayEvent::SwarmStatus { members }
+                if members.len() == 1 && members[0].status == "completed"
+        )));
+        assert!(replay_events.iter().any(|(_, event)| matches!(
+            event,
+            ReplayEvent::SwarmPlan { swarm_id, version, items }
+                if swarm_id == "swarm_abc" && *version == 7 && items.len() == 1
+        )));
     }
 
     #[test]

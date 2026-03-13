@@ -181,6 +181,37 @@ pub(super) fn apply_replay_event(
             let display = DisplayMessage::memory(summary.clone(), content.clone());
             app.push_display_message(display);
         }
+        ReplayEvent::DisplayMessage {
+            role,
+            title,
+            content,
+        } => {
+            if role == "swarm" {
+                app.swarm_enabled = true;
+            }
+            app.push_display_message(DisplayMessage {
+                role: role.clone(),
+                content: content.clone(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: title.clone(),
+                tool_data: None,
+            });
+        }
+        ReplayEvent::SwarmStatus { members } => {
+            app.swarm_enabled = true;
+            app.remote_swarm_members = members.clone();
+        }
+        ReplayEvent::SwarmPlan {
+            swarm_id,
+            version,
+            items,
+        } => {
+            app.swarm_enabled = true;
+            app.swarm_plan_swarm_id = Some(swarm_id.clone());
+            app.swarm_plan_version = Some(*version);
+            app.swarm_plan_items = items.clone();
+        }
         ReplayEvent::Server(server_event) => {
             if let crate::protocol::ServerEvent::TextDelta { text } = server_event {
                 if !text.is_empty() {
