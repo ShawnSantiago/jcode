@@ -31,9 +31,11 @@ workflows:
         script: |
           cd ios
           xcodegen generate
-          echo "=== Generated Info.plist ==="
+          echo "=== Source Info.plist ==="
           cat Sources/JCodeMobile/Info.plist
-          echo "=== End Info.plist ==="
+          echo "=== End Source Info.plist ==="
+          echo "=== Checking INFOPLIST_FILE in pbxproj ==="
+          grep -i "INFOPLIST_FILE\|NSAppTransportSecurity" JCodeMobile.xcodeproj/project.pbxproj || echo "NOT FOUND in pbxproj"
       - name: Set up code signing
         script: |
           keychain initialize
