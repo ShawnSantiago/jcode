@@ -70,6 +70,17 @@ pub enum Priority {
     High,
 }
 
+/// Where a scheduled task should be delivered when it becomes due.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleTarget {
+    /// Wake the ambient agent and hand it the queued task.
+    #[default]
+    Ambient,
+    /// Deliver the reminder back into a specific interactive session.
+    Session { session_id: String },
+}
+
 /// A scheduled ambient task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledItem {
@@ -77,6 +88,8 @@ pub struct ScheduledItem {
     pub scheduled_for: DateTime<Utc>,
     pub context: String,
     pub priority: Priority,
+    #[serde(default)]
+    pub target: ScheduleTarget,
     pub created_by_session: String,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,6 +144,10 @@ pub struct ScheduleRequest {
     pub wake_at: Option<DateTime<Utc>>,
     pub context: String,
     pub priority: Priority,
+    #[serde(default)]
+    pub target: ScheduleTarget,
+    #[serde(default)]
+    pub created_by_session: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,6 +354,38 @@ impl ScheduledQueue {
         ready
     }
 
+    /// Remove and return ready items targeted at sessions, leaving ambient-targeted
+    /// queue items intact for the ambient agent to process.
+    pub fn take_ready_session_items(&mut self) -> Vec<ScheduledItem> {
+        let now = Utc::now();
+        let mut ready_session = Vec::new();
+        let mut remaining = Vec::with_capacity(self.items.len());
+
+        for item in self.items.drain(..) {
+            let is_ready = item.scheduled_for <= now;
+            let is_session_target = matches!(item.target, ScheduleTarget::Session { .. });
+            if is_ready && is_session_target {
+                ready_session.push(item);
+            } else {
+                remaining.push(item);
+            }
+        }
+
+        self.items = remaining;
+
+        if !ready_session.is_empty() {
+            let _ = self.save();
+        }
+
+        ready_session.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
+        });
+
+        ready_session
+    }
+
     pub fn peek_next(&self) -> Option<&ScheduledItem> {
         self.items.iter().min_by_key(|i| i.scheduled_for)
     }
@@ -462,6 +511,16 @@ impl AmbientManager {
         Ok(())
     }
 
+    /// Remove and return all ready scheduled items.
+    pub fn take_ready_items(&mut self) -> Vec<ScheduledItem> {
+        self.queue.pop_ready()
+    }
+
+    /// Remove and return only ready items targeted at specific sessions.
+    pub fn take_ready_session_items(&mut self) -> Vec<ScheduledItem> {
+        self.queue.take_ready_session_items()
+    }
+
     /// Add a schedule request to the queue. Returns the item ID.
     pub fn schedule(&mut self, request: ScheduleRequest) -> Result<String> {
         let id = format!("sched_{:08x}", rand::random::<u32>());
@@ -474,7 +533,8 @@ impl AmbientManager {
             scheduled_for,
             context: request.context,
             priority: request.priority,
-            created_by_session: String::new(), // filled in by caller if needed
+            target: request.target,
+            created_by_session: request.created_by_session,
             created_at: Utc::now(),
             working_dir: request.working_dir,
             task_description: request.task_description,
@@ -792,6 +852,12 @@ pub fn build_ambient_system_prompt(
                 format_duration_rough(age),
                 priority,
             ));
+            match &item.target {
+                ScheduleTarget::Ambient => {}
+                ScheduleTarget::Session { session_id } => {
+                    prompt.push_str(&format!("  Target session: {}\n", session_id));
+                }
+            }
             if let Some(ref dir) = item.working_dir {
                 prompt.push_str(&format!("  Working dir: {}\n", dir));
             }
@@ -956,6 +1022,37 @@ pub fn build_ambient_system_prompt(
     prompt
 }
 
+pub fn format_scheduled_session_message(item: &ScheduledItem) -> String {
+    let mut lines = vec![
+        "[Scheduled reminder]".to_string(),
+        "A scheduled reminder for this session is now due.".to_string(),
+        String::new(),
+        format!(
+            "Task: {}",
+            item.task_description.as_deref().unwrap_or(&item.context)
+        ),
+    ];
+
+    if let Some(ref dir) = item.working_dir {
+        lines.push(format!("Working directory: {}", dir));
+    }
+    if !item.relevant_files.is_empty() {
+        lines.push(format!(
+            "Relevant files: {}",
+            item.relevant_files.join(", ")
+        ));
+    }
+    if let Some(ref branch) = item.git_branch {
+        lines.push(format!("Branch: {}", branch));
+    }
+    if let Some(ref ctx) = item.additional_context {
+        lines.push(String::new());
+        lines.push(ctx.clone());
+    }
+
+    lines.join("\n")
+}
+
 /// Format a chrono::Duration into a rough human-readable string.
 fn format_duration_rough(d: chrono::Duration) -> String {
     let secs = d.num_seconds().max(0);
@@ -1038,6 +1135,7 @@ mod tests {
             scheduled_for: past,
             context: "past item".into(),
             priority: Priority::Low,
+            target: ScheduleTarget::Ambient,
             created_by_session: "test".into(),
             created_at: Utc::now(),
             working_dir: None,
@@ -1052,6 +1150,7 @@ mod tests {
             scheduled_for: future,
             context: "future item".into(),
             priority: Priority::High,
+            target: ScheduleTarget::Ambient,
             created_by_session: "test".into(),
             created_at: Utc::now(),
             working_dir: None,
@@ -1086,6 +1185,7 @@ mod tests {
             scheduled_for: past1,
             context: "low early".into(),
             priority: Priority::Low,
+            target: ScheduleTarget::Ambient,
             created_by_session: "test".into(),
             created_at: Utc::now(),
             working_dir: None,
@@ -1100,6 +1200,7 @@ mod tests {
             scheduled_for: past2,
             context: "high late".into(),
             priority: Priority::High,
+            target: ScheduleTarget::Ambient,
             created_by_session: "test".into(),
             created_at: Utc::now(),
             working_dir: None,
@@ -1114,6 +1215,53 @@ mod tests {
         // High priority should come first
         assert_eq!(ready[0].id, "high_late");
         assert_eq!(ready[1].id, "low_early");
+    }
+
+    #[test]
+    fn test_take_ready_session_items_only_removes_session_targets() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let mut queue = ScheduledQueue::load(path);
+        let past = Utc::now() - Duration::minutes(5);
+
+        queue.push(ScheduledItem {
+            id: "session_due".into(),
+            scheduled_for: past,
+            context: "session reminder".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "session_123".into(),
+            },
+            created_by_session: "session_123".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        });
+
+        queue.push(ScheduledItem {
+            id: "ambient_due".into(),
+            scheduled_for: past,
+            context: "ambient reminder".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "ambient".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        });
+
+        let ready_session = queue.take_ready_session_items();
+        assert_eq!(ready_session.len(), 1);
+        assert_eq!(ready_session[0].id, "session_due");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.items()[0].id, "ambient_due");
     }
 
     #[test]
@@ -1155,6 +1303,8 @@ mod tests {
                 wake_at: None,
                 context: "check CI".into(),
                 priority: Priority::Normal,
+                target: ScheduleTarget::Ambient,
+                created_by_session: "ambient_test".into(),
                 working_dir: None,
                 task_description: None,
                 relevant_files: Vec::new(),
@@ -1253,6 +1403,7 @@ mod tests {
             scheduled_for: Utc::now(),
             context: "Check CI status".into(),
             priority: Priority::High,
+            target: ScheduleTarget::Ambient,
             created_by_session: "session_abc".into(),
             created_at: Utc::now() - Duration::minutes(10),
             working_dir: Some("/home/user/project".into()),
@@ -1330,6 +1481,7 @@ mod tests {
             scheduled_for: Utc::now(),
             context: "test item".into(),
             priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
             created_by_session: "test".into(),
             created_at: Utc::now(),
             working_dir: None,

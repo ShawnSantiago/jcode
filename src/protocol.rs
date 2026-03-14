@@ -113,6 +113,14 @@ pub enum Request {
     #[serde(rename = "resume_session")]
     ResumeSession { id: u64, session_id: String },
 
+    /// Deliver a scheduled reminder to a currently live session.
+    #[serde(rename = "notify_session")]
+    NotifySession {
+        id: u64,
+        session_id: String,
+        message: String,
+    },
+
     /// Cycle the active model (direction: 1 for next, -1 for previous)
     #[serde(rename = "cycle_model")]
     CycleModel {
@@ -921,6 +929,7 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
+            Request::NotifySession { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
             Request::SetModel { id, .. } => *id,
             Request::SetReasoningEffort { id, .. } => *id,

@@ -1,15 +1,77 @@
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{
-    SwarmEvent, SwarmMember, VersionedPlan, broadcast_swarm_status,
-    remove_session_channel_subscriptions, remove_session_from_swarm, swarm_id_for_dir,
-    truncate_detail, update_member_status,
+    ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, VersionedPlan,
+    broadcast_swarm_status, queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
+    remove_session_from_swarm, swarm_id_for_dir, truncate_detail, update_member_status,
 };
-use crate::agent::{Agent, StreamError};
+use crate::agent::{Agent, SoftInterruptSource, StreamError};
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+
+pub(super) async fn handle_notify_session(
+    id: u64,
+    session_id: String,
+    message: String,
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let target_has_client = {
+        let connections = client_connections.read().await;
+        connections
+            .values()
+            .any(|connection| connection.session_id == session_id)
+    };
+
+    let notified = {
+        let members = swarm_members.read().await;
+        if let Some(member) = members.get(&session_id) {
+            member
+                .event_tx
+                .send(ServerEvent::Notification {
+                    from_session: "schedule".to_string(),
+                    from_name: Some("scheduled task".to_string()),
+                    notification_type: NotificationType::Message {
+                        scope: Some("scheduled".to_string()),
+                        channel: None,
+                    },
+                    message: message.clone(),
+                })
+                .is_ok()
+        } else {
+            false
+        }
+    };
+
+    let queued_interrupt = if target_has_client {
+        false
+    } else {
+        queue_soft_interrupt_for_session(
+            &session_id,
+            message.clone(),
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await
+    };
+
+    if notified || queued_interrupt {
+        let _ = client_event_tx.send(ServerEvent::Done { id });
+    } else {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Session '{}' is not currently live", session_id),
+            retry_after_secs: None,
+        });
+    }
+}
 
 pub(super) async fn handle_set_feature(
     id: u64,

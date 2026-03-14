@@ -6,7 +6,8 @@
 
 use crate::agent::{Agent, SoftInterruptQueue};
 use crate::ambient::{
-    self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus, CycleStatus,
+    self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
+    CycleStatus, ScheduleTarget, ScheduledItem,
 };
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
@@ -15,6 +16,7 @@ use crate::memory::MemoryManager;
 use crate::notifications::NotificationDispatcher;
 use crate::provider::Provider;
 use crate::safety::SafetySystem;
+use crate::session::Session;
 use crate::tool;
 use crate::tool::ambient as ambient_tools;
 use chrono::Utc;
@@ -284,6 +286,94 @@ impl AmbientRunnerHandle {
         serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
     }
 
+    async fn wait_for_request_done(
+        client: &mut crate::server::Client,
+        request_id: u64,
+    ) -> anyhow::Result<()> {
+        loop {
+            match client.read_event().await? {
+                crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
+                crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
+                    anyhow::bail!(message)
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    async fn notify_live_session(&self, session_id: &str, message: &str) -> anyhow::Result<()> {
+        let mut client = crate::server::Client::connect().await?;
+        let request_id = client.notify_session(session_id, message).await?;
+        Self::wait_for_request_done(&mut client, request_id).await
+    }
+
+    async fn resume_dead_session_with_reminder(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let session = Session::load(session_id)?;
+        let cycle_provider = provider.fork();
+        let registry = tool::Registry::new(cycle_provider.clone()).await;
+        if session.is_canary {
+            registry.register_selfdev_tools().await;
+        }
+
+        let mut agent = Agent::new(cycle_provider, registry);
+        agent.set_debug(session.is_debug);
+        agent.restore_session(session_id)?;
+
+        let reminder = ambient::format_scheduled_session_message(item);
+        let _ = agent.run_once_capture(&reminder).await?;
+        agent.mark_closed();
+        Ok(())
+    }
+
+    async fn deliver_scheduled_session_item(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+    ) -> anyhow::Result<()> {
+        let ScheduleTarget::Session { session_id } = &item.target else {
+            return Ok(());
+        };
+
+        let reminder = ambient::format_scheduled_session_message(item);
+        match self.notify_live_session(session_id, &reminder).await {
+            Ok(()) => {
+                logging::info(&format!(
+                    "Ambient runner: delivered scheduled reminder {} to live session {}",
+                    item.id, session_id
+                ));
+                Ok(())
+            }
+            Err(err) => {
+                logging::info(&format!(
+                    "Ambient runner: live delivery for {} fell back to headless resume: {}",
+                    session_id, err
+                ));
+                self.resume_dead_session_with_reminder(provider, item, session_id)
+                    .await
+            }
+        }
+    }
+
+    async fn deliver_ready_session_items(
+        &self,
+        provider: &Arc<dyn Provider>,
+        items: Vec<ScheduledItem>,
+    ) {
+        for item in items {
+            if let Err(e) = self.deliver_scheduled_session_item(provider, &item).await {
+                logging::error(&format!(
+                    "Ambient runner: failed to deliver scheduled session item {}: {}",
+                    item.id, e
+                ));
+            }
+        }
+    }
+
     /// Start the background ambient loop. Call from a tokio::spawn.
     pub async fn run_loop(self, provider: Arc<dyn Provider>) {
         {
@@ -378,8 +468,9 @@ impl AmbientRunnerHandle {
             }
 
             // Load manager to check should_run and update queue info
-            let should_run = match AmbientManager::new() {
-                Ok(mgr) => {
+            let (should_run, ready_session_items) = match AmbientManager::new() {
+                Ok(mut mgr) => {
+                    let ready_session_items = mgr.take_ready_session_items();
                     // Update queue info for widget
                     {
                         let mut qc = self.inner.queue_count.write().await;
@@ -390,13 +481,21 @@ impl AmbientRunnerHandle {
                         *qp = mgr.queue().peek_next().map(|i| i.context.clone());
                     }
                     // Also run if there are pending email reply directives
-                    mgr.should_run() || ambient::has_pending_directives()
+                    (
+                        mgr.should_run() || ambient::has_pending_directives(),
+                        ready_session_items,
+                    )
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    false
+                    (false, Vec::new())
                 }
             };
+
+            if !ready_session_items.is_empty() {
+                self.deliver_ready_session_items(&provider, ready_session_items)
+                    .await;
+            }
 
             if !should_run {
                 // Calculate sleep interval

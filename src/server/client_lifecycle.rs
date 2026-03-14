@@ -1,5 +1,6 @@
 use super::client_actions::{
-    handle_agent_task, handle_compact, handle_set_feature, handle_split, handle_stdin_response,
+    handle_agent_task, handle_compact, handle_notify_session, handle_set_feature, handle_split,
+    handle_stdin_response,
 };
 use super::client_comm::{
     handle_comm_list, handle_comm_message, handle_comm_read, handle_comm_share,
@@ -834,6 +835,24 @@ pub(super) async fn handle_client(
 
             Request::AgentContext { id } => {
                 let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::NotifySession {
+                id,
+                session_id,
+                message,
+            } => {
+                handle_notify_session(
+                    id,
+                    session_id,
+                    message,
+                    &sessions,
+                    &soft_interrupt_queues,
+                    &client_connections,
+                    &swarm_members,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             // === Agent communication ===

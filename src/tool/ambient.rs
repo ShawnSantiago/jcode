@@ -1,6 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::ambient::{
     AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
+    ScheduleTarget,
 };
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
 use anyhow::Result;
@@ -179,7 +180,7 @@ impl Tool for EndAmbientCycleTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: EndCycleInput = serde_json::from_value(input)?;
 
         let next_schedule = params.next_schedule.map(|ns| ScheduleRequest {
@@ -187,6 +188,8 @@ impl Tool for EndAmbientCycleTool {
             wake_at: None,
             context: ns.context.unwrap_or_default(),
             priority: parse_priority(ns.priority.as_deref()),
+            target: ScheduleTarget::Ambient,
+            created_by_session: ctx.session_id.clone(),
             working_dir: None,
             task_description: None,
             relevant_files: Vec::new(),
@@ -302,7 +305,7 @@ impl Tool for ScheduleAmbientTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ScheduleInput = serde_json::from_value(input)?;
 
         let wake_at = if let Some(ref ts) = params.wake_at {
@@ -319,6 +322,8 @@ impl Tool for ScheduleAmbientTool {
             wake_at,
             context: params.context.clone(),
             priority: parse_priority(params.priority.as_deref()),
+            target: ScheduleTarget::Ambient,
+            created_by_session: ctx.session_id,
             working_dir: None,
             task_description: None,
             relevant_files: Vec::new(),
@@ -693,6 +698,8 @@ struct ScheduleToolInput {
     background: Option<String>,
     #[serde(default)]
     success_criteria: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
 }
 
 #[async_trait]
@@ -702,11 +709,10 @@ impl Tool for ScheduleTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule a task for the ambient agent to execute later. Use this for work that \
-         should happen in the future (e.g. 'run tests at 3am', 'check CI results in 2 hours', \
-         'deploy to staging tomorrow morning'). The ambient agent will wake at the scheduled \
-         time and execute the task with the context you provide. Include enough detail that \
-         the ambient agent can complete the task without further input from you."
+        "Schedule work to happen later. By default this wakes the ambient agent. You can also \
+         target the current session so the reminder is delivered back into this conversation: if \
+         the session is still live, the reminder is injected there; if it is no longer live, jcode \
+         restores that saved session headlessly and resumes it with the reminder."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -743,6 +749,11 @@ impl Tool for ScheduleTool {
                 "success_criteria": {
                     "type": "string",
                     "description": "How to know the task is done. What should the ambient agent verify?"
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["ambient", "session"],
+                    "description": "Where to deliver the scheduled task. 'ambient' wakes the ambient agent (default). 'session' delivers it back into the current session, resuming that saved session headlessly if needed."
                 }
             }
         })
@@ -789,11 +800,19 @@ impl Tool for ScheduleTool {
                 }
             });
 
+        let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id);
+        let target_summary = match &target {
+            ScheduleTarget::Ambient => "ambient agent".to_string(),
+            ScheduleTarget::Session { session_id } => format!("session {}", session_id),
+        };
+
         let request = ScheduleRequest {
             wake_in_minutes: params.wake_in_minutes,
             wake_at,
             context: params.task.clone(),
             priority: parse_priority(params.priority.as_deref()),
+            target,
+            created_by_session: ctx.session_id.clone(),
             working_dir: working_dir.clone(),
             task_description: Some(params.task.clone()),
             relevant_files: params.relevant_files.clone(),
@@ -832,6 +851,7 @@ impl Tool for ScheduleTool {
                 params.relevant_files.join(", ")
             ));
         }
+        summary.push_str(&format!("\nTarget: {}", target_summary));
 
         Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", params.task)))
     }
@@ -846,6 +866,15 @@ fn parse_priority(s: Option<&str>) -> Priority {
         Some("low") => Priority::Low,
         Some("high") => Priority::High,
         _ => Priority::Normal,
+    }
+}
+
+fn parse_schedule_target(s: Option<&str>, session_id: &str) -> ScheduleTarget {
+    match s {
+        Some("session") => ScheduleTarget::Session {
+            session_id: session_id.to_string(),
+        },
+        _ => ScheduleTarget::Ambient,
     }
 }
 
@@ -1220,6 +1249,18 @@ mod tests {
             parsed.success_criteria.as_deref(),
             Some("All tests pass, or a summary of failures is stored")
         );
+    }
+
+    #[test]
+    fn test_schedule_tool_input_session_target() {
+        let input = json!({
+            "task": "Follow up in this chat",
+            "wake_in_minutes": 10,
+            "target": "session"
+        });
+
+        let parsed: ScheduleToolInput = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.target.as_deref(), Some("session"));
     }
 
     #[test]
