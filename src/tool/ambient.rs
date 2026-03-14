@@ -717,13 +717,23 @@ impl Tool for ScheduleTool {
                 {
                     "type": "object",
                     "required": ["wake_in_minutes"],
-                    "properties": {},
+                    "properties": {
+                        "wake_in_minutes": {
+                            "type": "integer",
+                            "description": "Minutes from now to execute the task. Use this or wake_at."
+                        }
+                    },
                     "additionalProperties": false
                 },
                 {
                     "type": "object",
                     "required": ["wake_at"],
-                    "properties": {},
+                    "properties": {
+                        "wake_at": {
+                            "type": "string",
+                            "description": "ISO 8601 timestamp for when to execute (e.g. '2025-03-15T09:00:00Z'). Use this or wake_in_minutes."
+                        }
+                    },
                     "additionalProperties": false
                 }
             ],

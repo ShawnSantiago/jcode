@@ -4863,6 +4863,51 @@ mod tests {
     }
 
     #[test]
+    fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
+        let defs = vec![ToolDefinition {
+            name: "schedule".to_string(),
+            description: "schedule work".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["task"],
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "required": ["wake_in_minutes"],
+                        "properties": {
+                            "wake_in_minutes": { "type": "integer" }
+                        },
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "required": ["wake_at"],
+                        "properties": {
+                            "wake_at": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                    }
+                ],
+                "properties": {
+                    "task": { "type": "string" },
+                    "wake_in_minutes": { "type": "integer" },
+                    "wake_at": { "type": "string" }
+                }
+            }),
+        }];
+        let api_tools = build_tools(&defs);
+        assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
+        assert_eq!(
+            api_tools[0]["parameters"]["anyOf"][0]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            api_tools[0]["parameters"]["anyOf"][1]["additionalProperties"],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
     fn test_parse_text_wrapped_tool_call_prefers_trailing_json_object() {
         let text = "Status update\nassistant to=functions.batch commentary {}json\n{\"tool_calls\":[{\"tool\":\"read\",\"file_path\":\"src/main.rs\"}]}";
         let parsed = parse_text_wrapped_tool_call(text).expect("should parse wrapped tool call");
