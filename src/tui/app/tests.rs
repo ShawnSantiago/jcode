@@ -683,6 +683,55 @@ fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane() {
 }
 
 #[test]
+fn test_mouse_scroll_over_tool_side_panel_updates_visible_render() {
+    let _lock = scroll_render_test_lock();
+
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.diff_pane_scroll = 0;
+    app.diff_pane_focus = false;
+    app.diff_pane_auto_scroll = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            content: (1..=30)
+                .map(|i| format!("- side-scroll-{i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            updated_at_ms: 1,
+        }],
+    };
+
+    let backend = ratatui::backend::TestBackend::new(80, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(crate::tui::ui::pinned_pane_total_lines() > 3);
+    assert!(crate::tui::ui::last_layout_snapshot().and_then(|l| l.diff_pane_area).is_some());
+    assert!(before.contains("side-scroll-01"));
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 60,
+        row: 3,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(scroll_only, "wheel scroll should remain deferrable while streaming");
+    assert_eq!(app.diff_pane_scroll, 3);
+
+    let after = render_and_snap(&app, &mut terminal);
+    assert_eq!(crate::tui::ui::last_diff_pane_effective_scroll(), 3);
+    assert_ne!(before, after, "hover scrolling should repaint the side panel");
+    assert!(after.contains("side-scroll-04"));
+    assert!(after.contains("side-scroll-05"));
+    assert!(!after.contains("side-scroll-01"));
+}
+
+#[test]
 fn test_tool_side_panel_uses_shared_right_pane_keyboard_focus() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;

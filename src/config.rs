@@ -291,7 +291,7 @@ pub struct DisplayConfig {
     show_diffs: Option<bool>,
     /// Queue mode by default - wait until done before sending (default: false)
     pub queue_mode: bool,
-    /// Capture mouse events (default: false). Enables scroll wheel but disables terminal selection.
+    /// Capture mouse events (default: true). Enables scroll wheel but disables terminal selection.
     pub mouse_capture: bool,
     /// Enable debug socket for external control (default: false)
     pub debug_socket: bool,
