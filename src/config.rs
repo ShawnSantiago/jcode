@@ -745,6 +745,11 @@ impl Config {
                 self.features.swarm = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_MESSAGE_TIMESTAMPS") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.message_timestamps = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL") {
             match v.trim().to_lowercase().as_str() {
                 "main" | "nightly" | "edge" => {
@@ -1057,6 +1062,8 @@ prompt_entry_animation = true
 memory = true
 # Swarm: multi-session coordination features
 swarm = true
+# Inject timestamps into user messages and tool results sent to the model
+message_timestamps = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
@@ -1198,6 +1205,7 @@ desktop_notifications = true
 **Features:**
 - Memory: {}
 - Swarm: {}
+- Message timestamps: {}
 - Update channel: {}
 
 **Provider:**
@@ -1272,6 +1280,7 @@ desktop_notifications = true
             self.display.redraw_fps,
             self.features.memory,
             self.features.swarm,
+            self.features.message_timestamps,
             self.features.update_channel,
             self.provider
                 .default_model
