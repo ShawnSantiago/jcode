@@ -3406,6 +3406,27 @@ mod tests {
     }
 
     #[test]
+    fn usage_bar_shows_centered_numeric_label_when_space_allows() {
+        let line = super::render_usage_bar(200_000, 1_000_000, 26);
+        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+
+        assert!(text.starts_with('['), "expected opening bracket: {text}");
+        assert!(text.ends_with(']'), "expected closing bracket: {text}");
+        assert!(text.contains("200k/1000k"), "expected inline usage label: {text}");
+    }
+
+    #[test]
+    fn usage_bar_omits_numeric_label_when_bar_too_narrow() {
+        let line = super::render_usage_bar(200_000, 1_000_000, 10);
+        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+
+        assert!(
+            !text.contains("200k/1000k"),
+            "narrow bar should fall back to plain fill: {text}"
+        );
+    }
+
+    #[test]
     fn sticky_placement_clamps_width_to_current_margin() {
         {
             let mut guard = super::get_or_init_state();
@@ -4748,18 +4769,46 @@ fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line
     if used_cells > bar_width {
         used_cells = bar_width;
     }
-    let empty_cells = bar_width.saturating_sub(used_cells);
+    let label = format!("{}/{}", format_token_k(used_tokens), format_token_k(limit_tokens));
+    let show_label = label.len().saturating_add(2) <= bar_width;
     let mut spans = Vec::new();
     spans.push(Span::styled("[", Style::default().fg(rgb(90, 90, 100))));
-    spans.push(Span::styled(
-        "█".repeat(used_cells),
-        Style::default().fg(rgb(120, 200, 180)),
-    ));
-    if empty_cells > 0 {
+    if show_label {
+        let label_start = (bar_width - label.len()) / 2;
+        let label_end = label_start + label.len();
+        for idx in 0..bar_width {
+            let in_used = idx < used_cells;
+            let base_char = if in_used { '█' } else { '░' };
+            let ch = if idx >= label_start && idx < label_end {
+                label.as_bytes()[idx - label_start] as char
+            } else {
+                base_char
+            };
+            let style = if idx >= label_start && idx < label_end {
+                if in_used {
+                    Style::default().fg(rgb(20, 30, 35)).bold()
+                } else {
+                    Style::default().fg(rgb(170, 170, 180)).bold()
+                }
+            } else if in_used {
+                Style::default().fg(rgb(120, 200, 180))
+            } else {
+                Style::default().fg(rgb(50, 50, 60))
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+    } else {
+        let empty_cells = bar_width.saturating_sub(used_cells);
         spans.push(Span::styled(
-            "░".repeat(empty_cells),
-            Style::default().fg(rgb(50, 50, 60)),
+            "█".repeat(used_cells),
+            Style::default().fg(rgb(120, 200, 180)),
         ));
+        if empty_cells > 0 {
+            spans.push(Span::styled(
+                "░".repeat(empty_cells),
+                Style::default().fg(rgb(50, 50, 60)),
+            ));
+        }
     }
     spans.push(Span::styled("]", Style::default().fg(rgb(90, 90, 100))));
     Line::from(spans)
