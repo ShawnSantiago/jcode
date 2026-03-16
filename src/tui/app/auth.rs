@@ -775,6 +775,30 @@ impl App {
         }
     }
 
+    pub(super) fn switch_account_by_label(&mut self, label: &str) {
+        let has_anthropic = crate::auth::claude::list_accounts()
+            .unwrap_or_default()
+            .iter()
+            .any(|account| account.label == label);
+        let has_openai = crate::auth::codex::list_accounts()
+            .unwrap_or_default()
+            .iter()
+            .any(|account| account.label == label);
+
+        match (has_anthropic, has_openai) {
+            (true, false) => self.switch_account(label),
+            (false, true) => self.switch_openai_account(label),
+            (true, true) => self.push_display_message(DisplayMessage::error(format!(
+                "Account label `{}` exists for both Anthropic and OpenAI. Use `/account switch {}` or `/account openai switch {}` explicitly.",
+                label, label, label
+            ))),
+            (false, false) => self.push_display_message(DisplayMessage::error(format!(
+                "No Anthropic or OpenAI account with label `{}` found.",
+                label
+            ))),
+        }
+    }
+
     pub(super) fn remove_account(&mut self, label: &str) {
         match crate::auth::claude::remove_account(label) {
             Ok(()) => {
@@ -2062,7 +2086,7 @@ pub(super) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
             "list" | "ls" => app.show_accounts(),
             "switch" | "use" => {
                 if let Some(label) = parts.get(1) {
-                    app.switch_account(label.trim());
+                    app.switch_account_by_label(label.trim());
                 } else {
                     app.push_display_message(DisplayMessage::error(
                         "Usage: `/account switch <label>`".to_string(),
@@ -2083,9 +2107,12 @@ pub(super) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
                 }
             }
             other => {
-                let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-                if accounts.iter().any(|a| a.label == other) {
-                    app.switch_account(other);
+                let anthropic_accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+                let openai_accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+                if anthropic_accounts.iter().any(|a| a.label == other)
+                    || openai_accounts.iter().any(|a| a.label == other)
+                {
+                    app.switch_account_by_label(other);
                 } else {
                     app.push_display_message(DisplayMessage::error(format!(
                         "Unknown subcommand '{}'. Use: list, switch, add, remove",

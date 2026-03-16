@@ -1313,9 +1313,7 @@ mod tests {
 
         save_openai_tokens(&tokens).unwrap();
 
-        let auth_path = temp
-            .path()
-            .join("openai-auth.json");
+        let auth_path = temp.path().join("openai-auth.json");
         assert!(auth_path.exists(), "expected {}", auth_path.display());
 
         let creds = crate::auth::codex::load_credentials().unwrap();
