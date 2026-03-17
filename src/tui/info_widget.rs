@@ -3408,17 +3408,28 @@ mod tests {
     #[test]
     fn usage_bar_shows_centered_numeric_label_when_space_allows() {
         let line = super::render_usage_bar(200_000, 1_000_000, 26);
-        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
 
         assert!(text.starts_with('['), "expected opening bracket: {text}");
         assert!(text.ends_with(']'), "expected closing bracket: {text}");
-        assert!(text.contains("200k/1000k"), "expected inline usage label: {text}");
+        assert!(
+            text.contains("200k/1000k"),
+            "expected inline usage label: {text}"
+        );
     }
 
     #[test]
     fn usage_bar_omits_numeric_label_when_bar_too_narrow() {
         let line = super::render_usage_bar(200_000, 1_000_000, 10);
-        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
 
         assert!(
             !text.contains("200k/1000k"),
@@ -4769,7 +4780,11 @@ fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line
     if used_cells > bar_width {
         used_cells = bar_width;
     }
-    let label = format!("{}/{}", format_token_k(used_tokens), format_token_k(limit_tokens));
+    let label = format!(
+        "{}/{}",
+        format_token_k(used_tokens),
+        format_token_k(limit_tokens)
+    );
     let show_label = label.len().saturating_add(2) <= bar_width;
     let mut spans = Vec::new();
     spans.push(Span::styled("[", Style::default().fg(rgb(90, 90, 100))));

@@ -2828,8 +2828,8 @@ fn terminal_theme() -> Theme {
         // Uses transparent canvas so the rendered PNG integrates with the TUI,
         // while keeping nodes/labels readable against dark panes.
         background: "#00000000".to_string(),
-        font_family:
-            "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif".to_string(),
+        font_family: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+            .to_string(),
         font_size: 15.0,
         primary_color: "#313244".to_string(),
         primary_text_color: "#cdd6f4".to_string(),
