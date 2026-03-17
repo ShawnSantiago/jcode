@@ -301,25 +301,29 @@ pub(super) async fn handle_set_feature(
     }
 }
 
+fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, String)> {
+    let parent = Session::load(parent_session_id)?;
+
+    let mut child = Session::create(Some(parent_session_id.to_string()), None);
+    child.replace_messages(parent.messages.clone());
+    child.compaction = parent.compaction.clone();
+    child.working_dir = parent.working_dir.clone();
+    child.model = parent.model.clone();
+    child.status = crate::session::SessionStatus::Closed;
+    child.save()?;
+
+    let name = child.display_name().to_string();
+    Ok((child.id.clone(), name))
+}
+
 pub(super) async fn handle_split(
     id: u64,
-    agent: &Arc<Mutex<Agent>>,
+    client_session_id: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let (new_session_id, new_session_name) = {
-        let agent_guard = agent.lock().await;
-        let parent_session_id = agent_guard.session_id().to_string();
-        let messages = agent_guard.messages().to_vec();
-        let working_dir = agent_guard.working_dir().map(|s| s.to_string());
-        let model = Some(agent_guard.provider_model());
-
-        let mut child = Session::create(Some(parent_session_id), None);
-        child.replace_messages(messages);
-        child.working_dir = working_dir;
-        child.model = model;
-        child.status = crate::session::SessionStatus::Closed;
-
-        if let Err(e) = child.save() {
+    let (new_session_id, new_session_name) = match clone_split_session(client_session_id) {
+        Ok(result) => result,
+        Err(e) => {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Failed to save split session: {e}"),
@@ -327,9 +331,6 @@ pub(super) async fn handle_split(
             });
             return;
         }
-
-        let name = child.display_name().to_string();
-        (child.id.clone(), name)
     };
 
     let _ = client_event_tx.send(ServerEvent::SplitResponse {
@@ -337,6 +338,63 @@ pub(super) async fn handle_split(
         new_session_id,
         new_session_name,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clone_split_session;
+    use crate::message::{ContentBlock, Role};
+
+    #[test]
+    fn clone_split_session_uses_persisted_session_state() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let mut parent = crate::session::Session::create_with_id(
+            "session_parent_split_test".to_string(),
+            None,
+            None,
+        );
+        parent.working_dir = Some("/tmp/jcode-split-test".to_string());
+        parent.model = Some("gpt-test".to_string());
+        parent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "hello from parent".to_string(),
+                cache_control: None,
+            }],
+        );
+        parent.compaction = Some(crate::session::StoredCompactionState {
+            summary_text: "summary".to_string(),
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        });
+        parent.save().expect("save parent");
+
+        let (child_id, _child_name) = clone_split_session(&parent.id).expect("clone split");
+        let child = crate::session::Session::load(&child_id).expect("load child");
+
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(child.messages.len(), parent.messages.len());
+        assert_eq!(
+            child.messages[0].content_preview(),
+            parent.messages[0].content_preview()
+        );
+        assert_eq!(child.compaction, parent.compaction);
+        assert_eq!(child.working_dir, parent.working_dir);
+        assert_eq!(child.model, parent.model);
+        assert_eq!(child.status, crate::session::SessionStatus::Closed);
+        assert_ne!(child.id, parent.id);
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 }
 
 pub(super) fn handle_compact(

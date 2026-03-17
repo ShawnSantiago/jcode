@@ -335,6 +335,84 @@ fn resumed_window_title(session_id: &str) -> String {
     format!("{} jcode {}", icon, session_name)
 }
 
+fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
+    let term = term.into();
+    if term.trim().is_empty() {
+        return;
+    }
+    if !candidates.iter().any(|candidate| candidate == &term) {
+        candidates.push(term);
+    }
+}
+
+#[cfg(unix)]
+fn detected_resume_terminal() -> Option<&'static str> {
+    if std::env::var("KITTY_PID").is_ok() {
+        return Some("kitty");
+    }
+    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
+        return Some("wezterm");
+    }
+    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
+        return Some("alacritty");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let term_program = std::env::var("TERM_PROGRAM")
+            .ok()
+            .map(|value| value.to_ascii_lowercase());
+        return match term_program.as_deref() {
+            Some("kitty") => Some("kitty"),
+            Some("wezterm") => Some("wezterm"),
+            Some("alacritty") => Some("alacritty"),
+            Some("iterm.app") | Some("iterm2") => Some("iterm2"),
+            Some("apple_terminal") | Some("terminal") => Some("terminal"),
+            _ => None,
+        };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn resume_terminal_candidates_unix() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+        push_unique_terminal(&mut candidates, term);
+    }
+    if let Some(term) = detected_resume_terminal() {
+        push_unique_terminal(&mut candidates, term);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for term in ["kitty", "wezterm", "alacritty", "iterm2", "terminal"] {
+            push_unique_terminal(&mut candidates, term);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        for term in [
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "gnome-terminal",
+            "konsole",
+            "xterm",
+            "foot",
+        ] {
+            push_unique_terminal(&mut candidates, term);
+        }
+    }
+
+    candidates
+}
+
 #[cfg(unix)]
 pub(super) fn spawn_in_new_terminal(
     exe: &Path,
@@ -344,27 +422,9 @@ pub(super) fn spawn_in_new_terminal(
 ) -> anyhow::Result<bool> {
     use std::process::{Command, Stdio};
 
-    let mut candidates: Vec<String> = Vec::new();
-    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
-        if !term.trim().is_empty() {
-            candidates.push(term);
-        }
-    }
-    candidates.extend(
-        [
-            "kitty",
-            "wezterm",
-            "alacritty",
-            "gnome-terminal",
-            "konsole",
-            "xterm",
-            "foot",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
+    let mut last_spawn_error: Option<std::io::Error> = None;
 
-    for term in candidates {
+    for term in resume_terminal_candidates_unix() {
         let mut cmd = Command::new(&term);
         cmd.current_dir(cwd)
             .stdin(Stdio::null())
@@ -411,15 +471,41 @@ pub(super) fn spawn_in_new_terminal(
                     .arg(exe)
                     .args(resume_invocation_args(session_id, socket));
             }
+            #[cfg(target_os = "macos")]
+            "iterm2" => {
+                cmd = Command::new("osascript");
+                cmd.args([
+                    "-e",
+                    &format!(
+                        r#"tell application "iTerm2"
+                            create window with default profile command "{} {}"
+                        end tell"#,
+                        exe.to_string_lossy(),
+                        resume_invocation_args(session_id, socket).join(" ")
+                    ),
+                ]);
+            }
+            #[cfg(target_os = "macos")]
+            "terminal" => {
+                cmd = Command::new("open");
+                cmd.args(["-a", "Terminal", exe.to_str().unwrap_or("jcode"), "--args"]);
+                cmd.args(resume_invocation_args(session_id, socket));
+            }
             _ => continue,
         }
 
-        if crate::platform::spawn_detached(&mut cmd).is_ok() {
-            return Ok(true);
+        match crate::platform::spawn_detached(&mut cmd) {
+            Ok(_) => return Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => last_spawn_error = Some(err),
         }
     }
 
-    Ok(false)
+    if let Some(err) = last_spawn_error {
+        Err(err.into())
+    } else {
+        Ok(false)
+    }
 }
 
 #[cfg(not(unix))]
