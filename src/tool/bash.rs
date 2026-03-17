@@ -3,12 +3,14 @@ use crate::background::TaskResult;
 use crate::stdin_detect::{self, StdinState};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::process::Stdio;
-use std::time::Duration;
+use std::fs::OpenOptions;
+use std::process::{Command as StdCommand, Stdio};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
 const MAX_OUTPUT_LEN: usize = 30000;
@@ -16,18 +18,46 @@ const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
 
-fn build_shell_command(cmd_str: &str) -> Command {
+fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd.exe");
+        let mut cmd = TokioCommand::new("cmd.exe");
         cmd.arg("/C").arg(cmd_str);
         cmd
     }
     #[cfg(not(windows))]
     {
-        let mut cmd = Command::new("bash");
+        let mut cmd = TokioCommand::new("bash");
         cmd.arg("-c").arg(cmd_str);
         cmd
+    }
+}
+
+#[cfg(unix)]
+fn build_detached_shell_wrapper(command: &str) -> StdCommand {
+    let mut cmd = StdCommand::new("bash");
+    cmd.arg("-lc")
+        .arg(
+            r#"eval "$JCODE_RELOAD_DETACH_COMMAND"; status=$?; printf '\n--- Command finished with exit code: %s ---\n' "$status"; exit "$status""#,
+        )
+        .env("JCODE_RELOAD_DETACH_COMMAND", command);
+    cmd
+}
+
+fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
+    if output.len() > MAX_OUTPUT_LEN {
+        output.truncate(MAX_OUTPUT_LEN);
+        output.push_str("\n... (output truncated)");
+    }
+
+    if let Some(code) = exit_code.filter(|code| *code != 0) {
+        output.push_str(&format!("\n\nExit code: {}", code));
+    }
+
+    if output.trim().is_empty() {
+        "Command completed successfully (no output)".to_string()
+    } else {
+        output
     }
 }
 
@@ -169,6 +199,11 @@ impl BashTool {
         params: &BashInput,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
+        #[cfg(unix)]
+        if self.supports_reload_persistence(ctx) {
+            return self.execute_reload_persistable_foreground(params, ctx).await;
+        }
+
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
         let timeout_duration = Duration::from_millis(timeout_ms);
 
@@ -304,22 +339,7 @@ impl BashTool {
                     }
                     output.push_str(&stderr);
                 }
-
-                // Truncate if too long
-                if output.len() > MAX_OUTPUT_LEN {
-                    output.truncate(MAX_OUTPUT_LEN);
-                    output.push_str("\n... (output truncated)");
-                }
-
-                if !status.success() {
-                    output.push_str(&format!("\n\nExit code: {}", status.code().unwrap_or(-1)));
-                }
-
-                let output = if output.is_empty() {
-                    "Command completed successfully (no output)".to_string()
-                } else {
-                    output
-                };
+                let output = format_command_output(output, status.code());
                 Ok(ToolOutput::new(output).with_title(
                     params
                         .description
@@ -333,6 +353,108 @@ impl BashTool {
                 let _ = child.kill().await;
                 Err(anyhow::anyhow!("Command timed out after {}ms", timeout_ms))
             }
+        }
+    }
+
+    #[cfg(unix)]
+    fn supports_reload_persistence(&self, ctx: &ToolContext) -> bool {
+        matches!(ctx.execution_mode, crate::tool::ToolExecutionMode::AgentTurn)
+            && ctx.stdin_request_tx.is_none()
+            && ctx.graceful_shutdown_signal.is_some()
+    }
+
+    #[cfg(unix)]
+    async fn execute_reload_persistable_foreground(
+        &self,
+        params: &BashInput,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
+        let timeout_duration = Duration::from_millis(timeout_ms);
+        let started_at = Utc::now().to_rfc3339();
+        let started = Instant::now();
+        let manager = crate::background::global();
+        let info = manager.reserve_task_info();
+
+        let mut cmd = build_detached_shell_wrapper(&params.command);
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&info.output_file)?;
+        let stderr = stdout.try_clone()?;
+        cmd.stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr);
+        if let Some(ref dir) = ctx.working_dir {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = crate::platform::spawn_detached(&mut cmd)?;
+        let pid = child.id();
+        let shutdown_signal = ctx.graceful_shutdown_signal.clone();
+
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let output = tokio::fs::read_to_string(&info.output_file)
+                    .await
+                    .unwrap_or_default();
+                let _ = tokio::fs::remove_file(&info.output_file).await;
+                let _ = tokio::fs::remove_file(&info.status_file).await;
+                return Ok(ToolOutput::new(format_command_output(output, status.code())).with_title(
+                    params
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| params.command.clone()),
+                ));
+            }
+
+            if started.elapsed() >= timeout_duration {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                let _ = tokio::fs::remove_file(&info.output_file).await;
+                let _ = tokio::fs::remove_file(&info.status_file).await;
+                return Err(anyhow::anyhow!("Command timed out after {}ms", timeout_ms));
+            }
+
+            if shutdown_signal
+                .as_ref()
+                .map(|signal| signal.is_set())
+                .unwrap_or(false)
+            {
+                manager
+                    .register_detached_task(
+                        &info,
+                        "bash",
+                        &ctx.session_id,
+                        pid,
+                        &started_at,
+                        params.notify,
+                    )
+                    .await;
+                let output = format!(
+                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\nUse `bg` with action=\"status\" and task_id=\"{}\" after reload.",
+                    info.task_id,
+                    info.output_file.display(),
+                    info.status_file.display(),
+                    info.task_id,
+                );
+                return Ok(ToolOutput::new(output)
+                    .with_title(
+                        params
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| params.command.clone()),
+                    )
+                    .with_metadata(json!({
+                        "background": true,
+                        "task_id": info.task_id,
+                        "output_file": info.output_file.to_string_lossy(),
+                        "status_file": info.status_file.to_string_lossy(),
+                        "reload_persisted": true,
+                        "pid": pid,
+                    })));
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -472,6 +594,7 @@ impl BashTool {
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
+    use crate::bus::BackgroundTaskStatus;
     use crate::tool::StdinInputRequest;
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -483,7 +606,20 @@ mod tests {
             tool_call_id: "test-call".to_string(),
             working_dir: Some(std::path::PathBuf::from("/tmp")),
             stdin_request_tx: stdin_tx,
+            graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    fn make_agent_ctx(signal: crate::agent::InterruptSignal) -> ToolContext {
+        ToolContext {
+            session_id: "test-session".to_string(),
+            message_id: "test-msg".to_string(),
+            tool_call_id: "test-call-agent".to_string(),
+            working_dir: Some(std::path::PathBuf::from("/tmp")),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: Some(signal),
+            execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
         }
     }
 
@@ -634,6 +770,61 @@ mod tests {
             "error should mention timeout: {}",
             err_msg
         );
+    }
+
+    #[tokio::test]
+    async fn test_reload_persistable_bash_continues_in_background() {
+        let tool = BashTool::new();
+        let signal = crate::agent::InterruptSignal::new();
+        let ctx = make_agent_ctx(signal.clone());
+
+        let signal_task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            signal.fire();
+        });
+
+        let result = tool
+            .execute(
+                json!({"command": "sleep 1; echo reload_persist_ok", "timeout": 10000}),
+                ctx,
+            )
+            .await
+            .expect("reload-persistable command should succeed");
+        signal_task.await.expect("signal task should complete");
+
+        let metadata = result.metadata.expect("expected background metadata");
+        assert_eq!(metadata["background"], true);
+        assert_eq!(metadata["reload_persisted"], true);
+        let task_id = metadata["task_id"]
+            .as_str()
+            .expect("task_id should be present")
+            .to_string();
+        let output_file = std::path::PathBuf::from(
+            metadata["output_file"]
+                .as_str()
+                .expect("output_file should be present"),
+        );
+        let status_file = std::path::PathBuf::from(
+            metadata["status_file"]
+                .as_str()
+                .expect("status_file should be present"),
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+
+        let status = crate::background::global()
+            .status(&task_id)
+            .await
+            .expect("status should exist");
+        assert_eq!(status.status, BackgroundTaskStatus::Completed);
+        let output = crate::background::global()
+            .output(&task_id)
+            .await
+            .expect("output should exist");
+        assert!(output.contains("reload_persist_ok"), "output was: {output}");
+
+        let _ = tokio::fs::remove_file(output_file).await;
+        let _ = tokio::fs::remove_file(status_file).await;
     }
 
     #[tokio::test]

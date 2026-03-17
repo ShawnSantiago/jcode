@@ -5,6 +5,7 @@
 
 use crate::bus::{BackgroundTaskCompleted, BackgroundTaskStatus, Bus, BusEvent};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ fn task_dir() -> PathBuf {
     std::env::temp_dir().join("jcode-bg-tasks")
 }
 
+const EXIT_MARKER_PREFIX: &str = "--- Command finished with exit code: ";
+
 /// Status file format (written to disk)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStatusFile {
@@ -32,6 +35,16 @@ pub struct TaskStatusFile {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub duration_secs: Option<f64>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub detached: bool,
+    #[serde(default = "default_true")]
+    pub notify: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Information returned when a background task is started
@@ -101,6 +114,145 @@ impl BackgroundTaskManager {
         )
     }
 
+    fn output_path_for(&self, task_id: &str) -> PathBuf {
+        self.output_dir.join(format!("{}.output", task_id))
+    }
+
+    fn status_path_for(&self, task_id: &str) -> PathBuf {
+        self.output_dir.join(format!("{}.status.json", task_id))
+    }
+
+    fn status_duration_secs(started_at: &str, completed_at: DateTime<Utc>) -> Option<f64> {
+        DateTime::parse_from_rfc3339(started_at)
+            .ok()
+            .and_then(|started| (completed_at - started.with_timezone(&Utc)).to_std().ok())
+            .map(|duration| duration.as_secs_f64())
+    }
+
+    fn parse_exit_code_from_output(output: &str) -> Option<i32> {
+        output.lines().rev().find_map(|line| {
+            let trimmed = line.trim();
+            let suffix = trimmed.strip_prefix(EXIT_MARKER_PREFIX)?;
+            let suffix = suffix.strip_suffix(" ---")?;
+            suffix.trim().parse::<i32>().ok()
+        })
+    }
+
+    async fn read_status_file(&self, path: &std::path::Path) -> Option<TaskStatusFile> {
+        let content = fs::read_to_string(path).await.ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
+        if let Ok(json) = serde_json::to_string_pretty(status) {
+            let _ = fs::write(path, json).await;
+        }
+    }
+
+    async fn finalize_detached_status_if_needed(
+        &self,
+        mut status: TaskStatusFile,
+        status_path: &std::path::Path,
+    ) -> TaskStatusFile {
+        if status.status != BackgroundTaskStatus::Running || !status.detached {
+            return status;
+        }
+
+        let Some(pid) = status.pid else {
+            return status;
+        };
+
+        let reaped_exit = crate::platform::try_reap_child_process(pid).ok().flatten();
+
+        if reaped_exit.is_none() && crate::platform::is_process_running(pid) {
+            return status;
+        }
+
+        let output_path = self.output_path_for(&status.task_id);
+        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
+        let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
+        let completed_at = Utc::now();
+        let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
+        let final_status = if matches!(exit_code, Some(0)) {
+            BackgroundTaskStatus::Completed
+        } else {
+            BackgroundTaskStatus::Failed
+        };
+        let final_error = if matches!(final_status, BackgroundTaskStatus::Failed) {
+            Some(match exit_code {
+                Some(code) => format!("Command exited with code {}", code),
+                None => "Detached command exited without a readable exit code".to_string(),
+            })
+        } else {
+            None
+        };
+
+        status.status = final_status.clone();
+        status.exit_code = exit_code;
+        status.error = final_error.clone();
+        status.completed_at = Some(completed_at.to_rfc3339());
+        status.duration_secs = duration_secs;
+        status.pid = Some(pid);
+
+        self.write_status_file(status_path, &status).await;
+
+        let output_preview = if output.len() > 500 {
+            format!("{}...", crate::util::truncate_str(&output, 500))
+        } else {
+            output
+        };
+        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+            task_id: status.task_id.clone(),
+            tool_name: status.tool_name.clone(),
+            session_id: status.session_id.clone(),
+            status: final_status,
+            exit_code,
+            output_preview,
+            output_file: output_path,
+            duration_secs: duration_secs.unwrap_or_default(),
+            notify: status.notify,
+        }));
+
+        status
+    }
+
+    pub fn reserve_task_info(&self) -> BackgroundTaskInfo {
+        let task_id = Self::generate_task_id();
+        let output_file = self.output_path_for(&task_id);
+        let status_file = self.status_path_for(&task_id);
+        BackgroundTaskInfo {
+            task_id,
+            output_file,
+            status_file,
+        }
+    }
+
+    pub async fn register_detached_task(
+        &self,
+        info: &BackgroundTaskInfo,
+        tool_name: &str,
+        session_id: &str,
+        pid: u32,
+        started_at: &str,
+        notify: bool,
+    ) {
+        let status = TaskStatusFile {
+            task_id: info.task_id.clone(),
+            tool_name: tool_name.to_string(),
+            session_id: session_id.to_string(),
+            status: BackgroundTaskStatus::Running,
+            exit_code: None,
+            error: None,
+            started_at: started_at.to_string(),
+            completed_at: None,
+            duration_secs: None,
+            pid: Some(pid),
+            detached: true,
+            notify,
+        };
+        self.write_status_file(&info.status_file, &status).await;
+    }
+
     /// Spawn a background task
     ///
     /// The `execute_fn` receives the output file path and should write output there.
@@ -146,6 +298,9 @@ impl BackgroundTaskManager {
             started_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
             duration_secs: None,
+            pid: None,
+            detached: false,
+            notify,
         };
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
             let _ = std::fs::write(&status_path, json);
@@ -190,6 +345,9 @@ impl BackgroundTaskManager {
                 started_at: chrono::Utc::now().to_rfc3339(), // Not accurate but close enough
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 duration_secs: Some(duration_secs),
+                pid: None,
+                detached: false,
+                notify: notify_flag,
             };
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = tokio::fs::write(&status_path_clone, json).await;
@@ -269,6 +427,9 @@ impl BackgroundTaskManager {
             started_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
             duration_secs: None,
+            pid: None,
+            detached: false,
+            notify: true,
         };
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
             let _ = std::fs::write(&status_path, json);
@@ -320,6 +481,9 @@ impl BackgroundTaskManager {
                 started_at: chrono::Utc::now().to_rfc3339(),
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 duration_secs: Some(duration_secs),
+                pid: None,
+                detached: false,
+                notify: true,
             };
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = tokio::fs::write(&status_path_clone, json).await;
@@ -376,10 +540,9 @@ impl BackgroundTaskManager {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.extension().map(|e| e == "json").unwrap_or(false) {
-                    if let Ok(content) = fs::read_to_string(&path).await {
-                        if let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) {
-                            results.push(status);
-                        }
+                    if let Some(status) = self.read_status_file(&path).await {
+                        let reconciled = self.finalize_detached_status_if_needed(status, &path).await;
+                        results.push(reconciled);
                     }
                 }
             }
@@ -392,17 +555,14 @@ impl BackgroundTaskManager {
 
     /// Get status of a specific task
     pub async fn status(&self, task_id: &str) -> Option<TaskStatusFile> {
-        let status_path = self.output_dir.join(format!("{}.status.json", task_id));
-        if let Ok(content) = fs::read_to_string(&status_path).await {
-            serde_json::from_str(&content).ok()
-        } else {
-            None
-        }
+        let status_path = self.status_path_for(task_id);
+        let status = self.read_status_file(&status_path).await?;
+        Some(self.finalize_detached_status_if_needed(status, &status_path).await)
     }
 
     /// Get full output of a task
     pub async fn output(&self, task_id: &str) -> Option<String> {
-        let output_path = self.output_dir.join(format!("{}.output", task_id));
+        let output_path = self.output_path_for(task_id);
         fs::read_to_string(&output_path).await.ok()
     }
 
@@ -423,6 +583,9 @@ impl BackgroundTaskManager {
                 started_at: chrono::Utc::now().to_rfc3339(),
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 duration_secs: Some(task.started_at.elapsed().as_secs_f64()),
+                pid: None,
+                detached: false,
+                notify: true,
             };
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
@@ -430,7 +593,44 @@ impl BackgroundTaskManager {
 
             Ok(true)
         } else {
-            Ok(false)
+            drop(tasks);
+
+            let status_path = self.status_path_for(task_id);
+            let Some(mut status) = self.read_status_file(&status_path).await else {
+                return Ok(false);
+            };
+            status = self
+                .finalize_detached_status_if_needed(status, &status_path)
+                .await;
+            if status.status != BackgroundTaskStatus::Running || !status.detached {
+                return Ok(false);
+            }
+
+            let Some(pid) = status.pid else {
+                return Ok(false);
+            };
+
+            #[cfg(unix)]
+            {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                if crate::platform::is_process_running(pid) {
+                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                }
+            }
+            #[cfg(windows)]
+            {
+                let _ = crate::platform::signal_detached_process_group(pid, 0);
+            }
+
+            let completed_at = Utc::now();
+            status.status = BackgroundTaskStatus::Failed;
+            status.exit_code = None;
+            status.error = Some("Cancelled by user".to_string());
+            status.completed_at = Some(completed_at.to_rfc3339());
+            status.duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
+            self.write_status_file(&status_path, &status).await;
+            Ok(true)
         }
     }
 

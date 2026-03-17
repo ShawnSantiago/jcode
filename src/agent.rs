@@ -1732,6 +1732,7 @@ impl Agent {
             tool_call_id: call_id,
             working_dir: self.working_dir().map(PathBuf::from),
             stdin_request_tx: self.stdin_request_tx.clone(),
+            graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
             execution_mode: ToolExecutionMode::Direct,
         };
         self.registry.execute(name, input, ctx).await
@@ -2359,6 +2360,7 @@ impl Agent {
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
                             stdin_request_tx: self.stdin_request_tx.clone(),
+                            graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
@@ -2605,6 +2607,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
                     stdin_request_tx: self.stdin_request_tx.clone(),
+                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
                 };
 
@@ -3087,6 +3090,7 @@ impl Agent {
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
                             stdin_request_tx: self.stdin_request_tx.clone(),
+                            graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
@@ -3361,6 +3365,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
                     stdin_request_tx: self.stdin_request_tx.clone(),
+                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
                 };
 
@@ -3810,6 +3815,7 @@ impl Agent {
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
                             stdin_request_tx: self.stdin_request_tx.clone(),
+                            graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
@@ -4102,6 +4108,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
                     stdin_request_tx: self.stdin_request_tx.clone(),
+                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
                 };
 
@@ -4129,6 +4136,7 @@ impl Agent {
                 // OR graceful shutdown signal from server reload
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
+                let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut tool_handle = tool_handle;
                 tokio::select! {
@@ -4145,7 +4153,22 @@ impl Agent {
                             _ = shutdown_signal.notified() => {}
                         }
                     } => {
-                        tool_result = None;
+                        if self.is_graceful_shutdown() && allow_reload_handoff {
+                            tool_result = match tokio::time::timeout(
+                                Duration::from_millis(750),
+                                &mut tool_handle,
+                            )
+                            .await
+                            {
+                                Ok(res) => Some(match res {
+                                    Ok(r) => r,
+                                    Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
+                                }),
+                                Err(_) => None,
+                            };
+                        } else {
+                            tool_result = None;
+                        }
                     }
                 };
 

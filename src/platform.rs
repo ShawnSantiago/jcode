@@ -115,6 +115,79 @@ pub fn is_process_running(pid: u32) -> bool {
     }
 }
 
+/// Send a signal to an entire detached process group/session led by `pid`.
+///
+/// On Unix, detached tasks are spawned with `setsid()`, so the leader PID is
+/// also the process-group/session ID. Signaling `-pid` reaches the full tree.
+pub fn signal_detached_process_group(pid: u32, signal: i32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(-(pid as i32), signal) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = signal;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let ok = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+            if ok == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Best-effort non-blocking reap for a child process owned by the current process.
+///
+/// Returns:
+/// - `Ok(Some(exit_code))` if the child exited and was reaped now
+/// - `Ok(None)` if it is still running or is not our child
+pub fn try_reap_child_process(pid: u32) -> std::io::Result<Option<i32>> {
+    #[cfg(unix)]
+    {
+        let mut status = 0;
+        let rc = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+        if rc == 0 {
+            return Ok(None);
+        }
+        if rc == -1 {
+            let err = std::io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(code) if code == libc::ECHILD) {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+
+        if libc::WIFEXITED(status) {
+            Ok(Some(libc::WEXITSTATUS(status)))
+        } else if libc::WIFSIGNALED(status) {
+            Ok(Some(128 + libc::WTERMSIG(status)))
+        } else {
+            Ok(Some(-1))
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        Ok(None)
+    }
+}
+
 /// Atomically swap a symlink by creating a temp symlink and renaming.
 ///
 /// On Unix: creates temp symlink, then renames over target (atomic).

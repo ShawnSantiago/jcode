@@ -307,6 +307,7 @@ mod tests {
             tool_call_id: "test".to_string(),
             working_dir: None,
             stdin_request_tx: None,
+            graceful_shutdown_signal: None,
             execution_mode: tool::ToolExecutionMode::Direct,
         };
         let result = registry

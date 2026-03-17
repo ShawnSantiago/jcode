@@ -118,6 +118,7 @@ pub struct ToolContext {
     pub tool_call_id: String,
     pub working_dir: Option<PathBuf>,
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
+    pub graceful_shutdown_signal: Option<crate::agent::InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
 }
 
@@ -135,6 +136,7 @@ impl ToolContext {
             tool_call_id,
             working_dir: self.working_dir.clone(),
             stdin_request_tx: self.stdin_request_tx.clone(),
+            graceful_shutdown_signal: self.graceful_shutdown_signal.clone(),
             execution_mode: self.execution_mode,
         }
     }
@@ -756,6 +758,7 @@ mod tests {
             tool_call_id: "test".to_string(),
             working_dir: Some(temp_dir),
             stdin_request_tx: None,
+            graceful_shutdown_signal: None,
             execution_mode: ToolExecutionMode::Direct,
         };
 
