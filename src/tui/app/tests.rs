@@ -1548,6 +1548,54 @@ fn test_handle_key_escape_clears_input() {
 
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
+    assert_eq!(
+        app.status_notice(),
+        Some("Input cleared — Ctrl+Z to restore".to_string())
+    );
+}
+
+#[test]
+fn test_handle_key_ctrl_z_restores_escaped_input() {
+    let mut app = create_test_app();
+
+    app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "test");
+    assert_eq!(app.cursor_pos(), 4);
+    assert_eq!(app.status_notice(), Some("↶ Input restored".to_string()));
+}
+
+#[test]
+fn test_handle_key_ctrl_z_undoes_typing() {
+    let mut app = create_test_app();
+
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('b'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::empty())
+        .unwrap();
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input(), "ab");
+    assert_eq!(app.cursor_pos(), 2);
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input(), "a");
+    assert_eq!(app.cursor_pos(), 1);
 }
 
 #[test]
@@ -1755,6 +1803,11 @@ fn test_ctrl_x_cuts_entire_input_line_to_clipboard() {
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
     assert_eq!(app.status_notice(), Some("✂ Cut input line".to_string()));
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input(), "hello world");
+    assert_eq!(app.cursor_pos(), 5);
 }
 
 #[test]

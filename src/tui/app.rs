@@ -420,6 +420,8 @@ pub struct App {
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
+    // Undo history for in-progress input editing (Ctrl+Z)
+    input_undo_stack: Vec<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Ctrl+Enter in queue mode)
@@ -497,6 +499,7 @@ impl Provider for NullProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
+    const INPUT_UNDO_LIMIT: usize = 128;
 }
 
 #[cfg(test)]

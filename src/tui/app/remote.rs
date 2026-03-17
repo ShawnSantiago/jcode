@@ -2255,6 +2255,7 @@ pub(super) fn handle_remote_char_input(app: &mut App, c: char) {
             if idx >= 1 && idx <= suggestions.len() {
                 let (_label, prompt) = &suggestions[idx - 1];
                 if !prompt.starts_with('/') {
+                    app.remember_input_undo_state();
                     app.input = prompt.clone();
                     app.cursor_pos = app.input.len();
                     app.follow_chat_bottom_for_typing();
@@ -2279,7 +2280,9 @@ fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
     if handled {
         app.input.clear();
         app.cursor_pos = 0;
+        app.reset_tab_completion();
         app.sync_model_picker_preview_from_input();
+        app.clear_input_undo_history();
     }
 
     handled
@@ -2361,6 +2364,7 @@ pub(super) fn handle_disconnected_key(
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.remember_input_undo_state();
                 app.input.drain(prev..app.cursor_pos);
                 app.cursor_pos = prev;
                 app.reset_tab_completion();
@@ -2370,6 +2374,7 @@ pub(super) fn handle_disconnected_key(
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.remember_input_undo_state();
                 app.input.drain(app.cursor_pos..next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
@@ -2403,9 +2408,7 @@ pub(super) fn handle_disconnected_key(
         }
         KeyCode::Esc => {
             app.follow_chat_bottom();
-            app.input.clear();
-            app.cursor_pos = 0;
-            app.sync_model_picker_preview_from_input();
+            input::clear_input_for_escape(app);
         }
         _ => {}
     }
@@ -2619,11 +2622,17 @@ pub(super) async fn handle_remote_key(
             }
             KeyCode::Char('d') => {
                 let end = app.find_word_boundary_forward();
+                if app.cursor_pos < end {
+                    app.remember_input_undo_state();
+                }
                 app.input.drain(app.cursor_pos..end);
                 return Ok(());
             }
             KeyCode::Backspace => {
                 let start = app.find_word_boundary_back();
+                if start < app.cursor_pos {
+                    app.remember_input_undo_state();
+                }
                 app.input.drain(start..app.cursor_pos);
                 app.cursor_pos = start;
                 return Ok(());
@@ -2726,12 +2735,26 @@ pub(super) async fn handle_remote_key(
                 return Ok(());
             }
             KeyCode::Char('u') => {
+                if app.cursor_pos > 0 {
+                    app.remember_input_undo_state();
+                }
                 app.input.drain(..app.cursor_pos);
                 app.cursor_pos = 0;
                 return Ok(());
             }
             KeyCode::Char('k') => {
+                if app.cursor_pos < app.input.len() {
+                    app.remember_input_undo_state();
+                }
                 app.input.truncate(app.cursor_pos);
+                return Ok(());
+            }
+            KeyCode::Char('z') => {
+                app.undo_input_change();
+                return Ok(());
+            }
+            KeyCode::Char('x') => {
+                input::cut_input_line_to_clipboard(app);
                 return Ok(());
             }
             KeyCode::Char('a') => {
@@ -2762,6 +2785,9 @@ pub(super) async fn handle_remote_key(
             }
             KeyCode::Char('w') | KeyCode::Backspace => {
                 let start = app.find_word_boundary_back();
+                if start < app.cursor_pos {
+                    app.remember_input_undo_state();
+                }
                 app.input.drain(start..app.cursor_pos);
                 app.cursor_pos = start;
                 app.sync_model_picker_preview_from_input();
@@ -2859,6 +2885,7 @@ pub(super) async fn handle_remote_key(
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.remember_input_undo_state();
                 app.input.drain(prev..app.cursor_pos);
                 app.cursor_pos = prev;
                 app.reset_tab_completion();
@@ -2868,6 +2895,7 @@ pub(super) async fn handle_remote_key(
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.remember_input_undo_state();
                 app.input.drain(app.cursor_pos..next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
@@ -3684,16 +3712,13 @@ pub(super) async fn handle_remote_key(
                 .unwrap_or(false)
             {
                 app.picker_state = None;
-                app.input.clear();
-                app.cursor_pos = 0;
+                input::clear_input_for_escape(app);
             } else if app.is_processing {
                 remote.cancel().await?;
                 app.set_status_notice("Interrupting...");
             } else {
                 app.follow_chat_bottom();
-                app.input.clear();
-                app.cursor_pos = 0;
-                app.sync_model_picker_preview_from_input();
+                input::clear_input_for_escape(app);
             }
         }
         _ => {}

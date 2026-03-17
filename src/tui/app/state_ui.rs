@@ -441,6 +441,7 @@ impl App {
             {
                 let next_index = (idx + 1) % base_suggestions.len();
                 let (cmd, _) = &base_suggestions[next_index];
+                self.remember_input_undo_state();
                 self.input = cmd.clone();
                 self.cursor_pos = self.input.len();
                 self.tab_completion_state = Some((base.clone(), next_index));
@@ -459,6 +460,7 @@ impl App {
         // that accept arguments, then we're done
         if current_suggestions.len() == 1 && current_suggestions[0].0 == self.input {
             if !self.input.ends_with(' ') && Self::command_accepts_args(&self.input) {
+                self.remember_input_undo_state();
                 self.input.push(' ');
                 self.cursor_pos = self.input.len();
                 return true;
@@ -470,6 +472,7 @@ impl App {
         // Apply first suggestion and start tracking the cycle
         let (cmd, _) = &current_suggestions[0];
         let base = self.input.clone();
+        self.remember_input_undo_state();
         self.input = cmd.clone();
         // If unique match, add trailing space for arg-accepting commands
         if current_suggestions.len() == 1 && Self::command_accepts_args(&self.input) {
@@ -483,6 +486,33 @@ impl App {
     /// Reset tab completion state (call when user types/modifies input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
+    }
+
+    pub(super) fn remember_input_undo_state(&mut self) {
+        let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
+        if self.input_undo_stack.last() == Some(&snapshot) {
+            return;
+        }
+        if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
+            self.input_undo_stack.remove(0);
+        }
+        self.input_undo_stack.push(snapshot);
+    }
+
+    pub(super) fn clear_input_undo_history(&mut self) {
+        self.input_undo_stack.clear();
+    }
+
+    pub(super) fn undo_input_change(&mut self) {
+        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+            self.input = input;
+            self.cursor_pos = cursor_pos.min(self.input.len());
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+            self.set_status_notice("↶ Input restored");
+        } else {
+            self.set_status_notice("Nothing to undo");
+        }
     }
 
     pub(super) fn command_accepts_args(cmd: &str) -> bool {

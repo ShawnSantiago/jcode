@@ -249,6 +249,7 @@ impl App {
             scroll_bookmark: None,
             typing_scroll_lock: false,
             stashed_input: None,
+            input_undo_stack: Vec::new(),
             status_notice: None,
             interleave_message: None,
             pending_soft_interrupts: Vec::new(),

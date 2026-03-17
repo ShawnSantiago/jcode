@@ -172,6 +172,7 @@ where
         return false;
     }
 
+    app.remember_input_undo_state();
     app.input.clear();
     app.cursor_pos = 0;
     app.reset_tab_completion();
@@ -221,10 +222,25 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
         return;
     }
 
+    app.remember_input_undo_state();
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
+}
+
+pub(super) fn clear_input_for_escape(app: &mut App) {
+    let had_input = !app.input.is_empty();
+    if had_input {
+        app.remember_input_undo_state();
+    }
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    if had_input {
+        app.set_status_notice("Input cleared — Ctrl+Z to restore");
+    }
 }
 
 pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
@@ -322,9 +338,16 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
 pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char('u') => {
+            if app.cursor_pos > 0 {
+                app.remember_input_undo_state();
+            }
             app.input.drain(..app.cursor_pos);
             app.cursor_pos = 0;
             app.sync_model_picker_preview_from_input();
+            true
+        }
+        KeyCode::Char('z') => {
+            app.undo_input_change();
             true
         }
         KeyCode::Char('x') => {
@@ -353,6 +376,9 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('w') | KeyCode::Backspace => {
             let start = app.find_word_boundary_back();
+            if start < app.cursor_pos {
+                app.remember_input_undo_state();
+            }
             app.input.drain(start..app.cursor_pos);
             app.cursor_pos = start;
             app.sync_model_picker_preview_from_input();
@@ -408,12 +434,18 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('d') => {
             let end = app.find_word_boundary_forward();
+            if app.cursor_pos < end {
+                app.remember_input_undo_state();
+            }
             app.input.drain(app.cursor_pos..end);
             app.sync_model_picker_preview_from_input();
             true
         }
         KeyCode::Backspace => {
             let start = app.find_word_boundary_back();
+            if start < app.cursor_pos {
+                app.remember_input_undo_state();
+            }
             app.input.drain(start..app.cursor_pos);
             app.cursor_pos = start;
             app.sync_model_picker_preview_from_input();
@@ -775,6 +807,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     if idx >= 1 && idx <= suggestions.len() {
                         let (_label, prompt) = &suggestions[idx - 1];
                         if !prompt.starts_with('/') {
+                            app.remember_input_undo_state();
                             app.input = prompt.clone();
                             app.cursor_pos = app.input.len();
                             app.follow_chat_bottom_for_typing();
@@ -789,6 +822,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.remember_input_undo_state();
                 app.input.drain(prev..app.cursor_pos);
                 app.cursor_pos = prev;
                 app.reset_tab_completion();
@@ -799,6 +833,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.remember_input_undo_state();
                 app.input.drain(app.cursor_pos..next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
@@ -847,17 +882,14 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 .unwrap_or(false)
             {
                 app.picker_state = None;
-                app.input.clear();
-                app.cursor_pos = 0;
+                clear_input_for_escape(app);
             } else if app.is_processing {
                 app.cancel_requested = true;
                 app.interleave_message = None;
                 app.pending_soft_interrupts.clear();
             } else {
                 app.follow_chat_bottom();
-                app.input.clear();
-                app.cursor_pos = 0;
-                app.sync_model_picker_preview_from_input();
+                clear_input_for_escape(app);
             }
             true
         }
@@ -871,6 +903,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     app.pasted_contents.clear();
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
+    app.clear_input_undo_history();
     PreparedInput {
         raw_input,
         expanded,
@@ -887,6 +920,7 @@ fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let size_kb = base64_data.len() / 1024;
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
+    app.remember_input_undo_state();
     app.input.insert_str(app.cursor_pos, &placeholder);
     app.cursor_pos += placeholder.len();
     app.sync_model_picker_preview_from_input();
@@ -1314,6 +1348,7 @@ impl App {
         let input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
         self.cursor_pos = 0;
+        self.clear_input_undo_history();
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         if let Some(pending) = self.pending_login.take() {
