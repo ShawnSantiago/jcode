@@ -411,6 +411,42 @@ impl App {
 
     /// Returns true if this was a scroll-only event (safe to defer redraw during streaming)
     pub(super) fn handle_mouse_event(&mut self, mouse: MouseEvent) -> bool {
+        if self.changelog_scroll.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    let amt = self.mouse_scroll_amount();
+                    let current = self.changelog_scroll.unwrap_or(0);
+                    self.changelog_scroll = Some(current.saturating_sub(amt));
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let amt = self.mouse_scroll_amount();
+                    let current = self.changelog_scroll.unwrap_or(0);
+                    self.changelog_scroll = Some(current.saturating_add(amt));
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
+        if self.help_scroll.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    let amt = self.mouse_scroll_amount();
+                    let current = self.help_scroll.unwrap_or(0);
+                    self.help_scroll = Some(current.saturating_sub(amt));
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let amt = self.mouse_scroll_amount();
+                    let current = self.help_scroll.unwrap_or(0);
+                    self.help_scroll = Some(current.saturating_add(amt));
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
         if let Some(ref picker_cell) = self.session_picker_overlay {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             return false;

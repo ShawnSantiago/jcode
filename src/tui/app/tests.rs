@@ -1075,6 +1075,64 @@ fn test_mouse_scroll_events_are_classified_as_scroll_only() {
 }
 
 #[test]
+fn test_mouse_scroll_help_overlay_updates_help_scroll() {
+    let mut app = create_test_app();
+    app.help_scroll = Some(5);
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(
+        scroll_only,
+        "help overlay mouse wheel should be scroll-only"
+    );
+    assert_eq!(app.help_scroll, Some(8));
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(scroll_only);
+    assert_eq!(app.help_scroll, Some(5));
+}
+
+#[test]
+fn test_mouse_scroll_changelog_overlay_updates_changelog_scroll() {
+    let mut app = create_test_app();
+    app.changelog_scroll = Some(2);
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(
+        scroll_only,
+        "changelog overlay mouse wheel should be scroll-only"
+    );
+    assert_eq!(app.changelog_scroll, Some(0));
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(scroll_only);
+    assert_eq!(app.changelog_scroll, Some(3));
+}
+
+#[test]
 fn test_mouse_scroll_over_unfocused_diagram_resizes_immediately_without_animation() {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;

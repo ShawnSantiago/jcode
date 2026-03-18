@@ -65,7 +65,7 @@ pub(super) fn draw_changelog_overlay(frame: &mut Frame, area: Rect, scroll: usiz
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Line::from(Span::styled(
-            " Esc to close · j/k scroll · Space/PageUp page ",
+            " Esc to close · mouse wheel/j/k scroll · Space/PageUp page ",
             Style::default().fg(dim_color()),
         )))
         .borders(Borders::ALL)
@@ -348,7 +348,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Line::from(Span::styled(
-            " Esc to close · j/k scroll · Space/PageUp page · /help <cmd> for details ",
+            " Esc to close · mouse wheel/j/k scroll · Space/PageUp page · /help <cmd> for details ",
             Style::default().fg(dim_color()),
         )))
         .borders(Borders::ALL)
