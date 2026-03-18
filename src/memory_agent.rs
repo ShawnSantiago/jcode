@@ -71,6 +71,109 @@ static MEMORY_AGENT_STATS: Mutex<MemoryAgentStats> = Mutex::new(MemoryAgentStats
     last_maintenance_ms: None,
 });
 
+/// Build a transcript string suitable for memory extraction.
+pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> String {
+    let mut transcript = String::new();
+    for msg in messages {
+        let role = match msg.role {
+            crate::message::Role::User => "User",
+            crate::message::Role::Assistant => "Assistant",
+        };
+        transcript.push_str(&format!("**{}:**\n", role));
+        for block in &msg.content {
+            match block {
+                crate::message::ContentBlock::Text { text, .. } => {
+                    transcript.push_str(text);
+                    transcript.push('\n');
+                }
+                crate::message::ContentBlock::ToolUse { name, .. } => {
+                    transcript.push_str(&format!("[Used tool: {}]\n", name));
+                }
+                crate::message::ContentBlock::ToolResult { content, .. } => {
+                    let preview = if content.len() > 200 {
+                        format!("{}...", crate::util::truncate_str(content, 200))
+                    } else {
+                        content.clone()
+                    };
+                    transcript.push_str(&format!("[Result: {}]\n", preview));
+                }
+                crate::message::ContentBlock::Reasoning { .. } => {}
+                crate::message::ContentBlock::Image { .. } => {
+                    transcript.push_str("[Image]\n");
+                }
+            }
+        }
+        transcript.push('\n');
+    }
+    transcript
+}
+
+async fn run_final_extraction(transcript: String, session_id: String) {
+    crate::logging::info(&format!(
+        "Final extraction starting for session {} ({} chars)",
+        session_id,
+        transcript.len()
+    ));
+
+    let sidecar = crate::sidecar::Sidecar::new();
+    let manager = crate::memory::MemoryManager::new();
+
+    let existing: Vec<String> = manager
+        .list_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.active)
+        .map(|e| e.content)
+        .collect();
+
+    let result = sidecar
+        .extract_memories_with_existing(&transcript, &existing)
+        .await;
+
+    match result {
+        Ok(extracted) if !extracted.is_empty() => {
+            let mut stored_count = 0;
+
+            for mem in &extracted {
+                let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
+
+                let trust = match mem.trust.as_str() {
+                    "high" => crate::memory::TrustLevel::High,
+                    "low" => crate::memory::TrustLevel::Low,
+                    _ => crate::memory::TrustLevel::Medium,
+                };
+
+                let entry = crate::memory::MemoryEntry::new(category, &mem.content)
+                    .with_source(&session_id)
+                    .with_trust(trust);
+
+                if manager.remember_project(entry).is_ok() {
+                    stored_count += 1;
+                }
+            }
+
+            if stored_count > 0 {
+                crate::logging::info(&format!(
+                    "Final extraction for session {}: stored {} memories",
+                    session_id, stored_count
+                ));
+            }
+        }
+        Ok(_) => {
+            crate::logging::info(&format!(
+                "Final extraction for session {}: no memories extracted",
+                session_id
+            ));
+        }
+        Err(e) => {
+            crate::logging::info(&format!(
+                "Final extraction for session {} failed: {}",
+                session_id, e
+            ));
+        }
+    }
+}
+
 /// Handle to communicate with the memory agent
 #[derive(Clone)]
 pub struct MemoryAgentHandle {
@@ -1505,71 +1608,22 @@ pub fn trigger_final_extraction(transcript: String, session_id: String) {
 
     crate::memory_log::log_final_extraction(&session_id, transcript.len());
 
-    tokio::spawn(async move {
-        crate::logging::info(&format!(
-            "Final extraction starting for session {} ({} chars)",
-            session_id,
-            transcript.len()
-        ));
-
-        let sidecar = crate::sidecar::Sidecar::new();
-        let manager = crate::memory::MemoryManager::new();
-
-        let existing: Vec<String> = manager
-            .list_all()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|e| e.active)
-            .map(|e| e.content)
-            .collect();
-
-        let result = sidecar
-            .extract_memories_with_existing(&transcript, &existing)
-            .await;
-
-        match result {
-            Ok(extracted) if !extracted.is_empty() => {
-                let mut stored_count = 0;
-
-                for mem in &extracted {
-                    let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
-
-                    let trust = match mem.trust.as_str() {
-                        "high" => crate::memory::TrustLevel::High,
-                        "low" => crate::memory::TrustLevel::Low,
-                        _ => crate::memory::TrustLevel::Medium,
-                    };
-
-                    let entry = crate::memory::MemoryEntry::new(category, &mem.content)
-                        .with_source(&session_id)
-                        .with_trust(trust);
-
-                    if manager.remember_project(entry).is_ok() {
-                        stored_count += 1;
-                    }
-                }
-
-                if stored_count > 0 {
-                    crate::logging::info(&format!(
-                        "Final extraction for session {}: stored {} memories",
-                        session_id, stored_count
-                    ));
-                }
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(run_final_extraction(transcript, session_id));
+    } else {
+        std::thread::spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(run_final_extraction(transcript, session_id)),
+                Err(err) => crate::logging::info(&format!(
+                    "Final extraction runtime startup failed: {}",
+                    err
+                )),
             }
-            Ok(_) => {
-                crate::logging::info(&format!(
-                    "Final extraction for session {}: no memories extracted",
-                    session_id
-                ));
-            }
-            Err(e) => {
-                crate::logging::info(&format!(
-                    "Final extraction for session {} failed: {}",
-                    session_id, e
-                ));
-            }
-        }
-    });
+        });
+    }
 }
 
 /// Check if the memory agent is currently processing (has been initialized)

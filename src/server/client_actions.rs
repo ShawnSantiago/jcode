@@ -301,6 +301,32 @@ pub(super) async fn handle_set_feature(
     }
 }
 
+pub(super) async fn handle_trigger_memory_extraction(
+    id: u64,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let extraction = {
+        let agent_guard = agent.lock().await;
+        if !agent_guard.memory_enabled() {
+            None
+        } else {
+            let transcript = agent_guard.build_transcript_for_extraction();
+            if transcript.len() < 200 {
+                None
+            } else {
+                Some((transcript, agent_guard.session_id().to_string()))
+            }
+        }
+    };
+
+    if let Some((transcript, session_id)) = extraction {
+        crate::memory_agent::trigger_final_extraction(transcript, session_id);
+    }
+
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, String)> {
     let parent = Session::load(parent_session_id)?;
 

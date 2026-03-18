@@ -197,6 +197,10 @@ pub enum Request {
     #[serde(rename = "compact")]
     Compact { id: u64 },
 
+    /// Trigger immediate memory extraction for the current session
+    #[serde(rename = "trigger_memory_extraction")]
+    TriggerMemoryExtraction { id: u64 },
+
     /// Notify server that auth credentials changed (e.g., after login)
     #[serde(rename = "notify_auth_changed")]
     NotifyAuthChanged { id: u64 },
@@ -545,11 +549,29 @@ pub enum ServerEvent {
         /// What triggered it: "background", "hard_compact", "auto_recovery"
         trigger: String,
         /// Token count before compaction
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_tokens: Option<u64>,
+        /// Token estimate after compaction was applied
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_tokens: Option<u64>,
+        /// Approximate tokens saved by this compaction event
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_saved: Option<u64>,
+        /// Time spent compacting in the background (0 for synchronous emergency compaction)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
         /// Number of messages dropped (for hard/emergency compaction)
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         messages_dropped: Option<usize>,
+        /// Number of messages summarized or compacted by this event
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages_compacted: Option<usize>,
+        /// Character count of the persisted summary after compaction
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_chars: Option<usize>,
+        /// Count of recent messages still kept verbatim after compaction
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_messages: Option<usize>,
     },
 
     /// Message/turn completed
@@ -982,6 +1004,7 @@ impl Request {
             Request::SetCompactionMode { id, .. } => *id,
             Request::Split { id } => *id,
             Request::Compact { id } => *id,
+            Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::SwitchOpenAiAccount { id, .. } => *id,

@@ -2177,23 +2177,25 @@ pub(super) fn handle_server_event(
         ServerEvent::Compaction {
             trigger,
             pre_tokens,
+            post_tokens,
+            tokens_saved,
+            duration_ms,
             messages_dropped,
+            messages_compacted,
+            summary_chars,
+            active_messages,
         } => {
-            if let Some(dropped) = messages_dropped {
-                app.provider_session_id = None;
-                app.session.provider_session_id = None;
-                app.context_warning_shown = false;
-                app.push_display_message(DisplayMessage::system(
-                    App::format_emergency_compaction_message(dropped),
-                ));
-                app.set_status_notice("Emergency compaction");
-            } else {
-                app.handle_compaction_event(crate::compaction::CompactionEvent {
-                    trigger,
-                    pre_tokens,
-                    messages_dropped: None,
-                });
-            }
+            app.handle_compaction_event(crate::compaction::CompactionEvent {
+                trigger,
+                pre_tokens,
+                post_tokens,
+                tokens_saved,
+                duration_ms,
+                messages_dropped,
+                messages_compacted,
+                summary_chars,
+                active_messages,
+            });
             false
         }
         ServerEvent::SplitResponse {
@@ -3454,6 +3456,14 @@ pub(super) async fn handle_remote_key(
                             e
                         )));
                         return Ok(());
+                    }
+                    if app.memory_enabled {
+                        if let Err(err) = remote.trigger_memory_extraction().await {
+                            crate::logging::info(&format!(
+                                "Failed to trigger memory extraction for saved remote session: {}",
+                                err
+                            ));
+                        }
                     }
                     let name = app.session.display_name().to_string();
                     let msg = if let Some(ref lbl) = app.session.save_label {

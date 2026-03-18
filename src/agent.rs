@@ -2766,7 +2766,13 @@ impl Agent {
                 let _ = event_tx.send(ServerEvent::Compaction {
                     trigger: event.trigger.clone(),
                     pre_tokens: event.pre_tokens,
+                    post_tokens: event.post_tokens,
+                    tokens_saved: event.tokens_saved,
+                    duration_ms: event.duration_ms,
                     messages_dropped: None,
+                    messages_compacted: event.messages_compacted,
+                    summary_chars: event.summary_chars,
+                    active_messages: event.active_messages,
                 });
             }
 
@@ -2856,7 +2862,13 @@ impl Agent {
                                     let _ = event_tx.send(ServerEvent::Compaction {
                                         trigger: "auto_recovery".to_string(),
                                         pre_tokens: None,
+                                        post_tokens: None,
+                                        tokens_saved: None,
+                                        duration_ms: None,
                                         messages_dropped: None,
+                                        messages_compacted: None,
+                                        summary_chars: None,
+                                        active_messages: None,
                                     });
                                     continue;
                                 }
@@ -2927,7 +2939,13 @@ impl Agent {
                             let _ = event_tx.send(ServerEvent::Compaction {
                                 trigger: "auto_recovery".to_string(),
                                 pre_tokens: None,
+                                post_tokens: None,
+                                tokens_saved: None,
+                                duration_ms: None,
                                 messages_dropped: None,
+                                messages_compacted: None,
+                                summary_chars: None,
+                                active_messages: None,
                             });
                             break;
                         }
@@ -3129,7 +3147,13 @@ impl Agent {
                             let _ = event_tx.send(ServerEvent::Compaction {
                                 trigger: "auto_recovery".to_string(),
                                 pre_tokens: None,
+                                post_tokens: None,
+                                tokens_saved: None,
+                                duration_ms: None,
                                 messages_dropped: None,
+                                messages_compacted: None,
+                                summary_chars: None,
+                                active_messages: None,
                             });
                             break;
                         }
@@ -3483,7 +3507,13 @@ impl Agent {
                 let _ = event_tx.send(ServerEvent::Compaction {
                     trigger: event.trigger.clone(),
                     pre_tokens: event.pre_tokens,
+                    post_tokens: event.post_tokens,
+                    tokens_saved: event.tokens_saved,
+                    duration_ms: event.duration_ms,
                     messages_dropped: None,
+                    messages_compacted: event.messages_compacted,
+                    summary_chars: event.summary_chars,
+                    active_messages: event.active_messages,
                 });
             }
 
@@ -3573,7 +3603,13 @@ impl Agent {
                                     let _ = event_tx.send(ServerEvent::Compaction {
                                         trigger: "auto_recovery".to_string(),
                                         pre_tokens: None,
+                                        post_tokens: None,
+                                        tokens_saved: None,
+                                        duration_ms: None,
                                         messages_dropped: None,
+                                        messages_compacted: None,
+                                        summary_chars: None,
+                                        active_messages: None,
                                     });
                                     continue;
                                 }
@@ -3643,7 +3679,13 @@ impl Agent {
                             let _ = event_tx.send(ServerEvent::Compaction {
                                 trigger: "auto_recovery".to_string(),
                                 pre_tokens: None,
+                                post_tokens: None,
+                                tokens_saved: None,
+                                duration_ms: None,
                                 messages_dropped: None,
+                                messages_compacted: None,
+                                summary_chars: None,
+                                active_messages: None,
                             });
                             break;
                         }
@@ -3854,7 +3896,13 @@ impl Agent {
                             let _ = event_tx.send(ServerEvent::Compaction {
                                 trigger: "auto_recovery".to_string(),
                                 pre_tokens: None,
+                                post_tokens: None,
+                                tokens_saved: None,
+                                duration_ms: None,
                                 messages_dropped: None,
+                                messages_compacted: None,
+                                summary_chars: None,
+                                active_messages: None,
                             });
                             break;
                         }

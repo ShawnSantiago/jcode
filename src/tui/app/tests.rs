@@ -144,6 +144,41 @@ fn test_help_topic_shows_command_details() {
 }
 
 #[test]
+fn test_save_command_bookmarks_session_with_memory_enabled() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let mut app = create_test_app();
+    app.memory_enabled = true;
+    app.messages = vec![
+        Message::user("u1"),
+        Message::assistant_text("a1"),
+        Message::user("u2"),
+        Message::assistant_text("a2"),
+    ];
+
+    app.input = "/save quick-label".to_string();
+    app.submit_input();
+
+    assert!(app.session.saved);
+    assert_eq!(app.session.save_label.as_deref(), Some("quick-label"));
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing save response");
+    assert!(msg.content.contains("saved as"));
+    assert!(msg.content.contains("quick-label"));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn test_goals_command_opens_overview_in_side_panel() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2896,7 +2931,13 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
         crate::protocol::ServerEvent::Compaction {
             trigger: "semantic".to_string(),
             pre_tokens: Some(12_345),
+            post_tokens: Some(4_321),
+            tokens_saved: Some(8_024),
+            duration_ms: Some(1_532),
             messages_dropped: None,
+            messages_compacted: Some(24),
+            summary_chars: Some(987),
+            active_messages: Some(10),
         },
         &mut remote,
     );
@@ -2913,7 +2954,7 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     assert_eq!(last.role, "system");
     assert_eq!(
         last.content,
-        "📦 **Context compacted** (semantic) — older messages were summarized to stay within the context window. Previous size: ~12,345 tokens."
+        "📦 **Context compacted** (semantic) — older messages were summarized to stay within the context window.\n\nTook 1.5s · before ~12,345 tokens · now ~4,321 tokens (2.2% of window) · saved ~8,024 tokens · summarized 24 messages · summary 987 chars · kept 10 recent messages live"
     );
 }
 

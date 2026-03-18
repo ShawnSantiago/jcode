@@ -1,6 +1,6 @@
 use super::client_actions::{
     handle_agent_task, handle_compact, handle_input_shell, handle_notify_session,
-    handle_set_feature, handle_split, handle_stdin_response,
+    handle_set_feature, handle_split, handle_stdin_response, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_list, handle_comm_message, handle_comm_read, handle_comm_share,
@@ -808,6 +808,10 @@ pub(super) async fn handle_client(
 
             Request::Compact { id } => {
                 handle_compact(id, &agent, &client_event_tx);
+            }
+
+            Request::TriggerMemoryExtraction { id } => {
+                handle_trigger_memory_extraction(id, &agent, &client_event_tx).await;
             }
 
             // Agent-to-agent communication

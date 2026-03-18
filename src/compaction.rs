@@ -22,6 +22,7 @@ use crate::provider::Provider;
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::task::JoinHandle;
 
 /// Default token budget (200k tokens - matches Claude's actual context limit)
@@ -90,7 +91,13 @@ pub struct Summary {
 pub struct CompactionEvent {
     pub trigger: String,
     pub pre_tokens: Option<u64>,
+    pub post_tokens: Option<u64>,
+    pub tokens_saved: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub messages_dropped: Option<usize>,
+    pub messages_compacted: Option<usize>,
+    pub summary_chars: Option<usize>,
+    pub active_messages: Option<usize>,
 }
 
 /// What happened when ensure_context_fits was called
@@ -109,6 +116,8 @@ pub enum CompactionAction {
 struct CompactionResult {
     summary: String,
     covers_up_to_turn: usize,
+    duration_ms: u64,
+    summarized_messages: usize,
 }
 
 /// Manages background compaction of conversation context.
@@ -707,14 +716,20 @@ impl CompactionManager {
         self.pending_task = Some(tokio::spawn(async move {
             let start = std::time::Instant::now();
             let result = generate_summary(provider, messages_to_summarize, existing_summary).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction ({}) finished in {:.2}s ({} messages summarized)",
                 mode_label,
-                start.elapsed().as_secs_f64(),
+                duration_ms as f64 / 1000.0,
                 msg_count,
             ));
             crate::bus::Bus::global().publish(crate::bus::BusEvent::CompactionFinished);
-            result
+            result.map(|result| CompactionResult {
+                summary: result.summary,
+                covers_up_to_turn: result.covers_up_to_turn,
+                duration_ms,
+                summarized_messages: msg_count,
+            })
         }));
     }
 
@@ -824,13 +839,19 @@ impl CompactionManager {
         self.pending_task = Some(tokio::spawn(async move {
             let start = std::time::Instant::now();
             let result = generate_summary(provider, messages_to_summarize, existing_summary).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction finished in {:.2}s ({} messages summarized)",
-                start.elapsed().as_secs_f64(),
+                duration_ms as f64 / 1000.0,
                 msg_count,
             ));
             crate::bus::Bus::global().publish(crate::bus::BusEvent::CompactionFinished);
-            result
+            result.map(|result| CompactionResult {
+                summary: result.summary,
+                covers_up_to_turn: result.covers_up_to_turn,
+                duration_ms,
+                summarized_messages: msg_count,
+            })
         }));
 
         Ok(())
@@ -936,15 +957,25 @@ impl CompactionManager {
 
                 // Store summary
                 self.active_summary = Some(summary);
+                self.observed_input_tokens = None;
+                let post_tokens = self.effective_token_count() as u64;
                 self.last_compaction = Some(CompactionEvent {
                     trigger: self
                         .pending_trigger
                         .take()
                         .unwrap_or_else(|| self.mode_trigger_label().to_string()),
                     pre_tokens: Some(pre_tokens),
+                    post_tokens: Some(post_tokens),
+                    tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),
+                    duration_ms: Some(result.duration_ms),
                     messages_dropped: None,
+                    messages_compacted: Some(result.summarized_messages),
+                    summary_chars: self
+                        .active_summary
+                        .as_ref()
+                        .map(|summary| summary.text.len()),
+                    active_messages: Some(self.active_messages_count()),
                 });
-                self.observed_input_tokens = None;
 
                 // Reset cooldown counter so proactive/semantic modes don't
                 // fire again immediately after a successful compaction.
@@ -1062,6 +1093,11 @@ impl CompactionManager {
             .as_ref()
             .map(|s| s.text.len())
             .unwrap_or(0)
+    }
+
+    /// Get the current number of active, un-compacted messages.
+    pub fn active_messages_count(&self) -> usize {
+        self.total_turns.saturating_sub(self.compacted_count)
     }
 
     /// Get stats about current state (without message data)
@@ -1232,12 +1268,22 @@ impl CompactionManager {
 
         self.compacted_count += cutoff;
         self.active_summary = Some(summary);
+        self.observed_input_tokens = None;
+        let post_tokens = self.effective_token_count() as u64;
         self.last_compaction = Some(CompactionEvent {
             trigger: "hard_compact".to_string(),
             pre_tokens: Some(pre_tokens),
+            post_tokens: Some(post_tokens),
+            tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),
+            duration_ms: Some(0),
             messages_dropped: Some(dropped_count),
+            messages_compacted: Some(dropped_count),
+            summary_chars: self
+                .active_summary
+                .as_ref()
+                .map(|summary| summary.text.len()),
+            active_messages: Some(self.active_messages_count()),
         });
-        self.observed_input_tokens = None;
 
         Ok(dropped_count)
     }
@@ -1338,6 +1384,8 @@ async fn generate_summary(
     messages: Vec<Message>,
     existing_summary: Option<Summary>,
 ) -> Result<CompactionResult> {
+    let start = Instant::now();
+
     // Build the conversation text for summarization
     let mut conversation_text = String::new();
 
@@ -1405,6 +1453,8 @@ async fn generate_summary(
     Ok(CompactionResult {
         summary,
         covers_up_to_turn: messages.len(),
+        duration_ms: start.elapsed().as_millis() as u64,
+        summarized_messages: messages.len(),
     })
 }
 
