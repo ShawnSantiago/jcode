@@ -770,12 +770,7 @@ pub(super) fn handle_global_control_shortcuts(
             app.recover_session_without_tools();
             true
         }
-        KeyCode::Char('l')
-            if !app.is_processing && !diagram_available && !app.diff_pane_visible() =>
-        {
-            commands::reset_current_session(app);
-            true
-        }
+        KeyCode::Char('l') => true,
         _ => handle_control_key(app, code),
     }
 }

@@ -2733,11 +2733,7 @@ pub(super) async fn handle_remote_key(
                 app.recover_session_without_tools();
                 return Ok(());
             }
-            KeyCode::Char('l')
-                if !app.is_processing && !diagram_available && !app.diff_pane_visible() =>
-            {
-                app.clear_display_messages();
-                app.queued_messages.clear();
+            KeyCode::Char('l') => {
                 return Ok(());
             }
             KeyCode::Char('u') => {

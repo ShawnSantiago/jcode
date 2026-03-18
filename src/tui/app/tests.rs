@@ -643,6 +643,26 @@ fn test_diagram_focus_toggle_and_pan() {
 }
 
 #[test]
+fn test_ctrl_l_without_focusable_pane_does_not_clear_session() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Off;
+    app.input = "draft message".to_string();
+    app.cursor_pos = app.input.len();
+    app.display_messages = vec![DisplayMessage::system("keep chat".to_string())];
+    app.bump_display_messages_version();
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "draft message");
+    assert_eq!(app.cursor_pos(), "draft message".len());
+    assert_eq!(app.display_messages().len(), 1);
+    assert_eq!(app.display_messages()[0].content, "keep chat");
+    assert!(!app.diagram_focus);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
 fn test_diagram_cycle_ctrl_arrows() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
