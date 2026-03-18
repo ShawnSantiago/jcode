@@ -169,7 +169,7 @@ enum PinnedContentEntry {
         deletions: usize,
     },
     Image {
-        file_path: String,
+        label: String,
         hash: u64,
         width: u32,
         height: u32,
@@ -238,6 +238,7 @@ fn side_panel_render_cache() -> &'static Mutex<SidePanelRenderCacheState> {
 
 pub(super) fn collect_pinned_content_cached(
     messages: &[DisplayMessage],
+    images: &[crate::session::RenderedImage],
     collect_diffs: bool,
     collect_images: bool,
     messages_version: u64,
@@ -257,7 +258,7 @@ pub(super) fn collect_pinned_content_cached(
         return !cache.entries.is_empty();
     }
 
-    let entries = collect_pinned_content(messages, collect_diffs, collect_images);
+    let entries = collect_pinned_content(messages, images, collect_diffs, collect_images);
     let has_entries = !entries.is_empty();
     cache.key = Some(key);
     cache.entries = entries;
@@ -267,10 +268,32 @@ pub(super) fn collect_pinned_content_cached(
 
 fn collect_pinned_content(
     messages: &[DisplayMessage],
+    images: &[crate::session::RenderedImage],
     collect_diffs: bool,
     collect_images: bool,
 ) -> Vec<PinnedContentEntry> {
     let mut entries = Vec::new();
+
+    if collect_images {
+        for image in images {
+            let Some((hash, width, height)) =
+                mermaid::register_inline_image(&image.media_type, &image.data)
+            else {
+                continue;
+            };
+
+            entries.push(PinnedContentEntry::Image {
+                label: image
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| image.media_type.clone()),
+                hash,
+                width,
+                height,
+            });
+        }
+    }
+
     for msg in messages {
         if msg.role != "tool" {
             continue;
@@ -278,28 +301,6 @@ fn collect_pinned_content(
         let Some(ref tc) = msg.tool_data else {
             continue;
         };
-
-        if collect_images && matches!(tc.name.as_str(), "read" | "Read") {
-            let file_path = tc
-                .input
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let path = std::path::Path::new(&file_path);
-            if is_supported_image_ext(path) && path.exists() {
-                if let Some((w, h)) = get_image_dimensions_from_path(path) {
-                    let hash = mermaid::register_external_image(path, w, h);
-                    entries.push(PinnedContentEntry::Image {
-                        file_path,
-                        hash,
-                        width: w,
-                        height: h,
-                    });
-                }
-            }
-            continue;
-        }
 
         if !collect_diffs {
             continue;
@@ -371,51 +372,38 @@ fn collect_pinned_content(
     entries
 }
 
-fn is_supported_image_ext(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
-            )
-        })
-        .unwrap_or(false)
+fn compact_image_label(label: &str) -> String {
+    if label.contains('/') {
+        return label
+            .rsplit('/')
+            .take(2)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("/");
+    }
+    label.to_string()
 }
 
-fn get_image_dimensions_from_path(path: &std::path::Path) -> Option<(u32, u32)> {
-    let data = std::fs::read(path).ok()?;
-    if data.len() > 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
-        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
-        return Some((w, h));
+fn div_ceil_u32_local(value: u32, divisor: u32) -> u32 {
+    if divisor == 0 {
+        return value;
     }
-    if data.len() > 2 && data[0] == 0xFF && data[1] == 0xD8 {
-        let mut i = 2;
-        while i + 9 < data.len() {
-            if data[i] == 0xFF {
-                let marker = data[i + 1];
-                if marker == 0xC0 || marker == 0xC2 {
-                    let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
-                    let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
-                    return Some((w, h));
-                }
-                if marker == 0xD9 || marker == 0xDA {
-                    break;
-                }
-                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-                i += 2 + len;
-            } else {
-                i += 1;
-            }
-        }
-    }
-    if data.len() > 10 && (&data[0..4] == b"GIF8") {
-        let w = u16::from_le_bytes([data[6], data[7]]) as u32;
-        let h = u16::from_le_bytes([data[8], data[9]]) as u32;
-        return Some((w, h));
-    }
-    None
+    value.saturating_add(divisor - 1) / divisor
+}
+
+fn estimate_inline_image_rows(img_w: u32, img_h: u32, pane_width: u16, pane_height: u16) -> u16 {
+    let inner_width = pane_width.max(1) as u32;
+    let (cell_w, cell_h) = mermaid::get_font_size().unwrap_or((8, 16));
+    let cell_w = cell_w.max(1) as u32;
+    let cell_h = cell_h.max(1) as u32;
+    let width_px = inner_width.saturating_mul(cell_w);
+    let scaled_height_px = div_ceil_u32_local(img_h.max(1).saturating_mul(width_px), img_w.max(1));
+    let rows = div_ceil_u32_local(scaled_height_px, cell_h)
+        .max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS as u32)
+        .min(pane_height.max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS) as u32);
+    rows as u16
 }
 
 pub(super) fn draw_pinned_content_cached(
@@ -587,24 +575,17 @@ pub(super) fn draw_pinned_content_cached(
                     }
                 }
                 PinnedContentEntry::Image {
-                    file_path,
+                    label,
                     hash,
                     width: img_w,
                     height: img_h,
                 } => {
-                    let short_path = file_path
-                        .rsplit('/')
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join("/");
+                    let short_label = compact_image_label(label);
 
                     text_lines.push(Line::from(vec![
                         Span::styled("── 📷 ", Style::default().fg(dim_color())),
                         Span::styled(
-                            short_path,
+                            short_label,
                             Style::default()
                                 .fg(rgb(180, 200, 255))
                                 .add_modifier(ratatui::style::Modifier::BOLD),
@@ -616,7 +597,8 @@ pub(super) fn draw_pinned_content_cached(
                     ]));
 
                     if has_protocol {
-                        let img_rows = inner.height.min(12).max(4);
+                        let img_rows =
+                            estimate_inline_image_rows(*img_w, *img_h, inner.width, inner.height);
                         image_placements.push(PinnedImagePlacement {
                             after_text_line: text_lines.len(),
                             hash: *hash,
@@ -680,15 +662,18 @@ pub(super) fn draw_pinned_content_cached(
     let has_protocol = mermaid::protocol_type().is_some();
     if has_protocol {
         for placement in &rendered.image_placements {
-            let text_y = placement.after_text_line as u16;
-            if text_y < clamped_scroll as u16 {
+            let image_start = placement.after_text_line;
+            let image_end = image_start.saturating_add(placement.rows as usize);
+            let viewport_start = clamped_scroll;
+            let viewport_end = clamped_scroll.saturating_add(inner.height as usize);
+            if image_end <= viewport_start || image_start >= viewport_end {
                 continue;
             }
-            let y_in_inner = text_y.saturating_sub(clamped_scroll as u16);
-            if y_in_inner >= inner.height {
-                continue;
-            }
-            let avail_rows = inner.height.saturating_sub(y_in_inner).min(placement.rows);
+
+            let visible_start = image_start.max(viewport_start);
+            let visible_end = image_end.min(viewport_end);
+            let y_in_inner = visible_start.saturating_sub(viewport_start) as u16;
+            let avail_rows = visible_end.saturating_sub(visible_start) as u16;
             if avail_rows < 2 {
                 continue;
             }
@@ -787,15 +772,18 @@ pub(super) fn draw_side_panel_markdown(
 
     if has_protocol {
         for placement in &rendered.image_placements {
-            let text_y = placement.after_text_line as u16;
-            if text_y < clamped_scroll as u16 {
+            let image_start = placement.after_text_line;
+            let image_end = image_start.saturating_add(placement.rows as usize);
+            let viewport_start = clamped_scroll;
+            let viewport_end = clamped_scroll.saturating_add(inner.height as usize);
+            if image_end <= viewport_start || image_start >= viewport_end {
                 continue;
             }
-            let y_in_inner = text_y.saturating_sub(clamped_scroll as u16);
-            if y_in_inner >= inner.height {
-                continue;
-            }
-            let avail_rows = inner.height.saturating_sub(y_in_inner).min(placement.rows);
+
+            let visible_start = image_start.max(viewport_start);
+            let visible_end = image_end.min(viewport_end);
+            let y_in_inner = visible_start.saturating_sub(viewport_start) as u16;
+            let avail_rows = visible_end.saturating_sub(visible_start) as u16;
             if avail_rows < 2 {
                 continue;
             }
@@ -1097,11 +1085,59 @@ fn clamp_side_panel_image_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn mermaid_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_mermaid_placeholder_mode<T>(f: impl FnOnce() -> T) -> T {
+        struct ResetVideoExportMode;
+        impl Drop for ResetVideoExportMode {
+            fn drop(&mut self) {
+                crate::tui::mermaid::set_video_export_mode(false);
+            }
+        }
+
+        let _guard = mermaid_test_lock()
+            .lock()
+            .expect("mermaid placeholder test lock");
+        crate::tui::mermaid::set_video_export_mode(true);
+        let _reset = ResetVideoExportMode;
+        let result = f();
+        result
+    }
+
+    fn with_serialized_mermaid_state<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = mermaid_test_lock()
+            .lock()
+            .expect("mermaid test lock");
+        f()
+    }
+
+    fn sample_mermaid_page(content: impl Into<String>) -> crate::side_panel::SidePanelPage {
+        use std::hash::{Hash as _, Hasher as _};
+
+        let content = content.into();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        let content_hash = hasher.finish();
+
+        crate::side_panel::SidePanelPage {
+            id: format!("mermaid_demo_{content_hash:016x}"),
+            title: format!("Mermaid Demo {content_hash:016x}"),
+            file_path: format!("mermaid_demo_{content_hash:016x}.md"),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            content,
+            updated_at_ms: content_hash,
+        }
+    }
 
     #[test]
     fn clamp_side_panel_image_rows_leaves_room_for_following_content() {
         let rows = clamp_side_panel_image_rows(18, 16, 2, true);
-        assert_eq!(rows, 8);
+        assert_eq!(rows, 10);
     }
 
     #[test]
@@ -1161,17 +1197,13 @@ mod tests {
 
     #[test]
     fn render_side_panel_markdown_keeps_text_after_mermaid_block() {
-        let page = crate::side_panel::SidePanelPage {
-            id: "mermaid_demo".to_string(),
-            title: "Mermaid Demo".to_string(),
-            file_path: "mermaid_demo.md".to_string(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            content: "This is some text above the diagram.\n\n```mermaid\nflowchart TD\n    A[Start] --> B[Do the thing]\n    B --> C[Done]\n```\n\nThis is some text below the diagram.".to_string(),
-            updated_at_ms: 1,
-        };
+        let page = sample_mermaid_page(
+            "This is some text above the diagram.\n\n```mermaid\nflowchart TD\n    A[Start] --> B[Do the thing]\n    B --> C[Done]\n```\n\nThis is some text below the diagram.",
+        );
 
-        let rendered =
-            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 30), true, true);
+        let rendered = with_mermaid_placeholder_mode(|| {
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 30), true, true)
+        });
         let text: Vec<String> = rendered
             .lines
             .iter()
@@ -1213,19 +1245,11 @@ mod tests {
             "```mermaid\nxychart-beta\n    title \"Volume\"\n    x-axis [A, B, C, D]\n    y-axis \"Count\" 0 --> 100\n    bar [10, 50, 80, 30]\n```\n\nTail text after chart.\n",
         );
 
-        let page = crate::side_panel::SidePanelPage {
-            id: "late_mermaid_demo".to_string(),
-            title: "Late Mermaid Demo".to_string(),
-            file_path: "late_mermaid_demo.md".to_string(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            content,
-            updated_at_ms: 1,
-        };
+        let page = sample_mermaid_page(content);
 
-        crate::tui::mermaid::set_video_export_mode(true);
-        let rendered =
-            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 48, 30), true, true);
-        crate::tui::mermaid::set_video_export_mode(false);
+        let rendered = with_mermaid_placeholder_mode(|| {
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 48, 30), true, true)
+        });
 
         let placement = rendered
             .image_placements
@@ -1236,6 +1260,131 @@ mod tests {
             placement.rows >= 8,
             "late side-panel mermaid should not collapse to tiny height: {} rows",
             placement.rows
+        );
+    }
+
+    #[test]
+    fn render_side_panel_markdown_reserves_blank_rows_for_mermaid_placement() {
+        let page = sample_mermaid_page(
+            "Intro text.\n\n```mermaid\nflowchart TD\n    A[Start] --> B[Done]\n```\n",
+        );
+
+        let rendered = with_mermaid_placeholder_mode(|| {
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 24), true, true)
+        });
+
+        assert_eq!(
+            rendered.image_placements.len(),
+            1,
+            "expected one mermaid image placement"
+        );
+        let placement = &rendered.image_placements[0];
+        assert!(placement.rows >= SIDE_PANEL_INLINE_IMAGE_MIN_ROWS);
+        let reserved = &rendered.lines
+            [placement.after_text_line..placement.after_text_line + placement.rows as usize];
+        assert!(
+            reserved.iter().all(|line| line.width() == 0),
+            "expected reserved side-panel image rows to remain blank placeholders: {:?}",
+            reserved
+        );
+    }
+
+    #[test]
+    fn render_side_panel_markdown_multiple_mermaids_create_ordered_placements() {
+        let page = sample_mermaid_page(
+            "Alpha\n\n```mermaid\nflowchart TD\n    A --> B\n```\n\nBetween\n\n```mermaid\nflowchart TD\n    C --> D\n```\n\nOmega\n",
+        );
+
+        let rendered = with_mermaid_placeholder_mode(|| {
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 40, 28), true, true)
+        });
+
+        assert_eq!(
+            rendered.image_placements.len(),
+            2,
+            "expected two mermaid placements"
+        );
+        assert!(
+            rendered.image_placements[0].after_text_line
+                < rendered.image_placements[1].after_text_line,
+            "expected mermaid placements to preserve document order: {:?}",
+            rendered
+                .image_placements
+                .iter()
+                .map(|p| (p.after_text_line, p.rows))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn render_side_panel_markdown_without_protocol_falls_back_to_text_placeholder() {
+        let page = sample_mermaid_page("```mermaid\nflowchart TD\n    A --> B\n```\n");
+
+        let rendered = with_serialized_mermaid_state(|| {
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 20), false, true)
+        });
+        let text: Vec<String> = rendered
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(
+            rendered.image_placements.is_empty(),
+            "expected no image placement without protocol support: {:?}",
+            rendered.image_placements.len()
+        );
+        assert!(
+            text.iter().any(|line| line.contains("mermaid diagram")),
+            "expected textual placeholder when image protocols are unavailable: {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn render_side_panel_markdown_trailing_text_reduces_mermaid_rows() {
+        let chart = "```mermaid\nxychart-beta\n    title \"Volume\"\n    x-axis [A, B, C, D]\n    y-axis \"Count\" 0 --> 100\n    bar [10, 50, 80, 30]\n```\n";
+        let page_without_tail = sample_mermaid_page(chart);
+        let page_with_tail = sample_mermaid_page(format!("{chart}\nTail text after chart.\n"));
+
+        let (without_tail, with_tail) = with_mermaid_placeholder_mode(|| {
+            (
+                render_side_panel_markdown_cached(
+                    &page_without_tail,
+                    Rect::new(0, 0, 48, 30),
+                    true,
+                    true,
+                ),
+                render_side_panel_markdown_cached(
+                    &page_with_tail,
+                    Rect::new(0, 0, 48, 30),
+                    true,
+                    true,
+                ),
+            )
+        });
+
+        let rows_without_tail = without_tail
+            .image_placements
+            .first()
+            .expect("expected mermaid placement without trailing text")
+            .rows;
+        let rows_with_tail = with_tail
+            .image_placements
+            .first()
+            .expect("expected mermaid placement with trailing text")
+            .rows;
+
+        assert!(
+            rows_without_tail >= rows_with_tail,
+            "trailing text should not increase image rows: without tail {}, with tail {}",
+            rows_without_tail,
+            rows_with_tail
         );
     }
 
@@ -1464,24 +1613,17 @@ fn draw_pinned_content(
                 }
             }
             PinnedContentEntry::Image {
-                file_path,
+                label,
                 hash,
                 width: img_w,
                 height: img_h,
             } => {
-                let short_path = file_path
-                    .rsplit('/')
-                    .take(2)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join("/");
+                let short_label = compact_image_label(label);
 
                 text_lines.push(Line::from(vec![
                     Span::styled("── 📷 ", Style::default().fg(dim_color())),
                     Span::styled(
-                        short_path,
+                        short_label,
                         Style::default()
                             .fg(rgb(180, 200, 255))
                             .add_modifier(ratatui::style::Modifier::BOLD),
@@ -1493,7 +1635,8 @@ fn draw_pinned_content(
                 ]));
 
                 if has_protocol {
-                    let img_rows = inner.height.min(12).max(4);
+                    let img_rows =
+                        estimate_inline_image_rows(*img_w, *img_h, inner.width, inner.height);
                     image_placements.push(ImagePlacement {
                         after_text_line: text_lines.len(),
                         hash: *hash,
@@ -1532,15 +1675,18 @@ fn draw_pinned_content(
 
     if has_protocol {
         for placement in &image_placements {
-            let text_y = placement.after_text_line as u16;
-            if text_y < clamped_scroll as u16 {
+            let image_start = placement.after_text_line;
+            let image_end = image_start.saturating_add(placement.rows as usize);
+            let viewport_start = clamped_scroll;
+            let viewport_end = clamped_scroll.saturating_add(inner.height as usize);
+            if image_end <= viewport_start || image_start >= viewport_end {
                 continue;
             }
-            let y_in_inner = text_y.saturating_sub(clamped_scroll as u16);
-            if y_in_inner >= inner.height {
-                continue;
-            }
-            let avail_rows = inner.height.saturating_sub(y_in_inner).min(placement.rows);
+
+            let visible_start = image_start.max(viewport_start);
+            let visible_end = image_end.min(viewport_end);
+            let y_in_inner = visible_start.saturating_sub(viewport_start) as u16;
+            let avail_rows = visible_end.saturating_sub(visible_start) as u16;
             if avail_rows < 2 {
                 continue;
             }

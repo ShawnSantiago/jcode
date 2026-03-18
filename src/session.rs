@@ -1052,6 +1052,92 @@ pub struct RenderedMessage {
     pub tool_data: Option<ToolCall>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RenderedImage {
+    pub media_type: String,
+    pub data: String,
+    pub label: Option<String>,
+}
+
+fn fallback_image_label_for_tool(tool: &ToolCall) -> Option<String> {
+    tool.input
+        .get("file_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_attached_image_label(text: &str) -> Option<String> {
+    let prefix = "[Attached image associated with the preceding tool result: ";
+    let suffix = "]";
+    text.trim()
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub fn render_images(session: &Session) -> Vec<RenderedImage> {
+    let mut images = Vec::new();
+    let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
+
+    for msg in &session.messages {
+        let mut current_tool: Option<ToolCall> = None;
+        let mut last_image_idx: Option<usize> = None;
+
+        for block in &msg.content {
+            match block {
+                ContentBlock::ToolUse { id, name, input } => {
+                    tool_map.insert(
+                        id.clone(),
+                        ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            intent: None,
+                        },
+                    );
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    current_tool = tool_map.get(tool_use_id).cloned().or_else(|| {
+                        Some(ToolCall {
+                            id: tool_use_id.clone(),
+                            name: "tool".to_string(),
+                            input: serde_json::Value::Null,
+                            intent: None,
+                        })
+                    });
+                }
+                ContentBlock::Image { media_type, data } => {
+                    images.push(RenderedImage {
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                        label: current_tool
+                            .as_ref()
+                            .and_then(fallback_image_label_for_tool),
+                    });
+                    last_image_idx = Some(images.len().saturating_sub(1));
+                }
+                ContentBlock::Text { text, .. } => {
+                    let Some(label) = parse_attached_image_label(text) else {
+                        continue;
+                    };
+                    if let Some(last_idx) = last_image_idx {
+                        if let Some(image) = images.get_mut(last_idx) {
+                            image.label = Some(label);
+                        }
+                    }
+                }
+                ContentBlock::Reasoning { .. } => {}
+            }
+        }
+    }
+
+    images
+}
+
 pub fn summarize_tool_calls(
     session: &Session,
     limit: usize,

@@ -95,6 +95,7 @@ pub fn disable_keyboard_enhancement() {
 /// Trait for TUI state consumed by the shared renderer.
 pub trait TuiState {
     fn display_messages(&self) -> &[DisplayMessage];
+    fn side_pane_images(&self) -> Vec<crate::session::RenderedImage>;
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;

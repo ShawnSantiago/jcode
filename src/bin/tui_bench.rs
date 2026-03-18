@@ -188,6 +188,10 @@ impl TuiState for BenchState {
         &self.messages
     }
 
+    fn side_pane_images(&self) -> Vec<jcode::session::RenderedImage> {
+        Vec::new()
+    }
+
     fn display_messages_version(&self) -> u64 {
         self.messages_version
     }

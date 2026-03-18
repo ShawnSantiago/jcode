@@ -13,7 +13,9 @@
 //! - Clear only on render failure, not before every render
 
 use super::color_support::rgb;
+use base64::Engine as _;
 use image::DynamicImage;
+use image::GenericImageView;
 use mermaid_rs_renderer::{
     config::{LayoutConfig, RenderConfig},
     layout::compute_layout,
@@ -1311,6 +1313,59 @@ pub fn register_external_image(path: &Path, width: u32, height: u32) -> u64 {
         );
     }
     hash
+}
+
+pub fn register_inline_image(media_type: &str, data_b64: &str) -> Option<(u64, u32, u32)> {
+    use std::hash::{Hash as _, Hasher};
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .ok()?;
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    media_type.hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    if let Ok(mut cache) = RENDER_CACHE.lock() {
+        if let Some(existing) = cache.get(hash, None) {
+            return Some((hash, existing.width, existing.height));
+        }
+
+        let image = image::load_from_memory(&bytes).ok()?;
+        let (width, height) = image.dimensions();
+        let ext = inline_image_extension(media_type);
+        let path = cache
+            .cache_dir
+            .join(format!("{:016x}_inline.{}", hash, ext));
+        if !path.exists() {
+            fs::write(&path, &bytes).ok()?;
+        }
+        cache.insert(
+            hash,
+            CachedDiagram {
+                path,
+                width,
+                height,
+                complexity: 0,
+            },
+        );
+        return Some((hash, width, height));
+    }
+
+    None
+}
+
+fn inline_image_extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        _ => "img",
+    }
 }
 
 fn has_render_error(hash: u64) -> bool {

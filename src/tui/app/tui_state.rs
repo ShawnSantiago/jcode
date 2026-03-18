@@ -201,6 +201,14 @@ impl crate::tui::TuiState for App {
         &self.display_messages
     }
 
+    fn side_pane_images(&self) -> Vec<crate::session::RenderedImage> {
+        if self.is_remote {
+            Vec::new()
+        } else {
+            crate::session::render_images(&self.session)
+        }
+    }
+
     fn display_messages_version(&self) -> u64 {
         self.display_messages_version
     }

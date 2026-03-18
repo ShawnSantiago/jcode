@@ -2153,6 +2153,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let has_pinned_content = if collect_diffs || pin_images {
         collect_pinned_content_cached(
             app.display_messages(),
+            &app.side_pane_images(),
             collect_diffs,
             pin_images,
             app.display_messages_version(),
@@ -3132,6 +3133,9 @@ mod tests {
     impl crate::tui::TuiState for TestState {
         fn display_messages(&self) -> &[DisplayMessage] {
             &self.display_messages
+        }
+        fn side_pane_images(&self) -> Vec<crate::session::RenderedImage> {
+            Vec::new()
         }
         fn display_messages_version(&self) -> u64 {
             0
