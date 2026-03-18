@@ -175,7 +175,7 @@ impl App {
             ));
         }
         message.push_str(
-            "\nUse `/login <provider>` to authenticate. `/login jcode` is for curated jcode subscription access; `/account` lists Anthropic + OpenAI accounts, and `/account openai` focuses on OpenAI accounts.",
+            "\nUse `/login <provider>` to authenticate. `/login jcode` is for curated jcode subscription access; `/account` opens the provider/account management center, and `/account <provider> settings` shows provider-specific controls.",
         );
         self.push_display_message(DisplayMessage::system(message));
     }
@@ -755,14 +755,29 @@ impl App {
                 empty_value,
                 status_notice,
             } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
+            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
+                self.prompt_new_account_label(provider)
+            }
+            other => {
+                if let Some(input) = Self::account_command_for_picker(&other) {
+                    self.input = input;
+                    self.cursor_pos = self.input.len();
+                    self.submit_input();
+                }
+            }
         }
     }
 
     pub(super) fn prompt_new_account_label(
         &mut self,
-        provider_id: &str,
-        display_name: &str,
+        provider: crate::tui::account_picker::AccountProviderKind,
     ) {
+        let (provider_id, display_name) = match provider {
+            crate::tui::account_picker::AccountProviderKind::Anthropic => {
+                ("claude", "Anthropic/Claude")
+            }
+            crate::tui::account_picker::AccountProviderKind::OpenAi => ("openai", "OpenAI"),
+        };
         self.push_display_message(DisplayMessage::system(format!(
             "Enter a label for the new {} account, then press Enter. Use `/cancel` to abort.",
             display_name
@@ -772,6 +787,31 @@ impl App {
             provider_id: provider_id.to_string(),
             display_name: display_name.to_string(),
         });
+    }
+
+    pub(super) fn account_command_for_picker(
+        command: &crate::tui::account_picker::AccountPickerCommand,
+    ) -> Option<String> {
+        use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+
+        match command {
+            AccountPickerCommand::SubmitInput(input) => Some(input.clone()),
+            AccountPickerCommand::PromptValue { .. } | AccountPickerCommand::PromptNew { .. } => {
+                None
+            }
+            AccountPickerCommand::Switch { provider, label } => Some(match provider {
+                AccountProviderKind::Anthropic => format!("/account switch {}", label),
+                AccountProviderKind::OpenAi => format!("/account openai switch {}", label),
+            }),
+            AccountPickerCommand::Login { provider, label } => Some(match provider {
+                AccountProviderKind::Anthropic => format!("/account claude add {}", label),
+                AccountProviderKind::OpenAi => format!("/account openai add {}", label),
+            }),
+            AccountPickerCommand::Remove { provider, label } => Some(match provider {
+                AccountProviderKind::Anthropic => format!("/account claude remove {}", label),
+                AccountProviderKind::OpenAi => format!("/account openai remove {}", label),
+            }),
+        }
     }
 
     pub(super) fn prompt_account_value(
@@ -2730,26 +2770,40 @@ async fn execute_account_command_remote(
                 .any(|account| account.label == label);
             match (has_anthropic, has_openai) {
                 (true, false) => {
-                    execute_account_command_remote(
-                        app,
-                        AccountCommand::Switch {
-                            provider_id: "claude".to_string(),
-                            label,
-                        },
-                        remote,
-                    )
-                    .await?;
+                    if let Err(e) = crate::auth::claude::set_active_account(&label) {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to switch account: {}",
+                            e
+                        )));
+                        return Ok(());
+                    }
+                    crate::auth::AuthStatus::invalidate_cache();
+                    app.context_limit = app.provider.context_window() as u64;
+                    app.context_warning_shown = false;
+                    remote.switch_anthropic_account(&label).await?;
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Switched to Anthropic account `{}`.",
+                        label
+                    )));
+                    app.set_status_notice(&format!("Account: switched to {}", label));
                 }
                 (false, true) => {
-                    execute_account_command_remote(
-                        app,
-                        AccountCommand::Switch {
-                            provider_id: "openai".to_string(),
-                            label,
-                        },
-                        remote,
-                    )
-                    .await?;
+                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to switch OpenAI account: {}",
+                            e
+                        )));
+                        return Ok(());
+                    }
+                    crate::auth::AuthStatus::invalidate_cache();
+                    app.context_limit = app.provider.context_window() as u64;
+                    app.context_warning_shown = false;
+                    remote.switch_openai_account(&label).await?;
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Switched to OpenAI account `{}`.",
+                        label
+                    )));
+                    app.set_status_notice(&format!("OpenAI account: switched to {}", label));
                 }
                 _ => execute_account_command_local(app, AccountCommand::SwitchShorthand { label }),
             }
@@ -2781,14 +2835,18 @@ fn execute_account_add_local(app: &mut App, provider_id: &str, label: Option<&st
             if let Some(label) = label.filter(|label| !label.is_empty()) {
                 app.start_claude_login_for_account(label);
             } else {
-                app.prompt_new_account_label("claude", "Anthropic/Claude");
+                app.prompt_new_account_label(
+                    crate::tui::account_picker::AccountProviderKind::Anthropic,
+                );
             }
         }
         "openai" => {
             if let Some(label) = label.filter(|label| !label.is_empty()) {
                 app.start_openai_login_for_account(label);
             } else {
-                app.prompt_new_account_label("openai", "OpenAI");
+                app.prompt_new_account_label(
+                    crate::tui::account_picker::AccountProviderKind::OpenAi,
+                );
             }
         }
         other => match resolve_account_provider_descriptor(other) {

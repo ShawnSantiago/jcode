@@ -510,6 +510,30 @@ fn test_account_picker_prompt_new_openai_label_cancel_clears_prompt() {
 }
 
 #[test]
+fn test_account_openai_compatible_settings_renders_provider_settings() {
+    let mut app = create_test_app();
+    app.input = "/account openai-compatible settings".to_string();
+    app.submit_input();
+
+    let msg = app.display_messages().last().expect("missing settings output");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("OpenAI-compatible"));
+    assert!(msg.content.contains("API base"));
+    assert!(msg.content.contains("default-model"));
+}
+
+#[test]
+fn test_account_default_provider_command_saves_config() {
+    let _guard = crate::storage::lock_test_env();
+    let mut app = create_test_app();
+    app.input = "/account default-provider openai".to_string();
+    app.submit_input();
+
+    let cfg = crate::config::Config::load();
+    assert_eq!(cfg.provider.default_provider.as_deref(), Some("openai"));
+}
+
+#[test]
 fn test_commands_alias_shows_help() {
     let mut app = create_test_app();
     app.input = "/commands".to_string();
