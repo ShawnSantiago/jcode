@@ -20,6 +20,7 @@ const AVAILABLE_MODELS: &[&str] = &[
     "gemini-1.5-pro",
     "gemini-1.5-flash",
 ];
+const FALLBACK_MODELS: &[&str] = &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"];
 const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION: &str = "v1internal";
 const USER_TIER_FREE: &str = "free-tier";
@@ -633,6 +634,44 @@ impl Provider for GeminiProvider {
                 .await
             {
                 Ok(response) => response,
+                Err(err) if is_gemini_model_not_found_error(&err) => {
+                    let mut fallback_response = None;
+                    let mut last_err = err;
+                    for fallback_model in gemini_fallback_models(&model) {
+                        crate::logging::warn(&format!(
+                            "Gemini model '{}' was not found; retrying with fallback '{}'",
+                            model, fallback_model
+                        ));
+                        match provider
+                            .generate_content(
+                                &state,
+                                fallback_model,
+                                &messages,
+                                &tools,
+                                &system,
+                                resume_session_id.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(response) => {
+                                let _ = provider.set_model(fallback_model);
+                                fallback_response = Some(response);
+                                break;
+                            }
+                            Err(err) => {
+                                last_err = err;
+                            }
+                        }
+                    }
+
+                    match fallback_response {
+                        Some(response) => response,
+                        None => {
+                            let _ = tx.send(Err(last_err)).await;
+                            return;
+                        }
+                    }
+                }
                 Err(err) => {
                     let _ = tx.send(Err(err)).await;
                     return;
@@ -835,6 +874,21 @@ fn is_transient_gemini_transport_error(err: &reqwest::Error) -> bool {
         || lower.contains("connection reset")
         || lower.contains("broken pipe")
         || lower.contains("tls handshake eof")
+}
+
+fn is_gemini_model_not_found_error(err: &anyhow::Error) -> bool {
+    let lower = format!("{err:#}").to_ascii_lowercase();
+    lower.contains("http 404")
+        || lower.contains("\"status\": \"not_found\"")
+        || lower.contains("requested entity was not found")
+}
+
+fn gemini_fallback_models(current_model: &str) -> Vec<&'static str> {
+    FALLBACK_MODELS
+        .iter()
+        .copied()
+        .filter(|candidate| !candidate.eq_ignore_ascii_case(current_model))
+        .collect()
 }
 
 fn client_metadata(project_id: Option<String>) -> ClientMetadata {
@@ -1084,6 +1138,22 @@ mod tests {
     }
 
     #[test]
+    fn detects_model_not_found_errors() {
+        let err = anyhow::anyhow!(
+            "Gemini request generateContent failed (HTTP 404 Not Found): {{\"error\":{{\"status\":\"NOT_FOUND\",\"message\":\"Requested entity was not found.\"}}}}"
+        );
+        assert!(is_gemini_model_not_found_error(&err));
+    }
+
+    #[test]
+    fn fallback_models_skip_current_model() {
+        assert_eq!(
+            gemini_fallback_models("gemini-2.5-flash"),
+            vec!["gemini-2.5-pro", "gemini-2.0-flash"]
+        );
+    }
+
+    #[test]
     fn build_contents_preserves_tool_calls_and_results() {
         let messages = vec![
             Message {
@@ -1181,8 +1251,7 @@ mod tests {
 
         assert!(!schema_contains_key(parameters, "const"));
         assert_eq!(
-            parameters["properties"]["tool_calls"]["items"]["oneOf"][0]["properties"]["tool"]
-                ["enum"],
+            parameters["properties"]["tool_calls"]["items"]["oneOf"][0]["properties"]["tool"]["enum"],
             json!(["read"])
         );
     }
