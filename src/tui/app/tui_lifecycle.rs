@@ -205,6 +205,7 @@ impl App {
             tool_result_ids: HashSet::new(),
             remote_session_id: None,
             remote_sessions: Vec::new(),
+            remote_side_pane_images: Vec::new(),
             remote_swarm_members: Vec::new(),
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,

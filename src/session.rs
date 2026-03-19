@@ -1052,11 +1052,35 @@ pub struct RenderedMessage {
     pub tool_data: Option<ToolCall>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RenderedImageSource {
+    UserInput,
+    ToolResult { tool_name: String },
+    Other { role: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenderedImage {
     pub media_type: String,
     pub data: String,
     pub label: Option<String>,
+    pub source: RenderedImageSource,
+}
+
+fn image_source_for_message(role: Role, tool: Option<&ToolCall>) -> RenderedImageSource {
+    if let Some(tool) = tool {
+        return RenderedImageSource::ToolResult {
+            tool_name: tool.name.clone(),
+        };
+    }
+
+    match role {
+        Role::User => RenderedImageSource::UserInput,
+        Role::Assistant => RenderedImageSource::Other {
+            role: "assistant".to_string(),
+        },
+    }
 }
 
 fn fallback_image_label_for_tool(tool: &ToolCall) -> Option<String> {
@@ -1084,6 +1108,7 @@ pub fn render_images(session: &Session) -> Vec<RenderedImage> {
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
 
     for msg in &session.messages {
+        let message_role = msg.role.clone();
         let mut current_tool: Option<ToolCall> = None;
         let mut last_image_idx: Option<usize> = None;
 
@@ -1117,6 +1142,10 @@ pub fn render_images(session: &Session) -> Vec<RenderedImage> {
                         label: current_tool
                             .as_ref()
                             .and_then(fallback_image_label_for_tool),
+                        source: image_source_for_message(
+                            message_role.clone(),
+                            current_tool.as_ref(),
+                        ),
                     });
                     last_image_idx = Some(images.len().saturating_sub(1));
                 }
@@ -1136,6 +1165,14 @@ pub fn render_images(session: &Session) -> Vec<RenderedImage> {
     }
 
     images
+}
+
+pub fn has_rendered_images(session: &Session) -> bool {
+    session.messages.iter().any(|msg| {
+        msg.content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+    })
 }
 
 pub fn summarize_tool_calls(

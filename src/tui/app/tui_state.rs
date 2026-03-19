@@ -203,7 +203,7 @@ impl crate::tui::TuiState for App {
 
     fn side_pane_images(&self) -> Vec<crate::session::RenderedImage> {
         if self.is_remote {
-            Vec::new()
+            self.remote_side_pane_images.clone()
         } else {
             crate::session::render_images(&self.session)
         }

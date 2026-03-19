@@ -1815,6 +1815,10 @@ impl Agent {
             .collect()
     }
 
+    pub fn get_rendered_images(&self) -> Vec<crate::session::RenderedImage> {
+        crate::session::render_images(&self.session)
+    }
+
     pub fn get_tool_call_summaries(&self, limit: usize) -> Vec<crate::protocol::ToolCallSummary> {
         crate::session::summarize_tool_calls(&self.session, limit)
     }
