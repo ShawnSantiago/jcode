@@ -106,6 +106,21 @@ impl AuthStatus {
         status
     }
 
+    /// Fast auth snapshot for interactive UI surfaces like `/account`.
+    ///
+    /// Prefers any previously cached full probe (even if stale), and otherwise
+    /// falls back to a cheap local-files/env-only probe that avoids subprocesses
+    /// such as `cursor-agent status` or `sqlite3` lookups.
+    pub fn check_fast() -> Self {
+        if let Ok(cache) = AUTH_STATUS_CACHE.read() {
+            if let Some((ref status, _)) = *cache {
+                return status.clone();
+            }
+        }
+
+        Self::check_uncached_fast()
+    }
+
     /// Returns true if at least one provider has usable credentials.
     pub fn has_any_available(&self) -> bool {
         self.anthropic.state == AuthState::Available
@@ -393,13 +408,14 @@ impl AuthStatus {
 
         let cursor_has_cli = cursor::has_cursor_agent_cli();
         let cursor_has_api_key = cursor::has_cursor_api_key();
+        let cursor_has_native_auth = cursor::has_cursor_native_auth();
         let cursor_has_cli_auth = if cursor_has_cli {
             cursor::has_cursor_agent_auth()
         } else {
             false
         };
 
-        status.cursor = if cursor_has_cli && (cursor_has_api_key || cursor_has_cli_auth) {
+        status.cursor = if cursor_has_native_auth || (cursor_has_cli && cursor_has_cli_auth) {
             AuthState::Available
         } else if cursor_has_cli || cursor_has_api_key {
             AuthState::Expired
@@ -408,6 +424,130 @@ impl AuthStatus {
         };
 
         // Check Google/Gmail OAuth
+        match google::load_tokens() {
+            Ok(tokens) => {
+                if tokens.is_expired() {
+                    status.google = AuthState::Expired;
+                } else {
+                    status.google = AuthState::Available;
+                }
+                status.google_can_send = tokens.tier.can_send();
+            }
+            Err(_) => {
+                status.google = AuthState::NotConfigured;
+            }
+        }
+
+        status
+    }
+
+    fn check_uncached_fast() -> Self {
+        let mut status = Self::default();
+
+        if crate::subscription_catalog::has_credentials() {
+            status.jcode = AuthState::Available;
+        }
+
+        let mut anthropic = ProviderAuth::default();
+        match claude::load_credentials() {
+            Ok(creds) => {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                anthropic.has_oauth = true;
+                if creds.expires_at > now_ms {
+                    anthropic.state = AuthState::Available;
+                } else {
+                    anthropic.state = AuthState::Expired;
+                }
+            }
+            Err(_) => {}
+        }
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            anthropic.has_api_key = true;
+            anthropic.state = AuthState::Available;
+        }
+        status.anthropic = anthropic;
+
+        let openrouter_like_keys = openrouter_like_api_key_sources();
+        let openrouter_available = openrouter_like_keys
+            .iter()
+            .any(|(env_key, file_name)| api_key_available(env_key, file_name));
+        if openrouter_available {
+            status.openrouter = AuthState::Available;
+        }
+
+        status.azure_has_api_key = crate::auth::azure::has_api_key();
+        status.azure_uses_entra = crate::auth::azure::uses_entra_id();
+        if crate::auth::azure::has_configuration() {
+            status.azure = AuthState::Available;
+        }
+
+        match codex::load_credentials() {
+            Ok(creds) => {
+                if !creds.refresh_token.is_empty() {
+                    status.openai_has_oauth = true;
+                    if let Some(expires_at) = creds.expires_at {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        if expires_at > now_ms {
+                            status.openai = AuthState::Available;
+                        } else {
+                            status.openai = AuthState::Expired;
+                        }
+                    } else {
+                        status.openai = AuthState::Available;
+                    }
+                } else if !creds.access_token.is_empty() {
+                    status.openai_has_api_key = true;
+                    status.openai = AuthState::Available;
+                }
+            }
+            Err(_) => {}
+        }
+        if std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            status.openai_has_api_key = true;
+            status.openai = AuthState::Available;
+        }
+
+        status.copilot = if copilot::has_copilot_credentials() {
+            status.copilot_has_api_token = true;
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        };
+
+        status.antigravity =
+            if command_available_from_env("JCODE_ANTIGRAVITY_CLI_PATH", "antigravity") {
+                AuthState::Available
+            } else {
+                AuthState::NotConfigured
+            };
+
+        status.gemini = match gemini::load_tokens() {
+            Ok(tokens) => {
+                if tokens.is_expired() {
+                    AuthState::Expired
+                } else {
+                    AuthState::Available
+                }
+            }
+            Err(_) => AuthState::NotConfigured,
+        };
+
+        let cursor_has_cli = cursor::has_cursor_agent_cli();
+        let cursor_has_api_key = cursor::has_cursor_api_key();
+        let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
+
+        status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
+            AuthState::Available
+        } else if cursor_has_cli {
+            AuthState::Expired
+        } else {
+            AuthState::NotConfigured
+        };
+
         match google::load_tokens() {
             Ok(tokens) => {
                 if tokens.is_expired() {
@@ -841,12 +981,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cursor_status_is_partial_when_api_key_exists_without_cli() {
+    fn cursor_status_is_available_when_api_key_exists_without_cli() {
         let _lock = ENV_LOCK.lock().unwrap();
+        let prev_access_token = std::env::var_os("CURSOR_ACCESS_TOKEN");
+        let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
         let prev_api_key = std::env::var_os("CURSOR_API_KEY");
         let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
         let temp = tempfile::TempDir::new().expect("create temp dir");
 
+        crate::env::remove_var("CURSOR_ACCESS_TOKEN");
+        crate::env::remove_var("CURSOR_REFRESH_TOKEN");
         crate::env::set_var("CURSOR_API_KEY", "cursor-test-key");
         crate::env::set_var(
             "JCODE_CURSOR_CLI_PATH",
@@ -855,8 +999,42 @@ mod tests {
         AuthStatus::invalidate_cache();
 
         let status = AuthStatus::check();
-        assert_eq!(status.cursor, AuthState::Expired);
+        assert_eq!(status.cursor, AuthState::Available);
 
+        restore_env_var("CURSOR_ACCESS_TOKEN", prev_access_token);
+        restore_env_var("CURSOR_REFRESH_TOKEN", prev_refresh_token);
+        restore_env_var("CURSOR_API_KEY", prev_api_key);
+        restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+        AuthStatus::invalidate_cache();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_status_is_available_for_native_auth_without_cli() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_access_token = std::env::var_os("CURSOR_ACCESS_TOKEN");
+        let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
+        let prev_api_key = std::env::var_os("CURSOR_API_KEY");
+        let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+
+        crate::env::set_var(
+            "CURSOR_ACCESS_TOKEN",
+            "eyJhbGciOiJub25lIn0.eyJleHAiIjo0MTAyNDQ0ODAwfQ.",
+        );
+        crate::env::remove_var("CURSOR_REFRESH_TOKEN");
+        crate::env::remove_var("CURSOR_API_KEY");
+        crate::env::set_var(
+            "JCODE_CURSOR_CLI_PATH",
+            temp.path().join("missing-cursor-agent"),
+        );
+        AuthStatus::invalidate_cache();
+
+        let status = AuthStatus::check();
+        assert_eq!(status.cursor, AuthState::Available);
+
+        restore_env_var("CURSOR_ACCESS_TOKEN", prev_access_token);
+        restore_env_var("CURSOR_REFRESH_TOKEN", prev_refresh_token);
         restore_env_var("CURSOR_API_KEY", prev_api_key);
         restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
         AuthStatus::invalidate_cache();

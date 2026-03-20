@@ -507,7 +507,7 @@ impl App {
             AccountPicker, AccountPickerCommand, AccountPickerItem, AccountPickerSummary,
         };
 
-        let status = crate::auth::AuthStatus::check();
+        let status = crate::auth::AuthStatus::check_fast();
         let cfg = crate::config::Config::load();
         let compat = crate::provider_catalog::resolve_openai_compatible_profile(
             crate::provider_catalog::OPENAI_COMPAT_PROFILE,

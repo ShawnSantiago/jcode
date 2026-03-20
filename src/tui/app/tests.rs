@@ -463,6 +463,50 @@ fn test_account_command_opens_account_picker() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::storage::lock_test_env();
+    let prev_cursor_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let marker = temp.path().join("cursor-status-ran");
+    let script = temp.path().join("cursor-agent-mock");
+
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho ran > \"{}\"\nexit 0\n", marker.display()),
+    )
+    .expect("write mock cursor agent");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("stat mock cursor agent")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod mock cursor agent");
+
+    let mut app = create_test_app();
+
+    crate::env::set_var("JCODE_CURSOR_CLI_PATH", &script);
+    crate::auth::AuthStatus::invalidate_cache();
+    let _ = std::fs::remove_file(&marker);
+
+    app.input = "/account".to_string();
+    app.submit_input();
+
+    assert!(app.account_picker_overlay.is_some());
+    assert!(
+        !marker.exists(),
+        "/account should not execute `cursor-agent status` on open"
+    );
+
+    match prev_cursor_cli_path {
+        Some(value) => crate::env::set_var("JCODE_CURSOR_CLI_PATH", value),
+        None => crate::env::remove_var("JCODE_CURSOR_CLI_PATH"),
+    }
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
 #[test]
 fn test_account_switch_shorthand_switches_openai_account_by_label() {
     let _guard = crate::storage::lock_test_env();
@@ -1552,6 +1596,30 @@ fn configure_test_remote_models_with_copilot(app: &mut App) {
     ];
 }
 
+fn configure_test_remote_models_with_cursor(app: &mut App) {
+    app.is_remote = true;
+    app.remote_provider_name = Some("cursor".to_string());
+    app.remote_provider_model = Some("composer-1.5".to_string());
+    app.remote_available_models = vec![
+        "composer-2-fast".to_string(),
+        "composer-2".to_string(),
+        "composer-1.5".to_string(),
+    ];
+    app.remote_model_routes = app
+        .remote_available_models
+        .iter()
+        .cloned()
+        .map(|model| crate::provider::ModelRoute {
+            model,
+            provider: "Cursor".to_string(),
+            api_method: "cursor".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        })
+        .collect();
+}
+
 #[test]
 fn test_model_picker_includes_copilot_models_in_remote_mode() {
     let mut app = create_test_app();
@@ -1743,6 +1811,70 @@ fn test_model_picker_copilot_selection_prefixes_model() {
         );
     }
     // Picker should be closed
+    assert!(app.picker_state.is_none());
+}
+
+#[test]
+fn test_model_picker_cursor_models_have_cursor_route() {
+    let mut app = create_test_app();
+    configure_test_remote_models_with_cursor(&mut app);
+
+    app.open_model_picker();
+
+    let picker = app
+        .picker_state
+        .as_ref()
+        .expect("model picker should be open");
+
+    let composer_entry = picker
+        .models
+        .iter()
+        .find(|m| m.name == "composer-2-fast")
+        .expect("composer-2-fast should be in picker");
+
+    assert!(
+        composer_entry
+            .routes
+            .iter()
+            .any(|r| r.api_method == "cursor"),
+        "composer-2-fast should have a cursor route, got: {:?}",
+        composer_entry.routes
+    );
+}
+
+#[test]
+fn test_model_picker_cursor_selection_prefixes_model() {
+    let mut app = create_test_app();
+    configure_test_remote_models_with_cursor(&mut app);
+
+    app.open_model_picker();
+
+    let picker = app
+        .picker_state
+        .as_ref()
+        .expect("model picker should be open");
+
+    let composer_idx = picker
+        .models
+        .iter()
+        .position(|m| m.name == "composer-2-fast")
+        .expect("composer-2-fast should be in picker");
+
+    let filtered_pos = picker
+        .filtered
+        .iter()
+        .position(|&i| i == composer_idx)
+        .expect("composer-2-fast should be in filtered list");
+
+    app.picker_state.as_mut().unwrap().selected = filtered_pos;
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(
+        app.pending_model_switch.as_deref(),
+        Some("cursor:composer-2-fast")
+    );
     assert!(app.picker_state.is_none());
 }
 
