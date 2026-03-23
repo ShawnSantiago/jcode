@@ -183,9 +183,7 @@ async fn recover_reloading_server(
 
     let content = reconnect_status_message(app, state, detail);
     if let Some(idx) = state.disconnect_msg_idx {
-        if idx < app.display_messages.len() {
-            app.display_messages[idx].content = content;
-        }
+        let _ = app.replace_display_message_content(idx, content);
     } else {
         app.push_display_message(DisplayMessage::system(content));
         state.disconnect_msg_idx = Some(app.display_messages.len() - 1);
@@ -506,9 +504,7 @@ pub(super) async fn connect_with_retry(
                 state.reconnect_attempts
             ));
             if let Some(idx) = state.disconnect_msg_idx.take() {
-                if idx < app.display_messages.len() {
-                    app.display_messages.remove(idx);
-                }
+                let _ = app.remove_display_message(idx);
             }
             state.disconnect_start = None;
             state.last_disconnect_reason = None;
@@ -548,9 +544,7 @@ pub(super) async fn connect_with_retry(
             };
 
             if let Some(idx) = state.disconnect_msg_idx {
-                if idx < app.display_messages.len() {
-                    app.display_messages[idx].content = msg_content;
-                }
+                let _ = app.replace_display_message_content(idx, msg_content);
             } else {
                 app.push_display_message(DisplayMessage {
                     role: "system".to_string(),

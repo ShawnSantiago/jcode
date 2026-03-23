@@ -3694,6 +3694,37 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
 }
 
 #[test]
+fn test_replace_display_message_content_bumps_version() {
+    let mut app = create_test_app();
+    app.push_display_message(DisplayMessage::system("old reconnect status".to_string()));
+    let before = app.display_messages_version;
+
+    assert!(app.replace_display_message_content(0, "new reconnect status".to_string()));
+    assert_eq!(app.display_messages[0].content, "new reconnect status");
+    assert_ne!(app.display_messages_version, before);
+
+    let after_change = app.display_messages_version;
+    assert!(app.replace_display_message_content(0, "new reconnect status".to_string()));
+    assert_eq!(app.display_messages_version, after_change);
+}
+
+#[test]
+fn test_remove_display_message_bumps_version() {
+    let mut app = create_test_app();
+    app.push_display_message(DisplayMessage::system(
+        "temporary reconnect status".to_string(),
+    ));
+    let before = app.display_messages_version;
+
+    let removed = app
+        .remove_display_message(0)
+        .expect("message should be removed");
+    assert_eq!(removed.content, "temporary reconnect status");
+    assert!(app.display_messages.is_empty());
+    assert_ne!(app.display_messages_version, before);
+}
+
+#[test]
 fn test_handle_remote_disconnect_retryable_pending_schedules_retry() {
     let mut app = create_test_app();
     app.is_processing = true;
