@@ -68,6 +68,7 @@ even if they cannot reach the same fast path.
 ### Phase 2 — Measurement and repeatability
 
 - Add documented commands for cold/warm `check` and `build` timing.
+- Prefer touched-file timings (for example `scripts/bench_compile.sh check --touch src/server.rs`) over no-op hot-cache reruns when judging ROI.
 - Track timing deltas after each structural phase.
 - Fix build/link blockers before treating any timing data as authoritative.
 
