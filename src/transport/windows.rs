@@ -43,9 +43,7 @@ impl Listener {
                     pipe_name
                 );
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                let server = ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .create(&pipe_name)?;
+                let server = ServerOptions::new().create(&pipe_name)?;
                 Ok(Self {
                     pipe_name,
                     current_server: server,

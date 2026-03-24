@@ -743,7 +743,7 @@ pub fn clear_cache() -> Result<(), String> {
     let cache_dir = if let Ok(cache) = RENDER_CACHE.lock() {
         cache.cache_dir.clone()
     } else {
-        PathBuf::from("/tmp")
+        std::env::temp_dir()
     };
 
     // Clear in-memory caches
@@ -1428,7 +1428,7 @@ struct CachedDiagram {
 impl MermaidCache {
     fn new() -> Self {
         let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .unwrap_or_else(std::env::temp_dir)
             .join("jcode")
             .join("mermaid");
 

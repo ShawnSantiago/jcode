@@ -199,14 +199,14 @@ pub fn socket_dir() -> Result<PathBuf> {
 pub fn server_socket_path(name: &str) -> PathBuf {
     socket_dir()
         .map(|d| d.join(format!("{}.sock", name)))
-        .unwrap_or_else(|_| PathBuf::from(format!("/tmp/jcode-{}.sock", name)))
+        .unwrap_or_else(|_| std::env::temp_dir().join(format!("jcode-{}.sock", name)))
 }
 
 /// Get the debug socket path for a named server
 pub fn server_debug_socket_path(name: &str) -> PathBuf {
     socket_dir()
         .map(|d| d.join(format!("{}-debug.sock", name)))
-        .unwrap_or_else(|_| PathBuf::from(format!("/tmp/jcode-{}-debug.sock", name)))
+        .unwrap_or_else(|_| std::env::temp_dir().join(format!("jcode-{}-debug.sock", name)))
 }
 
 /// Check if a process is still running

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+use crate::{platform, storage};
+
 const GITHUB_API_LATEST: &str =
     "https://api.github.com/repos/1jehuang/firefox-agent-bridge/releases/latest";
 
@@ -9,9 +11,11 @@ const EXTENSION_ID_LISTED: &str = "browser-agent-bridge@1jehuang.github.io";
 const EXTENSION_ID_LOCAL: &str = "firefox-agent-bridge@local";
 
 fn jcode_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
+    storage::jcode_dir().unwrap_or_else(|_| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".jcode")
+    })
 }
 
 fn browser_dir() -> PathBuf {
@@ -51,11 +55,7 @@ fn setup_marker_path() -> PathBuf {
 }
 
 fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir)
-    } else {
-        PathBuf::from("/tmp")
-    }
+    storage::runtime_dir()
 }
 
 fn session_socket_path(name: &str) -> PathBuf {
@@ -70,8 +70,7 @@ fn is_session_alive(name: &str) -> bool {
     let pid_path = session_pid_path(name);
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let proc_path = format!("/proc/{}", pid);
-            if std::path::Path::new(&proc_path).exists() {
+            if platform::is_process_running(pid) {
                 return session_socket_path(name).exists();
             }
         }
@@ -451,7 +450,49 @@ fn install_native_host_manifest() -> Result<bool> {
 
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
 
+    #[cfg(target_os = "windows")]
+    register_windows_native_host_manifest(&manifest_path)?;
+
     Ok(true)
+}
+
+#[cfg(target_os = "windows")]
+fn register_windows_native_host_manifest(manifest_path: &std::path::Path) -> Result<()> {
+    let key = format!(
+        r"HKCU\Software\Mozilla\NativeMessagingHosts\{}",
+        NATIVE_HOST_NAME
+    );
+    let output = std::process::Command::new("reg")
+        .args([
+            "add",
+            &key,
+            "/ve",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &manifest_path.to_string_lossy(),
+            "/f",
+        ])
+        .output()
+        .context("Failed to register Firefox native messaging host in Windows registry")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let details = stderr.trim();
+        if details.is_empty() {
+            anyhow::bail!(
+                "Failed to register Firefox native messaging host in Windows registry: {}",
+                stdout.trim()
+            );
+        }
+        anyhow::bail!(
+            "Failed to register Firefox native messaging host in Windows registry: {}",
+            details
+        )
+    }
 }
 
 fn native_messaging_hosts_dir() -> Result<PathBuf> {

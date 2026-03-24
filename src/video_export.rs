@@ -9,19 +9,58 @@ use std::path::{Path, PathBuf};
 use crate::replay::TimelineEvent;
 
 fn find_command(name: &str) -> Option<PathBuf> {
-    std::process::Command::new("which")
+    #[cfg(windows)]
+    let path_lookup = {
+        let exe_name = if name.ends_with(".exe") {
+            name.to_string()
+        } else {
+            format!("{}.exe", name)
+        };
+        std::process::Command::new("where")
+            .arg(&exe_name)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(PathBuf::from)
+            })
+    };
+
+    #[cfg(not(windows))]
+    let path_lookup = std::process::Command::new("which")
         .arg(name)
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-        .or_else(|| {
-            let cargo_bin = dirs::home_dir()?.join(".cargo/bin").join(name);
-            cargo_bin.exists().then_some(cargo_bin)
-        })
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()));
+
+    path_lookup.or_else(|| {
+        let cargo_bin = dirs::home_dir()?.join(".cargo/bin");
+        let direct = cargo_bin.join(name);
+        if direct.exists() {
+            return Some(direct);
+        }
+        #[cfg(windows)]
+        {
+            let exe = cargo_bin.join(format!("{}.exe", name));
+            if exe.exists() {
+                return Some(exe);
+            }
+        }
+        None
+    })
 }
 
 fn get_terminal_font() -> (String, f64) {
+    #[cfg(windows)]
+    {
+        return ("JetBrains Mono".to_string(), 11.0);
+    }
+
     if let Ok(conf) = std::fs::read_to_string(
         dirs::home_dir()
             .unwrap_or_default()
@@ -188,7 +227,7 @@ async fn render_svg_pipeline(
     let img_w = cell_w * width as u32;
     let img_h = cell_h * height as u32;
 
-    let tmp_dir = PathBuf::from(format!("/tmp/jcode_video_{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(format!("jcode_video_{}", std::process::id()));
     if tmp_dir.exists() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
