@@ -37,10 +37,11 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
 /// User-Agent for OAuth requests (must match Claude CLI format)
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
+pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
 /// Beta headers required for OAuth (base)
-const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
+pub(crate) const OAUTH_BETA_HEADERS: &str =
+    "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
 
 /// Beta headers with 1M context
 const OAUTH_BETA_HEADERS_1M: &str =
@@ -624,14 +625,25 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") else {
-            return Ok(());
-        };
-        if api_key.trim().is_empty() {
+        let (token, is_oauth) = self.get_access_token().await?;
+        if token.trim().is_empty() {
             return Ok(());
         }
 
-        let catalog = crate::provider::fetch_anthropic_model_catalog(&api_key).await?;
+        let catalog = if is_oauth {
+            match crate::provider::fetch_anthropic_model_catalog_oauth(&token).await {
+                Ok(catalog) => catalog,
+                Err(err) => {
+                    crate::logging::warn(&format!(
+                        "Anthropic OAuth model catalog refresh failed; keeping fallback list: {}",
+                        err
+                    ));
+                    return Ok(());
+                }
+            }
+        } else {
+            crate::provider::fetch_anthropic_model_catalog(&token).await?
+        };
         if !catalog.context_limits.is_empty() {
             crate::provider::populate_context_limits(catalog.context_limits);
         }

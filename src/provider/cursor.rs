@@ -5,6 +5,7 @@ use crate::message::{Message, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
+use serde::Deserialize;
 use serde_json::Value;
 use std::io::Read;
 use std::sync::{Arc, RwLock};
@@ -16,6 +17,7 @@ use uuid::Uuid;
 
 const DIRECT_CHAT_URL: &str =
     "https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
+const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
 const DEFAULT_MODEL: &str = "composer-1.5";
 pub(crate) const AVAILABLE_MODELS: &[&str] = &[
     "composer-2-fast",
@@ -37,6 +39,66 @@ pub(crate) fn is_known_model(model: &str) -> bool {
     AVAILABLE_MODELS.contains(&trimmed)
 }
 
+#[derive(Debug, Deserialize)]
+struct CursorModelsResponse {
+    #[serde(default)]
+    models: Vec<String>,
+}
+
+fn merge_cursor_models(dynamic: &[String], current: &str) -> Vec<String> {
+    let mut merged = Vec::new();
+
+    for model in dynamic {
+        let trimmed = model.trim();
+        if !trimmed.is_empty() && !merged.iter().any(|known| known == trimmed) {
+            merged.push(trimmed.to_string());
+        }
+    }
+
+    for model in AVAILABLE_MODELS {
+        if !merged.iter().any(|known| known == model) {
+            merged.push((*model).to_string());
+        }
+    }
+
+    let current = current.trim();
+    if !current.is_empty() && !merged.iter().any(|known| known == current) {
+        merged.push(current.to_string());
+    }
+
+    merged
+}
+
+async fn fetch_available_models(client: &reqwest::Client, api_key: &str) -> Result<Vec<String>> {
+    let response = client
+        .get(MODELS_API_URL)
+        .basic_auth(api_key, Some(""))
+        .send()
+        .await
+        .context("Failed to fetch Cursor model catalog")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Cursor model catalog request failed ({}): {}",
+            status,
+            body.trim()
+        );
+    }
+
+    let parsed: CursorModelsResponse = response
+        .json()
+        .await
+        .context("Failed to decode Cursor model catalog response")?;
+    Ok(parsed
+        .models
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect())
+}
+
 fn runtime_cursor_api_key() -> Option<String> {
     crate::auth::cursor::load_api_key().ok()
 }
@@ -56,6 +118,7 @@ pub struct CursorCliProvider {
     cli_path: String,
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
+    fetched_models: Arc<RwLock<Vec<String>>>,
 }
 
 impl CursorCliProvider {
@@ -67,6 +130,7 @@ impl CursorCliProvider {
             cli_path,
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            fetched_models: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -136,12 +200,34 @@ impl Provider for CursorCliProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        let mut models: Vec<String> = AVAILABLE_MODELS.iter().map(|m| (*m).to_string()).collect();
-        let current = self.model();
-        if !current.trim().is_empty() && !models.contains(&current) {
-            models.push(current);
+        let dynamic = self.fetched_models.read().unwrap().clone();
+        merge_cursor_models(&dynamic, &self.model())
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        let Some(api_key) = runtime_cursor_api_key() else {
+            return Ok(());
+        };
+
+        match fetch_available_models(&self.client, &api_key).await {
+            Ok(models) => {
+                if !models.is_empty() {
+                    crate::logging::info(&format!(
+                        "Discovered Cursor models: {}",
+                        models.join(", ")
+                    ));
+                    *self.fetched_models.write().unwrap() = models;
+                }
+            }
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "Cursor model catalog refresh failed; keeping fallback list: {}",
+                    err
+                ));
+            }
         }
-        models
+
+        Ok(())
     }
 
     fn handles_tools_internally(&self) -> bool {
@@ -157,6 +243,7 @@ impl Provider for CursorCliProvider {
             cli_path: self.cli_path.clone(),
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
+            fetched_models: self.fetched_models.clone(),
         })
     }
 }
@@ -778,6 +865,44 @@ mod tests {
 
         let models = provider.available_models_display();
         assert!(models.contains(&"future-cursor-model".to_string()));
+    }
+
+    #[test]
+    fn available_models_display_prefers_fetched_cursor_models() {
+        let provider = CursorCliProvider::new();
+        *provider.fetched_models.write().unwrap() = vec![
+            "claude-4-sonnet-thinking".to_string(),
+            "gpt-5.2".to_string(),
+        ];
+
+        let models = provider.available_models_display();
+        assert_eq!(
+            models.first().map(|model| model.as_str()),
+            Some("claude-4-sonnet-thinking")
+        );
+        assert!(models.iter().any(|model| model == "gpt-5.2"));
+        assert!(models.iter().any(|model| model == "composer-1.5"));
+    }
+
+    #[test]
+    fn merge_cursor_models_deduplicates_dynamic_entries() {
+        let models = merge_cursor_models(
+            &[
+                "composer-2".to_string(),
+                "claude-4-sonnet-thinking".to_string(),
+                "claude-4-sonnet-thinking".to_string(),
+            ],
+            "claude-4-sonnet-thinking",
+        );
+
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.as_str() == "claude-4-sonnet-thinking")
+                .count(),
+            1
+        );
+        assert!(models.iter().any(|model| model == "composer-2"));
     }
 
     #[test]

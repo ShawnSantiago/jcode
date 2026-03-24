@@ -1887,23 +1887,62 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
 }
 
 pub async fn fetch_anthropic_model_catalog(api_key: &str) -> Result<AnthropicModelCatalog> {
-    let client = shared_http_client();
-    let mut available = HashSet::new();
-    let mut limits = HashMap::new();
-    let mut after_id: Option<String> = None;
-
-    loop {
+    fetch_anthropic_model_catalog_with_request(|client, after_id| {
         let mut req = client
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .query(&[("limit", "1000")]);
 
-        if let Some(after) = after_id.as_deref() {
+        if let Some(after) = after_id {
             req = req.query(&[("after_id", after)]);
         }
 
-        let resp = req.send().await?;
+        req
+    })
+    .await
+}
+
+pub async fn fetch_anthropic_model_catalog_oauth(
+    access_token: &str,
+) -> Result<AnthropicModelCatalog> {
+    fetch_anthropic_model_catalog_with_request(|client, after_id| {
+        let mut req = client
+            .get("https://api.anthropic.com/v1/models")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header(
+                "User-Agent",
+                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+            )
+            .header("anthropic-version", "2023-06-01")
+            .header(
+                "anthropic-beta",
+                crate::provider::anthropic::OAUTH_BETA_HEADERS,
+            )
+            .query(&[("limit", "1000")]);
+
+        if let Some(after) = after_id {
+            req = req.query(&[("after_id", after)]);
+        }
+
+        req
+    })
+    .await
+}
+
+async fn fetch_anthropic_model_catalog_with_request<F>(
+    mut build_request: F,
+) -> Result<AnthropicModelCatalog>
+where
+    F: FnMut(&reqwest::Client, Option<&str>) -> reqwest::RequestBuilder,
+{
+    let client = shared_http_client();
+    let mut available = HashSet::new();
+    let mut limits = HashMap::new();
+    let mut after_id: Option<String> = None;
+
+    loop {
+        let resp = build_request(&client, after_id.as_deref()).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("Failed to fetch Anthropic model catalog: {}", resp.status());
         }
@@ -4002,6 +4041,9 @@ impl Provider for MultiProvider {
         if let Some(ref anthropic) = self.anthropic {
             anthropic.prefetch_models().await?;
         }
+        if let Some(ref claude) = self.claude {
+            claude.prefetch_models().await?;
+        }
         if let Some(ref openai) = self.openai {
             openai.prefetch_models().await?;
         }
@@ -4019,6 +4061,12 @@ impl Provider for MultiProvider {
             let gemini = self.gemini.read().unwrap().clone();
             if let Some(gemini) = gemini {
                 gemini.prefetch_models().await?;
+            }
+        }
+        {
+            let cursor = self.cursor.read().unwrap().clone();
+            if let Some(cursor) = cursor {
+                cursor.prefetch_models().await?;
             }
         }
         Ok(())
