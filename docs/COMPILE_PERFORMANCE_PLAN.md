@@ -99,6 +99,17 @@ Start with the highest-leverage cache boundaries:
 3. self-dev/customization system once the new extension-point work lands
 4. server / agent split along the seams already being extracted
 
+### Phase 4a — First workspace boundary landed
+
+- 2026-03-24: moved the heavy ONNX/tokenizer implementation into the new
+  `crates/jcode-embedding` workspace crate.
+- The main `src/embedding.rs` module now acts as a facade for process-local
+  cache/stats/path/logging integration.
+- This preserves the public `crate::embedding` API while creating a real Cargo
+  cache boundary for the heaviest embedding dependencies.
+- Follow-up: gather more realistic before/after timing data using controlled
+  touched-file benchmarks rather than fully hot no-op rebuilds.
+
 ### Phase 5 — Reduce invalidation pressure
 
 - Continue shrinking giant hotspot files.
