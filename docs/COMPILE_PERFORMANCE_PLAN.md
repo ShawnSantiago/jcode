@@ -122,6 +122,15 @@ Start with the highest-leverage cache boundaries:
   cleanup; one post-split sample was anomalous and should not be treated as a
   trustworthy ROI datapoint yet.
 
+- 2026-03-24: moved email notification / IMAP reply transport behind the new
+  `crates/jcode-notify-email` workspace crate.
+- The main `src/notifications.rs` module now keeps the higher-level ambient,
+  safety, and channel integration while SMTP/IMAP/mail parsing lives behind a
+  dedicated crate boundary.
+- This split is primarily meant to keep `lettre`, `imap`, `mail-parser`, and
+  `native-tls` out of unrelated self-dev rebuilds; edits to `notifications.rs`
+  itself still invalidate the main crate and are not the right sole ROI metric.
+
 ### Phase 5 — Reduce invalidation pressure
 
 - Continue shrinking giant hotspot files.
@@ -148,11 +157,16 @@ Touched-file `cargo check` samples gathered during this batch:
 - `src/auth/azure.rs` before Azure crate split: ~7.0s
 - `src/provider/openrouter.rs` before Azure crate split: ~6.5s
 - `src/provider/openrouter.rs` after Azure crate split: ~6.0s
+- `src/notifications.rs` after notification-email crate split: ~11.4s
+- `src/channel.rs` after notification-email crate split: ~4.8s
 
 Notes:
 
 - The post-split touched-file measurement for `src/auth/azure.rs` produced an anomalous
   result and should not be treated as a reliable ROI datapoint yet.
+- The post-split `src/notifications.rs` timing is not by itself a negative signal: touching
+  that root module still rebuilds the main crate, while the intended win is that unrelated edits
+  stop dragging mail transport dependencies through the same compile unit.
 - No-op fully hot-cache reruns can look unrealistically fast; use touched-file scenarios
   when evaluating structural compile-speed changes.
 
@@ -160,13 +174,14 @@ Notes:
 
 The next obvious heavy dependency boundaries are less clearly safe/local than the ones already landed:
 
-- `notifications.rs` (email / IMAP) still mixes transport backends with higher-level ambient and
-  safety integration, so it needs a more careful seam before extraction.
 - provider support remains high-value, but `src/provider/mod.rs` and related implementations are
   broad enough that the next split should be designed carefully instead of rushed.
+- a future `jcode-provider-core` / provider-implementation split is still the most promising next
+  compile-speed move, but it needs boundary design first so high-churn shared types do not create
+  a new invalidation hotspot.
 
-That means the best next batch should likely start with a narrow provider-support boundary design or a
-small notifications transport seam, rather than another opportunistic crate move.
+That means the best next batch should likely start with a narrow provider-support boundary design,
+rather than another opportunistic crate move.
 
 ## Developer Workflow Guidance
 
