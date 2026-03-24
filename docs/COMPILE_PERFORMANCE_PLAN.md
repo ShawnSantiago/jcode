@@ -115,6 +115,13 @@ Start with the highest-leverage cache boundaries:
   crate and fixed the `--no-default-features` build path by making PDF support
   degrade gracefully when the feature is disabled.
 
+- 2026-03-24: moved Azure bearer-token retrieval behind the new
+  `crates/jcode-azure-auth` workspace crate so the Azure SDK no longer lives
+  directly in the main crate.
+- Note: touched-file timing for `src/auth/azure.rs` needs more instrumentation
+  cleanup; one post-split sample was anomalous and should not be treated as a
+  trustworthy ROI datapoint yet.
+
 ### Phase 5 — Reduce invalidation pressure
 
 - Continue shrinking giant hotspot files.
@@ -131,6 +138,35 @@ Start with the highest-leverage cache boundaries:
   - prompt overlays
   - routing/theme/layout data
 - Prefer those over direct Rust source edits whenever possible.
+
+## Scenario Measurements (2026-03-24)
+
+Touched-file `cargo check` samples gathered during this batch:
+
+- `src/server.rs`: ~8.7s
+- `src/tool/read.rs`: ~8.8s
+- `src/auth/azure.rs` before Azure crate split: ~7.0s
+- `src/provider/openrouter.rs` before Azure crate split: ~6.5s
+- `src/provider/openrouter.rs` after Azure crate split: ~6.0s
+
+Notes:
+
+- The post-split touched-file measurement for `src/auth/azure.rs` produced an anomalous
+  result and should not be treated as a reliable ROI datapoint yet.
+- No-op fully hot-cache reruns can look unrealistically fast; use touched-file scenarios
+  when evaluating structural compile-speed changes.
+
+## Next-Boundary Assessment
+
+The next obvious heavy dependency boundaries are less clearly safe/local than the ones already landed:
+
+- `notifications.rs` (email / IMAP) still mixes transport backends with higher-level ambient and
+  safety integration, so it needs a more careful seam before extraction.
+- provider support remains high-value, but `src/provider/mod.rs` and related implementations are
+  broad enough that the next split should be designed carefully instead of rushed.
+
+That means the best next batch should likely start with a narrow provider-support boundary design or a
+small notifications transport seam, rather than another opportunistic crate move.
 
 ## Developer Workflow Guidance
 
