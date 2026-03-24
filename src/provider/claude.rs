@@ -752,7 +752,10 @@ impl Provider for ClaudeProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        if !AVAILABLE_MODELS.contains(&model) {
+        if !crate::provider::known_anthropic_model_ids()
+            .iter()
+            .any(|known| known == model)
+        {
             anyhow::bail!("Unsupported Claude model '{}'.", model);
         }
         if let Ok(mut current) = self.model.write() {
@@ -767,6 +770,14 @@ impl Provider for ClaudeProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         AVAILABLE_MODELS.to_vec()
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        crate::provider::known_anthropic_model_ids()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        crate::provider::known_anthropic_model_ids()
     }
 
     fn handles_tools_internally(&self) -> bool {

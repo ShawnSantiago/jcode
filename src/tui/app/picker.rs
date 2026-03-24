@@ -446,7 +446,7 @@ impl App {
 
             let mut added_any = false;
 
-            if crate::provider::ALL_CLAUDE_MODELS.contains(&model.as_str())
+            if crate::provider::provider_for_model(model) == Some("claude")
                 && auth.anthropic.has_oauth
             {
                 let is_1m = model.ends_with("[1m]");
@@ -543,8 +543,10 @@ impl App {
     pub(super) fn remote_model_is_server_copilot_only(model: &str) -> bool {
         !model.is_empty()
             && !model.contains('/')
-            && !crate::provider::ALL_CLAUDE_MODELS.contains(&model)
-            && !crate::provider::ALL_OPENAI_MODELS.contains(&model)
+            && !matches!(
+                crate::provider::provider_for_model(model),
+                Some("claude" | "openai" | "gemini" | "cursor")
+            )
     }
 
     pub(super) fn handle_picker_preview_key(
@@ -984,8 +986,8 @@ impl App {
                         };
                         let pkey = match r.api_method.as_str() {
                             "claude-oauth" | "api-key"
-                                if crate::provider::ALL_CLAUDE_MODELS
-                                    .contains(&bare_name.as_str()) =>
+                                if crate::provider::provider_for_model(&bare_name)
+                                    == Some("claude") =>
                             {
                                 Some("claude")
                             }

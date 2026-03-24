@@ -601,7 +601,10 @@ impl Provider for AnthropicProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        if !AVAILABLE_MODELS.contains(&model) {
+        if !crate::provider::known_anthropic_model_ids()
+            .iter()
+            .any(|known| known == model)
+        {
             anyhow::bail!("Model {} not supported by Anthropic provider", model);
         }
         *self.model.write().unwrap() = model.to_string();
@@ -610,6 +613,32 @@ impl Provider for AnthropicProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         AVAILABLE_MODELS.to_vec()
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        crate::provider::known_anthropic_model_ids()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        crate::provider::known_anthropic_model_ids()
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") else {
+            return Ok(());
+        };
+        if api_key.trim().is_empty() {
+            return Ok(());
+        }
+
+        let catalog = crate::provider::fetch_anthropic_model_catalog(&api_key).await?;
+        if !catalog.context_limits.is_empty() {
+            crate::provider::populate_context_limits(catalog.context_limits);
+        }
+        if !catalog.available_models.is_empty() {
+            crate::provider::populate_anthropic_models(catalog.available_models);
+        }
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

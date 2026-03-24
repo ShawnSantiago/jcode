@@ -535,7 +535,7 @@ fn cheapness_for_route(
         "openrouter" => {
             let model_id = if model.contains('/') {
                 model.to_string()
-            } else if ALL_CLAUDE_MODELS.contains(&model) {
+            } else if provider_for_model(model) == Some("claude") {
                 format!("anthropic/{}", model)
             } else if ALL_OPENAI_MODELS.contains(&model) {
                 format!("openai/{}", model)
@@ -929,6 +929,14 @@ static ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT: std::sync::LazyLock<RwLock<HashMap<St
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 static ACCOUNT_MODEL_REFRESH_IN_FLIGHT: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
+static ANTHROPIC_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<HashMap<String, HashSet<String>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT: std::sync::LazyLock<
+    RwLock<HashMap<String, Instant>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT: std::sync::LazyLock<
+    RwLock<HashMap<String, SystemTime>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 const ACCOUNT_MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(10 * 60);
 const PROVIDER_RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -1016,6 +1024,18 @@ fn current_claude_account_scope() -> String {
         .map(|label| label.trim().to_string())
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| "default".to_string())
+}
+
+fn current_anthropic_catalog_scope() -> String {
+    if std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|key| !key.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "api-key".to_string()
+    } else {
+        format!("oauth::{}", current_claude_account_scope())
+    }
 }
 
 fn scoped_openai_model_key(scope: &str, model: &str) -> Option<String> {
@@ -1200,6 +1220,10 @@ fn openai_static_model_ids() -> Vec<String> {
     models
 }
 
+fn anthropic_static_model_ids() -> Vec<String> {
+    ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()).collect()
+}
+
 /// Look up a cached context limit for a model.
 fn get_cached_context_limit(model: &str) -> Option<usize> {
     let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
@@ -1224,6 +1248,10 @@ pub fn populate_context_limits(models: HashMap<String, usize>) {
 /// Populate the account-available model list (called once at startup from the Codex API).
 pub fn populate_account_models(slugs: Vec<String>) {
     populate_account_models_for_scope(&current_openai_account_scope(), slugs);
+}
+
+pub fn populate_anthropic_models(slugs: Vec<String>) {
+    populate_anthropic_models_for_scope(&current_anthropic_catalog_scope(), slugs);
 }
 
 fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
@@ -1270,6 +1298,41 @@ fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
     }
 }
 
+fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
+    if slugs.is_empty() {
+        return;
+    }
+
+    let mut normalized = HashSet::new();
+    for slug in slugs {
+        let slug = normalize_model_id(&slug);
+        if !slug.is_empty() {
+            normalized.insert(slug);
+        }
+    }
+    if normalized.is_empty() {
+        return;
+    }
+
+    if let Ok(mut available) = ANTHROPIC_AVAILABLE_MODELS.write() {
+        let mut sorted: Vec<String> = normalized.iter().cloned().collect();
+        sorted.sort();
+        crate::logging::info(&format!(
+            "Anthropic available models [{}]: {}",
+            scope,
+            sorted.join(", ")
+        ));
+        available.insert(scope.to_string(), normalized);
+    }
+    if let Ok(mut fetched_at) = ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT.write() {
+        fetched_at.insert(scope.to_string(), Instant::now());
+    }
+    if let Ok(mut observed_at) = ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT.write() {
+        observed_at.insert(scope.to_string(), SystemTime::now());
+    }
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+}
+
 fn merge_openai_model_ids(dynamic_models: Vec<String>) -> Vec<String> {
     let mut models = openai_static_model_ids();
     let mut seen: HashSet<String> = models
@@ -1295,6 +1358,47 @@ fn merge_openai_model_ids(dynamic_models: Vec<String>) -> Vec<String> {
     extras.sort();
     models.extend(extras);
     models
+}
+
+fn merge_anthropic_model_ids(dynamic_models: Vec<String>) -> Vec<String> {
+    let mut models = anthropic_static_model_ids();
+    let mut seen: HashSet<String> = models
+        .iter()
+        .map(|model| normalize_model_id(model))
+        .collect();
+    let mut extras = Vec::new();
+
+    for model in dynamic_models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_model_id(trimmed);
+        if normalized.is_empty() || !seen.insert(normalized) {
+            continue;
+        }
+
+        extras.push(trimmed.to_string());
+    }
+
+    extras.sort();
+    models.extend(extras);
+    models
+}
+
+pub fn known_anthropic_model_ids() -> Vec<String> {
+    let scope = current_anthropic_catalog_scope();
+    let dynamic_models = ANTHROPIC_AVAILABLE_MODELS
+        .read()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .get(&scope)
+                .map(|models| models.iter().cloned().collect())
+        })
+        .unwrap_or_default();
+    merge_anthropic_model_ids(dynamic_models)
 }
 
 pub fn known_openai_model_ids() -> Vec<String> {
@@ -1669,6 +1773,50 @@ pub struct OpenAIModelCatalog {
     pub context_limits: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AnthropicModelCatalog {
+    pub available_models: Vec<String>,
+    pub context_limits: HashMap<String, usize>,
+}
+
+fn parse_anthropic_model_catalog(data: &serde_json::Value) -> AnthropicModelCatalog {
+    let models = data
+        .get("data")
+        .and_then(|value| value.as_array())
+        .or_else(|| data.as_array());
+
+    let mut available: HashSet<String> = HashSet::new();
+    let mut limits: HashMap<String, usize> = HashMap::new();
+
+    for model in models.into_iter().flatten() {
+        let Some(id) = model.get("id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+
+        let normalized = normalize_model_id(id);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        available.insert(normalized.clone());
+
+        if let Some(limit) = model
+            .get("max_input_tokens")
+            .and_then(|value| value.as_u64())
+        {
+            limits.insert(normalized, limit as usize);
+        }
+    }
+
+    let mut available_models: Vec<String> = available.into_iter().collect();
+    available_models.sort();
+
+    AnthropicModelCatalog {
+        available_models,
+        context_limits: limits,
+    }
+}
+
 fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIModelCatalog {
     let models = data
         .get("models")
@@ -1736,6 +1884,60 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
 
     let data: serde_json::Value = resp.json().await?;
     Ok(parse_openai_model_catalog(&data))
+}
+
+pub async fn fetch_anthropic_model_catalog(api_key: &str) -> Result<AnthropicModelCatalog> {
+    let client = shared_http_client();
+    let mut available = HashSet::new();
+    let mut limits = HashMap::new();
+    let mut after_id: Option<String> = None;
+
+    loop {
+        let mut req = client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .query(&[("limit", "1000")]);
+
+        if let Some(after) = after_id.as_deref() {
+            req = req.query(&[("after_id", after)]);
+        }
+
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to fetch Anthropic model catalog: {}", resp.status());
+        }
+
+        let data: serde_json::Value = resp.json().await?;
+        let page = parse_anthropic_model_catalog(&data);
+        available.extend(page.available_models);
+        limits.extend(page.context_limits);
+
+        let has_more = data
+            .get("has_more")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if !has_more {
+            break;
+        }
+
+        let Some(next_after) = data
+            .get("last_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+        else {
+            break;
+        };
+
+        after_id = Some(next_after);
+    }
+
+    let mut available_models: Vec<String> = available.into_iter().collect();
+    available_models.sort();
+    Ok(AnthropicModelCatalog {
+        available_models,
+        context_limits: limits,
+    })
 }
 
 /// Fetch context window sizes from the Codex backend API.
@@ -3427,7 +3629,7 @@ impl Provider for MultiProvider {
 
     fn available_models_display(&self) -> Vec<String> {
         let mut models = Vec::new();
-        models.extend(ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()));
+        models.extend(known_anthropic_model_ids());
         models.extend(known_openai_model_ids());
         {
             let copilot_guard = self.copilot_api.read().unwrap();
@@ -3501,11 +3703,11 @@ impl Provider for MultiProvider {
 
         // Anthropic models (oauth and/or api-key)
         let is_max = crate::auth::claude::is_max_subscription();
-        for model in ALL_CLAUDE_MODELS {
+        for model in known_anthropic_model_ids() {
             let is_1m = model.ends_with("[1m]");
             let is_opus = model.contains("opus");
 
-            let model_defaults_1m = crate::provider::anthropic::effectively_1m(model);
+            let model_defaults_1m = crate::provider::anthropic::effectively_1m(&model);
             let (available, detail) =
                 if is_1m && !model_defaults_1m && !crate::usage::has_extra_usage() {
                     (false, "requires extra usage".to_string())
@@ -3522,7 +3724,7 @@ impl Provider for MultiProvider {
                     api_method: "claude-oauth".to_string(),
                     available,
                     detail: detail.clone(),
-                    cheapness: Some(anthropic_oauth_pricing(model)),
+                    cheapness: Some(anthropic_oauth_pricing(&model)),
                 });
             }
             if has_api_key {
@@ -3539,7 +3741,7 @@ impl Provider for MultiProvider {
                     api_method: "api-key".to_string(),
                     available: ak_available,
                     detail: ak_detail,
-                    cheapness: anthropic_api_pricing(model),
+                    cheapness: anthropic_api_pricing(&model),
                 });
             }
             if !has_oauth && !has_api_key {
@@ -3549,7 +3751,7 @@ impl Provider for MultiProvider {
                     api_method: "claude-oauth".to_string(),
                     available: false,
                     detail: "no credentials".to_string(),
-                    cheapness: Some(anthropic_oauth_pricing(model)),
+                    cheapness: Some(anthropic_oauth_pricing(&model)),
                 });
             }
         }
@@ -3722,7 +3924,7 @@ impl Provider for MultiProvider {
 
         // Also add Claude/OpenAI models via openrouter as alternative routes
         if has_openrouter {
-            for model in ALL_CLAUDE_MODELS {
+            for model in known_anthropic_model_ids() {
                 let or_model = format!("anthropic/{}", model);
                 if let Some((endpoints, _)) =
                     openrouter::load_endpoints_disk_cache_public(&or_model)
@@ -3797,6 +3999,9 @@ impl Provider for MultiProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if let Some(ref anthropic) = self.anthropic {
+            anthropic.prefetch_models().await?;
+        }
         if let Some(ref openai) = self.openai {
             openai.prefetch_models().await?;
         }
@@ -4572,6 +4777,68 @@ mod tests {
                 .filter(|model| model.as_str() == "gpt-5.4-fast-preview")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn test_merge_anthropic_model_ids_appends_dynamic_models() {
+        let models = merge_anthropic_model_ids(vec![
+            "claude-opus-4-6".to_string(),
+            "claude-sonnet-5-preview".to_string(),
+            "claude-sonnet-5-preview".to_string(),
+            " claude-haiku-5-beta ".to_string(),
+        ]);
+
+        assert!(models.iter().any(|model| model == "claude-opus-4-6"));
+        assert!(models.iter().any(|model| model == "claude-opus-4-6[1m]"));
+        assert!(
+            models
+                .iter()
+                .any(|model| model == "claude-sonnet-5-preview")
+        );
+        assert!(models.iter().any(|model| model == "claude-haiku-5-beta"));
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.as_str() == "claude-sonnet-5-preview")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_parse_anthropic_model_catalog_reads_context_limits() {
+        let data = serde_json::json!({
+            "data": [
+                {
+                    "id": "claude-opus-4-6",
+                    "max_input_tokens": 1_048_576
+                },
+                {
+                    "id": "claude-sonnet-5-preview",
+                    "max_input_tokens": 333_000
+                }
+            ]
+        });
+
+        let catalog = parse_anthropic_model_catalog(&data);
+        assert!(
+            catalog
+                .available_models
+                .contains(&"claude-opus-4-6".to_string())
+        );
+        assert!(
+            catalog
+                .available_models
+                .contains(&"claude-sonnet-5-preview".to_string())
+        );
+        assert_eq!(
+            catalog.context_limits.get("claude-opus-4-6"),
+            Some(&1_048_576)
+        );
+        assert_eq!(
+            catalog.context_limits.get("claude-sonnet-5-preview"),
+            Some(&333_000)
         );
     }
 

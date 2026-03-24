@@ -131,6 +131,19 @@ impl Provider for CursorCliProvider {
         AVAILABLE_MODELS.to_vec()
     }
 
+    fn available_models_for_switching(&self) -> Vec<String> {
+        self.available_models_display()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        let mut models: Vec<String> = AVAILABLE_MODELS.iter().map(|m| (*m).to_string()).collect();
+        let current = self.model();
+        if !current.trim().is_empty() && !models.contains(&current) {
+            models.push(current);
+        }
+        models
+    }
+
     fn handles_tools_internally(&self) -> bool {
         !use_native_transport()
     }
@@ -756,6 +769,15 @@ mod tests {
         let models = provider.available_models();
         assert!(models.contains(&"composer-1"));
         assert!(models.contains(&"composer-1.5"));
+    }
+
+    #[test]
+    fn available_models_display_includes_custom_current_model() {
+        let provider = CursorCliProvider::new();
+        provider.set_model("future-cursor-model").unwrap();
+
+        let models = provider.available_models_display();
+        assert!(models.contains(&"future-cursor-model".to_string()));
     }
 
     #[test]
