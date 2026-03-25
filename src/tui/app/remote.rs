@@ -1043,6 +1043,17 @@ pub(super) async fn handle_remote_event(
             process_remote_followups(app, remote).await;
             Ok(RemoteEventOutcome::Continue)
         }
+        RemoteRead::Event(ServerEvent::Transcript { text, mode }) => {
+            if let Err(error) = apply_remote_transcript_event(app, remote, text, mode).await {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to apply transcript: {}",
+                    error
+                )));
+                app.set_status_notice("Transcript failed");
+            }
+            process_remote_followups(app, remote).await;
+            Ok(RemoteEventOutcome::Continue)
+        }
         RemoteRead::Event(server_event) => {
             let _ = handle_server_event(app, server_event, remote);
             process_remote_followups(app, remote).await;
@@ -1424,6 +1435,53 @@ fn submit_transcript_input(app: &mut App) {
     }
 }
 
+async fn submit_remote_transcript_input(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> Result<()> {
+    let trimmed = app.input.trim().to_string();
+    if trimmed.is_empty() {
+        app.set_status_notice("Transcript was empty");
+        return Ok(());
+    }
+
+    if trimmed.starts_with('/') {
+        app.submit_input();
+        return Ok(());
+    }
+
+    if let Some(command) = input::extract_input_shell_command(&trimmed) {
+        let raw_input = std::mem::take(&mut app.input);
+        app.cursor_pos = 0;
+        app.clear_input_undo_history();
+        submit_remote_input_shell(app, remote, raw_input, command.to_string()).await?;
+        return Ok(());
+    }
+
+    match app.send_action(false) {
+        SendAction::Submit => {
+            let prepared = input::take_prepared_input(app);
+            app.push_display_message(DisplayMessage {
+                role: "user".to_string(),
+                content: prepared.raw_input,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
+                .await?;
+        }
+        SendAction::Queue => queue_transcript_input(app),
+        SendAction::Interleave => {
+            let prepared = input::take_prepared_input(app);
+            app.send_interleave_now(prepared.expanded, remote).await;
+        }
+    }
+
+    Ok(())
+}
+
 async fn submit_remote_input_shell(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -1489,6 +1547,29 @@ pub(super) fn apply_transcript_event(app: &mut App, text: String, mode: Transcri
     }
 
     app.follow_chat_bottom_for_typing();
+}
+
+pub(super) async fn apply_remote_transcript_event(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    text: String,
+    mode: TranscriptMode,
+) -> Result<()> {
+    if text.trim().is_empty() {
+        app.set_status_notice("Transcript was empty");
+        return Ok(());
+    }
+
+    match mode {
+        TranscriptMode::Send => {
+            input::insert_input_text(app, &text);
+            submit_remote_transcript_input(app, remote).await?;
+        }
+        _ => apply_transcript_event(app, text, mode),
+    }
+
+    app.follow_chat_bottom_for_typing();
+    Ok(())
 }
 
 pub(super) fn handle_server_event(

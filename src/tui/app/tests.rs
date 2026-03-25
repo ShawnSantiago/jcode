@@ -5259,15 +5259,18 @@ fn test_debug_command_message_respects_queue_mode() {
 fn test_remote_transcript_send_uses_remote_submission_path() {
     let mut app = create_test_app();
     app.is_remote = true;
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
 
-    rt.block_on(super::remote::apply_remote_transcript_event(
-        &mut app,
-        &mut remote,
-        "dictated hello".to_string(),
-        crate::protocol::TranscriptMode::Send,
-    ))
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        super::remote::apply_remote_transcript_event(
+            &mut app,
+            &mut remote,
+            "dictated hello".to_string(),
+            crate::protocol::TranscriptMode::Send,
+        )
+        .await
+    })
     .expect("remote transcript send should succeed");
 
     let last = app
