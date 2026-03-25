@@ -108,6 +108,17 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+fn create_jcode_repo_fixture() -> tempfile::TempDir {
+    let temp = tempfile::TempDir::new().expect("temp repo");
+    std::fs::create_dir_all(temp.path().join(".git")).expect("git dir");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("cargo toml");
+    temp
+}
+
 #[derive(Clone)]
 struct FastMockProvider {
     service_tier: StdArc<StdMutex<Option<String>>>,
@@ -1778,11 +1789,13 @@ fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
     assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
     assert!(app.diff_pane_focus);
 
-    app.handle_key(KeyCode::Right, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Right, KeyModifiers::empty())
+        .unwrap();
     assert_eq!(app.diff_pane_scroll_x, 4);
     assert!(app.input.is_empty());
 
-    app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Left, KeyModifiers::empty())
+        .unwrap();
     assert_eq!(app.diff_pane_scroll_x, 0);
 }
 
@@ -3615,6 +3628,52 @@ fn test_reload_requests_exit_when_newer_binary() {
 }
 
 #[test]
+fn test_selfdev_command_spawns_session_in_test_mode() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_test = std::env::var_os("JCODE_TEST_SESSION");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    crate::env::set_var("JCODE_TEST_SESSION", "1");
+
+    let repo = create_jcode_repo_fixture();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().display().to_string());
+
+    app.input = "/selfdev fix the markdown renderer".to_string();
+    app.submit_input();
+
+    let last = app.display_messages().last().expect("selfdev message");
+    assert!(last.content.contains("Created self-dev session"));
+    assert!(
+        last.content
+            .contains("Prompt captured but not delivered in test mode")
+    );
+    assert_eq!(app.status_notice(), Some("Self-dev".to_string()));
+
+    let sessions_dir = crate::storage::jcode_dir().unwrap().join("sessions");
+    let entries: Vec<_> = std::fs::read_dir(&sessions_dir)
+        .expect("sessions dir")
+        .flatten()
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "expected spawned self-dev session file"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(prev_test) = prev_test {
+        crate::env::set_var("JCODE_TEST_SESSION", prev_test);
+    } else {
+        crate::env::remove_var("JCODE_TEST_SESSION");
+    }
+}
+
+#[test]
 fn test_save_and_restore_reload_state_preserves_queued_messages() {
     let mut app = create_test_app();
     let session_id = format!("test-reload-{}", std::process::id());
@@ -5194,6 +5253,54 @@ fn test_debug_command_message_respects_queue_mode() {
         result
     );
     assert_eq!(app.interleave_message.as_deref(), Some("interleave_msg"));
+}
+
+#[test]
+fn test_remote_transcript_send_uses_remote_submission_path() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    rt.block_on(super::remote::apply_remote_transcript_event(
+        &mut app,
+        &mut remote,
+        "dictated hello".to_string(),
+        crate::protocol::TranscriptMode::Send,
+    ))
+    .expect("remote transcript send should succeed");
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("user message displayed");
+    assert_eq!(last.role, "user");
+    assert_eq!(last.content, "dictated hello");
+    assert!(
+        app.is_processing,
+        "remote send should enter processing state"
+    );
+    assert!(matches!(app.status, ProcessingStatus::Sending));
+    assert!(
+        app.current_message_id.is_some(),
+        "remote request id should be assigned"
+    );
+    assert!(
+        app.last_stream_activity.is_some(),
+        "remote send should start stall timer from a real send"
+    );
+    assert!(
+        !app.pending_turn,
+        "remote transcript send must not use local pending_turn path"
+    );
+    assert!(
+        app.input.is_empty(),
+        "submitted transcript should clear input"
+    );
+    assert!(
+        app.rate_limit_pending_message.is_some(),
+        "remote send should populate retry state for the in-flight request"
+    );
 }
 
 // ====================================================================

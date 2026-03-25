@@ -1499,6 +1499,9 @@ impl App {
                 "`/restart`\nRestart jcode with the current binary. Session is preserved.\nUseful after config changes, MCP server updates, or env var changes."
             }
             "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
+            "selfdev" => {
+                "`/selfdev`\nSpawn a new self-dev jcode session in a separate terminal.\n\n`/selfdev <prompt>`\nSpawn a new self-dev session and auto-deliver the prompt to it.\n\n`/selfdev status`\nShow current self-dev/build status."
+            }
             "split" => {
                 "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point."
             }
@@ -1506,6 +1509,9 @@ impl App {
                 "`/resume`\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and open any session in a new terminal window.\n\nPress `Esc` to return to your current session."
             }
             "info" => "`/info`\nShow session metadata and token usage.",
+            "context" => {
+                "`/context`\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."
+            }
             "usage" => {
                 "`/usage`\nFetch and display subscription usage limits for connected providers. Today this shows OAuth provider windows (Anthropic, OpenAI/ChatGPT); jcode subscription budget reporting is scaffolded but not yet backed by a live billing service."
             }

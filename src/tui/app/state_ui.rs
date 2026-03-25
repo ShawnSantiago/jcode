@@ -1,5 +1,5 @@
 use super::*;
-use crate::tui::{backend, core, is_unexpected_cache_miss, ui};
+use crate::tui::{TuiState, backend, core, is_unexpected_cache_miss, ui};
 
 pub(super) struct RestoredReloadInput {
     pub input: String,
@@ -284,6 +284,7 @@ impl App {
                 "Open goals overview / resume tracked goals",
             ),
             ("/swarm".into(), "Toggle swarm feature (on/off/status)"),
+            ("/context".into(), "Show the full session context snapshot"),
             ("/version".into(), "Show current version"),
             ("/changelog".into(), "Show recent changes in this build"),
             ("/info".into(), "Show session info and tokens"),
@@ -296,6 +297,7 @@ impl App {
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/restart".into(), "Restart with current binary (no build)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
+            ("/selfdev".into(), "Open a new self-dev jcode session"),
             ("/update".into(), "Check for and install latest release"),
             ("/resume".into(), "Open session picker"),
             ("/save".into(), "Bookmark session for easy access"),
@@ -718,6 +720,23 @@ impl App {
                 vec![
                     ("/goals resume".into(), "Resume the current goal"),
                     ("/goals show".into(), "Open a specific goal by id"),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/selfdev ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/selfdev status".into(),
+                        "Show current self-dev/build status",
+                    ),
+                    ("/selfdev enter".into(), "Open a blank self-dev session"),
+                    (
+                        "/selfdev enter ".into(),
+                        "Open a self-dev session with a prompt",
+                    ),
                 ],
             );
         }
@@ -1445,7 +1464,10 @@ impl App {
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         self.side_panel = snapshot;
-        if focused_before != focused_after || self.diff_pane_scroll > 0 || self.diff_pane_scroll_x != 0 {
+        if focused_before != focused_after
+            || self.diff_pane_scroll > 0
+            || self.diff_pane_scroll_x != 0
+        {
             self.diff_pane_scroll = 0;
             self.diff_pane_scroll_x = 0;
             self.diff_pane_auto_scroll = true;
@@ -1765,6 +1787,254 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             title: None,
             tool_data: None,
         });
+        return true;
+    }
+
+    if trimmed == "/context" {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let terminal_size = crossterm::terminal::size()
+            .map(|(w, h)| format!("{}x{}", w, h))
+            .unwrap_or_else(|_| "unknown".to_string());
+        let active_session_id = app
+            .active_client_session_id()
+            .unwrap_or(app.session.id.as_str())
+            .to_string();
+        let context = app.context_info();
+        let todos = super::helpers::gather_todos_for_session(Some(active_session_id.as_str()));
+
+        let (provider_name, model_name, reasoning_effort, service_tier, transport, total_tokens) =
+            if app.is_remote {
+                (
+                    app.remote_provider_name
+                        .clone()
+                        .unwrap_or_else(|| app.provider.name().to_string()),
+                    app.remote_provider_model
+                        .clone()
+                        .unwrap_or_else(|| app.provider.model()),
+                    app.remote_reasoning_effort.clone(),
+                    app.remote_service_tier.clone(),
+                    app.remote_transport.clone(),
+                    app.remote_total_tokens,
+                )
+            } else {
+                (
+                    app.provider.name().to_string(),
+                    app.provider.model(),
+                    app.provider.reasoning_effort(),
+                    app.provider.service_tier(),
+                    app.provider.transport(),
+                    Some((app.total_input_tokens, app.total_output_tokens)),
+                )
+            };
+
+        let compaction_summary = if app.provider.supports_compaction() {
+            let manager = app.registry.compaction();
+            if let Ok(manager) = manager.try_read() {
+                let stats = manager.stats_with(&app.messages);
+                let mode = if app.is_remote {
+                    app.remote_compaction_mode
+                        .as_ref()
+                        .map(|mode| mode.as_str().to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                } else {
+                    manager.mode().as_str().to_string()
+                };
+                let summary_kind = match app.session.compaction.as_ref() {
+                    Some(state) if state.openai_encrypted_content.is_some() => {
+                        "native/openai-encrypted"
+                    }
+                    Some(_) => "summary-text",
+                    None => "none",
+                };
+                format!(
+                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
+                    mode,
+                    if app.provider.uses_jcode_compaction() {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                    if stats.has_summary { "yes" } else { "no" },
+                    summary_kind,
+                    manager.compacted_count(),
+                    stats.active_messages,
+                    manager.summary_chars(),
+                    stats.token_estimate,
+                    stats.effective_tokens,
+                    stats
+                        .observed_input_tokens
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    stats.context_usage * 100.0,
+                    if stats.is_compacting { "yes" } else { "no" },
+                    manager.token_budget(),
+                )
+            } else {
+                "- supported: yes\n- state: unavailable (compaction manager busy)".to_string()
+            }
+        } else {
+            "- supported: no".to_string()
+        };
+
+        let pending_images = app.pending_images.len();
+        let queued_messages = app.queued_messages.len();
+        let soft_interrupts = app.pending_soft_interrupts.len();
+        let side_panel_pages = app.side_panel.pages.len();
+        let focused_side_panel = app.side_panel.focused_page_id.as_deref().unwrap_or("none");
+
+        let mut todo_lines = String::new();
+        if todos.is_empty() {
+            todo_lines.push_str("- none\n");
+        } else {
+            for todo in todos.iter().take(8) {
+                todo_lines.push_str(&format!(
+                    "- [{}|{}] {}\n",
+                    todo.status, todo.priority, todo.content
+                ));
+            }
+            if todos.len() > 8 {
+                todo_lines.push_str(&format!("- … {} more\n", todos.len() - 8));
+            }
+        }
+
+        let mut context_report = String::new();
+        context_report.push_str("# Session Context\n\n");
+        context_report.push_str("## Runtime\n");
+        context_report.push_str(&format!("- session id: `{}`\n", active_session_id));
+        context_report.push_str(&format!("- session name: {}\n", app.session.display_name()));
+        context_report.push_str(&format!(
+            "- mode: {}{}{}\n",
+            if app.is_remote { "remote" } else { "local" },
+            if app.is_replay { ", replay" } else { "" },
+            if app.session.is_canary {
+                ", self-dev"
+            } else {
+                ""
+            }
+        ));
+        context_report.push_str(&format!("- provider: {}\n", provider_name));
+        context_report.push_str(&format!("- model: {}\n", model_name));
+        context_report.push_str(&format!(
+            "- reasoning effort: {}\n",
+            reasoning_effort.as_deref().unwrap_or("default")
+        ));
+        context_report.push_str(&format!(
+            "- service tier: {}\n",
+            service_tier.as_deref().unwrap_or("default")
+        ));
+        context_report.push_str(&format!(
+            "- transport: {}\n",
+            transport.as_deref().unwrap_or("default")
+        ));
+        context_report.push_str(&format!("- cwd: {}\n", cwd));
+        context_report.push_str(&format!("- terminal: {}\n", terminal_size));
+        context_report.push_str(&format!(
+            "- features: memory={}, swarm={}\n",
+            if app.memory_enabled { "on" } else { "off" },
+            if app.swarm_enabled { "on" } else { "off" }
+        ));
+        context_report.push_str(&format!(
+            "- processing: {}\n",
+            match &app.status {
+                ProcessingStatus::Idle => "idle".to_string(),
+                ProcessingStatus::Sending => "sending".to_string(),
+                ProcessingStatus::Connecting(phase) => format!("connecting ({})", phase),
+                ProcessingStatus::Thinking(_) => "thinking".to_string(),
+                ProcessingStatus::Streaming => "streaming".to_string(),
+                ProcessingStatus::RunningTool(name) => format!("running tool ({})", name),
+            }
+        ));
+        if let Some((input, output)) = total_tokens {
+            context_report.push_str(&format!("- session tokens: ↑{} ↓{}\n", input, output));
+        }
+        context_report.push_str("\n## Prompt / Context Composition\n");
+        context_report.push_str(&format!(
+            "- total chars: {} (~{} tokens)\n",
+            context.total_chars,
+            context.estimated_tokens()
+        ));
+        context_report.push_str(&format!(
+            "- system prompt: {} chars\n- env context: {} chars\n- project AGENTS.md: {} ({})\n- project CLAUDE.md: {} ({})\n- global ~/.AGENTS.md: {} ({})\n- global ~/.CLAUDE.md: {} ({})\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",
+            context.system_prompt_chars,
+            context.env_context_chars,
+            if context.has_project_agents_md { "loaded" } else { "not loaded" },
+            context.project_agents_md_chars,
+            if context.has_project_claude_md { "loaded" } else { "not loaded" },
+            context.project_claude_md_chars,
+            if context.has_global_agents_md { "loaded" } else { "not loaded" },
+            context.global_agents_md_chars,
+            if context.has_global_claude_md { "loaded" } else { "not loaded" },
+            context.global_claude_md_chars,
+            context.skills_chars,
+            context.selfdev_chars,
+            context.memory_chars,
+            context.tool_defs_chars,
+            context.tool_defs_count,
+            context.user_messages_chars,
+            context.user_messages_count,
+            context.assistant_messages_chars,
+            context.assistant_messages_count,
+            context.tool_calls_chars,
+            context.tool_calls_count,
+            context.tool_results_chars,
+            context.tool_results_count,
+        ));
+        context_report.push_str("\n## Compaction\n");
+        context_report.push_str(&compaction_summary);
+        context_report.push_str("\n\n## Session State\n");
+        context_report.push_str(&format!(
+            "- queue mode: {}\n- queued messages: {}\n- interleave pending: {}\n- soft interrupts pending: {}\n- pasted snippets buffered: {}\n- pending images: {}\n- active skill: {}\n- improve mode: {}\n- subagent status: {}\n- provider session id: {}\n- status notice: {}\n- last stream error: {}\n- stashed input: {}\n",
+            if app.queue_mode { "on" } else { "off" },
+            queued_messages,
+            if app.interleave_message.is_some() { "yes" } else { "no" },
+            soft_interrupts,
+            app.pasted_contents.len(),
+            pending_images,
+            app.active_skill.as_deref().unwrap_or("none"),
+            app.improve_mode
+                .map(|mode| mode.status_label())
+                .unwrap_or("inactive"),
+            app.subagent_status.as_deref().unwrap_or("idle"),
+            app.provider_session_id.as_deref().unwrap_or("none"),
+            app.status_notice()
+                .as_deref()
+                .unwrap_or("none"),
+            app.last_stream_error.as_deref().unwrap_or("none"),
+            if app.stashed_input.is_some() { "yes" } else { "no" },
+        ));
+        context_report.push_str("\n## Todos\n");
+        context_report.push_str(&todo_lines);
+        context_report.push_str("\n## Side Panel\n");
+        context_report.push_str(&format!(
+            "- pages: {}\n- focused page: {}\n",
+            side_panel_pages, focused_side_panel
+        ));
+
+        if let Some(page) = app.side_panel.focused_page() {
+            context_report.push_str(&format!(
+                "- focused title: {}\n- focused source: {} ({})\n- focused content chars: {}\n",
+                page.title,
+                page.source.as_str(),
+                page.format.as_str(),
+                page.content.len(),
+            ));
+        }
+
+        if app.swarm_enabled {
+            context_report.push_str("\n## Swarm\n");
+            context_report.push_str(&format!(
+                "- plan items: {}\n- remote members: {}\n- connected clients: {}\n",
+                app.swarm_plan_items.len(),
+                app.remote_swarm_members.len(),
+                app.remote_client_count
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+            ));
+        }
+
+        app.push_display_message(DisplayMessage::system(context_report).with_title("Context"));
         return true;
     }
 

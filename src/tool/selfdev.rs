@@ -11,6 +11,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
@@ -36,6 +37,197 @@ pub struct ReloadContext {
     pub session_id: String,
     /// Timestamp
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelfDevLaunchResult {
+    pub session_id: String,
+    pub repo_dir: PathBuf,
+    pub launched: bool,
+    pub test_mode: bool,
+    pub exe: Option<PathBuf>,
+}
+
+impl SelfDevLaunchResult {
+    pub fn command_preview(&self) -> Option<String> {
+        self.exe
+            .as_ref()
+            .map(|exe| format!("{} --resume {} self-dev", exe.display(), self.session_id))
+    }
+}
+
+pub fn enter_selfdev_session(working_dir: Option<&Path>) -> Result<SelfDevLaunchResult> {
+    let repo_dir = SelfDevTool::resolve_repo_dir(working_dir).ok_or_else(|| {
+        anyhow::anyhow!("Could not find the jcode repository to enter self-dev mode")
+    })?;
+
+    let mut session = session::Session::create(None, Some("Self-development session".to_string()));
+    session.set_canary("self-dev");
+    session.working_dir = Some(repo_dir.display().to_string());
+    session.save()?;
+
+    let session_id = session.id.clone();
+
+    if SelfDevTool::is_test_session() {
+        return Ok(SelfDevLaunchResult {
+            session_id,
+            repo_dir,
+            launched: false,
+            test_mode: true,
+            exe: None,
+        });
+    }
+
+    let exe = SelfDevTool::launch_binary()?;
+    let launched = tui_launch::spawn_selfdev_in_new_terminal(&exe, &session_id, &repo_dir)?;
+
+    Ok(SelfDevLaunchResult {
+        session_id,
+        repo_dir,
+        launched,
+        test_mode: false,
+        exe: Some(exe),
+    })
+}
+
+pub fn schedule_selfdev_prompt_delivery(session_id: String, prompt: String) {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        match runtime {
+            Ok(runtime) => {
+                if let Err(err) =
+                    runtime.block_on(SelfDevTool::send_prompt_to_session(&session_id, &prompt))
+                {
+                    crate::logging::warn(&format!(
+                        "Failed to auto-deliver prompt to spawned self-dev session {}: {}",
+                        session_id, err
+                    ));
+                }
+            }
+            Err(err) => crate::logging::warn(&format!(
+                "Failed to initialize runtime for self-dev prompt delivery: {}",
+                err
+            )),
+        }
+    });
+}
+
+pub fn selfdev_status_output() -> Result<ToolOutput> {
+    let manifest = build::BuildManifest::load()?;
+
+    let mut status = String::new();
+
+    status.push_str("## Current Version\n\n");
+    status.push_str(&format!("**Running:** jcode {}\n", env!("JCODE_VERSION")));
+
+    if let Some(repo_dir) = build::get_repo_dir() {
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo_dir)
+            .output()
+            .ok();
+
+        if let Some(output) = output {
+            let changes: Vec<&str> = std::str::from_utf8(&output.stdout)
+                .unwrap_or("")
+                .lines()
+                .collect();
+            if changes.is_empty() {
+                status.push_str("**Working tree:** clean\n");
+            } else {
+                status.push_str(&format!(
+                    "**Working tree:** {} uncommitted change{}\n",
+                    changes.len(),
+                    if changes.len() == 1 { "" } else { "s" }
+                ));
+            }
+        }
+    }
+
+    status.push_str("\n## Build Status\n\n");
+
+    if let Some(ref stable) = manifest.stable {
+        status.push_str(&format!("**Stable:** {}\n", stable));
+    } else {
+        status.push_str("**Stable:** none\n");
+    }
+
+    if let Some(ref canary) = manifest.canary {
+        let status_str = match &manifest.canary_status {
+            Some(build::CanaryStatus::Testing) => "testing",
+            Some(build::CanaryStatus::Passed) => "passed",
+            Some(build::CanaryStatus::Failed) => "failed",
+            None => "unknown",
+        };
+        status.push_str(&format!("**Canary:** {} ({})\n", canary, status_str));
+    } else {
+        status.push_str("**Canary:** none\n");
+    }
+
+    status.push_str("\n## Debug Socket\n\n");
+    status.push_str(&format!(
+        "**Path:** {}\n",
+        server::debug_socket_path().display()
+    ));
+
+    if let Some(reload_state) = server::ReloadState::load() {
+        status.push_str("\n## Reload State\n\n");
+        status.push_str(&format!(
+            "**Phase:** {:?}\n**Request:** {}\n**Hash:** {}\n**PID:** {}\n**Timestamp:** {}\n",
+            reload_state.phase,
+            reload_state.request_id,
+            reload_state.hash,
+            reload_state.pid,
+            reload_state.timestamp,
+        ));
+        if let Some(detail) = reload_state.detail {
+            status.push_str(&format!("**Detail:** {}\n", detail));
+        }
+    }
+
+    if let Some(ref crash) = manifest.last_crash {
+        status.push_str(&format!(
+            "\n## Last Crash\n\n\
+             Build: {}\n\
+             Exit code: {}\n\
+             Time: {}\n",
+            crash.build_hash,
+            crash.exit_code,
+            crash.crashed_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+
+        if !crash.stderr.is_empty() {
+            let stderr_preview = if crash.stderr.len() > 500 {
+                format!("{}...", crate::util::truncate_str(&crash.stderr, 500))
+            } else {
+                crash.stderr.clone()
+            };
+            status.push_str(&format!("\nStderr:\n```\n{}\n```\n", stderr_preview));
+        }
+    }
+
+    if !manifest.history.is_empty() {
+        status.push_str("\n## Recent Builds\n\n");
+        for (i, info) in manifest.history.iter().take(5).enumerate() {
+            let dirty_marker = if info.dirty { " (dirty)" } else { "" };
+            let msg = info
+                .commit_message
+                .as_deref()
+                .unwrap_or("No commit message");
+            status.push_str(&format!(
+                "{}. `{}`{} - {}\n   Built: {}\n",
+                i + 1,
+                info.hash,
+                dirty_marker,
+                msg,
+                info.built_at.format("%Y-%m-%d %H:%M:%S UTC")
+            ));
+        }
+    }
+
+    Ok(ToolOutput::new(status))
 }
 
 impl ReloadContext {
@@ -305,24 +497,13 @@ impl SelfDevTool {
     }
 
     async fn do_enter(&self, prompt: Option<String>, ctx: &ToolContext) -> Result<ToolOutput> {
-        let repo_dir =
-            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
-                anyhow::anyhow!("Could not find the jcode repository to enter self-dev mode")
-            })?;
+        let launch = enter_selfdev_session(ctx.working_dir.as_deref())?;
 
-        let mut session =
-            session::Session::create(None, Some("Self-development session".to_string()));
-        session.set_canary("self-dev");
-        session.working_dir = Some(repo_dir.display().to_string());
-        session.save()?;
-
-        let session_id = session.id.clone();
-
-        if SelfDevTool::is_test_session() {
+        if launch.test_mode {
             let mut output = format!(
                 "Created self-dev session {} in {}.\n\nTest mode skipped launching a new terminal.",
-                session_id,
-                repo_dir.display()
+                launch.session_id,
+                launch.repo_dir.display()
             );
             if let Some(prompt) = prompt {
                 output.push_str(&format!(
@@ -331,40 +512,45 @@ impl SelfDevTool {
                 ));
             }
             return Ok(ToolOutput::new(output).with_metadata(json!({
-                "session_id": session_id,
-                "repo_dir": repo_dir,
+                "session_id": launch.session_id,
+                "repo_dir": launch.repo_dir,
                 "launched": false,
                 "test_mode": true
             })));
         }
 
-        let exe = SelfDevTool::launch_binary()?;
-        let launched = tui_launch::spawn_selfdev_in_new_terminal(&exe, &session_id, &repo_dir)?;
-
-        if !launched {
+        if !launch.launched {
+            let command_preview = launch
+                .command_preview()
+                .unwrap_or_else(|| format!("jcode --resume {} self-dev", launch.session_id));
             return Ok(ToolOutput::new(format!(
                 "Created self-dev session {} but could not find a supported terminal to spawn automatically.\n\nRun manually:\n`{} --resume {} self-dev`",
-                session_id,
-                exe.display(),
-                session_id
+                launch.session_id,
+                launch.exe.as_ref().map(|exe| exe.display().to_string()).unwrap_or_else(|| "jcode".to_string()),
+                launch.session_id
             ))
             .with_metadata(json!({
-                "session_id": session_id,
-                "repo_dir": repo_dir,
+                "session_id": launch.session_id,
+                "repo_dir": launch.repo_dir,
                 "launched": false
-            })));
+            }))
+            .with_title(format!("selfdev enter: {}", command_preview)));
         }
 
         let mut output = format!(
             "Spawned a new self-dev session in a separate terminal.\n\n- Session: `{}`\n- Repo: `{}`\n- Command: `{} --resume {} self-dev`",
-            session_id,
-            repo_dir.display(),
-            exe.display(),
-            session_id
+            launch.session_id,
+            launch.repo_dir.display(),
+            launch
+                .exe
+                .as_ref()
+                .map(|exe| exe.display().to_string())
+                .unwrap_or_else(|| "jcode".to_string()),
+            launch.session_id
         );
 
         let prompt_delivery = if let Some(prompt_text) = prompt {
-            match SelfDevTool::send_prompt_to_session(&session_id, &prompt_text).await {
+            match SelfDevTool::send_prompt_to_session(&launch.session_id, &prompt_text).await {
                 Ok(()) => {
                     output.push_str("\n- Prompt: delivered to the spawned self-dev session");
                     Some(true)
@@ -379,8 +565,8 @@ impl SelfDevTool {
         };
 
         Ok(ToolOutput::new(output).with_metadata(json!({
-            "session_id": session_id,
-            "repo_dir": repo_dir,
+            "session_id": launch.session_id,
+            "repo_dir": launch.repo_dir,
             "launched": true,
             "prompt_delivered": prompt_delivery
         })))
@@ -513,121 +699,7 @@ impl SelfDevTool {
     }
 
     async fn do_status(&self) -> Result<ToolOutput> {
-        let manifest = build::BuildManifest::load()?;
-
-        let mut status = String::new();
-
-        // Current running version
-        status.push_str("## Current Version\n\n");
-        status.push_str(&format!("**Running:** jcode {}\n", env!("JCODE_VERSION")));
-
-        // Working tree status
-        if let Some(repo_dir) = build::get_repo_dir() {
-            let output = std::process::Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(&repo_dir)
-                .output()
-                .ok();
-
-            if let Some(output) = output {
-                let changes: Vec<&str> = std::str::from_utf8(&output.stdout)
-                    .unwrap_or("")
-                    .lines()
-                    .collect();
-                if changes.is_empty() {
-                    status.push_str("**Working tree:** clean\n");
-                } else {
-                    status.push_str(&format!(
-                        "**Working tree:** {} uncommitted change{}\n",
-                        changes.len(),
-                        if changes.len() == 1 { "" } else { "s" }
-                    ));
-                }
-            }
-        }
-
-        // Build versions
-        status.push_str("\n## Build Status\n\n");
-
-        if let Some(ref stable) = manifest.stable {
-            status.push_str(&format!("**Stable:** {}\n", stable));
-        } else {
-            status.push_str("**Stable:** none\n");
-        }
-
-        if let Some(ref canary) = manifest.canary {
-            let status_str = match &manifest.canary_status {
-                Some(build::CanaryStatus::Testing) => "testing",
-                Some(build::CanaryStatus::Passed) => "passed",
-                Some(build::CanaryStatus::Failed) => "failed",
-                None => "unknown",
-            };
-            status.push_str(&format!("**Canary:** {} ({})\n", canary, status_str));
-        } else {
-            status.push_str("**Canary:** none\n");
-        }
-
-        // Debug socket info
-        status.push_str("\n## Debug Socket\n\n");
-        status.push_str(&format!(
-            "**Path:** {}\n",
-            server::debug_socket_path().display()
-        ));
-
-        if let Some(reload_state) = server::ReloadState::load() {
-            status.push_str("\n## Reload State\n\n");
-            status.push_str(&format!(
-                "**Phase:** {:?}\n**Request:** {}\n**Hash:** {}\n**PID:** {}\n**Timestamp:** {}\n",
-                reload_state.phase,
-                reload_state.request_id,
-                reload_state.hash,
-                reload_state.pid,
-                reload_state.timestamp,
-            ));
-            if let Some(detail) = reload_state.detail {
-                status.push_str(&format!("**Detail:** {}\n", detail));
-            }
-        }
-
-        // Recent crash info
-        if let Some(ref crash) = manifest.last_crash {
-            status.push_str(&format!(
-                "\n## Last Crash\n\n\
-                 Build: {}\n\
-                 Exit code: {}\n\
-                 Time: {}\n",
-                crash.build_hash,
-                crash.exit_code,
-                crash.crashed_at.format("%Y-%m-%d %H:%M:%S UTC")
-            ));
-
-            if !crash.stderr.is_empty() {
-                let stderr_preview = if crash.stderr.len() > 500 {
-                    format!("{}...", crate::util::truncate_str(&crash.stderr, 500))
-                } else {
-                    crash.stderr.clone()
-                };
-                status.push_str(&format!("\nStderr:\n```\n{}\n```\n", stderr_preview));
-            }
-        }
-
-        // Recent builds
-        if !manifest.history.is_empty() {
-            status.push_str("\n## Recent Builds\n\n");
-            for (i, info) in manifest.history.iter().take(5).enumerate() {
-                let dirty_marker = if info.dirty { " (dirty)" } else { "" };
-                let msg = info.commit_message.as_deref().unwrap_or("no message");
-                status.push_str(&format!(
-                    "{}. {} - {}{}\n",
-                    i + 1,
-                    info.hash,
-                    msg,
-                    dirty_marker
-                ));
-            }
-        }
-
-        Ok(ToolOutput::new(status))
+        selfdev_status_output()
     }
 
     async fn do_socket_info(&self) -> Result<ToolOutput> {
