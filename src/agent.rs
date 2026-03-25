@@ -1867,11 +1867,6 @@ impl Agent {
     }
 
     fn validate_tool_allowed(&self, name: &str) -> Result<()> {
-        if name == "selfdev" && !self.session.is_canary {
-            return Err(anyhow::anyhow!(
-                "Tool 'selfdev' is only available in self-dev mode"
-            ));
-        }
         if let Some(allowed) = self.allowed_tools.as_ref() {
             if !allowed.contains(name) {
                 return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));

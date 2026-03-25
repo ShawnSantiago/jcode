@@ -1,7 +1,10 @@
 //! Self-development tool - manage canary builds when working on jcode itself
 
 use crate::build;
+use crate::cli::tui_launch;
+use crate::protocol::{ServerEvent, TranscriptMode};
 use crate::server;
+use crate::session;
 use crate::storage;
 use crate::tool::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use anyhow::Result;
@@ -12,6 +15,9 @@ use serde_json::{Value, json};
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
     action: String,
+    /// Optional prompt to seed the spawned self-dev session.
+    #[serde(default)]
+    prompt: Option<String>,
     /// Optional context for reload - what the agent is working on
     #[serde(default)]
     context: Option<String>,
@@ -131,10 +137,9 @@ impl Tool for SelfDevTool {
     }
 
     fn description(&self) -> &str {
-        "Self-development tool for working on jcode itself. Only available in self-dev mode. \
-         Actions: 'reload' (restart with built binary), \
-         'status' (show build versions), \
-         'socket-info' (debug socket connection info), 'socket-help' (debug socket commands)."
+        "Self-development tool for working on jcode itself. Actions: 'enter' (spawn a new self-dev session), \
+         'status' (show build versions), and in self-dev mode also 'reload', \
+         'socket-info', and 'socket-help'."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -143,16 +148,22 @@ impl Tool for SelfDevTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": [
+                        "enum": [
+                        "enter",
                         "reload",
                         "status",
                         "socket-info",
                         "socket-help"
                     ],
-                    "description": "Action to perform: 'reload' restarts with built binary, \
+                    "description": "Action to perform: 'enter' spawns a new self-dev session, \
+                                   'reload' restarts with built binary, \
                                    'status' shows build versions and crash history, \
                                    'socket-info' returns debug socket paths and connection info, \
                                    'socket-help' shows available debug socket commands"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Optional prompt to send into the spawned self-dev session after it opens"
                 },
                 "context": {
                     "type": "string",
@@ -171,15 +182,38 @@ impl Tool for SelfDevTool {
         let title = format!("selfdev {}", action);
 
         let result = match action.as_str() {
+            "enter" => self.do_enter(params.prompt, &ctx).await,
             "reload" => {
-                self.do_reload(params.context, &ctx.session_id, ctx.execution_mode)
-                    .await
+                if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
+                    Ok(ToolOutput::new(
+                        "`selfdev reload` is only available inside a self-dev session. Use `selfdev enter` first.",
+                    ))
+                } else {
+                    self.do_reload(params.context, &ctx.session_id, ctx.execution_mode)
+                        .await
+                }
             }
             "status" => self.do_status().await,
-            "socket-info" => self.do_socket_info().await,
-            "socket-help" => self.do_socket_help().await,
+            "socket-info" => {
+                if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
+                    Ok(ToolOutput::new(
+                        "`selfdev socket-info` is only available inside a self-dev session. Use `selfdev enter` first.",
+                    ))
+                } else {
+                    self.do_socket_info().await
+                }
+            }
+            "socket-help" => {
+                if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
+                    Ok(ToolOutput::new(
+                        "`selfdev socket-help` is only available inside a self-dev session. Use `selfdev enter` first.",
+                    ))
+                } else {
+                    self.do_socket_help().await
+                }
+            }
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'reload', 'status', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. Use 'enter', 'reload', 'status', 'socket-info', or 'socket-help'.",
                 action
             ))),
         };
@@ -204,6 +238,152 @@ impl SelfDevTool {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0)
             .unwrap_or(15)
+    }
+
+    fn session_is_selfdev(session_id: &str) -> bool {
+        session::Session::load(session_id)
+            .map(|session| session.is_canary)
+            .unwrap_or(false)
+    }
+
+    fn resolve_repo_dir(working_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+        if let Some(dir) = working_dir {
+            for ancestor in dir.ancestors() {
+                if build::is_jcode_repo(ancestor) {
+                    return Some(ancestor.to_path_buf());
+                }
+            }
+        }
+
+        build::get_repo_dir()
+    }
+
+    fn launch_binary() -> Result<std::path::PathBuf> {
+        build::client_update_candidate(false)
+            .map(|(path, _label)| path)
+            .or_else(|| std::env::current_exe().ok())
+            .ok_or_else(|| anyhow::anyhow!("Could not resolve jcode executable to launch"))
+    }
+
+    async fn send_prompt_to_session(session_id: &str, prompt: &str) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut last_error: Option<String> = None;
+
+        while std::time::Instant::now() < deadline {
+            match Self::try_send_prompt_once(session_id, prompt).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Timed out delivering prompt to spawned self-dev session {}: {}",
+            session_id,
+            last_error.unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+
+    async fn try_send_prompt_once(session_id: &str, prompt: &str) -> Result<()> {
+        let mut client = server::Client::connect_debug().await?;
+        let request_id = client
+            .send_transcript(prompt, TranscriptMode::Send, Some(session_id.to_string()))
+            .await?;
+
+        loop {
+            match client.read_event().await? {
+                ServerEvent::Ack { id } if id == request_id => {}
+                ServerEvent::Done { id } if id == request_id => return Ok(()),
+                ServerEvent::Error { id, message, .. } if id == request_id => {
+                    anyhow::bail!(message)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn do_enter(&self, prompt: Option<String>, ctx: &ToolContext) -> Result<ToolOutput> {
+        let repo_dir =
+            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
+                anyhow::anyhow!("Could not find the jcode repository to enter self-dev mode")
+            })?;
+
+        let mut session =
+            session::Session::create(None, Some("Self-development session".to_string()));
+        session.set_canary("self-dev");
+        session.working_dir = Some(repo_dir.display().to_string());
+        session.save()?;
+
+        let session_id = session.id.clone();
+
+        if SelfDevTool::is_test_session() {
+            let mut output = format!(
+                "Created self-dev session {} in {}.\n\nTest mode skipped launching a new terminal.",
+                session_id,
+                repo_dir.display()
+            );
+            if let Some(prompt) = prompt {
+                output.push_str(&format!(
+                    "\n\nSeed prompt captured ({} chars) but not delivered in test mode.",
+                    prompt.chars().count()
+                ));
+            }
+            return Ok(ToolOutput::new(output).with_metadata(json!({
+                "session_id": session_id,
+                "repo_dir": repo_dir,
+                "launched": false,
+                "test_mode": true
+            })));
+        }
+
+        let exe = SelfDevTool::launch_binary()?;
+        let launched = tui_launch::spawn_selfdev_in_new_terminal(&exe, &session_id, &repo_dir)?;
+
+        if !launched {
+            return Ok(ToolOutput::new(format!(
+                "Created self-dev session {} but could not find a supported terminal to spawn automatically.\n\nRun manually:\n`{} --resume {} self-dev`",
+                session_id,
+                exe.display(),
+                session_id
+            ))
+            .with_metadata(json!({
+                "session_id": session_id,
+                "repo_dir": repo_dir,
+                "launched": false
+            })));
+        }
+
+        let mut output = format!(
+            "Spawned a new self-dev session in a separate terminal.\n\n- Session: `{}`\n- Repo: `{}`\n- Command: `{} --resume {} self-dev`",
+            session_id,
+            repo_dir.display(),
+            exe.display(),
+            session_id
+        );
+
+        let prompt_delivery = if let Some(prompt_text) = prompt {
+            match SelfDevTool::send_prompt_to_session(&session_id, &prompt_text).await {
+                Ok(()) => {
+                    output.push_str("\n- Prompt: delivered to the spawned self-dev session");
+                    Some(true)
+                }
+                Err(err) => {
+                    output.push_str(&format!("\n- Prompt: failed to auto-deliver ({})", err));
+                    Some(false)
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(ToolOutput::new(output).with_metadata(json!({
+            "session_id": session_id,
+            "repo_dir": repo_dir,
+            "launched": true,
+            "prompt_delivered": prompt_delivery
+        })))
     }
 
     async fn do_reload(
@@ -569,6 +749,32 @@ mod tests {
         }
     }
 
+    fn create_test_context(
+        session_id: &str,
+        working_dir: Option<std::path::PathBuf>,
+    ) -> ToolContext {
+        ToolContext {
+            session_id: session_id.to_string(),
+            message_id: "test-message".to_string(),
+            tool_call_id: "test-tool-call".to_string(),
+            working_dir,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    fn create_repo_fixture() -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(temp.path().join(".git")).expect("git dir");
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("cargo toml");
+        temp
+    }
+
     #[test]
     fn test_reload_context_serialization() {
         // Create test context with task info
@@ -700,5 +906,70 @@ mod tests {
             .expect("waiter task should complete")
             .expect("ack should be received");
         assert_eq!(ack.hash, "direct-hash");
+    }
+
+    #[tokio::test]
+    async fn enter_creates_selfdev_session_in_test_mode() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp_home = tempfile::TempDir::new().expect("temp home");
+        let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+        let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+        let repo = create_repo_fixture();
+
+        let tool = SelfDevTool::new();
+        let ctx = create_test_context("origin-session", Some(repo.path().to_path_buf()));
+        let output = tool
+            .execute(
+                json!({"action": "enter", "prompt": "Work on jcode itself"}),
+                ctx,
+            )
+            .await
+            .expect("selfdev enter should succeed in test mode");
+
+        assert!(output.output.contains("Created self-dev session"));
+        assert!(
+            output
+                .output
+                .contains("Test mode skipped launching a new terminal")
+        );
+
+        let metadata = output.metadata.expect("metadata");
+        let session_id = metadata["session_id"]
+            .as_str()
+            .expect("session id metadata");
+        let session = session::Session::load(session_id).expect("load spawned session");
+        assert!(
+            session.is_canary,
+            "spawned session should be canary/self-dev"
+        );
+        assert_eq!(session.testing_build.as_deref(), Some("self-dev"));
+        assert_eq!(
+            session.working_dir.as_deref(),
+            Some(repo.path().to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_requires_selfdev_session() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp_home = tempfile::TempDir::new().expect("temp home");
+        let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+
+        let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+        session.save().expect("save session");
+
+        let tool = SelfDevTool::new();
+        let ctx = create_test_context(&session.id, session.working_dir.clone().map(Into::into));
+        let output = tool
+            .execute(json!({"action": "reload"}), ctx)
+            .await
+            .expect("reload should return guidance instead of failing");
+
+        assert!(
+            output
+                .output
+                .contains("only available inside a self-dev session")
+        );
+        assert!(output.output.contains("selfdev enter"));
     }
 }

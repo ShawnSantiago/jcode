@@ -298,8 +298,8 @@ mod tests {
 
         let tools_before = registry.tool_names().await;
         assert!(
-            !tools_before.contains(&"selfdev".to_string()),
-            "selfdev should NOT be registered initially"
+            tools_before.contains(&"selfdev".to_string()),
+            "selfdev should be available in all sessions initially"
         );
 
         registry.register_selfdev_tools().await;

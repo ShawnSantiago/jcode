@@ -175,11 +175,14 @@ pub fn build_system_prompt_full(
         parts.push(env_context);
     }
 
-    // Add self-dev tools section when in canary mode
+    // Add self-dev guidance. Full workflow instructions are only included for
+    // active self-dev sessions; other sessions get a lightweight hint.
     if is_selfdev {
         let selfdev_prompt = build_selfdev_prompt();
         info.selfdev_chars = selfdev_prompt.len();
         parts.push(selfdev_prompt);
+    } else {
+        parts.push(build_selfdev_hint_prompt());
     }
 
     // Add AGENTS.md and CLAUDE.md instructions with tracking (from working_dir or cwd)
@@ -247,11 +250,14 @@ pub fn build_system_prompt_split(
 
     // === STATIC CONTENT (cacheable) ===
 
-    // Add self-dev tools section (static, without dynamic socket path)
+    // Add self-dev guidance. Full workflow instructions are only included for
+    // active self-dev sessions; other sessions get a lightweight hint.
     if is_selfdev {
         let selfdev_prompt = build_selfdev_prompt_static();
         info.selfdev_chars = selfdev_prompt.len();
         static_parts.push(selfdev_prompt);
+    } else {
+        static_parts.push(build_selfdev_hint_prompt());
     }
 
     // Add AGENTS.md and CLAUDE.md instructions (static per project)
@@ -315,6 +321,18 @@ pub fn build_system_prompt_split(
         },
         info,
     )
+}
+
+/// Build self-dev tools prompt section (static version without dynamic socket path)
+fn build_selfdev_hint_prompt() -> String {
+    r#"# Self-Development Access
+
+You have access to a `selfdev` tool in all sessions.
+
+- Use `selfdev` with action `status` to inspect self-dev/build availability.
+- Use `selfdev` with action `enter` when the user wants to work on jcode itself.
+- Outside self-dev mode, advanced actions like `reload` and debug socket access are unavailable.
+- After entering self-dev mode, fuller workflow instructions will be provided in that spawned session."#.to_string()
 }
 
 /// Build self-dev tools prompt section (static version without dynamic socket path)
@@ -622,5 +640,21 @@ mod tests {
         let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
         assert!(split.dynamic_part.contains("Time: "));
         assert!(split.dynamic_part.contains("Timezone: UTC"));
+    }
+
+    #[test]
+    fn test_non_selfdev_prompt_includes_lightweight_selfdev_hint() {
+        let prompt = build_system_prompt(None, &[]);
+        assert!(prompt.contains("Self-Development Access"));
+        assert!(prompt.contains("`selfdev` tool"));
+        assert!(prompt.contains("action `enter`"));
+        assert!(!prompt.contains("You are running in self-dev mode"));
+    }
+
+    #[test]
+    fn test_selfdev_prompt_uses_full_selfdev_instructions() {
+        let prompt = build_system_prompt_with_selfdev(None, &[], true);
+        assert!(prompt.contains("You are running in self-dev mode"));
+        assert!(!prompt.contains("Self-Development Access"));
     }
 }

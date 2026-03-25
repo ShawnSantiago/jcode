@@ -255,6 +255,7 @@ impl Registry {
             Self::insert_tool(&mut m, "goal", goal::GoalTool::new());
             Self::insert_tool(&mut m, "gmail", gmail::GmailTool::new());
             Self::insert_tool(&mut m, "schedule", ambient::ScheduleTool::new());
+            Self::insert_tool(&mut m, "selfdev", selfdev::SelfDevTool::new());
             m
         });
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
