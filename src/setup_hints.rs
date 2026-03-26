@@ -8,12 +8,13 @@
 //! State is persisted in `~/.jcode/setup_hints.json`.
 
 use crate::storage;
-#[allow(unused_imports)]
-use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::{self, IsTerminal};
 #[cfg(any(windows, target_os = "macos"))]
 use std::io::Write;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -266,17 +267,6 @@ fn is_alacritty_installed() -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(windows))]
-fn is_alacritty_installed() -> bool {
-    std::process::Command::new("which")
-        .arg("alacritty")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// Check if winget is available (Windows).
 #[cfg(windows)]
 fn is_winget_available() -> bool {
@@ -287,11 +277,6 @@ fn is_winget_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-#[cfg(not(windows))]
-fn is_winget_available() -> bool {
-    false
 }
 
 /// Find the full path to Alacritty binary.
@@ -690,6 +675,7 @@ fn install_alacritty() -> Result<()> {
 }
 
 /// Read a single-character choice from the user.
+#[cfg(windows)]
 fn read_choice() -> String {
     let mut input = String::new();
     let _ = io::stdin().read_line(&mut input);
@@ -1047,7 +1033,9 @@ pub fn run_setup_hotkey(_listen_macos_hotkey: bool) -> Result<()> {
             let choice = read_choice();
             if choice == "y" || choice == "yes" {
                 if !is_winget_available() {
-                    eprintln!("\n  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:");
+                    eprintln!(
+                        "\n  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:"
+                    );
                     eprintln!("     https://alacritty.org/\n");
                 } else {
                     match install_alacritty() {
