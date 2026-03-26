@@ -20,18 +20,6 @@ impl Agent {
         split.dynamic_part.push_str(reminder);
     }
 
-    /// Build the system prompt, including skill, memory, self-dev context, and CLAUDE.md files
-    pub(super) fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
-        let split = self.build_system_prompt_split(memory_prompt);
-        if split.dynamic_part.is_empty() {
-            split.static_part
-        } else if split.static_part.is_empty() {
-            split.dynamic_part
-        } else {
-            format!("{}\n\n{}", split.static_part, split.dynamic_part)
-        }
-    }
-
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
     pub(super) fn build_system_prompt_split(

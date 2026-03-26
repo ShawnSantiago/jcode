@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use serde_json::Value;
+use std::fmt;
 use std::io::Read;
 use std::sync::{Arc, RwLock};
 use tokio::io::AsyncReadExt;
@@ -683,12 +684,22 @@ struct ProtobufField {
     value: FieldValue,
 }
 
-#[derive(Debug)]
 enum FieldValue {
     Varint(u64),
     Bytes(Vec<u8>),
     Fixed32([u8; 4]),
     Fixed64([u8; 8]),
+}
+
+impl fmt::Debug for FieldValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Varint(value) => f.debug_tuple("Varint").field(value).finish(),
+            Self::Bytes(bytes) => f.debug_struct("Bytes").field("len", &bytes.len()).finish(),
+            Self::Fixed32(bytes) => f.debug_tuple("Fixed32").field(bytes).finish(),
+            Self::Fixed64(bytes) => f.debug_tuple("Fixed64").field(bytes).finish(),
+        }
+    }
 }
 
 fn parse_fields(bytes: &[u8]) -> Result<Vec<ProtobufField>> {

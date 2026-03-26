@@ -423,14 +423,6 @@ pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
         && state.queued_messages().is_empty()
 }
 
-pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
-    state.is_processing()
-        || state.has_notification()
-        || state.rate_limit_remaining().is_some()
-        || startup_animation_active(state)
-        || idle_donut_active(state)
-}
-
 fn fps_to_duration(fps: u32) -> Duration {
     Duration::from_millis((1000 / fps.max(1)) as u64)
 }

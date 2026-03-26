@@ -8,7 +8,6 @@ use ratatui::layout::Rect;
 pub enum ColorCapability {
     TrueColor,
     Color256,
-    Basic,
 }
 
 static CAPABILITY: OnceLock<ColorCapability> = OnceLock::new();
@@ -61,10 +60,6 @@ fn detect_color_capability() -> ColorCapability {
 
 pub fn has_truecolor() -> bool {
     color_capability() == ColorCapability::TrueColor
-}
-
-pub fn clear_bg() -> Color {
-    Color::Reset
 }
 
 pub fn clear_buf(area: Rect, buf: &mut Buffer) {
@@ -210,14 +205,18 @@ mod tests {
     fn test_mid_gray() {
         let idx = rgb_to_xterm256(128, 128, 128);
         // Should pick grayscale 243 (value 128) or nearby
-        assert!(idx >= 232 && idx <= 255, "Expected grayscale, got {}", idx);
+        assert!(
+            (232..=255).contains(&u16::from(idx)),
+            "Expected grayscale, got {}",
+            idx
+        );
     }
 
     #[test]
     fn test_dim_gray() {
         let idx = rgb_to_xterm256(80, 80, 80);
         assert!(
-            idx >= 232 && idx <= 255,
+            (232..=255).contains(&u16::from(idx)),
             "Expected grayscale for dim, got {}",
             idx
         );
