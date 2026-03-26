@@ -3983,6 +3983,40 @@ fn test_local_bus_dictation_completion_applies_transcript() {
 }
 
 #[test]
+fn test_handle_server_event_transcript_send_prefixes_user_message() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Transcript {
+            text: "dictated hello".to_string(),
+            mode: crate::protocol::TranscriptMode::Send,
+        },
+        &mut remote,
+    );
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("user message displayed");
+    assert_eq!(last.role, "user");
+    assert_eq!(last.content, "[transcription] dictated hello");
+    assert!(
+        matches!(app.messages.last(), Some(message) if matches!(message.role, crate::message::Role::User))
+    );
+    assert!(matches!(
+        app.messages.last().and_then(|message| message.content.last()),
+        Some(crate::message::ContentBlock::Text { text, .. }) if text == "[transcription] dictated hello"
+    ));
+    assert!(
+        app.pending_turn,
+        "local transcript send should use normal submit path"
+    );
+}
+
+#[test]
 fn test_handle_server_event_history_clears_connection_type_on_session_change_when_missing() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5392,11 +5426,18 @@ fn test_debug_command_mermaid_flicker_bench_returns_json() {
 
     assert_eq!(value["steps"].as_u64(), Some(8));
     assert!(
-        value.get("protocol_supported").and_then(|v| v.as_bool()).is_some(),
+        value
+            .get("protocol_supported")
+            .and_then(|v| v.as_bool())
+            .is_some(),
         "expected protocol_supported bool in result: {}",
         result
     );
-    assert!(value.get("deltas").is_some(), "expected delta counters: {}", result);
+    assert!(
+        value.get("deltas").is_some(),
+        "expected delta counters: {}",
+        result
+    );
 }
 
 #[test]
@@ -5422,7 +5463,7 @@ fn test_remote_transcript_send_uses_remote_submission_path() {
         .last()
         .expect("user message displayed");
     assert_eq!(last.role, "user");
-    assert_eq!(last.content, "dictated hello");
+    assert_eq!(last.content, "[transcription] dictated hello");
     assert!(
         app.is_processing,
         "remote send should enter processing state"

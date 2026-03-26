@@ -1414,6 +1414,21 @@ fn set_transcript_input(app: &mut App, text: String) {
     app.sync_model_picker_preview_from_input();
 }
 
+fn transcript_send_text(text: &str) -> String {
+    const TRANSCRIPTION_PREFIX: &str = "[transcription]";
+
+    let trimmed_start = text.trim_start();
+    if trimmed_start.is_empty()
+        || trimmed_start.starts_with(TRANSCRIPTION_PREFIX)
+        || trimmed_start.starts_with('/')
+        || trimmed_start.starts_with('!')
+    {
+        return text.to_string();
+    }
+
+    format!("{} {}", TRANSCRIPTION_PREFIX, trimmed_start)
+}
+
 fn queue_transcript_input(app: &mut App) {
     input::queue_message(app);
     let count = app.queued_messages.len();
@@ -1541,6 +1556,7 @@ pub(super) fn apply_transcript_event(app: &mut App, text: String, mode: Transcri
             app.set_status_notice("Transcript replaced input");
         }
         TranscriptMode::Send => {
+            let text = transcript_send_text(&text);
             input::insert_input_text(app, &text);
             submit_transcript_input(app);
         }
@@ -1562,6 +1578,7 @@ pub(super) async fn apply_remote_transcript_event(
 
     match mode {
         TranscriptMode::Send => {
+            let text = transcript_send_text(&text);
             input::insert_input_text(app, &text);
             submit_remote_transcript_input(app, remote).await?;
         }
