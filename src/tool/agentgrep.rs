@@ -4,11 +4,13 @@ use crate::session::{Session, render_messages};
 use crate::storage;
 use anyhow::Result;
 use async_trait::async_trait;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tokio::process::Command;
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +54,8 @@ struct AgentGrepHarnessContext {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     known_files: Vec<AgentGrepKnownFile>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    known_symbols: Vec<AgentGrepKnownSymbol>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     focus_files: Vec<String>,
 }
 
@@ -76,6 +80,37 @@ struct AgentGrepKnownFile {
     prune_confidence: f32,
     source_strength: &'static str,
     reasons: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentGrepKnownSymbol {
+    path: String,
+    symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    structure_confidence: f32,
+    body_confidence: f32,
+    current_version_confidence: f32,
+    prune_confidence: f32,
+    source_strength: &'static str,
+    reasons: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegionConfidenceProfile {
+    body_confidence: f32,
+    current_version_confidence: f32,
+    prune_confidence: f32,
+    source_strength: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTraceRegion {
+    path: String,
+    label: String,
+    kind: Option<&'static str>,
+    start_line: usize,
+    end_line: usize,
 }
 
 pub struct AgentGrepTool {
@@ -387,22 +422,37 @@ fn build_harness_context(
     let mut focus = HashSet::new();
 
     for msg in rendered {
-        let Some(tool) = msg.tool_data else {
+        let Some(tool) = msg.tool_data.as_ref() else {
             continue;
         };
         if msg.role != "tool" {
             continue;
         }
         match tool.name.as_str() {
-            "read" => collect_read_exposure(&tool, &search_root, ctx, &mut context, &mut focus),
-            "agentgrep" => {
-                collect_agentgrep_exposure(&tool, &search_root, ctx, &mut context, &mut focus)
-            }
+            "read" => collect_read_exposure(tool, &search_root, ctx, &mut context, &mut focus),
+            "agentgrep" => collect_agentgrep_exposure(
+                tool,
+                &msg.content,
+                &search_root,
+                ctx,
+                &mut context,
+                &mut focus,
+            ),
+            "bash" => collect_bash_exposure(
+                tool,
+                &msg.content,
+                &search_root,
+                ctx,
+                &mut context,
+                &mut focus,
+            ),
             _ => {}
         }
     }
 
-    context.focus_files = focus.into_iter().collect();
+    let mut focus_files = focus.into_iter().collect::<Vec<_>>();
+    focus_files.sort();
+    context.focus_files = focus_files;
     if context.known_regions.is_empty()
         && context.known_files.is_empty()
         && context.focus_files.is_empty()
@@ -428,29 +478,36 @@ fn collect_read_exposure(
     };
     let (start_line, end_line) = normalize_read_range_from_tool_input(&tool.input);
     focus.insert(path.clone());
-    context.known_regions.push(AgentGrepKnownRegion {
-        path: path.clone(),
-        start_line,
-        end_line,
-        body_confidence: 0.85,
-        current_version_confidence: 0.7,
-        prune_confidence: 0.78,
-        source_strength: "full_region",
-        reasons: vec!["read_tool_exposure", "session_local_history"],
-    });
-    context.known_files.push(AgentGrepKnownFile {
-        path,
-        structure_confidence: 0.55,
-        body_confidence: 0.45,
-        current_version_confidence: 0.7,
-        prune_confidence: 0.4,
-        source_strength: "snippet",
-        reasons: vec!["read_tool_exposure"],
-    });
+    push_known_region(
+        context,
+        AgentGrepKnownRegion {
+            path: path.clone(),
+            start_line,
+            end_line,
+            body_confidence: 0.85,
+            current_version_confidence: 0.7,
+            prune_confidence: 0.78,
+            source_strength: "full_region",
+            reasons: vec!["read_tool_exposure", "session_local_history"],
+        },
+    );
+    push_known_file(
+        context,
+        AgentGrepKnownFile {
+            path,
+            structure_confidence: 0.55,
+            body_confidence: 0.45,
+            current_version_confidence: 0.7,
+            prune_confidence: 0.4,
+            source_strength: "snippet",
+            reasons: vec!["read_tool_exposure"],
+        },
+    );
 }
 
 fn collect_agentgrep_exposure(
     tool: &ToolCall,
+    content: &str,
     search_root: &Path,
     ctx: &ToolContext,
     context: &mut AgentGrepHarnessContext,
@@ -473,15 +530,19 @@ fn collect_agentgrep_exposure(
                 return;
             };
             focus.insert(path.clone());
-            context.known_files.push(AgentGrepKnownFile {
-                path,
-                structure_confidence: 0.95,
-                body_confidence: 0.15,
-                current_version_confidence: 0.75,
-                prune_confidence: 0.86,
-                source_strength: "outline_only",
-                reasons: vec!["agentgrep_outline_result"],
-            });
+            push_known_file(
+                context,
+                AgentGrepKnownFile {
+                    path: path.clone(),
+                    structure_confidence: 0.95,
+                    body_confidence: 0.15,
+                    current_version_confidence: 0.75,
+                    prune_confidence: 0.86,
+                    source_strength: "outline_only",
+                    reasons: vec!["agentgrep_outline_result"],
+                },
+            );
+            collect_outline_symbols(content, &path, context);
         }
         "trace" | "smart" => {
             if let Some(path_hint) = tool.input.get("path").and_then(|value| value.as_str())
@@ -489,12 +550,74 @@ fn collect_agentgrep_exposure(
             {
                 focus.insert(path);
             }
+            collect_trace_exposure(content, search_root, ctx, context, focus);
         }
         _ => {}
     }
 }
 
+fn collect_bash_exposure(
+    tool: &ToolCall,
+    content: &str,
+    search_root: &Path,
+    ctx: &ToolContext,
+    context: &mut AgentGrepHarnessContext,
+    focus: &mut HashSet<String>,
+) {
+    let Some(command) = tool.input.get("command").and_then(|value| value.as_str()) else {
+        return;
+    };
+
+    if let Some(path) = parse_sed_file_range(command).and_then(|(path, start_line, end_line)| {
+        normalize_context_path(&path, search_root, ctx)
+            .map(|normalized| (normalized, start_line, end_line))
+    }) {
+        let (path, start_line, end_line) = path;
+        focus.insert(path.clone());
+        push_known_region(
+            context,
+            AgentGrepKnownRegion {
+                path,
+                start_line,
+                end_line,
+                body_confidence: 0.78,
+                current_version_confidence: 0.65,
+                prune_confidence: 0.7,
+                source_strength: "snippet",
+                reasons: vec!["bash_sed_exposure"],
+            },
+        );
+    }
+
+    for candidate in parse_cat_files(command)
+        .into_iter()
+        .chain(parse_git_show_files(command).into_iter())
+        .chain(parse_git_diff_files(command).into_iter())
+    {
+        let Some(path) = normalize_context_path(&candidate, search_root, ctx) else {
+            continue;
+        };
+        focus.insert(path.clone());
+        push_known_file(
+            context,
+            AgentGrepKnownFile {
+                path,
+                structure_confidence: 0.5,
+                body_confidence: 0.72,
+                current_version_confidence: 0.6,
+                prune_confidence: 0.55,
+                source_strength: "full_file",
+                reasons: vec!["bash_file_exposure"],
+            },
+        );
+    }
+
+    collect_shell_output_path_exposure(content, search_root, ctx, context, focus);
+}
+
 fn normalize_context_path(path: &str, search_root: &Path, ctx: &ToolContext) -> Option<String> {
+    let path = path.trim().trim_matches('"').trim_matches('\'');
+    let path = path.strip_prefix("./").unwrap_or(path);
     let resolved = ctx.resolve_path(Path::new(path));
     if let Ok(relative) = resolved.strip_prefix(search_root) {
         return Some(relative.display().to_string());
@@ -535,6 +658,411 @@ fn normalize_read_range_from_tool_input(input: &Value) -> (usize, usize) {
     let start_line = offset + 1;
     let end_line = start_line + limit.saturating_sub(1);
     (start_line, end_line)
+}
+
+fn collect_outline_symbols(content: &str, path: &str, context: &mut AgentGrepHarnessContext) {
+    for (kind, label, _start_line, _end_line) in parse_structure_items(content) {
+        push_known_symbol(
+            context,
+            AgentGrepKnownSymbol {
+                path: path.to_string(),
+                symbol: label,
+                kind: Some(kind),
+                structure_confidence: 0.92,
+                body_confidence: 0.1,
+                current_version_confidence: 0.75,
+                prune_confidence: 0.8,
+                source_strength: "outline_only",
+                reasons: vec!["agentgrep_outline_structure"],
+            },
+        );
+    }
+}
+
+fn collect_trace_exposure(
+    content: &str,
+    search_root: &Path,
+    ctx: &ToolContext,
+    context: &mut AgentGrepHarnessContext,
+    focus: &mut HashSet<String>,
+) {
+    let mut current_file: Option<String> = None;
+    let mut section: Option<&str> = None;
+    let mut pending_region: Option<PendingTraceRegion> = None;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim_end();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(path) = parse_ranked_file_header(trimmed) {
+            current_file = Some(path.clone());
+            focus.insert(path.clone());
+            push_known_file(
+                context,
+                AgentGrepKnownFile {
+                    path,
+                    structure_confidence: 0.72,
+                    body_confidence: 0.2,
+                    current_version_confidence: 0.7,
+                    prune_confidence: 0.62,
+                    source_strength: "trace_summary",
+                    reasons: vec!["agentgrep_trace_file"],
+                },
+            );
+            section = None;
+            pending_region = None;
+            continue;
+        }
+        if let Some(best_file) = trimmed.strip_prefix("best answer likely in ") {
+            if let Some(path) = normalize_context_path(best_file.trim(), search_root, ctx) {
+                focus.insert(path);
+            }
+            continue;
+        }
+        match trimmed {
+            "structure:" => {
+                section = Some("structure");
+                pending_region = None;
+                continue;
+            }
+            "regions:" => {
+                section = Some("regions");
+                pending_region = None;
+                continue;
+            }
+            _ => {}
+        }
+
+        let Some(file_path) = current_file.clone() else {
+            continue;
+        };
+
+        if section == Some("structure") {
+            if let Some((kind, label, _start_line, _end_line)) = parse_structure_item_line(trimmed)
+            {
+                push_known_symbol(
+                    context,
+                    AgentGrepKnownSymbol {
+                        path: file_path,
+                        symbol: label,
+                        kind: Some(kind),
+                        structure_confidence: 0.82,
+                        body_confidence: 0.12,
+                        current_version_confidence: 0.7,
+                        prune_confidence: 0.66,
+                        source_strength: "trace_structure",
+                        reasons: vec!["agentgrep_trace_structure"],
+                    },
+                );
+            }
+            continue;
+        }
+
+        if section == Some("regions") {
+            if let Some((label, start_line, end_line)) = parse_region_header_line(trimmed) {
+                pending_region = Some(PendingTraceRegion {
+                    path: file_path.clone(),
+                    label: label.clone(),
+                    kind: None,
+                    start_line,
+                    end_line,
+                });
+                push_known_symbol(
+                    context,
+                    AgentGrepKnownSymbol {
+                        path: file_path,
+                        symbol: label,
+                        kind: None,
+                        structure_confidence: 0.86,
+                        body_confidence: 0.28,
+                        current_version_confidence: 0.72,
+                        prune_confidence: 0.68,
+                        source_strength: "trace_region",
+                        reasons: vec!["agentgrep_trace_region_header"],
+                    },
+                );
+                continue;
+            }
+            if let Some(kind) = trimmed.strip_prefix("kind: ") {
+                if let Some(region) = pending_region.as_mut() {
+                    region.kind = Some(leak_str(kind.trim().to_string()));
+                }
+                continue;
+            }
+            if trimmed == "full region:" || trimmed == "snippet:" {
+                if let Some(region) = pending_region.take() {
+                    let profile = if trimmed == "full region:" {
+                        RegionConfidenceProfile {
+                            body_confidence: 0.9,
+                            current_version_confidence: 0.72,
+                            prune_confidence: 0.82,
+                            source_strength: "full_region",
+                        }
+                    } else {
+                        RegionConfidenceProfile {
+                            body_confidence: 0.48,
+                            current_version_confidence: 0.72,
+                            prune_confidence: 0.52,
+                            source_strength: "snippet",
+                        }
+                    };
+                    push_known_region(
+                        context,
+                        AgentGrepKnownRegion {
+                            path: region.path,
+                            start_line: region.start_line,
+                            end_line: region.end_line,
+                            body_confidence: profile.body_confidence,
+                            current_version_confidence: profile.current_version_confidence,
+                            prune_confidence: profile.prune_confidence,
+                            source_strength: profile.source_strength,
+                            reasons: vec!["agentgrep_trace_region_body"],
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn collect_shell_output_path_exposure(
+    content: &str,
+    search_root: &Path,
+    ctx: &ToolContext,
+    context: &mut AgentGrepHarnessContext,
+    focus: &mut HashSet<String>,
+) {
+    for (path, line_number) in parse_path_line_hits(content) {
+        let Some(path) = normalize_context_path(&path, search_root, ctx) else {
+            continue;
+        };
+        focus.insert(path.clone());
+        push_known_file(
+            context,
+            AgentGrepKnownFile {
+                path: path.clone(),
+                structure_confidence: 0.28,
+                body_confidence: 0.22,
+                current_version_confidence: 0.6,
+                prune_confidence: 0.18,
+                source_strength: "match_line_only",
+                reasons: vec!["bash_output_file_hit"],
+            },
+        );
+        push_known_region(
+            context,
+            AgentGrepKnownRegion {
+                path,
+                start_line: line_number,
+                end_line: line_number,
+                body_confidence: 0.26,
+                current_version_confidence: 0.6,
+                prune_confidence: 0.2,
+                source_strength: "match_line_only",
+                reasons: vec!["bash_output_line_hit"],
+            },
+        );
+    }
+}
+
+fn push_known_file(context: &mut AgentGrepHarnessContext, known: AgentGrepKnownFile) {
+    if let Some(existing) = context
+        .known_files
+        .iter_mut()
+        .find(|entry| entry.path == known.path)
+    {
+        existing.structure_confidence = existing
+            .structure_confidence
+            .max(known.structure_confidence);
+        existing.body_confidence = existing.body_confidence.max(known.body_confidence);
+        existing.current_version_confidence = existing
+            .current_version_confidence
+            .max(known.current_version_confidence);
+        existing.prune_confidence = existing.prune_confidence.max(known.prune_confidence);
+        merge_reasons(&mut existing.reasons, known.reasons);
+        return;
+    }
+    context.known_files.push(known);
+}
+
+fn push_known_region(context: &mut AgentGrepHarnessContext, known: AgentGrepKnownRegion) {
+    if let Some(existing) = context.known_regions.iter_mut().find(|entry| {
+        entry.path == known.path
+            && entry.start_line == known.start_line
+            && entry.end_line == known.end_line
+    }) {
+        existing.body_confidence = existing.body_confidence.max(known.body_confidence);
+        existing.current_version_confidence = existing
+            .current_version_confidence
+            .max(known.current_version_confidence);
+        existing.prune_confidence = existing.prune_confidence.max(known.prune_confidence);
+        merge_reasons(&mut existing.reasons, known.reasons);
+        return;
+    }
+    context.known_regions.push(known);
+}
+
+fn push_known_symbol(context: &mut AgentGrepHarnessContext, known: AgentGrepKnownSymbol) {
+    if let Some(existing) = context.known_symbols.iter_mut().find(|entry| {
+        entry.path == known.path && entry.symbol == known.symbol && entry.kind == known.kind
+    }) {
+        existing.structure_confidence = existing
+            .structure_confidence
+            .max(known.structure_confidence);
+        existing.body_confidence = existing.body_confidence.max(known.body_confidence);
+        existing.current_version_confidence = existing
+            .current_version_confidence
+            .max(known.current_version_confidence);
+        existing.prune_confidence = existing.prune_confidence.max(known.prune_confidence);
+        merge_reasons(&mut existing.reasons, known.reasons);
+        return;
+    }
+    context.known_symbols.push(known);
+}
+
+fn merge_reasons(existing: &mut Vec<&'static str>, new_reasons: Vec<&'static str>) {
+    for reason in new_reasons {
+        if !existing.contains(&reason) {
+            existing.push(reason);
+        }
+    }
+}
+
+fn parse_structure_items(content: &str) -> Vec<(&'static str, String, usize, usize)> {
+    content
+        .lines()
+        .filter_map(|line| parse_structure_item_line(line.trim()))
+        .collect()
+}
+
+fn parse_structure_item_line(line: &str) -> Option<(&'static str, String, usize, usize)> {
+    static STRUCTURE_ITEM_RE: OnceLock<Regex> = OnceLock::new();
+    let captures = STRUCTURE_ITEM_RE
+        .get_or_init(|| {
+            Regex::new(r"^-\s+([A-Za-z0-9_-]+)\s+(.+?)\s+@\s*(\d+)-(\d+)")
+                .expect("valid structure item regex")
+        })
+        .captures(line)?;
+    let kind = captures.get(1)?.as_str();
+    let label = captures.get(2)?.as_str().trim().to_string();
+    let start_line = captures.get(3)?.as_str().parse().ok()?;
+    let end_line = captures.get(4)?.as_str().parse().ok()?;
+    Some((leak_str(kind.to_string()), label, start_line, end_line))
+}
+
+fn parse_ranked_file_header(line: &str) -> Option<String> {
+    static FILE_HEADER_RE: OnceLock<Regex> = OnceLock::new();
+    FILE_HEADER_RE
+        .get_or_init(|| Regex::new(r"^\d+\.\s+(.+)$").expect("valid ranked file regex"))
+        .captures(line)
+        .and_then(|captures| {
+            captures
+                .get(1)
+                .map(|value| value.as_str().trim().to_string())
+        })
+}
+
+fn parse_region_header_line(line: &str) -> Option<(String, usize, usize)> {
+    static REGION_HEADER_RE: OnceLock<Regex> = OnceLock::new();
+    let captures = REGION_HEADER_RE
+        .get_or_init(|| Regex::new(r"^-\s+(.+?)\s+@\s*(\d+)-(\d+)").expect("valid region regex"))
+        .captures(line)?;
+    let label = captures.get(1)?.as_str().trim().to_string();
+    let start_line = captures.get(2)?.as_str().parse().ok()?;
+    let end_line = captures.get(3)?.as_str().parse().ok()?;
+    Some((label, start_line, end_line))
+}
+
+fn parse_sed_file_range(command: &str) -> Option<(String, usize, usize)> {
+    static SED_RE: OnceLock<Regex> = OnceLock::new();
+    let captures = SED_RE
+        .get_or_init(|| {
+            Regex::new(r#"sed\s+-n\s+['"]?(\d+),(\d+)p['"]?\s+(?:"([^"]+)"|'([^']+)'|([^\s|;]+))"#)
+                .expect("valid sed range regex")
+        })
+        .captures(command)?;
+    let start_line = captures.get(1)?.as_str().parse().ok()?;
+    let end_line = captures.get(2)?.as_str().parse().ok()?;
+    let path = captures
+        .get(3)
+        .or_else(|| captures.get(4))
+        .or_else(|| captures.get(5))?
+        .as_str()
+        .to_string();
+    Some((path, start_line, end_line))
+}
+
+fn parse_cat_files(command: &str) -> Vec<String> {
+    static CAT_RE: OnceLock<Regex> = OnceLock::new();
+    CAT_RE
+        .get_or_init(|| {
+            Regex::new(r#"(?:^|[;&|]\s*)cat\s+(?:"([^"]+)"|'([^']+)'|([^\s|;]+))"#)
+                .expect("valid cat regex")
+        })
+        .captures_iter(command)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .or_else(|| captures.get(2))
+                .or_else(|| captures.get(3))
+                .map(|value| value.as_str().to_string())
+        })
+        .collect()
+}
+
+fn parse_git_show_files(command: &str) -> Vec<String> {
+    static GIT_SHOW_RE: OnceLock<Regex> = OnceLock::new();
+    GIT_SHOW_RE
+        .get_or_init(|| {
+            Regex::new(r#"git\s+show\s+[^:\s]+:(?:"([^"]+)"|'([^']+)'|([^\s|;]+))"#)
+                .expect("valid git show regex")
+        })
+        .captures_iter(command)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .or_else(|| captures.get(2))
+                .or_else(|| captures.get(3))
+                .map(|value| value.as_str().to_string())
+        })
+        .collect()
+}
+
+fn parse_git_diff_files(command: &str) -> Vec<String> {
+    static GIT_DIFF_RE: OnceLock<Regex> = OnceLock::new();
+    GIT_DIFF_RE
+        .get_or_init(|| {
+            Regex::new(r#"git\s+diff(?:\s+[^\n]*)?\s+--\s+(?:"([^"]+)"|'([^']+)'|([^\s|;]+))"#)
+                .expect("valid git diff regex")
+        })
+        .captures_iter(command)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .or_else(|| captures.get(2))
+                .or_else(|| captures.get(3))
+                .map(|value| value.as_str().to_string())
+        })
+        .collect()
+}
+
+fn parse_path_line_hits(content: &str) -> Vec<(String, usize)> {
+    static PATH_LINE_RE: OnceLock<Regex> = OnceLock::new();
+    PATH_LINE_RE
+        .get_or_init(|| Regex::new(r"(?m)^([^:\n]+):(\d+):").expect("valid path line regex"))
+        .captures_iter(content)
+        .filter_map(|captures| {
+            let path = captures.get(1)?.as_str().trim().to_string();
+            let line_number = captures.get(2)?.as_str().parse().ok()?;
+            Some((path, line_number))
+        })
+        .collect()
+}
+
+fn leak_str(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
 }
 
 fn push_common_flags(args: &mut Vec<OsString>, params: &AgentGrepInput, ctx: &ToolContext) {
@@ -790,5 +1318,93 @@ mod tests {
                 .output
                 .contains("subject:lsp relation:implementation")
         );
+    }
+
+    #[test]
+    fn trace_output_collects_symbols_regions_and_focus() {
+        let ctx = test_ctx(Path::new("/repo"));
+        let mut context = AgentGrepHarnessContext {
+            version: 1,
+            ..Default::default()
+        };
+        let mut focus = HashSet::new();
+        let content = r#"
+query parameters:
+  subject: auth_status
+  relation: rendered
+
+top results: 1 files, 1 regions
+best answer likely in src/tui/app.rs
+
+1. src/tui/app.rs
+   role: ui
+   structure:
+     - function render_status_bar @ 9002-9017 (16 lines)
+     - function draw_header @ 9035-9056 (22 lines)
+   regions:
+     - render_status_bar @ 9002-9017 (16 lines)
+       kind: render-site
+       full region:
+         fn render_status_bar(&self, ui: &mut Ui) {
+             let status = auth_status();
+         }
+       why:
+         - exact subject match
+"#;
+
+        collect_trace_exposure(content, Path::new("/repo"), &ctx, &mut context, &mut focus);
+
+        assert!(focus.contains("src/tui/app.rs"));
+        assert!(
+            context
+                .known_files
+                .iter()
+                .any(|entry| entry.path == "src/tui/app.rs")
+        );
+        assert!(context.known_symbols.iter().any(|entry| {
+            entry.path == "src/tui/app.rs" && entry.symbol == "render_status_bar"
+        }));
+        assert!(context.known_regions.iter().any(|entry| {
+            entry.path == "src/tui/app.rs" && entry.start_line == 9002 && entry.end_line == 9017
+        }));
+    }
+
+    #[test]
+    fn bash_exposure_collects_file_and_line_hits() {
+        let ctx = test_ctx(Path::new("/repo"));
+        let mut context = AgentGrepHarnessContext {
+            version: 1,
+            ..Default::default()
+        };
+        let mut focus = HashSet::new();
+        let tool = ToolCall {
+            id: "tool-1".to_string(),
+            name: "bash".to_string(),
+            input: json!({
+                "command": "cat src/tool/lsp.rs && rg -n auth_status src/tool/lsp.rs"
+            }),
+            intent: None,
+        };
+        let content = "src/tool/lsp.rs:42:let status = auth_status();\n";
+
+        collect_bash_exposure(
+            &tool,
+            content,
+            Path::new("/repo"),
+            &ctx,
+            &mut context,
+            &mut focus,
+        );
+
+        assert!(focus.contains("src/tool/lsp.rs"));
+        assert!(
+            context
+                .known_files
+                .iter()
+                .any(|entry| entry.path == "src/tool/lsp.rs")
+        );
+        assert!(context.known_regions.iter().any(|entry| {
+            entry.path == "src/tool/lsp.rs" && entry.start_line == 42 && entry.end_line == 42
+        }));
     }
 }
