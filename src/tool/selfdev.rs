@@ -1,5 +1,6 @@
 //! Self-development tool - manage canary builds when working on jcode itself
 
+use crate::background::{self, TaskResult};
 use crate::build;
 use crate::cli::tui_launch;
 use crate::protocol::{ServerEvent, TranscriptMode};
@@ -9,9 +10,12 @@ use crate::storage;
 use crate::tool::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
@@ -22,6 +26,12 @@ struct SelfDevInput {
     /// Optional context for reload - what the agent is working on
     #[serde(default)]
     context: Option<String>,
+    /// Why this build is needed; shown to other queued/blocked agents.
+    #[serde(default)]
+    reason: Option<String>,
+    /// Whether to notify the requesting agent when the queued background build completes.
+    #[serde(default)]
+    notify: Option<bool>,
 }
 
 /// Context saved before reload, restored after restart
@@ -53,6 +63,122 @@ impl SelfDevLaunchResult {
         self.exe
             .as_ref()
             .map(|exe| format!("{} --resume {} self-dev", exe.display(), self.session_id))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BuildRequestState {
+    Queued,
+    Building,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BuildRequest {
+    request_id: String,
+    background_task_id: Option<String>,
+    session_id: String,
+    session_short_name: Option<String>,
+    session_title: Option<String>,
+    reason: String,
+    repo_dir: String,
+    command: String,
+    requested_at: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    state: BuildRequestState,
+    version: Option<String>,
+    error: Option<String>,
+    output_file: Option<String>,
+    status_file: Option<String>,
+}
+
+impl BuildRequest {
+    fn requests_dir() -> Result<PathBuf> {
+        let dir = storage::jcode_dir()?.join("selfdev-build-requests");
+        storage::ensure_dir(&dir)?;
+        Ok(dir)
+    }
+
+    fn path_for_request(request_id: &str) -> Result<PathBuf> {
+        Ok(Self::requests_dir()?.join(format!("{}.json", request_id)))
+    }
+
+    fn save(&self) -> Result<()> {
+        storage::write_json(&Self::path_for_request(&self.request_id)?, self)
+    }
+
+    fn load(request_id: &str) -> Result<Option<Self>> {
+        let path = Self::path_for_request(request_id)?;
+        if path.exists() {
+            Ok(Some(storage::read_json(&path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn load_all() -> Result<Vec<Self>> {
+        let dir = Self::requests_dir()?;
+        let mut requests = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(request) = storage::read_json::<Self>(&path) {
+                requests.push(request);
+            }
+        }
+        requests.sort_by(|a, b| {
+            a.requested_at
+                .cmp(&b.requested_at)
+                .then_with(|| a.request_id.cmp(&b.request_id))
+        });
+        Ok(requests)
+    }
+
+    fn pending_requests() -> Result<Vec<Self>> {
+        Ok(Self::load_all()?
+            .into_iter()
+            .filter(|request| {
+                matches!(
+                    request.state,
+                    BuildRequestState::Queued | BuildRequestState::Building
+                )
+            })
+            .collect())
+    }
+
+    fn display_owner(&self) -> String {
+        if let Some(short_name) = self.session_short_name.as_deref() {
+            return format!("{} ({})", short_name, self.session_id);
+        }
+        if let Some(title) = self.session_title.as_deref() {
+            return format!("{} ({})", title, self.session_id);
+        }
+        self.session_id.clone()
+    }
+}
+
+struct BuildLockGuard {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct SelfDevBuildCommand {
+    program: String,
+    args: Vec<String>,
+    display: String,
+}
+
+#[cfg(unix)]
+impl Drop for BuildLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -190,6 +316,33 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
         ));
         if let Some(detail) = reload_state.detail {
             status.push_str(&format!("**Detail:** {}\n", detail));
+        }
+    }
+
+    let pending_requests = BuildRequest::pending_requests()?;
+    if !pending_requests.is_empty() {
+        status.push_str("\n## Build Queue\n\n");
+        for (index, request) in pending_requests.iter().enumerate() {
+            let state = match request.state {
+                BuildRequestState::Queued => "queued",
+                BuildRequestState::Building => "building",
+                BuildRequestState::Completed => "completed",
+                BuildRequestState::Failed => "failed",
+            };
+            status.push_str(&format!(
+                "{}. **{}** — {}\n   Reason: {}\n   Requested: {}\n",
+                index + 1,
+                state,
+                request.display_owner(),
+                request.reason,
+                request.requested_at,
+            ));
+            if let Some(task_id) = request.background_task_id.as_deref() {
+                status.push_str(&format!("   Task: `{}`\n", task_id));
+            }
+            if let Some(started_at) = request.started_at.as_deref() {
+                status.push_str(&format!("   Started: {}\n", started_at));
+            }
         }
     }
 
@@ -336,8 +489,8 @@ impl Tool for SelfDevTool {
 
     fn description(&self) -> &str {
         "Self-development tool for working on jcode itself. Actions: 'enter' (spawn a new self-dev session), \
-         'status' (show build versions), and in self-dev mode also 'reload', \
-         'socket-info', and 'socket-help'."
+         'build' (queue a background self-dev build with a reason/comment), 'status' (show build versions), \
+         and in self-dev mode also 'reload', 'socket-info', and 'socket-help'."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -348,12 +501,14 @@ impl Tool for SelfDevTool {
                     "type": "string",
                         "enum": [
                         "enter",
+                        "build",
                         "reload",
                         "status",
                         "socket-info",
                         "socket-help"
                     ],
                     "description": "Action to perform: 'enter' spawns a new self-dev session, \
+                                   'build' queues a coordinated background build with a reason/comment, \
                                    'reload' restarts with built binary, \
                                    'status' shows build versions and crash history, \
                                    'socket-info' returns debug socket paths and connection info, \
@@ -367,6 +522,14 @@ impl Tool for SelfDevTool {
                     "type": "string",
                     "description": "Optional context for reload - describe what you're working on. \
                                    This will be included in the continuation message after restart."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this self-dev build is needed. Required for action='build' so other queued agents can see the reason."
+                },
+                "notify": {
+                    "type": "boolean",
+                    "description": "For action='build': notify the requesting agent when the queued background build completes (default: true)."
                 }
             },
             "required": ["action"]
@@ -381,6 +544,7 @@ impl Tool for SelfDevTool {
 
         let result = match action.as_str() {
             "enter" => self.do_enter(params.prompt, &ctx).await,
+            "build" => self.do_build(params.reason, params.notify, &ctx).await,
             "reload" => {
                 if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
                     Ok(ToolOutput::new(
@@ -411,7 +575,7 @@ impl Tool for SelfDevTool {
                 }
             }
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'enter', 'reload', 'status', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. Use 'enter', 'build', 'reload', 'status', 'socket-info', or 'socket-help'.",
                 action
             ))),
         };
@@ -463,6 +627,295 @@ impl SelfDevTool {
             .ok_or_else(|| anyhow::anyhow!("Could not resolve jcode executable to launch"))
     }
 
+    fn build_command(repo_dir: &Path) -> SelfDevBuildCommand {
+        let wrapper = repo_dir.join("scripts").join("dev_cargo.sh");
+        if wrapper.is_file() {
+            return SelfDevBuildCommand {
+                program: "bash".to_string(),
+                args: vec![
+                    wrapper.to_string_lossy().into_owned(),
+                    "build".to_string(),
+                    "--release".to_string(),
+                    "--bin".to_string(),
+                    "jcode".to_string(),
+                ],
+                display: "scripts/dev_cargo.sh build --release --bin jcode".to_string(),
+            };
+        }
+
+        SelfDevBuildCommand {
+            program: "cargo".to_string(),
+            args: vec![
+                "build".to_string(),
+                "--release".to_string(),
+                "--bin".to_string(),
+                "jcode".to_string(),
+            ],
+            display: "cargo build --release --bin jcode".to_string(),
+        }
+    }
+
+    fn build_lock_path() -> Result<PathBuf> {
+        Ok(storage::jcode_dir()?.join("selfdev-build.lock"))
+    }
+
+    #[cfg(unix)]
+    fn try_acquire_build_lock() -> Result<Option<BuildLockGuard>> {
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+
+        let path = Self::build_lock_path()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret == 0 {
+            Ok(Some(BuildLockGuard { _file: file, path }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn try_acquire_build_lock() -> Result<Option<BuildLockGuard>> {
+        use std::fs::OpenOptions;
+
+        let path = Self::build_lock_path()?;
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(file) => Ok(Some(BuildLockGuard { _file: file, path })),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn load_session_labels(session_id: &str) -> (Option<String>, Option<String>) {
+        session::Session::load(session_id)
+            .map(|session| (session.short_name, session.title))
+            .unwrap_or((None, None))
+    }
+
+    fn newest_active_request() -> Result<Option<BuildRequest>> {
+        Ok(BuildRequest::pending_requests()?
+            .into_iter()
+            .find(|request| request.state == BuildRequestState::Building))
+    }
+
+    fn next_request_id() -> String {
+        format!("selfdev-build-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    fn current_queue_position(request_id: &str) -> Result<Option<usize>> {
+        Ok(BuildRequest::pending_requests()?
+            .into_iter()
+            .position(|request| request.request_id == request_id)
+            .map(|index| index + 1))
+    }
+
+    async fn append_output_line(file: &mut tokio::fs::File, line: impl AsRef<str>) {
+        let _ = file.write_all(line.as_ref().as_bytes()).await;
+        let _ = file.write_all(b"\n").await;
+        let _ = file.flush().await;
+    }
+
+    async fn wait_for_turn(request_id: &str, file: &mut tokio::fs::File) -> Result<BuildLockGuard> {
+        let mut last_note: Option<String> = None;
+        loop {
+            let pending = BuildRequest::pending_requests()?;
+            let my_index = pending
+                .iter()
+                .position(|request| request.request_id == request_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Queued build request {} disappeared", request_id)
+                })?;
+
+            if my_index == 0 {
+                if let Some(lock) = Self::try_acquire_build_lock()? {
+                    return Ok(lock);
+                }
+            }
+
+            let note = if my_index == 0 {
+                Some("Waiting for the self-dev build lock to become available".to_string())
+            } else {
+                pending.get(my_index - 1).map(|request| {
+                    format!(
+                        "Waiting in queue behind {} — {}",
+                        request.display_owner(),
+                        request.reason
+                    )
+                })
+            };
+            if note.as_ref() != last_note.as_ref() {
+                if let Some(note) = note.as_ref() {
+                    Self::append_output_line(file, note).await;
+                }
+                last_note = note;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn stream_build_command(
+        repo_dir: PathBuf,
+        command: SelfDevBuildCommand,
+        output_path: PathBuf,
+    ) -> Result<TaskResult> {
+        let mut cmd = tokio::process::Command::new(&command.program);
+        cmd.args(&command.args)
+            .current_dir(repo_dir)
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn build command: {}", e))?;
+
+        let mut file = tokio::fs::File::create(&output_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
+        Self::append_output_line(
+            &mut file,
+            format!("Starting build with {}", command.display),
+        )
+        .await;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let mut stdout_lines = stdout.map(|s| BufReader::new(s).lines());
+        let mut stderr_lines = stderr.map(|s| BufReader::new(s).lines());
+        let mut stdout_done = stdout_lines.is_none();
+        let mut stderr_done = stderr_lines.is_none();
+
+        while !stdout_done || !stderr_done {
+            tokio::select! {
+                line = async {
+                    match stdout_lines.as_mut() {
+                        Some(r) => r.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !stdout_done => {
+                    match line {
+                        Ok(Some(line)) => Self::append_output_line(&mut file, line).await,
+                        _ => stdout_done = true,
+                    }
+                }
+                line = async {
+                    match stderr_lines.as_mut() {
+                        Some(r) => r.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !stderr_done => {
+                    match line {
+                        Ok(Some(line)) => Self::append_output_line(&mut file, format!("[stderr] {}", line)).await,
+                        _ => stderr_done = true,
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().await?;
+        let exit_code = status.code();
+        Self::append_output_line(
+            &mut file,
+            format!(
+                "--- Command finished with exit code: {} ---",
+                exit_code.unwrap_or(-1)
+            ),
+        )
+        .await;
+
+        if status.success() {
+            Ok(TaskResult {
+                exit_code,
+                error: None,
+            })
+        } else {
+            Ok(TaskResult {
+                exit_code,
+                error: Some(format!(
+                    "Command exited with code {}",
+                    exit_code.unwrap_or(-1)
+                )),
+            })
+        }
+    }
+
+    async fn run_test_build(output_path: PathBuf, reason: &str) -> Result<TaskResult> {
+        let mut file = tokio::fs::File::create(&output_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
+        Self::append_output_line(
+            &mut file,
+            format!("[test mode] Simulated selfdev build for reason: {}", reason),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        Self::append_output_line(&mut file, "--- Command finished with exit code: 0 ---").await;
+        Ok(TaskResult {
+            exit_code: Some(0),
+            error: None,
+        })
+    }
+
+    async fn run_build_request(
+        request_id: String,
+        repo_dir: PathBuf,
+        command: SelfDevBuildCommand,
+        reason: String,
+        output_path: PathBuf,
+    ) -> Result<TaskResult> {
+        let mut request = BuildRequest::load(&request_id)?
+            .ok_or_else(|| anyhow::anyhow!("Missing queued build request {}", request_id))?;
+        let mut queue_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to open output file: {}", e))?;
+
+        let _lock = Self::wait_for_turn(&request_id, &mut queue_file).await?;
+        request.state = BuildRequestState::Building;
+        request.started_at = Some(Utc::now().to_rfc3339());
+        request.version = if Self::is_test_session() {
+            Some("test-build".to_string())
+        } else {
+            build::current_git_hash(&repo_dir).ok()
+        };
+        request.save()?;
+        Self::append_output_line(&mut queue_file, format!("Build starting now: {}", reason)).await;
+        drop(queue_file);
+
+        let result = if Self::is_test_session() {
+            Self::run_test_build(output_path.clone(), &reason).await?
+        } else {
+            let result =
+                Self::stream_build_command(repo_dir.clone(), command.clone(), output_path.clone())
+                    .await?;
+            if result.error.is_none() {
+                build::publish_local_current_build(&repo_dir)?;
+                let mut manifest = build::BuildManifest::load()?;
+                manifest.add_to_history(build::current_build_info(&repo_dir)?)?;
+            }
+            result
+        };
+
+        let mut request = BuildRequest::load(&request_id)?
+            .ok_or_else(|| anyhow::anyhow!("Missing queued build request {}", request_id))?;
+        request.completed_at = Some(Utc::now().to_rfc3339());
+        request.state = if result.error.is_some() {
+            BuildRequestState::Failed
+        } else {
+            BuildRequestState::Completed
+        };
+        request.error = result.error.clone();
+        request.save()?;
+        Ok(result)
+    }
+
     async fn send_prompt_to_session(session_id: &str, prompt: &str) -> Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let mut last_error: Option<String> = None;
@@ -500,6 +953,120 @@ impl SelfDevTool {
                 _ => {}
             }
         }
+    }
+
+    async fn do_build(
+        &self,
+        reason: Option<String>,
+        notify: Option<bool>,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        let reason = reason
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`selfdev build` requires a non-empty `reason` so other queued agents can see why the build is needed."
+                )
+            })?;
+        let repo_dir =
+            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
+                anyhow::anyhow!("Could not find the jcode repository directory for selfdev build")
+            })?;
+
+        let blocker = SelfDevTool::newest_active_request()?;
+        let command = SelfDevTool::build_command(&repo_dir);
+        let (session_short_name, session_title) = SelfDevTool::load_session_labels(&ctx.session_id);
+        let request_id = SelfDevTool::next_request_id();
+
+        let mut request = BuildRequest {
+            request_id: request_id.clone(),
+            background_task_id: None,
+            session_id: ctx.session_id.clone(),
+            session_short_name,
+            session_title,
+            reason: reason.clone(),
+            repo_dir: repo_dir.display().to_string(),
+            command: command.display.clone(),
+            requested_at: Utc::now().to_rfc3339(),
+            started_at: None,
+            completed_at: None,
+            state: BuildRequestState::Queued,
+            version: None,
+            error: None,
+            output_file: None,
+            status_file: None,
+        };
+        request.save()?;
+
+        let request_id_for_task = request_id.clone();
+        let repo_dir_for_task = repo_dir.clone();
+        let command_for_task = command.clone();
+        let reason_for_task = reason.clone();
+        let notify = notify.unwrap_or(true);
+        let info = background::global()
+            .spawn_with_notify(
+                "selfdev-build",
+                &ctx.session_id,
+                notify,
+                move |output_path| async move {
+                    SelfDevTool::run_build_request(
+                        request_id_for_task,
+                        repo_dir_for_task,
+                        command_for_task,
+                        reason_for_task,
+                        output_path,
+                    )
+                    .await
+                },
+            )
+            .await;
+
+        request.background_task_id = Some(info.task_id.clone());
+        request.output_file = Some(info.output_file.display().to_string());
+        request.status_file = Some(info.status_file.display().to_string());
+        request.save()?;
+
+        let queue_position = SelfDevTool::current_queue_position(&request_id)?.unwrap_or(1);
+        let mut output = format!(
+            "Self-dev build queued in background.\n\n- Request ID: `{}`\n- Task ID: `{}`\n- Reason: {}\n- Command: `{}`\n- Queue position: {}\n- Output file: `{}`\n- Status file: `{}`\n\nYou will{} be notified when the build completes.",
+            request_id,
+            info.task_id,
+            reason,
+            command.display,
+            queue_position,
+            info.output_file.display(),
+            info.status_file.display(),
+            if notify { "" } else { " not" }
+        );
+
+        if let Some(ref blocker) = blocker {
+            output.push_str(&format!(
+                "\n\nCurrently blocked by: {}\nReason: {}",
+                blocker.display_owner(),
+                blocker.reason
+            ));
+        }
+
+        output.push_str(&format!(
+            "\n\nUse `bg action=\"status\" task_id=\"{}\"` to check progress, or `selfdev status` to inspect the build queue.\nAfter it finishes, use `selfdev reload` when you want to restart onto the new binary.",
+            info.task_id
+        ));
+
+        Ok(ToolOutput::new(output).with_metadata(json!({
+            "background": true,
+            "request_id": request_id,
+            "task_id": info.task_id,
+            "output_file": info.output_file.to_string_lossy(),
+            "status_file": info.status_file.to_string_lossy(),
+            "queue_position": queue_position,
+            "blocked_by": blocker.as_ref().map(|request| json!({
+                "session_id": request.session_id,
+                "session_short_name": request.session_short_name,
+                "session_title": request.session_title,
+                "reason": request.reason,
+            }))
+        })))
     }
 
     async fn do_enter(&self, prompt: Option<String>, ctx: &ToolContext) -> Result<ToolOutput> {
@@ -795,10 +1362,17 @@ Use the `debug_socket` tool to execute these commands directly."#
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::BackgroundTaskStatus;
     use std::ffi::OsStr;
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -854,6 +1428,23 @@ mod tests {
         temp
     }
 
+    async fn wait_for_task_completion(task_id: &str) -> background::TaskStatusFile {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = background::global().status(task_id).await {
+                if status.status != BackgroundTaskStatus::Running {
+                    return status;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for background task {}",
+                task_id
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     #[test]
     fn test_reload_context_serialization() {
         // Create test context with task info
@@ -890,7 +1481,8 @@ mod tests {
 
     #[test]
     fn test_reload_context_save_and_load_for_session_uses_session_scoped_file() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
         let temp_home = tempfile::TempDir::new().expect("temp home");
         let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
 
@@ -927,21 +1519,24 @@ mod tests {
 
     #[test]
     fn reload_timeout_secs_defaults_to_15() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
         let _guard = EnvVarGuard::remove("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS");
         assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
     }
 
     #[test]
     fn reload_timeout_secs_honors_valid_env_override() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
         let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "27");
         assert_eq!(SelfDevTool::reload_timeout_secs(), 27);
     }
 
     #[test]
     fn reload_timeout_secs_ignores_empty_invalid_and_zero_values() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
         let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "   ");
         assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
         drop(_guard);
@@ -989,7 +1584,8 @@ mod tests {
 
     #[tokio::test]
     async fn enter_creates_selfdev_session_in_test_mode() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
         let temp_home = tempfile::TempDir::new().expect("temp home");
         let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
         let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
@@ -1030,7 +1626,8 @@ mod tests {
 
     #[tokio::test]
     async fn reload_requires_selfdev_session() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
         let temp_home = tempfile::TempDir::new().expect("temp home");
         let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
 
@@ -1050,5 +1647,93 @@ mod tests {
                 .contains("only available inside a self-dev session")
         );
         assert!(output.output.contains("selfdev enter"));
+    }
+
+    #[tokio::test]
+    async fn build_requires_reason() {
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
+        let temp_home = tempfile::TempDir::new().expect("temp home");
+        let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+        let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+        let repo = create_repo_fixture();
+
+        let tool = SelfDevTool::new();
+        let ctx = create_test_context("build-session", Some(repo.path().to_path_buf()));
+        let err = tool
+            .execute(json!({"action": "build"}), ctx)
+            .await
+            .expect_err("build without reason should fail");
+
+        assert!(err.to_string().contains("requires a non-empty `reason`"));
+    }
+
+    #[tokio::test]
+    async fn build_queues_background_tasks_and_reports_queue_status() {
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
+        let temp_home = tempfile::TempDir::new().expect("temp home");
+        let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+        let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+        let repo = create_repo_fixture();
+
+        let mut session_one =
+            session::Session::create(None, Some("First build session".to_string()));
+        session_one.short_name = Some("alpha".to_string());
+        session_one.save().expect("save session one");
+
+        let mut session_two =
+            session::Session::create(None, Some("Second build session".to_string()));
+        session_two.short_name = Some("beta".to_string());
+        session_two.save().expect("save session two");
+
+        let tool = SelfDevTool::new();
+        let first = tool
+            .execute(
+                json!({"action": "build", "reason": "first reason"}),
+                create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
+            )
+            .await
+            .expect("first build should queue");
+        let second = tool
+            .execute(
+                json!({"action": "build", "reason": "second reason"}),
+                create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
+            )
+            .await
+            .expect("second build should queue");
+
+        let first_meta = first.metadata.expect("first metadata");
+        let second_meta = second.metadata.expect("second metadata");
+        let first_task_id = first_meta["task_id"].as_str().expect("first task id");
+        let second_task_id = second_meta["task_id"].as_str().expect("second task id");
+
+        assert_eq!(first_meta["queue_position"].as_u64(), Some(1));
+        assert_eq!(second_meta["queue_position"].as_u64(), Some(2));
+        assert!(second.output.contains("second reason"));
+
+        let status_output = selfdev_status_output().expect("status output");
+        assert!(status_output.output.contains("## Build Queue"));
+        assert!(status_output.output.contains("first reason"));
+        assert!(status_output.output.contains("second reason"));
+
+        let first_status = wait_for_task_completion(first_task_id).await;
+        let second_status = wait_for_task_completion(second_task_id).await;
+        assert_eq!(first_status.status, BackgroundTaskStatus::Completed);
+        assert_eq!(second_status.status, BackgroundTaskStatus::Completed);
+
+        let request_one =
+            BuildRequest::load(first_meta["request_id"].as_str().expect("first request id"))
+                .expect("load request one")
+                .expect("request one exists");
+        let request_two = BuildRequest::load(
+            second_meta["request_id"]
+                .as_str()
+                .expect("second request id"),
+        )
+        .expect("load request two")
+        .expect("request two exists");
+        assert_eq!(request_one.state, BuildRequestState::Completed);
+        assert_eq!(request_two.state, BuildRequestState::Completed);
     }
 }
