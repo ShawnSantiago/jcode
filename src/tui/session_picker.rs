@@ -20,8 +20,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
 use serde::Deserialize;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -232,7 +231,7 @@ fn is_empty_session_file(path: &Path) -> bool {
 }
 
 fn collect_recent_session_stems(sessions_dir: &Path, scan_limit: usize) -> Result<Vec<String>> {
-    let mut top_k: BinaryHeap<Reverse<(u64, String)>> = BinaryHeap::new();
+    let mut candidates: Vec<(u64, String)> = Vec::new();
 
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
@@ -243,28 +242,24 @@ fn collect_recent_session_stems(sessions_dir: &Path, scan_limit: usize) -> Resul
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
+        candidates.push((session_sort_key(stem), stem.to_string()));
+    }
 
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+
+    let mut recent = Vec::with_capacity(scan_limit);
+    for (_, stem) in candidates {
+        let path = sessions_dir.join(format!("{stem}.json"));
         if is_empty_session_file(&path) {
             continue;
         }
-
-        let candidate = (session_sort_key(stem), stem.to_string());
-        if top_k.len() < scan_limit {
-            top_k.push(Reverse(candidate));
-            continue;
-        }
-
-        if let Some(smallest) = top_k.peek() {
-            if candidate > smallest.0 {
-                top_k.pop();
-                top_k.push(Reverse(candidate));
-            }
+        recent.push(stem);
+        if recent.len() >= scan_limit {
+            break;
         }
     }
 
-    let mut candidates: Vec<(u64, String)> = top_k.into_iter().map(|rev| rev.0).collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    Ok(candidates.into_iter().map(|(_, stem)| stem).collect())
+    Ok(recent)
 }
 
 #[derive(Deserialize)]
@@ -2733,6 +2728,62 @@ mod tests {
         for session in &sessions {
             let _ = session.status.display();
         }
+    }
+
+    #[test]
+    fn test_collect_recent_session_stems_skips_empty_recent_sessions() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        std::fs::write(
+            dir.path().join("session_alpha_1000.json"),
+            r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .expect("write alpha");
+        std::fs::write(
+            dir.path().join("session_beta_2000.json"),
+            r#"{"messages":[]}"#,
+        )
+        .expect("write beta");
+        std::fs::write(
+            dir.path().join("session_gamma_3000.json"),
+            r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+        )
+        .expect("write gamma");
+        std::fs::write(
+            dir.path().join("session_delta_4000.json"),
+            r#"{"messages":[]}"#,
+        )
+        .expect("write delta");
+
+        let stems = collect_recent_session_stems(dir.path(), 2).expect("collect stems");
+        assert_eq!(stems, vec!["session_gamma_3000", "session_alpha_1000"]);
+    }
+
+    #[test]
+    fn test_collect_recent_session_stems_orders_by_timestamp_desc() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        std::fs::write(
+            dir.path().join("session_old_1111.json"),
+            r#"{"messages":[{"role":"user","content":"old"}]}"#,
+        )
+        .expect("write old");
+        std::fs::write(
+            dir.path().join("session_mid_2222.json"),
+            r#"{"messages":[{"role":"user","content":"mid"}]}"#,
+        )
+        .expect("write mid");
+        std::fs::write(
+            dir.path().join("session_new_3333.json"),
+            r#"{"messages":[{"role":"user","content":"new"}]}"#,
+        )
+        .expect("write new");
+
+        let stems = collect_recent_session_stems(dir.path(), 3).expect("collect stems");
+        assert_eq!(
+            stems,
+            vec!["session_new_3333", "session_mid_2222", "session_old_1111"]
+        );
     }
 
     #[test]
