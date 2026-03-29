@@ -372,6 +372,19 @@ fn resumed_window_title(session_id: &str) -> String {
     format!("{} jcode {}", icon, session_name)
 }
 
+#[cfg(unix)]
+fn sh_escape(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn shell_command(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| sh_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
     let term = term.into();
     if term.trim().is_empty() {
@@ -384,6 +397,16 @@ fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
 
 #[cfg(unix)]
 fn detected_resume_terminal() -> Option<&'static str> {
+    if std::env::var("HANDTERM_SESSION").is_ok() || std::env::var("HANDTERM_PID").is_ok() {
+        return Some("handterm");
+    }
+    if std::env::var("TERM_PROGRAM")
+        .ok()
+        .map(|value| value.eq_ignore_ascii_case("handterm"))
+        .unwrap_or(false)
+    {
+        return Some("handterm");
+    }
     if std::env::var("KITTY_PID").is_ok() {
         return Some("kitty");
     }
@@ -435,6 +458,7 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
     #[cfg(not(target_os = "macos"))]
     {
         for term in [
+            "handterm",
             "kitty",
             "wezterm",
             "alacritty",
@@ -469,6 +493,12 @@ pub(super) fn spawn_in_new_terminal(
             .stderr(Stdio::null());
 
         match term.as_str() {
+            "handterm" => {
+                let command = shell_command(&std::iter::once(exe.to_string_lossy().into_owned())
+                    .chain(resume_invocation_args(session_id, socket))
+                    .collect::<Vec<_>>());
+                cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+            }
             "kitty" => {
                 let title = resumed_window_title(session_id);
                 cmd.args(["--title", &title, "-e"])
@@ -558,8 +588,8 @@ pub(super) fn spawn_in_new_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_bracketed_system_message, format_countdown_until, gather_ambient_info,
-        partition_queued_messages, resume_invocation_args,
+        detected_resume_terminal, extract_bracketed_system_message, format_countdown_until,
+        gather_ambient_info, partition_queued_messages, resume_invocation_args, shell_command,
     };
     use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
     use chrono::{Duration as ChronoDuration, Utc};
@@ -570,6 +600,12 @@ mod tests {
     }
 
     impl EnvVarGuard {
+        fn set_value(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, prev }
+        }
+
         fn set_path(key: &'static str, value: &std::path::Path) -> Self {
             let prev = std::env::var_os(key);
             crate::env::set_var(key, value);
@@ -616,6 +652,27 @@ mod tests {
         assert_eq!(
             reminder.as_deref(),
             Some("hidden reminder\n\nContinue where you left off.")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detected_resume_terminal_recognizes_handterm_term_program() {
+        let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
+        assert_eq!(detected_resume_terminal(), Some("handterm"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_command_quotes_single_quotes_for_handterm_exec() {
+        let command = shell_command(&[
+            "/tmp/jcode binary".to_string(),
+            "--resume".to_string(),
+            "session'quote".to_string(),
+        ]);
+        assert_eq!(
+            command,
+            "'/tmp/jcode binary' '--resume' 'session'\"'\"'quote'"
         );
     }
 
