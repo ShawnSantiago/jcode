@@ -284,7 +284,8 @@ impl MemoryGraph {
 
     /// Add a memory entry to the graph
     /// Also creates tag nodes and HasTag edges for any tags on the entry
-    pub fn add_memory(&mut self, entry: MemoryEntry) -> String {
+    pub fn add_memory(&mut self, mut entry: MemoryEntry) -> String {
+        entry.refresh_search_text();
         let id = entry.id.clone();
 
         // Create tag nodes and edges for existing tags
@@ -397,6 +398,7 @@ impl MemoryGraph {
         if let Some(memory) = self.memories.get_mut(memory_id) {
             if !memory.tags.contains(&tag_name.to_string()) {
                 memory.tags.push(tag_name.to_string());
+                memory.refresh_search_text();
             }
         }
     }
@@ -423,6 +425,7 @@ impl MemoryGraph {
         // Update memory's tags list
         if let Some(memory) = self.memories.get_mut(memory_id) {
             memory.tags.retain(|t| t != tag_name);
+            memory.refresh_search_text();
         }
     }
 

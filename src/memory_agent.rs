@@ -12,6 +12,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -195,20 +196,20 @@ impl MemoryAgentHandle {
     pub async fn update_context(
         &self,
         session_id: &str,
-        messages: Vec<crate::message::Message>,
+        messages: Arc<[crate::message::Message]>,
         working_dir: Option<String>,
     ) {
         self.update_context_sync_with_dir(session_id, messages, working_dir);
     }
 
-    pub fn update_context_sync(&self, session_id: &str, messages: Vec<crate::message::Message>) {
+    pub fn update_context_sync(&self, session_id: &str, messages: Arc<[crate::message::Message]>) {
         self.update_context_sync_with_dir(session_id, messages, None);
     }
 
     pub fn update_context_sync_with_dir(
         &self,
         session_id: &str,
-        messages: Vec<crate::message::Message>,
+        messages: Arc<[crate::message::Message]>,
         working_dir: Option<String>,
     ) {
         let msg = AgentMessage::Context {
@@ -230,7 +231,7 @@ impl MemoryAgentHandle {
 enum AgentMessage {
     Context {
         session_id: String,
-        messages: Vec<crate::message::Message>,
+        messages: Arc<[crate::message::Message]>,
         working_dir: Option<String>,
         timestamp: Instant,
     },
@@ -377,7 +378,7 @@ impl MemoryAgent {
     async fn process_context(
         &mut self,
         session_id: &str,
-        messages: Vec<crate::message::Message>,
+        messages: Arc<[crate::message::Message]>,
         _timestamp: Instant,
     ) -> Result<()> {
         let memory_manager = self.manager_for_session(session_id);
@@ -1506,7 +1507,7 @@ pub fn get() -> Option<MemoryAgentHandle> {
 /// Send a context update to the memory agent (convenience function)
 pub async fn update_context(
     session_id: &str,
-    messages: Vec<crate::message::Message>,
+    messages: Arc<[crate::message::Message]>,
     working_dir: Option<String>,
 ) {
     if let Some(handle) = get() {
@@ -1518,13 +1519,13 @@ pub async fn update_context(
 
 /// Send a context update synchronously (for use from non-async code)
 /// This is non-blocking - it just sends to the channel
-pub fn update_context_sync(session_id: &str, messages: Vec<crate::message::Message>) {
+pub fn update_context_sync(session_id: &str, messages: Arc<[crate::message::Message]>) {
     update_context_sync_with_dir(session_id, messages, None);
 }
 
 pub fn update_context_sync_with_dir(
     session_id: &str,
-    messages: Vec<crate::message::Message>,
+    messages: Arc<[crate::message::Message]>,
     working_dir: Option<String>,
 ) {
     if let Some(handle) = get() {

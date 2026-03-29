@@ -86,11 +86,12 @@ impl Agent {
             .as_deref()
             .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
             .unwrap_or_else(crate::memory::MemoryManager::new);
-        manager.spawn_relevance_check(session_id, messages.to_vec());
+        let shared_messages: std::sync::Arc<[Message]> = messages.to_vec().into();
+        manager.spawn_relevance_check(session_id, shared_messages.clone());
 
         crate::memory_agent::update_context_sync_with_dir(
             session_id,
-            messages.to_vec(),
+            shared_messages,
             self.session.working_dir.clone(),
         );
 

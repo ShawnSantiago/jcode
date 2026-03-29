@@ -60,7 +60,13 @@ fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
 
     if has_start_end && has_mixed_offset {
         return Err(anyhow::anyhow!(
-            "Use either start_line/end_line (1-based) or offset/limit (0-based), not both."
+            "Use either start_line/end_line (1-based) or offset (0-based), not both. `limit` may be used with either style."
+        ));
+    }
+
+    if params.end_line.is_some() && params.limit.is_some() {
+        return Err(anyhow::anyhow!(
+            "Use either end_line or limit with start_line, not both."
         ));
     }
 

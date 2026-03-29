@@ -443,7 +443,7 @@ impl App {
 
             let compaction = self.registry.compaction();
             let done = if let Ok(mut manager) = compaction.try_write() {
-                if let Some(event) = manager.poll_compaction_event() {
+                if let Some(event) = manager.poll_compaction_event_with(&self.messages) {
                     self.sync_session_compaction_state_from_manager(&manager);
                     self.handle_compaction_event(event);
                     true

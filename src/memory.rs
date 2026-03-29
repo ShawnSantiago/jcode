@@ -637,6 +637,9 @@ pub struct MemoryEntry {
     pub category: MemoryCategory,
     pub content: String,
     pub tags: Vec<String>,
+    /// Pre-normalized lowercase search text for content + tags.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub search_text: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub access_count: u32,
@@ -675,10 +678,12 @@ fn default_active() -> bool {
 impl MemoryEntry {
     pub fn new(category: MemoryCategory, content: impl Into<String>) -> Self {
         let now = Utc::now();
+        let content = content.into();
         Self {
             id: crate::id::new_id("mem"),
             category,
-            content: content.into(),
+            search_text: normalize_memory_search_text(&content, &[]),
+            content,
             tags: Vec::new(),
             created_at: now,
             updated_at: now,
@@ -691,6 +696,18 @@ impl MemoryEntry {
             reinforcements: Vec::new(),
             embedding: None,
             confidence: 1.0,
+        }
+    }
+
+    pub fn refresh_search_text(&mut self) {
+        self.search_text = normalize_memory_search_text(&self.content, &self.tags);
+    }
+
+    pub fn searchable_text(&self) -> std::borrow::Cow<'_, str> {
+        if self.search_text.is_empty() {
+            std::borrow::Cow::Owned(normalize_memory_search_text(&self.content, &self.tags))
+        } else {
+            std::borrow::Cow::Borrowed(&self.search_text)
         }
     }
 
@@ -732,6 +749,7 @@ impl MemoryEntry {
 
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags = tags;
+        self.refresh_search_text();
         self
     }
 
@@ -1432,12 +1450,27 @@ fn normalize_search_text(text: &str) -> String {
     normalized.trim_end().to_string()
 }
 
+fn normalize_memory_search_text(content: &str, tags: &[String]) -> String {
+    let normalized_content = normalize_search_text(content);
+    let normalized_tags: Vec<String> = tags
+        .iter()
+        .map(|tag| normalize_search_text(tag))
+        .filter(|tag| !tag.is_empty())
+        .collect();
+
+    if normalized_tags.is_empty() {
+        return normalized_content;
+    }
+
+    if normalized_content.is_empty() {
+        return normalized_tags.join(" ");
+    }
+
+    format!("{} {}", normalized_content, normalized_tags.join(" "))
+}
+
 fn memory_matches_search(memory: &MemoryEntry, normalized_query: &str) -> bool {
-    normalize_search_text(&memory.content).contains(normalized_query)
-        || memory
-            .tags
-            .iter()
-            .any(|tag| normalize_search_text(tag).contains(normalized_query))
+    memory.searchable_text().contains(normalized_query)
 }
 
 #[derive(Clone)]
@@ -1548,6 +1581,18 @@ impl MemoryManager {
                 .join("notes")
                 .join(format!("{}.json", project_hash)),
         ))
+    }
+
+    fn normalize_graph_search_text(graph: &mut MemoryGraph) -> bool {
+        let mut changed = false;
+        for memory in graph.memories.values_mut() {
+            let expected = normalize_memory_search_text(&memory.content, &memory.tags);
+            if memory.search_text != expected {
+                memory.search_text = expected;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn import_legacy_notes_into_graph(&self, graph: &mut MemoryGraph) -> Result<bool> {
@@ -2296,7 +2341,11 @@ impl MemoryManager {
     /// with take_pending_memory(session_id).
     /// This method returns immediately and never blocks the caller.
     /// Only ONE memory check runs at a time per session - additional calls are ignored.
-    pub fn spawn_relevance_check(&self, session_id: &str, messages: Vec<crate::message::Message>) {
+    pub fn spawn_relevance_check(
+        &self,
+        session_id: &str,
+        messages: std::sync::Arc<[crate::message::Message]>,
+    ) {
         let sid = session_id.to_string();
 
         // Only spawn if no check is currently in progress for this session
@@ -2620,7 +2669,10 @@ impl MemoryManager {
         };
 
         if !self.test_mode {
-            if let Some(graph) = cached_graph(&path) {
+            if let Some(mut graph) = cached_graph(&path) {
+                if Self::normalize_graph_search_text(&mut graph) {
+                    cache_graph(path.clone(), &graph);
+                }
                 return Ok(graph);
             }
         }
@@ -2630,8 +2682,11 @@ impl MemoryManager {
             if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
                 if graph.graph_version == GRAPH_VERSION {
                     let mut graph = graph;
+                    let normalized = Self::normalize_graph_search_text(&mut graph);
                     if self.import_legacy_notes_into_graph(&mut graph)? {
                         self.save_project_graph(&graph)?;
+                    } else if normalized {
+                        storage::write_json(&path, &graph)?;
                     }
                     if !self.test_mode {
                         cache_graph(path, &graph);
@@ -2676,7 +2731,10 @@ impl MemoryManager {
     pub fn load_global_graph(&self) -> Result<MemoryGraph> {
         let path = self.global_memory_path()?;
         if !self.test_mode {
-            if let Some(graph) = cached_graph(&path) {
+            if let Some(mut graph) = cached_graph(&path) {
+                if Self::normalize_graph_search_text(&mut graph) {
+                    cache_graph(path.clone(), &graph);
+                }
                 return Ok(graph);
             }
         }
@@ -2685,6 +2743,10 @@ impl MemoryManager {
             // Try loading as MemoryGraph first
             if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
                 if graph.graph_version == GRAPH_VERSION {
+                    let mut graph = graph;
+                    if Self::normalize_graph_search_text(&mut graph) {
+                        storage::write_json(&path, &graph)?;
+                    }
                     if !self.test_mode {
                         cache_graph(path, &graph);
                     }
