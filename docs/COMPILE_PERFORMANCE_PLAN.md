@@ -76,6 +76,11 @@ even if they cannot reach the same fast path.
   touched-file measurements instead of one-off ad hoc timings.
 - 2026-03-25: upgraded `scripts/dev_cargo.sh` with `--print-setup` plus clearer cache/linker
   diagnostics so developers can confirm whether `sccache` / fast-linker paths are actually active.
+- 2026-03-30: removed the per-build `build.rs` timestamp/build-number churn from local source
+  builds. `JCODE_VERSION` for source builds is now stable per `Cargo.toml` version + git hash,
+  while UI/version build-time display comes from the binary mtime at runtime. Validation on this
+  machine: two no-op release-jcode runs measured **221.688s then 0.559s**, confirming the main
+  crate no longer recompiles just because build metadata changed.
 
 ### Phase 3 — Workspace boundary design
 

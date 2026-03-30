@@ -1034,17 +1034,17 @@ fn format_age(secs: i64) -> String {
 /// Get how long ago the binary was built and when the code was committed
 /// Shows both if they differ significantly, otherwise just the build time
 fn binary_age() -> Option<String> {
-    let build_time = env!("JCODE_BUILD_TIME");
     let git_date = env!("JCODE_GIT_DATE");
 
     let now = chrono::Utc::now();
 
-    // Parse build time
-    let build_date = chrono::DateTime::parse_from_str(build_time, "%Y-%m-%d %H:%M:%S %z").ok()?;
+    let build_date = crate::build::current_binary_built_at()?;
     let build_secs = now.signed_duration_since(build_date).num_seconds();
 
     // Parse git commit date
-    let git_commit_date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z").ok();
+    let git_commit_date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z")
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc));
     let git_secs = git_commit_date.map(|d| now.signed_duration_since(d).num_seconds());
 
     let build_age = format_age(build_secs);

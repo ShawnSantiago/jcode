@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 /// Get the jcode repository directory
 pub fn get_repo_dir() -> Option<PathBuf> {
@@ -65,6 +66,18 @@ pub fn binary_name() -> &'static str {
 
 pub fn release_binary_path(repo_dir: &std::path::Path) -> PathBuf {
     repo_dir.join("target").join("release").join(binary_name())
+}
+
+pub fn current_binary_built_at() -> Option<DateTime<Utc>> {
+    let modified: SystemTime = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())?;
+    Some(DateTime::<Utc>::from(modified))
+}
+
+pub fn current_binary_build_time_string() -> Option<String> {
+    current_binary_built_at().map(|dt| dt.format("%Y-%m-%d %H:%M:%S %z").to_string())
 }
 
 /// Find the best development binary in the repo.
