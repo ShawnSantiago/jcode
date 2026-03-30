@@ -134,6 +134,14 @@ impl AuthStatus {
             || self.cursor == AuthState::Available
     }
 
+    pub fn has_any_untrusted_external_auth() -> bool {
+        crate::auth::codex::has_unconsented_legacy_credentials()
+            || crate::auth::claude::has_unconsented_external_auth().is_some()
+            || crate::auth::gemini::has_unconsented_cli_auth()
+            || crate::auth::copilot::has_unconsented_external_auth().is_some()
+            || crate::auth::cursor::has_unconsented_external_auth().is_some()
+    }
+
     pub fn state_for_key(&self, key: LoginProviderAuthStateKey) -> AuthState {
         match key {
             LoginProviderAuthStateKey::Jcode => self.jcode,

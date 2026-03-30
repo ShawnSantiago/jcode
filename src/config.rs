@@ -115,6 +115,9 @@ pub struct Config {
     /// Feature toggles
     pub features: FeatureConfig,
 
+    /// Auth trust / consent configuration
+    pub auth: AuthConfig,
+
     /// Provider configuration
     pub provider: ProviderConfig,
 
@@ -138,6 +141,14 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+}
+
+/// Remembered trust decisions for external auth sources managed by other tools.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// External auth source ids that the user has approved jcode to read/use.
+    pub trusted_external_sources: Vec<String>,
 }
 
 /// Agent-specific model defaults.
@@ -982,6 +993,14 @@ impl Config {
             }
         }
 
+        if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
+            self.auth.trusted_external_sources = parse_env_list(&v)
+                .into_iter()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect();
+        }
+
         // Autoreview
         if let Ok(v) = std::env::var("JCODE_AUTOREVIEW_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
@@ -1278,6 +1297,45 @@ impl Config {
         cfg.display.centered = centered;
         cfg.save()?;
         crate::logging::info(&format!("Saved display.centered to config: {}", centered));
+        Ok(())
+    }
+
+    pub fn external_auth_source_allowed(source_id: &str) -> bool {
+        let source_id = source_id.trim().to_ascii_lowercase();
+        if source_id.is_empty() {
+            return false;
+        }
+
+        let cfg = Self::load();
+        cfg.auth
+            .trusted_external_sources
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
+    }
+
+    pub fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
+        let source_id = source_id.trim().to_ascii_lowercase();
+        if source_id.is_empty() {
+            anyhow::bail!("External auth source id cannot be empty");
+        }
+
+        let mut cfg = Self::load();
+        if !cfg
+            .auth
+            .trusted_external_sources
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
+        {
+            cfg.auth.trusted_external_sources.push(source_id.clone());
+            cfg.auth.trusted_external_sources.sort();
+            cfg.auth.trusted_external_sources.dedup();
+            cfg.save()?;
+        }
+
+        crate::logging::info(&format!(
+            "Saved trusted external auth source to config: {}",
+            source_id
+        ));
         Ok(())
     }
 

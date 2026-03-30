@@ -14,6 +14,38 @@ pub const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/
 
 /// Copilot API base URL
 pub const COPILOT_API_BASE: &str = "https://api.githubcopilot.com";
+pub const COPILOT_HOSTS_AUTH_SOURCE_ID: &str = "copilot_hosts_json";
+pub const COPILOT_APPS_AUTH_SOURCE_ID: &str = "copilot_apps_json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalCopilotAuthSource {
+    HostsJson,
+    AppsJson,
+}
+
+impl ExternalCopilotAuthSource {
+    pub fn source_id(self) -> &'static str {
+        match self {
+            Self::HostsJson => COPILOT_HOSTS_AUTH_SOURCE_ID,
+            Self::AppsJson => COPILOT_APPS_AUTH_SOURCE_ID,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::HostsJson => "GitHub Copilot CLI hosts.json",
+            Self::AppsJson => "GitHub Copilot apps.json",
+        }
+    }
+
+    pub fn path(self) -> PathBuf {
+        let config_dir = copilot_config_dir();
+        match self {
+            Self::HostsJson => config_dir.join("hosts.json"),
+            Self::AppsJson => config_dir.join("apps.json"),
+        }
+    }
+}
 
 /// Required headers for Copilot API requests
 pub const EDITOR_VERSION: &str = "jcode/1.0";
@@ -76,18 +108,19 @@ pub fn load_github_token() -> Result<String> {
         return Ok(token.trim().to_string());
     }
 
-    // Get config directory
-    let config_dir = copilot_config_dir();
-
     // 2. hosts.json (Copilot CLI login)
-    let hosts_path = config_dir.join("hosts.json");
-    if let Ok(token) = load_token_from_json(&hosts_path) {
+    let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
+    if crate::config::Config::external_auth_source_allowed(COPILOT_HOSTS_AUTH_SOURCE_ID)
+        && let Ok(token) = load_token_from_json(&hosts_path)
+    {
         return Ok(token);
     }
 
     // 3. apps.json (VS Code)
-    let apps_path = config_dir.join("apps.json");
-    if let Ok(token) = load_token_from_json(&apps_path) {
+    let apps_path = ExternalCopilotAuthSource::AppsJson.path();
+    if crate::config::Config::external_auth_source_allowed(COPILOT_APPS_AUTH_SOURCE_ID)
+        && let Ok(token) = load_token_from_json(&apps_path)
+    {
         return Ok(token);
     }
 
@@ -101,6 +134,30 @@ pub fn load_github_token() -> Result<String> {
 /// Check if Copilot credentials are available (without loading the full token)
 pub fn has_copilot_credentials() -> bool {
     load_github_token().is_ok()
+}
+
+pub fn preferred_external_auth_source() -> Option<ExternalCopilotAuthSource> {
+    [
+        ExternalCopilotAuthSource::HostsJson,
+        ExternalCopilotAuthSource::AppsJson,
+    ]
+    .into_iter()
+    .find(|source| source.path().exists())
+}
+
+pub fn has_unconsented_external_auth() -> Option<ExternalCopilotAuthSource> {
+    let source = preferred_external_auth_source()?;
+    if crate::config::Config::external_auth_source_allowed(source.source_id()) {
+        None
+    } else {
+        Some(source)
+    }
+}
+
+pub fn trust_external_auth_source(source: ExternalCopilotAuthSource) -> Result<()> {
+    crate::config::Config::allow_external_auth_source(source.source_id())?;
+    super::AuthStatus::invalidate_cache();
+    Ok(())
 }
 
 fn copilot_config_dir() -> PathBuf {

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 const ALLOW_LEGACY_AUTH_ENV: &str = "JCODE_ALLOW_CODEX_LEGACY_AUTH";
+pub const LEGACY_CODEX_AUTH_SOURCE_ID: &str = "openai_codex_auth_json";
 
 #[derive(Debug, Clone)]
 pub struct CodexCredentials {
@@ -173,9 +174,10 @@ pub fn legacy_auth_file_path() -> Result<PathBuf> {
     legacy_auth_path()
 }
 
-pub fn allow_legacy_auth_for_process() {
-    crate::env::set_var(ALLOW_LEGACY_AUTH_ENV, "1");
+pub fn trust_legacy_auth_for_future_use() -> Result<()> {
+    crate::config::Config::allow_external_auth_source(LEGACY_CODEX_AUTH_SOURCE_ID)?;
     super::AuthStatus::invalidate_cache();
+    Ok(())
 }
 
 pub fn legacy_auth_allowed() -> bool {
@@ -188,14 +190,17 @@ pub fn legacy_auth_allowed() -> bool {
             )
         })
         .unwrap_or(false)
+        || crate::config::Config::external_auth_source_allowed(LEGACY_CODEX_AUTH_SOURCE_ID)
 }
 
-pub fn has_legacy_credentials() -> bool {
-    load_legacy_oauth_credentials().is_ok() || load_legacy_api_key_credentials().is_ok()
+pub fn legacy_auth_source_exists() -> bool {
+    legacy_auth_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
 }
 
 pub fn has_unconsented_legacy_credentials() -> bool {
-    has_legacy_credentials() && !legacy_auth_allowed()
+    legacy_auth_source_exists() && !legacy_auth_allowed()
 }
 
 pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {

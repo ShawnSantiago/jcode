@@ -5,6 +5,38 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::RwLock;
 
+pub const CLAUDE_CODE_AUTH_SOURCE_ID: &str = "claude_code_credentials";
+pub const OPENCODE_AUTH_SOURCE_ID: &str = "opencode_anthropic_auth";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalClaudeAuthSource {
+    ClaudeCode,
+    OpenCode,
+}
+
+impl ExternalClaudeAuthSource {
+    pub fn source_id(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => CLAUDE_CODE_AUTH_SOURCE_ID,
+            Self::OpenCode => OPENCODE_AUTH_SOURCE_ID,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    pub fn path(self) -> Result<PathBuf> {
+        match self {
+            Self::ClaudeCode => claude_code_path(),
+            Self::OpenCode => opencode_path(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaudeCredentials {
     pub access_token: String,
@@ -374,6 +406,30 @@ pub fn has_credentials() -> bool {
     load_credentials().is_ok()
 }
 
+pub fn preferred_external_auth_source() -> Option<ExternalClaudeAuthSource> {
+    [
+        ExternalClaudeAuthSource::ClaudeCode,
+        ExternalClaudeAuthSource::OpenCode,
+    ]
+    .into_iter()
+    .find(|source| source.path().map(|path| path.exists()).unwrap_or(false))
+}
+
+pub fn has_unconsented_external_auth() -> Option<ExternalClaudeAuthSource> {
+    let source = preferred_external_auth_source()?;
+    if crate::config::Config::external_auth_source_allowed(source.source_id()) {
+        None
+    } else {
+        Some(source)
+    }
+}
+
+pub fn trust_external_auth_source(source: ExternalClaudeAuthSource) -> Result<()> {
+    crate::config::Config::allow_external_auth_source(source.source_id())?;
+    super::AuthStatus::invalidate_cache();
+    Ok(())
+}
+
 /// Get the subscription type (e.g., "pro", "max") if available.
 pub fn get_subscription_type() -> Option<String> {
     load_credentials().ok().and_then(|c| c.subscription_type)
@@ -402,14 +458,18 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("jcode", creds));
     }
 
-    if let Ok(creds) = load_claude_code_credentials() {
+    if crate::config::Config::external_auth_source_allowed(CLAUDE_CODE_AUTH_SOURCE_ID)
+        && let Ok(creds) = load_claude_code_credentials()
+    {
         if creds.expires_at > now_ms {
             return Ok(creds);
         }
         expired_candidates.push(("claude", creds));
     }
 
-    if let Ok(creds) = load_opencode_credentials() {
+    if crate::config::Config::external_auth_source_allowed(OPENCODE_AUTH_SOURCE_ID)
+        && let Ok(creds) = load_opencode_credentials()
+    {
         if creds.expires_at > now_ms {
             return Ok(creds);
         }

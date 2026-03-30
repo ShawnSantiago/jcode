@@ -6,6 +6,7 @@ const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 const GEMINI_MANUAL_REDIRECT_URI: &str = "https://codeassist.google.com/authcode";
+pub const GEMINI_CLI_AUTH_SOURCE_ID: &str = "gemini_cli_oauth_creds";
 // OAuth credentials from Google's official Gemini CLI (@google/gemini-cli).
 // These are for a "Desktop app" OAuth type where the client secret is safe to embed.
 // See: https://developers.google.com/identity/protocols/oauth2#installed
@@ -123,6 +124,23 @@ pub fn gemini_cli_oauth_path() -> Result<std::path::PathBuf> {
     crate::storage::user_home_path(".gemini/oauth_creds.json")
 }
 
+pub fn gemini_cli_auth_source_exists() -> bool {
+    gemini_cli_oauth_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+pub fn has_unconsented_cli_auth() -> bool {
+    gemini_cli_auth_source_exists()
+        && !crate::config::Config::external_auth_source_allowed(GEMINI_CLI_AUTH_SOURCE_ID)
+}
+
+pub fn trust_cli_auth_for_future_use() -> Result<()> {
+    crate::config::Config::allow_external_auth_source(GEMINI_CLI_AUTH_SOURCE_ID)?;
+    super::AuthStatus::invalidate_cache();
+    Ok(())
+}
+
 pub fn load_tokens() -> Result<GeminiTokens> {
     let native_path = tokens_path()?;
     if native_path.exists() {
@@ -132,7 +150,9 @@ pub fn load_tokens() -> Result<GeminiTokens> {
     }
 
     let cli_path = gemini_cli_oauth_path()?;
-    if cli_path.exists() {
+    if cli_path.exists()
+        && crate::config::Config::external_auth_source_allowed(GEMINI_CLI_AUTH_SOURCE_ID)
+    {
         crate::storage::harden_secret_file_permissions(&cli_path);
         let raw = std::fs::read_to_string(&cli_path)
             .with_context(|| format!("Failed to read {}", cli_path.display()))?;
@@ -679,7 +699,12 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::TempDir::new().expect("tempdir");
         let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_trusted = std::env::var_os("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
         crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var(
+            "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
+            GEMINI_CLI_AUTH_SOURCE_ID,
+        );
 
         let cli_path = gemini_cli_oauth_path().expect("cli path");
         std::fs::create_dir_all(cli_path.parent().unwrap()).expect("create cli dir");
@@ -698,6 +723,11 @@ mod tests {
             crate::env::set_var("JCODE_HOME", prev_home);
         } else {
             crate::env::remove_var("JCODE_HOME");
+        }
+        if let Some(prev_trusted) = prev_trusted {
+            crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", prev_trusted);
+        } else {
+            crate::env::remove_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
         }
     }
 }

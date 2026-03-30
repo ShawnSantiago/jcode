@@ -9,6 +9,37 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
 const CURSOR_DIRECT_CLIENT_VERSION_DEFAULT: &str = "2.4.0";
 const CURSOR_OAUTH_CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
+pub const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
+pub const CURSOR_VSCDB_SOURCE_ID: &str = "cursor_vscdb";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalCursorAuthSource {
+    CursorAuthFile,
+    CursorVscdb,
+}
+
+impl ExternalCursorAuthSource {
+    pub fn source_id(self) -> &'static str {
+        match self {
+            Self::CursorAuthFile => CURSOR_AUTH_FILE_SOURCE_ID,
+            Self::CursorVscdb => CURSOR_VSCDB_SOURCE_ID,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::CursorAuthFile => "Cursor auth.json",
+            Self::CursorVscdb => "Cursor IDE state.vscdb",
+        }
+    }
+
+    pub fn path(self) -> Result<PathBuf> {
+        match self {
+            Self::CursorAuthFile => cursor_auth_file_path(),
+            Self::CursorVscdb => find_cursor_vscdb(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorDirectTokens {
@@ -61,6 +92,36 @@ pub fn has_cursor_native_auth() -> bool {
     load_access_token_from_env_or_file().is_ok() || has_cursor_vscdb_token() || has_cursor_api_key()
 }
 
+pub fn preferred_external_auth_source() -> Option<ExternalCursorAuthSource> {
+    if cursor_auth_file_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+    {
+        return Some(ExternalCursorAuthSource::CursorAuthFile);
+    }
+
+    if cursor_vscdb_paths().into_iter().any(|path| path.exists()) {
+        return Some(ExternalCursorAuthSource::CursorVscdb);
+    }
+
+    None
+}
+
+pub fn has_unconsented_external_auth() -> Option<ExternalCursorAuthSource> {
+    let source = preferred_external_auth_source()?;
+    if crate::config::Config::external_auth_source_allowed(source.source_id()) {
+        None
+    } else {
+        Some(source)
+    }
+}
+
+pub fn trust_external_auth_source(source: ExternalCursorAuthSource) -> Result<()> {
+    crate::config::Config::allow_external_auth_source(source.source_id())?;
+    super::AuthStatus::invalidate_cache();
+    Ok(())
+}
+
 /// Resolve the advertised client version for native Cursor API requests.
 pub fn cursor_direct_client_version() -> String {
     std::env::var("JCODE_CURSOR_CLIENT_VERSION")
@@ -99,7 +160,8 @@ pub fn has_cursor_agent_auth() -> bool {
 
 /// Check if Cursor IDE's local vscdb has an access token.
 pub fn has_cursor_vscdb_token() -> bool {
-    read_vscdb_token().is_ok()
+    crate::config::Config::external_auth_source_allowed(CURSOR_VSCDB_SOURCE_ID)
+        && read_vscdb_token().is_ok()
 }
 
 /// Read access token from Cursor IDE's SQLite storage (state.vscdb).
@@ -279,7 +341,9 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
     }
 
     let file_path = cursor_auth_file_path()?;
-    if file_path.exists() {
+    if file_path.exists()
+        && crate::config::Config::external_auth_source_allowed(CURSOR_AUTH_FILE_SOURCE_ID)
+    {
         crate::storage::harden_secret_file_permissions(&file_path);
         let raw = std::fs::read_to_string(&file_path)
             .with_context(|| format!("Failed to read {}", file_path.display()))?;
@@ -322,7 +386,9 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
         }
     }
 
-    if let Ok(access_token) = read_vscdb_token() {
+    if crate::config::Config::external_auth_source_allowed(CURSOR_VSCDB_SOURCE_ID)
+        && let Ok(access_token) = read_vscdb_token()
+    {
         let refresh_token = read_vscdb_refresh_token().ok();
         if !token_is_expiring_soon(&access_token) {
             return Ok(CursorDirectTokens {
