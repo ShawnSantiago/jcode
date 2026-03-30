@@ -673,6 +673,14 @@ impl App {
                 "Background update + auto reload when ready",
             ),
             ("/resume".into(), "Open session picker"),
+            (
+                "/catchup".into(),
+                "Open Catch Up picker for sessions needing attention",
+            ),
+            (
+                "/back".into(),
+                "Return to the previous session visited via Catch Up",
+            ),
             ("/save".into(), "Bookmark session for easy access"),
             ("/unsave".into(), "Remove bookmark from session"),
             ("/split".into(), "Split session into a new window"),

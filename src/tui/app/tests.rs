@@ -3077,6 +3077,17 @@ fn test_top_level_command_suggestions_include_config_and_subscription() {
 }
 
 #[test]
+fn test_top_level_command_suggestions_include_catchup_and_back() {
+    let app = create_test_app();
+
+    let suggestions = app.get_suggestions_for("/cat");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/catchup"));
+
+    let suggestions = app.get_suggestions_for("/bac");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/back"));
+}
+
+#[test]
 fn test_help_topic_suggestions_are_contextual() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/help fi");
@@ -3084,6 +3095,17 @@ fn test_help_topic_suggestions_are_contextual() {
         suggestions.first().map(|(cmd, _)| cmd.as_str()),
         Some("/help fix")
     );
+}
+
+#[test]
+fn test_help_topic_suggestions_include_catchup_topics() {
+    let app = create_test_app();
+
+    let suggestions = app.get_suggestions_for("/help cat");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/help catchup"));
+
+    let suggestions = app.get_suggestions_for("/help bac");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/help back"));
 }
 
 #[test]
