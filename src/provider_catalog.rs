@@ -220,7 +220,7 @@ pub fn load_api_key_from_env_or_config(env_key: &str, file_name: &str) -> Option
         }
     }
 
-    let config_path = dirs::config_dir()?.join("jcode").join(file_name);
+    let config_path = crate::storage::app_config_dir().ok()?.join(file_name);
     crate::storage::harden_secret_file_permissions(&config_path);
     let content = std::fs::read_to_string(config_path).ok()?;
     let prefix = format!("{}=", env_key);
@@ -279,7 +279,7 @@ pub fn load_env_value_from_env_or_config(env_key: &str, file_name: &str) -> Opti
         }
     }
 
-    let config_path = dirs::config_dir()?.join("jcode").join(file_name);
+    let config_path = crate::storage::app_config_dir().ok()?.join(file_name);
     crate::storage::harden_secret_file_permissions(&config_path);
     let content = std::fs::read_to_string(config_path).ok()?;
     let prefix = format!("{}=", env_key);
@@ -308,9 +308,7 @@ pub fn save_env_value_to_env_file(
         anyhow::bail!("Invalid env file name: {}", file_name);
     }
 
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
-        .join("jcode");
+    let config_dir = crate::storage::app_config_dir()?;
     std::fs::create_dir_all(&config_dir)?;
     crate::platform::set_directory_permissions_owner_only(&config_dir)?;
 
@@ -551,10 +549,12 @@ mod tests {
             "openrouter.env".to_string()
         )));
         for profile in openai_compatible_profiles() {
-            assert!(sources.contains(&(
-                profile.api_key_env.to_string(),
-                profile.env_file.to_string()
-            )));
+            if profile.requires_api_key {
+                assert!(sources.contains(&(
+                    profile.api_key_env.to_string(),
+                    profile.env_file.to_string()
+                )));
+            }
         }
     }
 
@@ -597,16 +597,12 @@ mod tests {
         crate::env::set_var("JCODE_OPENAI_COMPAT_ENV_FILE", "../bad-compat.env");
 
         let sources = openrouter_like_api_key_sources();
-        assert!(
-            !sources
-                .iter()
-                .any(|(key, _)| key == "bad-key-name" || key == "bad key")
-        );
-        assert!(
-            !sources
-                .iter()
-                .any(|(_, file)| file == "../bad.env" || file == "../bad-compat.env")
-        );
+        assert!(!sources
+            .iter()
+            .any(|(key, _)| key == "bad-key-name" || key == "bad key"));
+        assert!(!sources
+            .iter()
+            .any(|(_, file)| file == "../bad.env" || file == "../bad-compat.env"));
     }
 
     #[test]

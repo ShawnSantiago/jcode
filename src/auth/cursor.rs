@@ -292,9 +292,7 @@ pub fn save_api_key(key: &str) -> Result<()> {
 }
 
 fn config_file_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
-        .join("jcode");
+    let config_dir = crate::storage::app_config_dir()?;
     Ok(config_dir.join("cursor.env"))
 }
 

@@ -137,7 +137,12 @@ pub async fn login(tier: GmailAccessTier) -> Result<GoogleTokens> {
     let state = super::oauth::generate_state_public();
 
     let scopes = tier.scopes().join(" ");
-    let redirect_uri = format!("http://localhost:{}", DEFAULT_PORT);
+    let listener = super::oauth::bind_callback_listener(0).ok();
+    let redirect_uri = listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|addr| format!("http://127.0.0.1:{}", addr.port()))
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", DEFAULT_PORT));
 
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
@@ -160,38 +165,38 @@ pub async fn login(tier: GmailAccessTier) -> Result<GoogleTokens> {
     }
 
     let browser_opened = open::that(&auth_url).is_ok();
-    let callback_available = super::oauth::callback_listener_available(DEFAULT_PORT);
 
-    let code = if browser_opened && callback_available {
+    let code = if browser_opened {
         eprintln!(
             "Waiting up to 300s for automatic callback on {}",
             redirect_uri
         );
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            super::oauth::wait_for_callback_async(DEFAULT_PORT, &state),
-        )
-        .await
-        {
-            Ok(Ok(code)) => code,
-            Ok(Err(err)) => {
-                eprintln!("Automatic callback failed ({err}). Falling back to manual paste.");
-                read_manual_callback_code(&state)?
+        if let Some(listener) = listener {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                super::oauth::wait_for_callback_async_on_listener(listener, &state),
+            )
+            .await
+            {
+                Ok(Ok(code)) => code,
+                Ok(Err(err)) => {
+                    eprintln!("Automatic callback failed ({err}). Falling back to manual paste.");
+                    read_manual_callback_code(&state)?
+                }
+                Err(_) => {
+                    eprintln!("Timed out waiting for callback. Falling back to manual paste.");
+                    read_manual_callback_code(&state)?
+                }
             }
-            Err(_) => {
-                eprintln!("Timed out waiting for callback. Falling back to manual paste.");
-                read_manual_callback_code(&state)?
-            }
+        } else {
+            eprintln!(
+                "Couldn't start a local callback listener. Finish login in any browser, then paste the full callback URL here.\n"
+            );
+            read_manual_callback_code(&state)?
         }
-    } else if !browser_opened {
-        eprintln!(
-            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
-        );
-        read_manual_callback_code(&state)?
     } else {
         eprintln!(
-            "Local callback port {} is unavailable. Finish login in any browser, then paste the full callback URL here.\n",
-            DEFAULT_PORT
+            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
         );
         read_manual_callback_code(&state)?
     };

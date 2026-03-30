@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -40,6 +40,22 @@ pub fn jcode_dir() -> Result<PathBuf> {
 
 pub fn logs_dir() -> Result<PathBuf> {
     Ok(jcode_dir()?.join("logs"))
+}
+
+/// Resolve jcode's app-owned config directory.
+///
+/// Default location is the platform config dir + `jcode` (for example
+/// `~/.config/jcode` on Linux). When `JCODE_HOME` is set, sandbox this under
+/// `$JCODE_HOME/config/jcode` so self-dev/tests do not leak into the user's
+/// real config directory.
+pub fn app_config_dir() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("JCODE_HOME") {
+        return Ok(PathBuf::from(path).join("config").join("jcode"));
+    }
+
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| anyhow::anyhow!("No config directory found"))?;
+    Ok(config_dir.join("jcode"))
 }
 
 /// Resolve a path under the user's home directory, but sandbox it under
@@ -163,6 +179,23 @@ mod tests {
                 .join(".codex")
                 .join("auth.json")
         );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn app_config_dir_uses_jcode_home_when_set() {
+        let _guard = lock_test_env();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let resolved = app_config_dir().expect("resolve app config dir");
+        assert_eq!(resolved, temp.path().join("config").join("jcode"));
 
         if let Some(prev_home) = prev_home {
             crate::env::set_var("JCODE_HOME", prev_home);

@@ -493,6 +493,7 @@ fn load_legacy_api_key_credentials() -> Result<CodexCredentials> {
 
 fn load_legacy_auth_file() -> Result<LegacyAuthFile> {
     let path = legacy_auth_path()?;
+    crate::storage::harden_secret_file_permissions(&path);
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
     serde_json::from_str(&content).context("Could not parse Codex credentials")

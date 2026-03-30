@@ -1483,7 +1483,9 @@ async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
     let api_key = std::env::var("OPENROUTER_API_KEY")
         .ok()
         .or_else(|| {
-            let config_path = dirs::config_dir()?.join("jcode").join("openrouter.env");
+            let config_path = crate::storage::app_config_dir()
+                .ok()?
+                .join("openrouter.env");
             crate::storage::harden_secret_file_permissions(&config_path);
             let content = std::fs::read_to_string(config_path).ok()?;
             content

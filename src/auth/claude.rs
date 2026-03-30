@@ -535,6 +535,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
 
 fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
     let path = claude_code_path()?;
+    crate::storage::harden_secret_file_permissions(&path);
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
 
@@ -555,6 +556,7 @@ fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
 
 pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
     let path = opencode_path()?;
+    crate::storage::harden_secret_file_permissions(&path);
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read OpenCode credentials from {:?}", path))?;
 
