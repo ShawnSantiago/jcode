@@ -22,8 +22,8 @@ mod ui;
 mod ui_diff;
 pub mod visual_debug;
 pub mod workspace_client;
-pub mod workspace_map;
-pub mod workspace_map_widget;
+pub use jcode_tui_workspace::workspace_map;
+pub use jcode_tui_workspace::workspace_map_widget;
 
 pub use app::{App, CopyBadgeUiState, DisplayMessage, ProcessingStatus, RunResult};
 

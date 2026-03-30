@@ -1,5 +1,5 @@
-use crate::tui::color_support::rgb;
-use crate::tui::workspace_map::{VisibleWorkspaceRow, WorkspaceSessionVisualState};
+use crate::color_support::rgb;
+use crate::workspace_map::{VisibleWorkspaceRow, WorkspaceSessionVisualState};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -201,7 +201,7 @@ fn tile_color(
 #[cfg(test)]
 mod tests {
     use super::{compute_workspace_tile_placements, render_workspace_map};
-    use crate::tui::workspace_map::{
+    use crate::workspace_map::{
         VisibleWorkspaceRow, WorkspaceSessionTile, WorkspaceSessionVisualState,
     };
     use ratatui::{buffer::Buffer, layout::Rect};

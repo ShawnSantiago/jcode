@@ -172,6 +172,20 @@ Start with the highest-leverage cache boundaries:
 - Reason: this creates another real provider-side compile boundary without forcing the `Provider` / `EventStream`
   seam prematurely.
 
+- 2026-03-30: moved the pure OpenAI tool-schema normalization helpers into
+  `crates/jcode-provider-core/src/openai_schema.rs`.
+- Boundary decision: move **pure schema adaptation / strict-normalization helpers** first, while keeping
+  `build_tools(...)` and request-history rewriting in `src/provider/openai_request.rs` because those still depend on
+  local tool/message types.
+- Reason: this creates another provider-side cache boundary now without prematurely pulling `Message`, `ToolDefinition`,
+  or the `Provider` trait into a shared crate.
+
+- 2026-03-30: moved the workspace-map subsystem into the new `crates/jcode-tui-workspace` crate.
+- Boundary decision: move **workspace map data/model + widget rendering** first, while keeping the surrounding
+  `info_widget`, app state, and higher-level TUI composition in the main crate.
+- Reason: this is a safe first `jcode-tui` foothold because the workspace map code is already mostly self-contained and
+  avoids the much riskier `App` / renderer / markdown / mermaid seams.
+
 ### Phase 5 — Reduce invalidation pressure
 
 - Continue shrinking giant hotspot files.
@@ -248,6 +262,7 @@ Current provider-boundary stance:
 - **Done:** `jcode-provider-core` for shared HTTP client plus route/cost/core provider value types.
 - **Done:** `jcode-provider-openrouter` for OpenRouter-specific catalog/cache/ranking/model-spec support.
 - **Done:** `jcode-provider-gemini` for Gemini Code Assist schema/types and pure model support helpers.
+- **Done:** `jcode-provider-core::openai_schema` for pure OpenAI schema adaptation / strict-normalization helpers.
 - **Not done yet:** `Provider` trait / `EventStream` extraction and fully standalone provider impl crates.
 - **Reason:** the trait side still depends on `message.rs`, auth flows, runtime behavior, and provider-specific
   streaming logic; the current staged split avoids turning that unstable seam into a low-value high-churn crate.
@@ -255,6 +270,13 @@ Current provider-boundary stance:
 That means the best next batch should likely target either:
 - a carefully designed trait seam, or
 - another provider implementation support split with similarly clean boundaries.
+
+Current TUI-boundary stance:
+
+- **Done:** `jcode-tui-workspace` for workspace-map model + widget rendering.
+- **Not done yet:** broader `jcode-tui` extraction for markdown, mermaid, info widgets, and the shared renderer.
+- **Reason:** the remaining high-value TUI files are larger but still more tightly coupled to `App`, config, images,
+  side-panel state, and rendering orchestration, so they need staged extraction rather than a rushed top-level split.
 
 ## Developer Workflow Guidance
 
