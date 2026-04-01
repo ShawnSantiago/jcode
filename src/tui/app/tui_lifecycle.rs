@@ -352,6 +352,7 @@ impl App {
             login_picker_overlay: None,
             account_picker_overlay: None,
             usage_overlay: None,
+            usage_report_refreshing: false,
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -623,6 +624,7 @@ impl App {
             login_picker_overlay: None,
             account_picker_overlay: None,
             usage_overlay: None,
+            usage_report_refreshing: false,
         };
 
         for notice in app.provider.drain_startup_notices() {

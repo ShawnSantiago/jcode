@@ -656,6 +656,8 @@ impl App {
         };
         use crate::tui::{ModelEntry, PickerKind, PickerSelection, PickerState, RouteOption};
 
+        self.usage_report_refreshing = false;
+
         #[derive(Clone)]
         struct UsageViewRow {
             id: String,

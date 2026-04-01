@@ -1192,6 +1192,7 @@ fn test_usage_command_opens_usage_picker_loading() {
     assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
     assert!(!picker.preview);
     assert_eq!(picker.models[0].name, "Refreshing usage");
+    assert!(app.usage_report_refreshing);
 }
 
 #[test]
@@ -1206,12 +1207,72 @@ fn test_usage_submit_input_opens_usage_picker_loading() {
     assert!(!picker.preview);
     assert_eq!(picker.models[0].name, "Refreshing usage");
     assert!(app.display_messages().is_empty());
+    assert!(app.usage_report_refreshing);
+}
+
+#[test]
+fn test_usage_preview_opens_loading_picker_and_preserves_input() {
+    let mut app = create_test_app();
+
+    for c in "/usage".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .expect("type /usage");
+    }
+
+    let picker = app
+        .picker_state
+        .as_ref()
+        .expect("usage preview should be open");
+    assert!(picker.preview);
+    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
+    assert_eq!(picker.models[0].name, "Refreshing usage");
+    assert_eq!(app.input(), "/usage");
+    assert!(app.usage_report_refreshing);
+}
+
+#[test]
+fn test_usage_preview_enter_opens_picker_not_overlay() {
+    let mut app = create_test_app();
+
+    for c in "/usage".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .expect("type /usage");
+    }
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("submit usage preview");
+
+    let picker = app
+        .picker_state
+        .as_ref()
+        .expect("usage picker should stay open after Enter");
+    assert!(!picker.preview);
+    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
+    assert!(app.usage_overlay.is_none());
+    assert_eq!(app.input(), "");
+    assert!(app.usage_report_refreshing);
+}
+
+#[test]
+fn test_usage_picker_esc_closes_and_input_recovers() {
+    let mut app = create_test_app();
+    assert!(super::commands::handle_usage_command(&mut app, "/usage"));
+    assert!(app.picker_state.is_some());
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty())
+        .expect("close usage picker");
+    assert!(app.picker_state.is_none());
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+        .expect("type after closing usage picker");
+    assert_eq!(app.input(), "h");
 }
 
 #[test]
 fn test_usage_report_updates_usage_picker_rows() {
     let mut app = create_test_app();
     app.open_usage_picker_loading();
+    app.usage_report_refreshing = true;
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
         provider_name: "OpenAI (ChatGPT)".to_string(),
         limits: vec![crate::usage::UsageLimit {
@@ -1225,6 +1286,7 @@ fn test_usage_report_updates_usage_picker_rows() {
 
     let picker = app.picker_state.as_ref().expect("missing usage picker");
     assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
+    assert!(!app.usage_report_refreshing);
     let entry = picker
         .models
         .iter()

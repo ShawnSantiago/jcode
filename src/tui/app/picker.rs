@@ -384,7 +384,10 @@ impl App {
             let saved_cursor = self.cursor_pos;
             match &request {
                 InlinePickerPreviewRequest::Model { .. } => self.open_model_picker(),
-                InlinePickerPreviewRequest::Usage { .. } => self.open_usage_picker_loading(),
+                InlinePickerPreviewRequest::Usage { .. } => {
+                    self.open_usage_picker_loading();
+                    self.request_usage_report();
+                }
                 InlinePickerPreviewRequest::Login { .. } => self.open_login_picker_inline(),
                 InlinePickerPreviewRequest::Account {
                     provider_filter, ..
@@ -1105,12 +1108,14 @@ impl App {
                         return Ok(true);
                     }
                     picker.preview = false;
-                    picker.column = if matches!(picker.kind, PickerKind::Account | PickerKind::Usage)
-                    {
-                        0
-                    } else {
-                        2
-                    };
+                    if picker.kind == PickerKind::Usage {
+                        picker.column = 0;
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                        self.request_usage_report();
+                        return Ok(true);
+                    }
+                    picker.column = if picker.kind == PickerKind::Account { 0 } else { 2 };
                 }
                 self.input.clear();
                 self.cursor_pos = 0;
