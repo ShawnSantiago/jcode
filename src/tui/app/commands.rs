@@ -2764,11 +2764,7 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    app.open_usage_picker_loading();
-    if let Some(ref mut picker) = app.picker_state {
-        picker.filter = rest.trim().to_string();
-        App::apply_picker_filter(picker);
-    }
+    app.set_status_notice("Usage → refreshing");
     app.request_usage_report();
     true
 }

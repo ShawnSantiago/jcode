@@ -1,8 +1,8 @@
 use super::*;
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, SessionPicker};
 use crate::tui::{
-    AccountPickerAction, AgentModelTarget, PickerEntry, PickerKind, PickerAction, PickerState,
-    PickerOption,
+    AccountPickerAction, AgentModelTarget, PickerAction, PickerEntry, PickerKind, PickerOption,
+    PickerState,
 };
 
 enum InlinePickerPreviewRequest {
@@ -58,9 +58,9 @@ impl InlinePickerPreviewRequest {
                 app.request_usage_report();
             }
             Self::Login { .. } => app.open_login_picker_inline(),
-            Self::Account { provider_filter, .. } => {
-                app.open_account_picker(provider_filter.as_deref())
-            }
+            Self::Account {
+                provider_filter, ..
+            } => app.open_account_picker(provider_filter.as_deref()),
         }
     }
 
@@ -73,7 +73,8 @@ impl InlinePickerPreviewRequest {
             return true;
         }
 
-        let desired_provider = app.inline_account_picker_provider_id(self.account_provider_filter());
+        let desired_provider =
+            app.inline_account_picker_provider_id(self.account_provider_filter());
         desired_provider.as_deref() == picker_account_provider_scope(picker)
     }
 }
@@ -81,9 +82,13 @@ impl InlinePickerPreviewRequest {
 fn picker_account_provider_scope(picker: &PickerState) -> Option<&str> {
     picker.entries.first().and_then(|entry| match entry.action {
         PickerAction::Account(
-            AccountPickerAction::Switch { ref provider_id, .. }
+            AccountPickerAction::Switch {
+                ref provider_id, ..
+            }
             | AccountPickerAction::Add { ref provider_id }
-            | AccountPickerAction::Replace { ref provider_id, .. },
+            | AccountPickerAction::Replace {
+                ref provider_id, ..
+            },
         ) => Some(provider_id.as_str()),
         PickerAction::Account(AccountPickerAction::OpenCenter {
             provider_filter: Some(ref provider_id),
@@ -270,7 +275,8 @@ impl App {
     }
 
     pub(super) fn usage_picker_preview_filter(input: &str) -> Option<String> {
-        slash_command_preview_filter(input, &["/usage"])
+        let _ = input;
+        None
     }
 
     fn account_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
@@ -361,10 +367,6 @@ impl App {
     fn inline_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
         Self::model_picker_preview_filter(input)
             .map(|filter| InlinePickerPreviewRequest::Model { filter })
-            .or_else(|| {
-                Self::usage_picker_preview_filter(input)
-                    .map(|filter| InlinePickerPreviewRequest::Usage { filter })
-            })
             .or_else(|| {
                 Self::login_picker_preview_filter(input)
                     .map(|filter| InlinePickerPreviewRequest::Login { filter })
@@ -1112,7 +1114,11 @@ impl App {
                         self.request_usage_report();
                         return Ok(true);
                     }
-                    picker.column = if picker.kind == PickerKind::Account { 0 } else { 2 };
+                    picker.column = if picker.kind == PickerKind::Account {
+                        0
+                    } else {
+                        2
+                    };
                 }
                 self.input.clear();
                 self.cursor_pos = 0;
@@ -1878,12 +1884,10 @@ impl App {
                                 if m.is_current { "active" } else { "saved" }
                             }
                             PickerAction::Account(AccountPickerAction::Add { .. }) => "add",
-                            PickerAction::Account(AccountPickerAction::Replace {
-                                ..
-                            }) => "replace",
-                            PickerAction::Account(AccountPickerAction::OpenCenter {
-                                ..
-                            }) => "manage",
+                            PickerAction::Account(AccountPickerAction::Replace { .. }) => "replace",
+                            PickerAction::Account(AccountPickerAction::OpenCenter { .. }) => {
+                                "manage"
+                            }
                             PickerAction::Model
                             | PickerAction::Usage { .. }
                             | PickerAction::Login(_)

@@ -1148,69 +1148,49 @@ fn test_subscription_command_shows_jcode_status_scaffold() {
 
 #[test]
 fn test_usage_report_shows_no_connected_providers_when_results_empty() {
-    let _guard = crate::storage::lock_test_env();
-    crate::subscription_catalog::clear_runtime_env();
-    crate::subscription_catalog::apply_runtime_env();
-
     let mut app = create_test_app();
-    app.open_usage_overlay_loading();
     app.handle_usage_report(Vec::new());
 
-    let overlay = app
-        .usage_overlay
-        .as_ref()
-        .expect("missing /usage overlay")
-        .borrow();
-    assert_eq!(overlay.selected_item_title(), Some("No connected providers"));
-    let detail = overlay.selected_item_detail_text();
-    assert!(detail.contains("No connected providers"));
-    assert!(detail.contains("Use `/login openai`"));
-
-    crate::subscription_catalog::clear_runtime_env();
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing /usage response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("## Usage"));
+    assert!(
+        msg.content
+            .contains("No providers with OAuth credentials found")
+    );
+    assert!(msg.content.contains("/login claude"));
+    assert!(msg.content.contains("/login openai"));
 }
 
 #[test]
-fn test_usage_overlay_esc_closes_modal() {
-    let mut app = create_test_app();
-    app.open_usage_overlay_loading();
-    assert!(app.usage_overlay.is_some());
-
-    app.handle_key(KeyCode::Esc, KeyModifiers::empty())
-        .expect("close usage overlay");
-
-    assert!(app.usage_overlay.is_none());
-}
-
-#[test]
-fn test_usage_command_opens_usage_picker_loading() {
+fn test_usage_command_requests_usage_report_without_picker() {
     let mut app = create_test_app();
 
     assert!(super::commands::handle_usage_command(&mut app, "/usage"));
 
-    let picker = app.picker_state.as_ref().expect("missing usage picker");
-    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
-    assert!(!picker.preview);
-    assert_eq!(picker.entries[0].name, "Refreshing usage");
+    assert!(app.picker_state.is_none());
+    assert!(app.usage_overlay.is_none());
     assert!(app.usage_report_refreshing);
 }
 
 #[test]
-fn test_usage_submit_input_opens_usage_picker_loading() {
+fn test_usage_submit_input_requests_usage_report_without_picker() {
     let mut app = create_test_app();
     app.input = "/usage".to_string();
 
     app.submit_input();
 
-    let picker = app.picker_state.as_ref().expect("missing usage picker");
-    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
-    assert!(!picker.preview);
-    assert_eq!(picker.entries[0].name, "Refreshing usage");
+    assert!(app.picker_state.is_none());
+    assert!(app.usage_overlay.is_none());
     assert!(app.display_messages().is_empty());
     assert!(app.usage_report_refreshing);
 }
 
 #[test]
-fn test_usage_preview_opens_loading_picker_and_preserves_input() {
+fn test_usage_typing_does_not_open_picker_preview() {
     let mut app = create_test_app();
 
     for c in "/usage".chars() {
@@ -1218,19 +1198,13 @@ fn test_usage_preview_opens_loading_picker_and_preserves_input() {
             .expect("type /usage");
     }
 
-    let picker = app
-        .picker_state
-        .as_ref()
-        .expect("usage preview should be open");
-    assert!(picker.preview);
-    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
-    assert_eq!(picker.entries[0].name, "Refreshing usage");
+    assert!(app.picker_state.is_none());
     assert_eq!(app.input(), "/usage");
-    assert!(app.usage_report_refreshing);
+    assert!(!app.usage_report_refreshing);
 }
 
 #[test]
-fn test_usage_preview_enter_opens_picker_not_overlay() {
+fn test_usage_enter_requests_report_without_opening_picker() {
     let mut app = create_test_app();
 
     for c in "/usage".chars() {
@@ -1239,38 +1213,17 @@ fn test_usage_preview_enter_opens_picker_not_overlay() {
     }
 
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .expect("submit usage preview");
+        .expect("submit /usage");
 
-    let picker = app
-        .picker_state
-        .as_ref()
-        .expect("usage picker should stay open after Enter");
-    assert!(!picker.preview);
-    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
+    assert!(app.picker_state.is_none());
     assert!(app.usage_overlay.is_none());
     assert_eq!(app.input(), "");
     assert!(app.usage_report_refreshing);
 }
 
 #[test]
-fn test_usage_picker_esc_closes_and_input_recovers() {
+fn test_usage_report_pushes_system_message() {
     let mut app = create_test_app();
-    assert!(super::commands::handle_usage_command(&mut app, "/usage"));
-    assert!(app.picker_state.is_some());
-
-    app.handle_key(KeyCode::Esc, KeyModifiers::empty())
-        .expect("close usage picker");
-    assert!(app.picker_state.is_none());
-
-    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
-        .expect("type after closing usage picker");
-    assert_eq!(app.input(), "h");
-}
-
-#[test]
-fn test_usage_report_updates_usage_picker_rows() {
-    let mut app = create_test_app();
-    app.open_usage_picker_loading();
     app.usage_report_refreshing = true;
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
         provider_name: "OpenAI (ChatGPT)".to_string(),
@@ -1283,21 +1236,21 @@ fn test_usage_report_updates_usage_picker_rows() {
         error: None,
     }]);
 
-    let picker = app.picker_state.as_ref().expect("missing usage picker");
-    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
     assert!(!app.usage_report_refreshing);
-    let entry = picker
-        .entries
-        .iter()
-        .find(|entry| entry.name == "OpenAI (ChatGPT)")
-        .expect("missing OpenAI usage row");
-    assert!(entry.options[0].api_method.contains("5h 82%"));
-    assert!(entry.options[0].detail.contains("82%"));
-    assert!(entry.options[0].detail.contains("plan pro"));
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing usage report message");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("## Usage"));
+    assert!(msg.content.contains("### OpenAI (ChatGPT)"));
+    assert!(msg.content.contains("**5h**"));
+    assert!(msg.content.contains("82%"));
+    assert!(msg.content.contains("plan: pro"));
 }
 
 #[test]
-fn test_usage_picker_preview_stays_open_and_updates_filter() {
+fn test_usage_with_suffix_does_not_open_picker_preview() {
     let mut app = create_test_app();
 
     for c in "/usage open".chars() {
@@ -1305,28 +1258,7 @@ fn test_usage_picker_preview_stays_open_and_updates_filter() {
             .unwrap();
     }
 
-    app.handle_usage_report(vec![crate::usage::ProviderUsage {
-        provider_name: "OpenAI (ChatGPT)".to_string(),
-        limits: vec![crate::usage::UsageLimit {
-            name: "7d".to_string(),
-            usage_percent: 35.0,
-            resets_at: None,
-        }],
-        extra_info: Vec::new(),
-        error: None,
-    }]);
-
-    let picker = app
-        .picker_state
-        .as_ref()
-        .expect("usage picker preview should be open");
-    assert!(picker.preview);
-    assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
-    assert_eq!(picker.filter, "open");
-    assert!(picker
-        .filtered
-        .iter()
-        .any(|&i| picker.entries[i].name == "OpenAI (ChatGPT)"));
+    assert!(app.picker_state.is_none());
     assert_eq!(app.input(), "/usage open");
 }
 

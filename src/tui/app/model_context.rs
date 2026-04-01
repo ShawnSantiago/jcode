@@ -651,307 +651,72 @@ impl App {
     }
 
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
-        use crate::tui::usage_overlay::{
-            UsageOverlay, UsageOverlayItem, UsageOverlayStatus, UsageOverlaySummary,
-        };
-        use crate::tui::{PickerEntry, PickerKind, PickerAction, PickerState, PickerOption};
-
         self.usage_report_refreshing = false;
-
-        #[derive(Clone)]
-        struct UsageViewRow {
-            id: String,
-            title: String,
-            subtitle: String,
-            status: UsageOverlayStatus,
-            window_summary: String,
-            detail_lines: Vec<String>,
-        }
-
-        impl UsageViewRow {
-            fn overlay_item(&self) -> UsageOverlayItem {
-                UsageOverlayItem::new(
-                    self.id.clone(),
-                    self.title.clone(),
-                    self.subtitle.clone(),
-                    self.status,
-                    self.detail_lines.clone(),
-                )
-            }
-
-            fn picker_entry(&self) -> PickerEntry {
-                PickerEntry {
-                    name: self.title.clone(),
-                    options: vec![PickerOption {
-                        provider: status_label(self.status).to_string(),
-                        api_method: self.window_summary.clone(),
-                        available: true,
-                        detail: self.subtitle.clone(),
-                        estimated_reference_cost_micros: None,
-                    }],
-                    action: PickerAction::Usage {
-                        id: self.id.clone(),
-                        title: self.title.clone(),
-                        subtitle: self.subtitle.clone(),
-                        status: self.status,
-                        detail_lines: self.detail_lines.clone(),
-                    },
-                    selected_option: 0,
-                    is_current: false,
-                    is_default: false,
-                    recommended: false,
-                    recommendation_rank: usize::MAX,
-                    old: false,
-                    created_date: None,
-                    effort: None,
-                }
-            }
-        }
-
-        fn format_token_count(tokens: u64) -> String {
-            if tokens >= 1_000_000 {
-                format!("{:.1}M", tokens as f64 / 1_000_000.0)
-            } else if tokens >= 1_000 {
-                format!("{:.1}k", tokens as f64 / 1_000.0)
-            } else {
-                tokens.to_string()
-            }
-        }
-
-        fn provider_status(provider: &crate::usage::ProviderUsage) -> UsageOverlayStatus {
-            if provider.error.is_some() {
-                return UsageOverlayStatus::Error;
-            }
-
-            let highest = provider
-                .limits
-                .iter()
-                .map(|limit| limit.usage_percent)
-                .fold(0.0_f32, f32::max);
-
-            if highest >= 95.0 {
-                UsageOverlayStatus::Critical
-            } else if highest >= 80.0 {
-                UsageOverlayStatus::Warning
-            } else if provider.limits.is_empty() && provider.extra_info.is_empty() {
-                UsageOverlayStatus::Info
-            } else {
-                UsageOverlayStatus::Good
-            }
-        }
-
-        fn status_label(status: UsageOverlayStatus) -> &'static str {
-            match status {
-                UsageOverlayStatus::Loading => "loading",
-                UsageOverlayStatus::Good => "healthy",
-                UsageOverlayStatus::Warning => "watch",
-                UsageOverlayStatus::Critical => "high",
-                UsageOverlayStatus::Error => "error",
-                UsageOverlayStatus::Info => "info",
-            }
-        }
-
-        fn compact_limit_summary(limit: &crate::usage::UsageLimit) -> String {
-            let reset = limit
-                .resets_at
-                .as_deref()
-                .map(crate::usage::format_reset_time)
-                .map(|relative| format!(" · resets {}", relative))
-                .unwrap_or_default();
-            format!(
-                "{} {}{}",
-                limit.name,
-                crate::usage::format_usage_bar(limit.usage_percent, 8),
-                reset
-            )
-        }
-
-        fn compact_extra_info(provider: &crate::usage::ProviderUsage) -> Vec<String> {
-            provider
-                .extra_info
-                .iter()
-                .take(2)
-                .map(|(key, value)| format!("{} {}", key, value))
-                .collect()
-        }
-
-        let existing_usage_picker = self.picker_state.as_ref().and_then(|picker| {
-            (picker.kind == PickerKind::Usage).then(|| {
-                let selected_id = picker.filtered.get(picker.selected).and_then(|idx| {
-                    picker.entries.get(*idx).and_then(|entry| match &entry.action {
-                        PickerAction::Usage { id, .. } => Some(id.clone()),
-                        _ => None,
-                    })
-                });
-                (
-                    picker.preview,
-                    picker.filter.clone(),
-                    picker.column,
-                    selected_id,
-                )
-            })
-        });
-
-        let mut rows = Vec::new();
-        let mut summary = UsageOverlaySummary::default();
-
-        for provider in &results {
-            let status = provider_status(provider);
-            summary.provider_count += 1;
-            match status {
-                UsageOverlayStatus::Warning => summary.warning_count += 1,
-                UsageOverlayStatus::Critical => summary.critical_count += 1,
-                UsageOverlayStatus::Error => summary.error_count += 1,
-                _ => {}
-            }
-
-            let highest_limit = provider
-                .limits
-                .iter()
-                .max_by(|left, right| left.usage_percent.total_cmp(&right.usage_percent));
-
-            let compact_limits = provider
-                .limits
-                .iter()
-                .map(compact_limit_summary)
-                .collect::<Vec<_>>();
-            let compact_extra = compact_extra_info(provider);
-
-            let subtitle = if let Some(err) = &provider.error {
-                crate::util::truncate_str(err, 96).to_string()
-            } else {
-                let mut parts = Vec::new();
-                parts.extend(compact_limits.iter().cloned());
-                parts.extend(compact_extra.iter().cloned());
-                if parts.is_empty() {
-                    "No usage data returned".to_string()
-                } else {
-                    crate::util::truncate_str(&parts.join(" · "), 120).to_string()
-                }
-            };
-
-            let mut detail_lines = vec![format!("## {}", provider.provider_name)];
-            if let Some(err) = &provider.error {
-                detail_lines.push(format!("• {}", err));
-            } else {
-                if provider.limits.is_empty() && provider.extra_info.is_empty() {
-                    detail_lines.push("• No usage data available.".to_string());
-                }
-
-                if !provider.limits.is_empty() {
-                    detail_lines.push("".to_string());
-                    detail_lines.push("## Usage windows".to_string());
-                    for limit in &provider.limits {
-                        let reset_info = limit
-                            .resets_at
-                            .as_deref()
-                            .map(crate::usage::format_reset_time)
-                            .map(|relative| format!(" · resets in {}", relative))
-                            .unwrap_or_default();
-                        detail_lines.push(format!(
-                            "• {}: {}{}",
-                            limit.name,
-                            crate::usage::format_usage_bar(limit.usage_percent, 15),
-                            reset_info
-                        ));
-                    }
-                }
-
-                if !provider.extra_info.is_empty() {
-                    detail_lines.push("".to_string());
-                    detail_lines.push("## Details".to_string());
-                    for (key, value) in &provider.extra_info {
-                        detail_lines.push(format!("• {}: {}", key, value));
-                    }
-                }
-            }
-
-            rows.push(UsageViewRow {
-                id: provider.provider_name.to_lowercase(),
-                title: provider.provider_name.clone(),
-                subtitle,
-                status,
-                window_summary: if let Some(limit) = highest_limit {
-                    format!("{} {:.0}%", limit.name, limit.usage_percent)
-                } else if provider.error.is_some() {
-                    "error".to_string()
-                } else if !provider.extra_info.is_empty() {
-                    compact_extra
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| format!("{} info", provider.extra_info.len()))
-                } else {
-                    "setup".to_string()
-                },
-                detail_lines,
-            });
+        self.usage_overlay = None;
+        if self
+            .picker_state
+            .as_ref()
+            .map(|picker| picker.kind == crate::tui::PickerKind::Usage)
+            .unwrap_or(false)
+        {
+            self.picker_state = None;
         }
 
         if results.is_empty() {
-            rows.push(UsageViewRow {
-                id: "setup".to_string(),
-                title: "No connected providers".to_string(),
-                subtitle: "Add Claude or OpenAI OAuth to inspect connected-provider usage"
+            self.push_display_message(DisplayMessage::system(
+                "## Usage\n\nNo providers with OAuth credentials found.\n\nUse `/login claude` or `/login openai` to connect a provider, then run `/usage` again."
                     .to_string(),
-                status: UsageOverlayStatus::Info,
-                window_summary: "setup".to_string(),
-                detail_lines: vec![
-                    "## No connected providers".to_string(),
-                    "No providers with OAuth credentials found.".to_string(),
-                    "".to_string(),
-                    "## Next steps".to_string(),
-                    "• Use `/login claude` to connect Claude OAuth.".to_string(),
-                    "• Use `/login openai` to connect ChatGPT / Codex OAuth.".to_string(),
-                ],
-            });
+            ));
+            self.set_status_notice("Usage → no connected providers");
+            return;
         }
 
-        let overlay_items = rows.iter().map(UsageViewRow::overlay_item).collect::<Vec<_>>();
-        let picker_models = rows.iter().map(UsageViewRow::picker_entry).collect::<Vec<_>>();
+        let mut output = String::from("## Usage\n\n");
 
-        let mut updated_ui = false;
-
-        if self.usage_overlay.is_some() {
-            self.usage_overlay = Some(std::cell::RefCell::new(UsageOverlay::new(
-                "Usage",
-                overlay_items,
-                summary.clone(),
-            )));
-            updated_ui = true;
-        }
-
-        if let Some((preview, filter, column, selected_id)) = existing_usage_picker {
-            let mut picker = PickerState {
-                kind: PickerKind::Usage,
-                filtered: Vec::new(),
-                entries: picker_models,
-                selected: 0,
-                column: column.min(2),
-                filter,
-                preview,
-            };
-            Self::apply_picker_filter(&mut picker);
-            if let Some(selected_id) = selected_id {
-                if let Some(position) = picker.filtered.iter().position(|idx| {
-                    picker
-                        .entries
-                        .get(*idx)
-                        .and_then(|entry| match &entry.action {
-                            PickerAction::Usage { id, .. } => Some(id == &selected_id),
-                            _ => None,
-                        })
-                        .unwrap_or(false)
-                }) {
-                    picker.selected = position;
-                }
+        for (i, provider) in results.iter().enumerate() {
+            if i > 0 {
+                output.push_str("---\n\n");
             }
-            self.picker_state = Some(picker);
-            updated_ui = true;
+
+            output.push_str(&format!("### {}\n\n", provider.provider_name));
+
+            if let Some(err) = &provider.error {
+                output.push_str(&format!("⚠ {}\n", err));
+                if i + 1 < results.len() {
+                    output.push('\n');
+                }
+                continue;
+            }
+
+            if provider.limits.is_empty() && provider.extra_info.is_empty() {
+                output.push_str("No usage data available.\n\n");
+                continue;
+            }
+
+            for limit in &provider.limits {
+                let reset_info = limit
+                    .resets_at
+                    .as_deref()
+                    .map(crate::usage::format_reset_time)
+                    .map(|relative| format!(" (resets in {})", relative))
+                    .unwrap_or_default();
+                output.push_str(&format!(
+                    "- **{}**: {}{}\n",
+                    limit.name,
+                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    reset_info
+                ));
+            }
+
+            for (key, value) in &provider.extra_info {
+                output.push_str(&format!("- {}: {}\n", key, value));
+            }
+
+            output.push('\n');
         }
 
-        if updated_ui {
-            self.set_status_notice("Usage → updated");
-        }
+        self.push_display_message(DisplayMessage::system(output));
+        self.set_status_notice("Usage → updated");
     }
 
     pub(super) fn run_fix_command(&mut self) {
