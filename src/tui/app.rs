@@ -441,8 +441,8 @@ pub struct App {
     remote_service_tier: Option<String>,
     remote_transport: Option<String>,
     remote_compaction_mode: Option<crate::config::CompactionMode>,
-    remote_available_models: Vec<String>,
-    remote_model_routes: Vec<crate::provider::ModelRoute>,
+    remote_available_entries: Vec<String>,
+    remote_model_options: Vec<crate::provider::ModelRoute>,
     // Remote MCP servers and skills (set from server in remote mode)
     remote_mcp_servers: Vec<String>,
     remote_skills: Vec<String>,
@@ -568,7 +568,7 @@ pub struct App {
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
-    pending_account_picker_selection: Option<crate::tui::AccountPickerSelection>,
+    pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching

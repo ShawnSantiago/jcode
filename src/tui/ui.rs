@@ -4040,7 +4040,7 @@ mod tests {
 
         let picker_state = crate::tui::PickerState {
             kind: crate::tui::PickerKind::Model,
-            models: vec![],
+            entries: vec![],
             filtered: vec![],
             selected: 0,
             column: 0,

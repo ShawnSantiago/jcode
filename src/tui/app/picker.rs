@@ -1,8 +1,8 @@
 use super::*;
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, SessionPicker};
 use crate::tui::{
-    AccountPickerSelection, AgentModelTarget, ModelEntry, PickerKind, PickerSelection, PickerState,
-    RouteOption,
+    AccountPickerAction, AgentModelTarget, PickerEntry, PickerKind, PickerAction, PickerState,
+    PickerOption,
 };
 
 enum InlinePickerPreviewRequest {
@@ -19,6 +19,104 @@ enum InlinePickerPreviewRequest {
         provider_filter: Option<String>,
         filter: String,
     },
+}
+
+impl InlinePickerPreviewRequest {
+    fn kind(&self) -> PickerKind {
+        match self {
+            Self::Model { .. } => PickerKind::Model,
+            Self::Login { .. } => PickerKind::Login,
+            Self::Usage { .. } => PickerKind::Usage,
+            Self::Account { .. } => PickerKind::Account,
+        }
+    }
+
+    fn filter(&self) -> &str {
+        match self {
+            Self::Model { filter }
+            | Self::Login { filter }
+            | Self::Usage { filter }
+            | Self::Account { filter, .. } => filter,
+        }
+    }
+
+    fn account_provider_filter(&self) -> Option<&str> {
+        match self {
+            Self::Account {
+                provider_filter: Some(provider_filter),
+                ..
+            } => Some(provider_filter.as_str()),
+            _ => None,
+        }
+    }
+
+    fn open(&self, app: &mut App) {
+        match self {
+            Self::Model { .. } => app.open_model_picker(),
+            Self::Usage { .. } => {
+                app.open_usage_picker_loading();
+                app.request_usage_report();
+            }
+            Self::Login { .. } => app.open_login_picker_inline(),
+            Self::Account { provider_filter, .. } => {
+                app.open_account_picker(provider_filter.as_deref())
+            }
+        }
+    }
+
+    fn matches_picker(&self, app: &App, picker: &PickerState) -> bool {
+        if !picker.preview || picker.kind != self.kind() {
+            return false;
+        }
+
+        if self.kind() != PickerKind::Account {
+            return true;
+        }
+
+        let desired_provider = app.inline_account_picker_provider_id(self.account_provider_filter());
+        desired_provider.as_deref() == picker_account_provider_scope(picker)
+    }
+}
+
+fn picker_account_provider_scope(picker: &PickerState) -> Option<&str> {
+    picker.entries.first().and_then(|entry| match entry.action {
+        PickerAction::Account(
+            AccountPickerAction::Switch { ref provider_id, .. }
+            | AccountPickerAction::Add { ref provider_id }
+            | AccountPickerAction::Replace { ref provider_id, .. },
+        ) => Some(provider_id.as_str()),
+        PickerAction::Account(AccountPickerAction::OpenCenter {
+            provider_filter: Some(ref provider_id),
+        }) => Some(provider_id.as_str()),
+        PickerAction::Account(AccountPickerAction::OpenCenter {
+            provider_filter: None,
+        })
+        | PickerAction::Model
+        | PickerAction::Login(_)
+        | PickerAction::Usage { .. }
+        | PickerAction::AgentTarget(_)
+        | PickerAction::AgentModelChoice { .. } => None,
+    })
+}
+
+fn slash_command_preview_filter(input: &str, commands: &[&str]) -> Option<String> {
+    let trimmed = input.trim_start();
+    for command in commands {
+        if let Some(rest) = trimmed.strip_prefix(command) {
+            if rest.is_empty() {
+                return Some(String::new());
+            }
+            if rest
+                .chars()
+                .next()
+                .map(|ch| ch.is_whitespace())
+                .unwrap_or(false)
+            {
+                return Some(rest.trim_start().to_string());
+            }
+        }
+    }
+    None
 }
 
 fn catchup_candidates(current_session_id: &str) -> Vec<crate::tui::session_picker::SessionInfo> {
@@ -106,7 +204,7 @@ fn save_agent_model_override(target: AgentModelTarget, model: Option<&str>) -> a
     cfg.save()
 }
 
-fn model_entry_base_name(entry: &ModelEntry) -> String {
+fn model_entry_base_name(entry: &PickerEntry) -> String {
     if entry.effort.is_some() {
         entry
             .name
@@ -118,9 +216,9 @@ fn model_entry_base_name(entry: &ModelEntry) -> String {
     }
 }
 
-fn model_entry_saved_spec(entry: &ModelEntry) -> String {
+fn model_entry_saved_spec(entry: &PickerEntry) -> String {
     let bare_name = model_entry_base_name(entry);
-    let route = entry.routes.get(entry.selected_route);
+    let route = entry.options.get(entry.selected_option);
     if let Some(route) = route {
         if route.api_method == "copilot" {
             format!("copilot:{}", bare_name)
@@ -164,57 +262,15 @@ fn agent_model_default_summary(target: AgentModelTarget, app: &App) -> String {
 
 impl App {
     pub(super) fn model_picker_preview_filter(input: &str) -> Option<String> {
-        let trimmed = input.trim_start();
-        for cmd in ["/model", "/models"] {
-            if let Some(rest) = trimmed.strip_prefix(cmd) {
-                if rest.is_empty() {
-                    return Some(String::new());
-                }
-                if rest
-                    .chars()
-                    .next()
-                    .map(|c| c.is_whitespace())
-                    .unwrap_or(false)
-                {
-                    return Some(rest.trim_start().to_string());
-                }
-            }
-        }
-        None
+        slash_command_preview_filter(input, &["/model", "/models"])
     }
 
     pub(super) fn login_picker_preview_filter(input: &str) -> Option<String> {
-        let trimmed = input.trim_start();
-        let rest = trimmed.strip_prefix("/login")?;
-        if rest.is_empty() {
-            return Some(String::new());
-        }
-        if rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-        {
-            return Some(rest.trim_start().to_string());
-        }
-        None
+        slash_command_preview_filter(input, &["/login"])
     }
 
     pub(super) fn usage_picker_preview_filter(input: &str) -> Option<String> {
-        let trimmed = input.trim_start();
-        let rest = trimmed.strip_prefix("/usage")?;
-        if rest.is_empty() {
-            return Some(String::new());
-        }
-        if rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-        {
-            return Some(rest.trim_start().to_string());
-        }
-        None
+        slash_command_preview_filter(input, &["/usage"])
     }
 
     fn account_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
@@ -329,70 +385,16 @@ impl App {
             return;
         };
 
-        let should_open = match (&request, self.picker_state.as_ref()) {
-            (_, None) => true,
-            (InlinePickerPreviewRequest::Model { .. }, Some(picker)) => {
-                picker.preview && picker.kind != PickerKind::Model
-            }
-            (InlinePickerPreviewRequest::Usage { .. }, Some(picker)) => {
-                !picker.preview || picker.kind != PickerKind::Usage
-            }
-            (InlinePickerPreviewRequest::Login { .. }, Some(picker)) => {
-                !picker.preview || picker.kind != PickerKind::Login
-            }
-            (
-                InlinePickerPreviewRequest::Account {
-                    provider_filter, ..
-                },
-                Some(picker),
-            ) => {
-                let desired_provider =
-                    self.inline_account_picker_provider_id(provider_filter.as_deref());
-                !picker.preview
-                    || picker.kind != PickerKind::Account
-                    || desired_provider.as_deref()
-                        != picker
-                            .models
-                            .first()
-                            .and_then(|entry| match entry.selection {
-                                PickerSelection::Account(
-                                    AccountPickerSelection::Switch {
-                                        ref provider_id, ..
-                                    }
-                                    | AccountPickerSelection::Add { ref provider_id }
-                                    | AccountPickerSelection::Replace {
-                                        ref provider_id, ..
-                                    },
-                                ) => Some(provider_id.as_str()),
-                                PickerSelection::Account(AccountPickerSelection::OpenCenter {
-                                    provider_filter: Some(ref provider_id),
-                                }) => Some(provider_id.as_str()),
-                                PickerSelection::Model
-                                | PickerSelection::Login(_)
-                                | PickerSelection::Usage { .. }
-                                | PickerSelection::AgentTarget(_)
-                                | PickerSelection::AgentModelChoice { .. } => None,
-                                PickerSelection::Account(AccountPickerSelection::OpenCenter {
-                                    provider_filter: None,
-                                }) => None,
-                            })
-            }
-        };
+        let should_open = self
+            .picker_state
+            .as_ref()
+            .map(|picker| !request.matches_picker(self, picker))
+            .unwrap_or(true);
 
         if should_open {
             let saved_input = self.input.clone();
             let saved_cursor = self.cursor_pos;
-            match &request {
-                InlinePickerPreviewRequest::Model { .. } => self.open_model_picker(),
-                InlinePickerPreviewRequest::Usage { .. } => {
-                    self.open_usage_picker_loading();
-                    self.request_usage_report();
-                }
-                InlinePickerPreviewRequest::Login { .. } => self.open_login_picker_inline(),
-                InlinePickerPreviewRequest::Account {
-                    provider_filter, ..
-                } => self.open_account_picker(provider_filter.as_deref()),
-            }
+            request.open(self);
             if let Some(ref mut picker) = self.picker_state {
                 picker.preview = true;
             }
@@ -403,12 +405,7 @@ impl App {
 
         if let Some(ref mut picker) = self.picker_state {
             if picker.preview {
-                picker.filter = match request {
-                    InlinePickerPreviewRequest::Model { filter }
-                    | InlinePickerPreviewRequest::Usage { filter }
-                    | InlinePickerPreviewRequest::Login { filter }
-                    | InlinePickerPreviewRequest::Account { filter, .. } => filter,
-                };
+                picker.filter = request.filter().to_string();
                 Self::apply_picker_filter(picker);
             }
         }
@@ -460,17 +457,17 @@ impl App {
             let summary = configured
                 .clone()
                 .unwrap_or_else(|| agent_model_default_summary(target, self));
-            ModelEntry {
+            PickerEntry {
                 name: agent_model_target_label(target).to_string(),
-                routes: vec![RouteOption {
+                options: vec![PickerOption {
                     provider: summary,
                     api_method: agent_model_target_config_path(target).to_string(),
                     available: true,
                     detail: format!("/agents {}", agent_model_target_slug(target)),
                     estimated_reference_cost_micros: None,
                 }],
-                selection: PickerSelection::AgentTarget(target),
-                selected_route: 0,
+                action: PickerAction::AgentTarget(target),
+                selected_option: 0,
                 is_current: false,
                 is_default: configured.is_some(),
                 recommended: false,
@@ -485,7 +482,7 @@ impl App {
         self.picker_state = Some(PickerState {
             kind: PickerKind::Model,
             filtered: (0..5).collect(),
-            models,
+            entries: models,
             selected: 0,
             column: 0,
             filter: String::new(),
@@ -508,17 +505,17 @@ impl App {
                     crate::auth::AuthState::NotConfigured => "setup",
                 };
                 let method_detail = status.method_detail_for_provider(provider);
-                ModelEntry {
+                PickerEntry {
                     name: provider.display_name.to_string(),
-                    routes: vec![RouteOption {
+                    options: vec![PickerOption {
                         provider: provider.auth_kind.label().to_string(),
                         api_method: state_label.to_string(),
                         available: true,
                         detail: format!("{} · {}", method_detail, provider.menu_detail),
                         estimated_reference_cost_micros: None,
                     }],
-                    selection: PickerSelection::Login(provider),
-                    selected_route: 0,
+                    action: PickerAction::Login(provider),
+                    selected_option: 0,
                     is_current: auth_state == crate::auth::AuthState::Available,
                     is_default: false,
                     recommended: provider.recommended,
@@ -533,7 +530,7 @@ impl App {
         self.picker_state = Some(PickerState {
             kind: PickerKind::Login,
             filtered: (0..models.len()).collect(),
-            models,
+            entries: models,
             selected: 0,
             column: 0,
             filter: String::new(),
@@ -550,7 +547,7 @@ impl App {
 
         if let Some(ref mut picker) = self.picker_state {
             if target == AgentModelTarget::Memory {
-                picker.models.retain(|entry| {
+                picker.entries.retain(|entry| {
                     matches!(
                         crate::provider::provider_for_model(&model_entry_base_name(entry)),
                         Some("openai" | "claude")
@@ -558,12 +555,12 @@ impl App {
                 });
             }
 
-            for entry in &mut picker.models {
+            for entry in &mut picker.entries {
                 let matches_saved = configured.as_deref().map(|saved| {
                     let base = model_entry_base_name(entry);
                     model_entry_saved_spec(entry) == saved || base == saved
                 }) == Some(true);
-                entry.selection = PickerSelection::AgentModelChoice {
+                entry.action = PickerAction::AgentModelChoice {
                     target,
                     clear_override: false,
                 };
@@ -572,26 +569,26 @@ impl App {
             }
 
             if let Some(saved) = configured.as_deref() {
-                let already_present = picker.models.iter().any(|entry| {
+                let already_present = picker.entries.iter().any(|entry| {
                     model_entry_saved_spec(entry) == saved || model_entry_base_name(entry) == saved
                 });
                 if !already_present {
-                    picker.models.insert(
+                    picker.entries.insert(
                         0,
-                        ModelEntry {
+                        PickerEntry {
                             name: saved.to_string(),
-                            routes: vec![RouteOption {
+                            options: vec![PickerOption {
                                 provider: "saved override".to_string(),
                                 api_method: agent_model_target_config_path(target).to_string(),
                                 available: true,
                                 detail: "not in current picker catalog".to_string(),
                                 estimated_reference_cost_micros: None,
                             }],
-                            selection: PickerSelection::AgentModelChoice {
+                            action: PickerAction::AgentModelChoice {
                                 target,
                                 clear_override: false,
                             },
-                            selected_route: 0,
+                            selected_option: 0,
                             is_current: true,
                             is_default: false,
                             recommended: false,
@@ -604,22 +601,22 @@ impl App {
                 }
             }
 
-            picker.models.insert(
+            picker.entries.insert(
                 0,
-                ModelEntry {
+                PickerEntry {
                     name: format!("inherit ({})", inherit_summary),
-                    routes: vec![RouteOption {
+                    options: vec![PickerOption {
                         provider: "default".to_string(),
                         api_method: agent_model_target_config_path(target).to_string(),
                         available: true,
                         detail: "clear saved override".to_string(),
                         estimated_reference_cost_micros: None,
                     }],
-                    selection: PickerSelection::AgentModelChoice {
+                    action: PickerAction::AgentModelChoice {
                         target,
                         clear_override: true,
                     },
-                    selected_route: 0,
+                    selected_option: 0,
                     is_current: configured.is_none(),
                     is_default: false,
                     recommended: false,
@@ -630,9 +627,9 @@ impl App {
                 },
             );
 
-            picker.filtered = (0..picker.models.len()).collect();
+            picker.filtered = (0..picker.entries.len()).collect();
             picker.selected = picker
-                .models
+                .entries
                 .iter()
                 .position(|entry| entry.is_current)
                 .unwrap_or(0);
@@ -668,8 +665,8 @@ impl App {
         };
 
         let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
-            if !self.remote_model_routes.is_empty() {
-                self.remote_model_routes.clone()
+            if !self.remote_model_options.is_empty() {
+                self.remote_model_options.clone()
             } else {
                 self.build_remote_model_routes_fallback()
             }
@@ -699,15 +696,15 @@ impl App {
         }
 
         let mut model_order: Vec<String> = Vec::new();
-        let mut model_routes: BTreeMap<String, Vec<RouteOption>> = BTreeMap::new();
+        let mut model_options: BTreeMap<String, Vec<PickerOption>> = BTreeMap::new();
         for r in &routes {
-            if !model_routes.contains_key(&r.model) {
+            if !model_options.contains_key(&r.model) {
                 model_order.push(r.model.clone());
             }
-            model_routes
+            model_options
                 .entry(r.model.clone())
                 .or_default()
-                .push(RouteOption {
+                .push(PickerOption {
                     provider: r.provider.clone(),
                     api_method: r.api_method.clone(),
                     available: r.available,
@@ -716,7 +713,7 @@ impl App {
                 });
         }
 
-        fn route_sort_key(r: &RouteOption) -> (u8, u8, u64, String) {
+        fn route_sort_key(r: &PickerOption) -> (u8, u8, u64, String) {
             let avail = if r.available { 0 } else { 1 };
             let method = match r.api_method.as_str() {
                 "claude-oauth" | "openai-oauth" => 0,
@@ -780,9 +777,9 @@ impl App {
         let available_efforts = self.provider.available_efforts();
         let is_openai = !available_efforts.is_empty();
 
-        let mut models: Vec<ModelEntry> = Vec::new();
+        let mut entries: Vec<PickerEntry> = Vec::new();
         for name in &model_order {
-            let mut entry_routes = model_routes.remove(name).unwrap_or_default();
+            let mut entry_routes = model_options.remove(name).unwrap_or_default();
             entry_routes.sort_by_key(route_sort_key);
 
             let is_openai_model = crate::provider::ALL_OPENAI_MODELS.contains(&name.as_str());
@@ -801,11 +798,11 @@ impl App {
                     let is_this_current =
                         *name == current_model && current_effort.as_deref() == Some(*effort);
                     let or_created = crate::provider::openrouter::model_created_timestamp(name);
-                    models.push(ModelEntry {
+                    entries.push(PickerEntry {
                         name: display_name,
-                        routes: entry_routes.clone(),
-                        selection: PickerSelection::Model,
-                        selected_route: 0,
+                        options: entry_routes.clone(),
+                        action: PickerAction::Model,
+                        selected_option: 0,
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
                             && (*effort == "xhigh" || *effort == "high")
@@ -840,11 +837,11 @@ impl App {
                                 || r.api_method == "copilot")
                                 && r.available
                         }));
-                models.push(ModelEntry {
+                entries.push(PickerEntry {
                     name: name.clone(),
-                    routes: entry_routes,
-                    selection: PickerSelection::Model,
-                    selected_route: 0,
+                    options: entry_routes,
+                    action: PickerAction::Model,
+                    selected_option: 0,
                     is_current: *name == current_model,
                     recommended: is_recommended,
                     recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
@@ -856,7 +853,7 @@ impl App {
             }
         }
 
-        models.sort_by(|a, b| {
+        entries.sort_by(|a, b| {
             let a_current = if a.is_current { 0u8 } else { 1 };
             let b_current = if b.is_current { 0u8 } else { 1 };
             let a_rec = if a.recommended { 0u8 } else { 1 };
@@ -871,12 +868,12 @@ impl App {
             } else {
                 usize::MAX
             };
-            let a_avail = if a.routes.first().map(|r| r.available).unwrap_or(false) {
+            let a_avail = if a.options.first().map(|r| r.available).unwrap_or(false) {
                 0u8
             } else {
                 1
             };
-            let b_avail = if b.routes.first().map(|r| r.available).unwrap_or(false) {
+            let b_avail = if b.options.first().map(|r| r.available).unwrap_or(false) {
                 0u8
             } else {
                 1
@@ -894,8 +891,8 @@ impl App {
 
         self.picker_state = Some(PickerState {
             kind: PickerKind::Model,
-            filtered: (0..models.len()).collect(),
-            models,
+            filtered: (0..entries.len()).collect(),
+            entries,
             selected: 0,
             column: 0,
             filter: String::new(),
@@ -908,7 +905,7 @@ impl App {
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {
         let auth = crate::auth::AuthStatus::check_fast();
         let mut routes = Vec::new();
-        for model in &self.remote_available_models {
+        for model in &self.remote_available_entries {
             if model.contains('/') {
                 let cached = crate::provider::openrouter::load_endpoints_disk_cache_public(model);
                 let auto_detail = cached
@@ -1132,11 +1129,11 @@ impl App {
         }
     }
 
-    fn handle_account_picker_selection(&mut self, selection: AccountPickerSelection) {
-        match selection {
-            AccountPickerSelection::Switch { provider_id, label } => {
+    fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
+        match action {
+            AccountPickerAction::Switch { provider_id, label } => {
                 if self.is_remote {
-                    self.pending_account_picker_selection = Some(AccountPickerSelection::Switch {
+                    self.pending_account_picker_action = Some(AccountPickerAction::Switch {
                         provider_id: provider_id.clone(),
                         label: label.clone(),
                     });
@@ -1153,7 +1150,7 @@ impl App {
                     ))),
                 }
             }
-            AccountPickerSelection::Add { provider_id } => match provider_id.as_str() {
+            AccountPickerAction::Add { provider_id } => match provider_id.as_str() {
                 "claude" => match crate::auth::claude::next_account_label() {
                     Ok(label) => self.start_claude_login_for_account(&label),
                     Err(e) => self.push_display_message(DisplayMessage::error(format!(
@@ -1173,7 +1170,7 @@ impl App {
                     provider_id
                 ))),
             },
-            AccountPickerSelection::Replace { provider_id, label } => match provider_id.as_str() {
+            AccountPickerAction::Replace { provider_id, label } => match provider_id.as_str() {
                 "claude" => self.start_claude_login_for_account(&label),
                 "openai" => self.start_openai_login_for_account(&label),
                 _ => self.push_display_message(DisplayMessage::error(format!(
@@ -1181,7 +1178,7 @@ impl App {
                     provider_id
                 ))),
             },
-            AccountPickerSelection::OpenCenter { provider_filter } => {
+            AccountPickerAction::OpenCenter { provider_filter } => {
                 self.open_account_center(provider_filter.as_deref())
             }
         }
@@ -1481,8 +1478,8 @@ impl App {
                     if picker.column == 0 {
                         picker.selected = picker.selected.saturating_sub(1);
                     } else if let Some(&idx) = picker.filtered.get(picker.selected) {
-                        let entry = &mut picker.models[idx];
-                        entry.selected_route = entry.selected_route.saturating_sub(1);
+                        let entry = &mut picker.entries[idx];
+                        entry.selected_option = entry.selected_option.saturating_sub(1);
                     }
                 }
             }
@@ -1507,9 +1504,9 @@ impl App {
                         let max = picker.filtered.len().saturating_sub(1);
                         picker.selected = (picker.selected + 1).min(max);
                     } else if let Some(&idx) = picker.filtered.get(picker.selected) {
-                        let entry = &mut picker.models[idx];
-                        let max = entry.routes.len().saturating_sub(1);
-                        entry.selected_route = (entry.selected_route + 1).min(max);
+                        let entry = &mut picker.entries[idx];
+                        let max = entry.options.len().saturating_sub(1);
+                        entry.selected_option = (entry.selected_option + 1).min(max);
                     }
                 }
             }
@@ -1520,7 +1517,7 @@ impl App {
                     }
                     if picker.column < 2 {
                         if let Some(&idx) = picker.filtered.get(picker.selected) {
-                            if picker.models[idx].routes.len() > 1 || picker.column > 0 {
+                            if picker.entries[idx].options.len() > 1 || picker.column > 0 {
                                 picker.column += 1;
                             }
                         }
@@ -1546,7 +1543,7 @@ impl App {
                         Self::tab_complete_filter(picker);
                     } else if picker.column < 2 {
                         if let Some(&idx) = picker.filtered.get(picker.selected) {
-                            if picker.models[idx].routes.len() > 1 || picker.column > 0 {
+                            if picker.entries[idx].options.len() > 1 || picker.column > 0 {
                                 picker.column += 1;
                             }
                         }
@@ -1562,11 +1559,11 @@ impl App {
                         return Ok(());
                     }
                     let idx = picker.filtered[picker.selected];
-                    let entry = &picker.models[idx];
-                    if !matches!(entry.selection, PickerSelection::Model) {
+                    let entry = &picker.entries[idx];
+                    if !matches!(entry.action, PickerAction::Model) {
                         return Ok(());
                     }
-                    let route = entry.routes.get(entry.selected_route);
+                    let route = entry.options.get(entry.selected_option);
 
                     let bare_name = model_entry_base_name(entry);
 
@@ -1626,10 +1623,10 @@ impl App {
                     return Ok(());
                 }
                 let idx = picker.filtered[picker.selected];
-                let entry = picker.models[idx].clone();
+                let entry = picker.entries[idx].clone();
 
-                if matches!(entry.selection, PickerSelection::Model) {
-                    if picker.column == 0 && entry.routes.len() > 1 {
+                if matches!(entry.action, PickerAction::Model) {
+                    if picker.column == 0 && entry.options.len() > 1 {
                         picker.column = 1;
                         return Ok(());
                     }
@@ -1639,7 +1636,7 @@ impl App {
                     }
                 }
 
-                let route = &entry.routes[entry.selected_route];
+                let route = &entry.options[entry.selected_option];
 
                 if !route.available {
                     let detail = if route.detail.is_empty() {
@@ -1652,16 +1649,16 @@ impl App {
                     return Ok(());
                 }
 
-                match entry.selection {
-                    PickerSelection::Account(selection) => {
+                match entry.action {
+                    PickerAction::Account(selection) => {
                         self.picker_state = None;
                         self.handle_account_picker_selection(selection);
                     }
-                    PickerSelection::Login(provider) => {
+                    PickerAction::Login(provider) => {
                         self.picker_state = None;
                         self.start_login_provider(provider);
                     }
-                    PickerSelection::Usage {
+                    PickerAction::Usage {
                         id,
                         title,
                         subtitle,
@@ -1684,10 +1681,10 @@ impl App {
                         ));
                         self.set_status_notice(format!("Usage → {}", title));
                     }
-                    PickerSelection::AgentTarget(target) => {
+                    PickerAction::AgentTarget(target) => {
                         self.open_agent_model_picker(target);
                     }
-                    PickerSelection::AgentModelChoice {
+                    PickerAction::AgentModelChoice {
                         target,
                         clear_override,
                     } => {
@@ -1727,7 +1724,7 @@ impl App {
                             }
                         }
                     }
-                    PickerSelection::Model => {
+                    PickerAction::Model => {
                         let bare_name = model_entry_base_name(&entry);
 
                         let spec = if route.api_method == "openrouter" && route.provider != "auto" {
@@ -1863,68 +1860,68 @@ impl App {
 
     pub(super) fn apply_picker_filter(picker: &mut PickerState) {
         if picker.filter.is_empty() {
-            picker.filtered = (0..picker.models.len()).collect();
+            picker.filtered = (0..picker.entries.len()).collect();
         } else {
             let mut scored: Vec<(usize, i32)> = picker
-                .models
+                .entries
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
                     let filter_text = if picker.kind == PickerKind::Account {
                         let provider = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.provider.as_str())
                             .unwrap_or("");
-                        let state = match &m.selection {
-                            PickerSelection::Account(AccountPickerSelection::Switch { .. }) => {
+                        let state = match &m.action {
+                            PickerAction::Account(AccountPickerAction::Switch { .. }) => {
                                 if m.is_current { "active" } else { "saved" }
                             }
-                            PickerSelection::Account(AccountPickerSelection::Add { .. }) => "add",
-                            PickerSelection::Account(AccountPickerSelection::Replace {
+                            PickerAction::Account(AccountPickerAction::Add { .. }) => "add",
+                            PickerAction::Account(AccountPickerAction::Replace {
                                 ..
                             }) => "replace",
-                            PickerSelection::Account(AccountPickerSelection::OpenCenter {
+                            PickerAction::Account(AccountPickerAction::OpenCenter {
                                 ..
                             }) => "manage",
-                            PickerSelection::Model
-                            | PickerSelection::Usage { .. }
-                            | PickerSelection::Login(_)
-                            | PickerSelection::AgentTarget(_)
-                            | PickerSelection::AgentModelChoice { .. } => "",
+                            PickerAction::Model
+                            | PickerAction::Usage { .. }
+                            | PickerAction::Login(_)
+                            | PickerAction::AgentTarget(_)
+                            | PickerAction::AgentModelChoice { .. } => "",
                         };
                         format!("{} {} {}", m.name, provider, state)
                     } else if picker.kind == PickerKind::Login {
                         let auth_kind = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.provider.as_str())
                             .unwrap_or("");
                         let state = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.api_method.as_str())
                             .unwrap_or("");
                         let detail = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.detail.as_str())
                             .unwrap_or("");
                         format!("{} {} {} {}", m.name, auth_kind, state, detail)
                     } else if picker.kind == PickerKind::Usage {
                         let status = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.provider.as_str())
                             .unwrap_or("");
                         let window = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.api_method.as_str())
                             .unwrap_or("");
                         let detail = m
-                            .routes
-                            .get(m.selected_route)
+                            .options
+                            .get(m.selected_option)
                             .map(|route| route.detail.as_str())
                             .unwrap_or("");
                         format!("{} {} {} {}", m.name, status, window, detail)
@@ -1940,11 +1937,11 @@ impl App {
             scored.sort_by(|a, b| {
                 b.1.cmp(&a.1)
                     .then(
-                        picker.models[a.0]
+                        picker.entries[a.0]
                             .recommendation_rank
-                            .cmp(&picker.models[b.0].recommendation_rank),
+                            .cmp(&picker.entries[b.0].recommendation_rank),
                     )
-                    .then(picker.models[a.0].name.cmp(&picker.models[b.0].name))
+                    .then(picker.entries[a.0].name.cmp(&picker.entries[b.0].name))
             });
             picker.filtered = scored.into_iter().map(|(i, _)| i).collect();
         }
@@ -1960,7 +1957,7 @@ impl App {
             return;
         }
         if picker.filtered.len() == 1 {
-            let name = picker.models[picker.filtered[0]].name.clone();
+            let name = picker.entries[picker.filtered[0]].name.clone();
             picker.filter = name;
             Self::apply_picker_filter(picker);
             return;
@@ -1968,7 +1965,7 @@ impl App {
         let names: Vec<&str> = picker
             .filtered
             .iter()
-            .map(|&i| picker.models[i].name.as_str())
+            .map(|&i| picker.entries[i].name.as_str())
             .collect();
         let first = names[0].to_lowercase();
         let first_chars: Vec<char> = first.chars().collect();
@@ -1987,7 +1984,7 @@ impl App {
             prefix_len = prefix_len.min(common);
         }
         if prefix_len > picker.filter.len() {
-            let first_original = &picker.models[picker.filtered[0]].name;
+            let first_original = &picker.entries[picker.filtered[0]].name;
             picker.filter = first_original[..prefix_len].to_string();
             Self::apply_picker_filter(picker);
         }

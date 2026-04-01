@@ -80,7 +80,7 @@ pub struct CopySelectionRange {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CopySelectionStatus {
     pub pane: CopySelectionPane,
-    pub has_selection: bool,
+    pub has_action: bool,
     pub selected_chars: usize,
     pub selected_lines: usize,
     pub dragging: bool,
@@ -359,7 +359,7 @@ pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
     Model,
     Account,
@@ -367,8 +367,107 @@ pub enum PickerKind {
     Usage,
 }
 
+impl PickerKind {
+    pub fn uses_compact_navigation(&self) -> bool {
+        matches!(self, Self::Account)
+    }
+
+    pub fn supports_option_columns(&self) -> bool {
+        !self.uses_compact_navigation()
+    }
+
+    pub fn primary_label(&self) -> &'static str {
+        match self {
+            Self::Account => "ACCOUNT",
+            _ => "ITEM",
+        }
+    }
+
+    pub fn secondary_label(&self, preview: bool) -> &'static str {
+        match (self, preview) {
+            (Self::Account, _) => "STATE",
+            (Self::Usage, true) => "ITEM",
+            (Self::Usage, false) => "STATUS",
+            (_, _) => "PROVIDER",
+        }
+    }
+
+    pub fn tertiary_label(&self) -> &'static str {
+        match self {
+            Self::Usage => "WINDOW",
+            Self::Login => "ACTION",
+            Self::Account => "",
+            Self::Model => "ACTION",
+        }
+    }
+
+    pub fn preview_submit_hint(&self) -> &'static str {
+        match self {
+            Self::Usage => "  ↵ inspect",
+            Self::Account => "  ↵ select",
+            _ => "  ↵ open",
+        }
+    }
+
+    pub fn active_submit_hint(&self) -> &'static str {
+        if self.uses_compact_navigation() {
+            "  ↑↓/jk ↵ Esc"
+        } else {
+            "  ↑↓ ←→ ↵ Esc"
+        }
+    }
+
+    pub fn shows_default_shortcut_hint(&self) -> bool {
+        matches!(self, Self::Model | Self::Login)
+    }
+
+    pub fn filter_text(&self, entry: &PickerEntry) -> String {
+        match self {
+            Self::Account => {
+                let provider = entry
+                    .active_option()
+                    .map(|option| option.provider.as_str())
+                    .unwrap_or("");
+                let state = entry.account_state_label().unwrap_or("");
+                format!("{} {} {}", entry.name, provider, state)
+            }
+            Self::Login => {
+                let auth_kind = entry
+                    .active_option()
+                    .map(|option| option.provider.as_str())
+                    .unwrap_or("");
+                let state = entry
+                    .active_option()
+                    .map(|option| option.api_method.as_str())
+                    .unwrap_or("");
+                let detail = entry
+                    .active_option()
+                    .map(|option| option.detail.as_str())
+                    .unwrap_or("");
+                format!("{} {} {} {}", entry.name, auth_kind, state, detail)
+            }
+            Self::Usage => {
+                let status = entry
+                    .active_option()
+                    .map(|option| option.provider.as_str())
+                    .unwrap_or("");
+                let window = entry
+                    .active_option()
+                    .map(|option| option.api_method.as_str())
+                    .unwrap_or("");
+                let detail = entry
+                    .active_option()
+                    .map(|option| option.detail.as_str())
+                    .unwrap_or("");
+                format!("{} {} {} {}", entry.name, status, window, detail)
+            }
+            Self::Model => entry.name.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AccountPickerSelection {
+pub enum AccountPickerAction {
     Switch { provider_id: String, label: String },
     Add { provider_id: String },
     Replace { provider_id: String, label: String },
@@ -385,9 +484,9 @@ pub enum AgentModelTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PickerSelection {
+pub enum PickerAction {
     Model,
-    Account(AccountPickerSelection),
+    Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
     Usage {
         id: String,
@@ -408,27 +507,43 @@ pub enum PickerSelection {
 pub struct PickerState {
     /// Which inline picker is currently active.
     pub kind: PickerKind,
-    /// All unique model entries with their routes
-    pub models: Vec<ModelEntry>,
-    /// Filtered indices into `models` (by model filter)
+    /// All visible picker entries and their available actions/options.
+    pub entries: Vec<PickerEntry>,
+    /// Filtered indices into `entries`.
     pub filtered: Vec<usize>,
     /// Selected row in filtered list
     pub selected: usize,
-    /// Active column: 0=model, 1=provider, 2=via
+    /// Active column: 0=primary item, 1=secondary option, 2=tertiary option.
     pub column: usize,
-    /// Filter text (applies to model column)
+    /// Filter text applied to the picker kind's searchable text.
     pub filter: String,
     /// Preview mode: picker is visible but input stays in main text box
     pub preview: bool,
 }
 
-/// A unique model with its available routes
+impl PickerState {
+    pub fn selected_entry_index(&self) -> Option<usize> {
+        self.filtered.get(self.selected).copied()
+    }
+
+    pub fn selected_entry(&self) -> Option<&PickerEntry> {
+        self.selected_entry_index()
+            .and_then(|index| self.entries.get(index))
+    }
+
+    pub fn selected_entry_mut(&mut self) -> Option<&mut PickerEntry> {
+        self.selected_entry_index()
+            .and_then(|index| self.entries.get_mut(index))
+    }
+}
+
+/// A reusable picker entry with one or more available actions/options.
 #[derive(Debug, Clone)]
-pub struct ModelEntry {
+pub struct PickerEntry {
     pub name: String,
-    pub routes: Vec<RouteOption>,
-    pub selection: PickerSelection,
-    pub selected_route: usize,
+    pub options: Vec<PickerOption>,
+    pub action: PickerAction,
+    pub selected_option: usize,
     pub is_current: bool,
     pub is_default: bool,
     pub recommended: bool,
@@ -439,9 +554,35 @@ pub struct ModelEntry {
     pub effort: Option<String>,
 }
 
-/// A single route to reach a model
+impl PickerEntry {
+    pub fn active_option(&self) -> Option<&PickerOption> {
+        self.options.get(self.selected_option)
+    }
+
+    pub fn active_option_mut(&mut self) -> Option<&mut PickerOption> {
+        self.options.get_mut(self.selected_option)
+    }
+
+    pub fn option_count(&self) -> usize {
+        self.options.len()
+    }
+
+    pub fn account_state_label(&self) -> Option<&'static str> {
+        match &self.action {
+            PickerAction::Account(AccountPickerAction::Switch { .. }) => {
+                Some(if self.is_current { "active" } else { "saved" })
+            }
+            PickerAction::Account(AccountPickerAction::Add { .. }) => Some("add"),
+            PickerAction::Account(AccountPickerAction::Replace { .. }) => Some("replace"),
+            PickerAction::Account(AccountPickerAction::OpenCenter { .. }) => Some("manage"),
+            _ => None,
+        }
+    }
+}
+
+/// A single available option for a picker entry.
 #[derive(Debug, Clone)]
-pub struct RouteOption {
+pub struct PickerOption {
     pub provider: String,
     pub api_method: String,
     pub available: bool,

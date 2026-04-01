@@ -734,11 +734,11 @@ impl App {
     fn model_suggestion_candidates(&self) -> Vec<(String, &'static str)> {
         fn push_unique(
             seen: &mut std::collections::HashSet<String>,
-            models: &mut Vec<String>,
+            entries: &mut Vec<String>,
             model: String,
         ) {
             if !model.is_empty() && seen.insert(model.clone()) {
-                models.push(model);
+                entries.push(model);
             }
         }
 
@@ -750,8 +750,8 @@ impl App {
                 push_unique(&mut seen, &mut models, current);
             }
 
-            let routes = if !self.remote_model_routes.is_empty() {
-                self.remote_model_routes.clone()
+            let routes = if !self.remote_model_options.is_empty() {
+                self.remote_model_options.clone()
             } else {
                 self.build_remote_model_routes_fallback()
             };
@@ -760,7 +760,7 @@ impl App {
                 push_unique(&mut seen, &mut models, route.model);
             }
 
-            for model in &self.remote_available_models {
+            for model in &self.remote_available_entries {
                 push_unique(&mut seen, &mut models, model.clone());
             }
         } else {

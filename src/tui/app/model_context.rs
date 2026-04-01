@@ -654,7 +654,7 @@ impl App {
         use crate::tui::usage_overlay::{
             UsageOverlay, UsageOverlayItem, UsageOverlayStatus, UsageOverlaySummary,
         };
-        use crate::tui::{ModelEntry, PickerKind, PickerSelection, PickerState, RouteOption};
+        use crate::tui::{PickerEntry, PickerKind, PickerAction, PickerState, PickerOption};
 
         self.usage_report_refreshing = false;
 
@@ -679,24 +679,24 @@ impl App {
                 )
             }
 
-            fn picker_entry(&self) -> ModelEntry {
-                ModelEntry {
+            fn picker_entry(&self) -> PickerEntry {
+                PickerEntry {
                     name: self.title.clone(),
-                    routes: vec![RouteOption {
+                    options: vec![PickerOption {
                         provider: status_label(self.status).to_string(),
                         api_method: self.window_summary.clone(),
                         available: true,
                         detail: self.subtitle.clone(),
                         estimated_reference_cost_micros: None,
                     }],
-                    selection: PickerSelection::Usage {
+                    action: PickerAction::Usage {
                         id: self.id.clone(),
                         title: self.title.clone(),
                         subtitle: self.subtitle.clone(),
                         status: self.status,
                         detail_lines: self.detail_lines.clone(),
                     },
-                    selected_route: 0,
+                    selected_option: 0,
                     is_current: false,
                     is_default: false,
                     recommended: false,
@@ -778,8 +778,8 @@ impl App {
         let existing_usage_picker = self.picker_state.as_ref().and_then(|picker| {
             (picker.kind == PickerKind::Usage).then(|| {
                 let selected_id = picker.filtered.get(picker.selected).and_then(|idx| {
-                    picker.models.get(*idx).and_then(|entry| match &entry.selection {
-                        PickerSelection::Usage { id, .. } => Some(id.clone()),
+                    picker.entries.get(*idx).and_then(|entry| match &entry.action {
+                        PickerAction::Usage { id, .. } => Some(id.clone()),
                         _ => None,
                     })
                 });
@@ -924,7 +924,7 @@ impl App {
             let mut picker = PickerState {
                 kind: PickerKind::Usage,
                 filtered: Vec::new(),
-                models: picker_models,
+                entries: picker_models,
                 selected: 0,
                 column: column.min(2),
                 filter,
@@ -934,10 +934,10 @@ impl App {
             if let Some(selected_id) = selected_id {
                 if let Some(position) = picker.filtered.iter().position(|idx| {
                     picker
-                        .models
+                        .entries
                         .get(*idx)
-                        .and_then(|entry| match &entry.selection {
-                            PickerSelection::Usage { id, .. } => Some(id == &selected_id),
+                        .and_then(|entry| match &entry.action {
+                            PickerAction::Usage { id, .. } => Some(id == &selected_id),
                             _ => None,
                         })
                         .unwrap_or(false)

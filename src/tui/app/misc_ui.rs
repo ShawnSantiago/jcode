@@ -11,7 +11,7 @@ impl App {
 
     pub(super) fn open_usage_picker_loading(&mut self) {
         use crate::tui::usage_overlay::UsageOverlayStatus;
-        use crate::tui::{ModelEntry, PickerKind, PickerSelection, PickerState, RouteOption};
+        use crate::tui::{PickerEntry, PickerKind, PickerAction, PickerState, PickerOption};
 
         let detail_lines = vec![
             "## Refreshing usage".to_string(),
@@ -23,23 +23,23 @@ impl App {
         self.usage_overlay = None;
         self.picker_state = Some(PickerState {
             kind: PickerKind::Usage,
-            models: vec![ModelEntry {
+            entries: vec![PickerEntry {
                 name: "Refreshing usage".to_string(),
-                routes: vec![RouteOption {
+                options: vec![PickerOption {
                     provider: "loading".to_string(),
                     api_method: "wait".to_string(),
                     available: true,
                     detail: "Fetching limits from connected providers".to_string(),
                     estimated_reference_cost_micros: None,
                 }],
-                selection: PickerSelection::Usage {
+                action: PickerAction::Usage {
                     id: "loading".to_string(),
                     title: "Refreshing usage".to_string(),
                     subtitle: "Fetching limits from connected providers".to_string(),
                     status: UsageOverlayStatus::Loading,
                     detail_lines,
                 },
-                selected_route: 0,
+                selected_option: 0,
                 is_current: false,
                 is_default: false,
                 recommended: false,

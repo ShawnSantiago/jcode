@@ -368,9 +368,9 @@ pub(super) async fn handle_terminal_event(
                 if let Some(spec) = app.pending_model_switch.take() {
                     let _ = remote.set_model(&spec).await;
                 }
-                if let Some(selection) = app.pending_account_picker_selection.take() {
+                if let Some(selection) = app.pending_account_picker_action.take() {
                     match selection {
-                        crate::tui::AccountPickerSelection::Switch { provider_id, label } => {
+                        crate::tui::AccountPickerAction::Switch { provider_id, label } => {
                             match provider_id.as_str() {
                                 "claude" => {
                                     if let Err(e) = crate::auth::claude::set_active_account(&label)
@@ -421,9 +421,9 @@ pub(super) async fn handle_terminal_event(
                                 ))),
                             }
                         }
-                        crate::tui::AccountPickerSelection::Add { .. }
-                        | crate::tui::AccountPickerSelection::Replace { .. }
-                        | crate::tui::AccountPickerSelection::OpenCenter { .. } => {}
+                        crate::tui::AccountPickerAction::Add { .. }
+                        | crate::tui::AccountPickerAction::Replace { .. }
+                        | crate::tui::AccountPickerAction::OpenCenter { .. } => {}
                     }
                 }
             }
@@ -1811,8 +1811,8 @@ pub(super) fn handle_server_event(
             app.remote_compaction_mode = Some(compaction_mode);
             app.set_side_panel_snapshot(side_panel);
             app.remote_side_pane_images = images;
-            app.remote_available_models = available_models;
-            app.remote_model_routes = available_model_routes;
+            app.remote_available_entries = available_models;
+            app.remote_model_options = available_model_routes;
             app.remote_skills = skills;
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
@@ -1979,8 +1979,8 @@ pub(super) fn handle_server_event(
             available_models,
             available_model_routes,
         } => {
-            app.remote_available_models = available_models;
-            app.remote_model_routes = available_model_routes;
+            app.remote_available_entries = available_models;
+            app.remote_model_options = available_model_routes;
             false
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {

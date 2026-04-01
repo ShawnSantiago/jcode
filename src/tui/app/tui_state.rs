@@ -1089,7 +1089,7 @@ impl crate::tui::TuiState for App {
             pane: self
                 .current_copy_selection_pane()
                 .unwrap_or(crate::tui::CopySelectionPane::Chat),
-            has_selection,
+            has_action: has_selection,
             selected_chars: text.chars().count(),
             selected_lines: if has_selection {
                 text.lines().count().max(1)

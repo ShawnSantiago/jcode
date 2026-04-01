@@ -781,7 +781,7 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
 
     if let Some(selection) = app.copy_selection_status() {
         let pane_label = selection.pane.label();
-        let label = if selection.has_selection {
+        let label = if selection.has_action {
             if selection.selected_lines > 1 {
                 format!(
                     "{} selection · {} chars · {} lines · Enter/Y copy · Esc exit",

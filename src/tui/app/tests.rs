@@ -1190,7 +1190,7 @@ fn test_usage_command_opens_usage_picker_loading() {
     let picker = app.picker_state.as_ref().expect("missing usage picker");
     assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
     assert!(!picker.preview);
-    assert_eq!(picker.models[0].name, "Refreshing usage");
+    assert_eq!(picker.entries[0].name, "Refreshing usage");
     assert!(app.usage_report_refreshing);
 }
 
@@ -1204,7 +1204,7 @@ fn test_usage_submit_input_opens_usage_picker_loading() {
     let picker = app.picker_state.as_ref().expect("missing usage picker");
     assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
     assert!(!picker.preview);
-    assert_eq!(picker.models[0].name, "Refreshing usage");
+    assert_eq!(picker.entries[0].name, "Refreshing usage");
     assert!(app.display_messages().is_empty());
     assert!(app.usage_report_refreshing);
 }
@@ -1224,7 +1224,7 @@ fn test_usage_preview_opens_loading_picker_and_preserves_input() {
         .expect("usage preview should be open");
     assert!(picker.preview);
     assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
-    assert_eq!(picker.models[0].name, "Refreshing usage");
+    assert_eq!(picker.entries[0].name, "Refreshing usage");
     assert_eq!(app.input(), "/usage");
     assert!(app.usage_report_refreshing);
 }
@@ -1287,13 +1287,13 @@ fn test_usage_report_updates_usage_picker_rows() {
     assert_eq!(picker.kind, crate::tui::PickerKind::Usage);
     assert!(!app.usage_report_refreshing);
     let entry = picker
-        .models
+        .entries
         .iter()
         .find(|entry| entry.name == "OpenAI (ChatGPT)")
         .expect("missing OpenAI usage row");
-    assert!(entry.routes[0].api_method.contains("5h 82%"));
-    assert!(entry.routes[0].detail.contains("82%"));
-    assert!(entry.routes[0].detail.contains("plan pro"));
+    assert!(entry.options[0].api_method.contains("5h 82%"));
+    assert!(entry.options[0].detail.contains("82%"));
+    assert!(entry.options[0].detail.contains("plan pro"));
 }
 
 #[test]
@@ -1326,7 +1326,7 @@ fn test_usage_picker_preview_stays_open_and_updates_filter() {
     assert!(picker
         .filtered
         .iter()
-        .any(|&i| picker.models[i].name == "OpenAI (ChatGPT)"));
+        .any(|&i| picker.entries[i].name == "OpenAI (ChatGPT)"));
     assert_eq!(app.input(), "/usage open");
 }
 
@@ -1395,10 +1395,10 @@ fn test_account_openai_command_opens_account_picker() {
             .as_ref()
             .expect("/account openai should open the inline account picker");
         assert_eq!(picker.kind, crate::tui::PickerKind::Account);
-        assert!(picker.models.iter().any(|entry| {
+        assert!(picker.entries.iter().any(|entry| {
             matches!(
-                entry.selection,
-                crate::tui::PickerSelection::Account(crate::tui::AccountPickerSelection::Switch {
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ..
                 }) if provider_id == "openai"
@@ -1406,19 +1406,19 @@ fn test_account_openai_command_opens_account_picker() {
         }));
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "new account")
         );
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "replace account")
         );
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "account center")
         );
@@ -1460,19 +1460,19 @@ fn test_account_command_opens_account_picker() {
             .picker_state
             .as_ref()
             .expect("/account should open the inline account picker");
-        assert!(picker.models.iter().any(|entry| {
+        assert!(picker.entries.iter().any(|entry| {
             matches!(
-                entry.selection,
-                crate::tui::PickerSelection::Account(crate::tui::AccountPickerSelection::Switch {
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
                 }) if provider_id == "claude" && label == "claude-1"
             )
         }));
-        assert!(picker.models.iter().any(|entry| {
+        assert!(picker.entries.iter().any(|entry| {
             matches!(
-                entry.selection,
-                crate::tui::PickerSelection::Account(crate::tui::AccountPickerSelection::Switch {
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ..
                 }) if provider_id == "openai"
@@ -1480,19 +1480,19 @@ fn test_account_command_opens_account_picker() {
         }));
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "new Claude account")
         );
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "new OpenAI account")
         );
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "account center")
         );
@@ -1641,19 +1641,19 @@ fn test_account_command_combines_claude_and_openai_accounts() {
             .picker_state
             .as_ref()
             .expect("inline account picker should open");
-        assert!(picker.models.iter().any(|entry| {
+        assert!(picker.entries.iter().any(|entry| {
             matches!(
-                entry.selection,
-                crate::tui::PickerSelection::Account(crate::tui::AccountPickerSelection::Switch {
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
                 }) if provider_id == "claude" && label == "claude-1"
             )
         }));
-        assert!(picker.models.iter().any(|entry| {
+        assert!(picker.entries.iter().any(|entry| {
             matches!(
-                entry.selection,
-                crate::tui::PickerSelection::Account(crate::tui::AccountPickerSelection::Switch {
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
                 }) if provider_id == "openai" && label == "openai-1"
@@ -1661,7 +1661,7 @@ fn test_account_command_combines_claude_and_openai_accounts() {
         }));
         assert!(
             picker
-                .models
+                .entries
                 .iter()
                 .any(|entry| entry.name == "account center")
         );
@@ -3411,13 +3411,13 @@ fn test_goals_show_suggestions_include_goal_ids() {
 fn configure_test_remote_models(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.3-codex".to_string());
-    app.remote_available_models = vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()];
+    app.remote_available_entries = vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()];
 }
 
 fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.2".to_string());
-    app.remote_available_models = vec![
+    app.remote_available_entries = vec![
         "gpt-5.2".to_string(),
         "gpt-5.4".to_string(),
         "gpt-5.4-pro".to_string(),
@@ -3425,8 +3425,8 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         "gpt-5.3-codex".to_string(),
         "claude-opus-4-6".to_string(),
     ];
-    app.remote_model_routes = app
-        .remote_available_models
+    app.remote_model_options = app
+        .remote_available_entries
         .iter()
         .cloned()
         .map(|model| crate::provider::ModelRoute {
@@ -3485,13 +3485,13 @@ fn test_agents_command_opens_agent_picker() {
         .expect("/agents should open the agent picker");
     assert!(
         picker
-            .models
+            .entries
             .iter()
             .any(|entry| entry.name == "Code review")
     );
-    assert!(picker.models.iter().any(|entry| matches!(
-        entry.selection,
-        crate::tui::PickerSelection::AgentTarget(crate::tui::AgentModelTarget::Swarm)
+    assert!(picker.entries.iter().any(|entry| matches!(
+        entry.action,
+        crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm)
     )));
 }
 
@@ -3515,8 +3515,8 @@ fn test_agents_review_picker_saves_config_override() {
             .and_then(|picker| {
                 picker.filtered.iter().position(|&idx| {
                     matches!(
-                        picker.models[idx].selection,
-                        crate::tui::PickerSelection::AgentModelChoice {
+                        picker.entries[idx].action,
+                        crate::tui::PickerAction::AgentModelChoice {
                             target: crate::tui::AgentModelTarget::Review,
                             clear_override: false,
                         }
@@ -3526,11 +3526,11 @@ fn test_agents_review_picker_saves_config_override() {
             .expect("review picker should include at least one model option");
         app.picker_state.as_mut().unwrap().selected = selected;
         let selected_model_idx = app.picker_state.as_ref().unwrap().filtered[selected];
-        app.picker_state.as_mut().unwrap().models[selected_model_idx].routes[0].available = true;
+        app.picker_state.as_mut().unwrap().entries[selected_model_idx].options[0].available = true;
 
         let expected = {
             let picker = app.picker_state.as_ref().unwrap();
-            let entry = &picker.models[picker.filtered[selected]];
+            let entry = &picker.entries[picker.filtered[selected]];
             let base = if entry.effort.is_some() {
                 entry
                     .name
@@ -3540,7 +3540,7 @@ fn test_agents_review_picker_saves_config_override() {
             } else {
                 entry.name.clone()
             };
-            let route = &entry.routes[entry.selected_route];
+            let route = &entry.options[entry.selected_option];
             if route.api_method == "copilot" {
                 format!("copilot:{}", base)
             } else if route.api_method == "cursor" {
@@ -3638,7 +3638,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.models[i].name == "gpt-5.2-codex")
+            .any(|&i| picker.entries[i].name == "gpt-5.2-codex")
     );
     assert_eq!(app.input(), "/model g52c");
 }
@@ -3724,7 +3724,7 @@ fn test_login_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.models[i].name == "Z.AI")
+            .any(|&i| picker.entries[i].name == "Z.AI")
     );
     assert_eq!(app.input(), "/login za");
 }
@@ -4144,7 +4144,7 @@ fn test_subagent_command_suggestions_include_manual_launch_and_model_policy() {
 fn configure_test_remote_models_with_copilot(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_model = Some("claude-sonnet-4".to_string());
-    app.remote_available_models = vec![
+    app.remote_available_entries = vec![
         "claude-sonnet-4-6".to_string(),
         "gpt-5.3-codex".to_string(),
         "claude-opus-4.6".to_string(),
@@ -4157,13 +4157,13 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_name = Some("cursor".to_string());
     app.remote_provider_model = Some("composer-1.5".to_string());
-    app.remote_available_models = vec![
+    app.remote_available_entries = vec![
         "composer-2-fast".to_string(),
         "composer-2".to_string(),
         "composer-1.5".to_string(),
     ];
-    app.remote_model_routes = app
-        .remote_available_models
+    app.remote_model_options = app
+        .remote_available_entries
         .iter()
         .cloned()
         .map(|model| crate::provider::ModelRoute {
@@ -4189,7 +4189,7 @@ fn test_model_picker_includes_copilot_models_in_remote_mode() {
         .as_ref()
         .expect("model picker should be open");
 
-    let model_names: Vec<&str> = picker.models.iter().map(|m| m.name.as_str()).collect();
+    let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
 
     assert!(
         model_names.contains(&"claude-opus-4.6"),
@@ -4214,8 +4214,8 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
     app.is_remote = true;
     app.remote_provider_name = Some("openrouter".to_string());
     app.remote_provider_model = Some("anthropic/claude-sonnet-4".to_string());
-    app.remote_available_models.clear();
-    app.remote_model_routes.clear();
+    app.remote_available_entries.clear();
+    app.remote_model_options.clear();
 
     app.open_model_picker();
 
@@ -4224,12 +4224,12 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
         .as_ref()
         .expect("model picker should open with current-model fallback");
 
-    assert_eq!(picker.models.len(), 1);
-    assert_eq!(picker.models[0].name, "anthropic/claude-sonnet-4");
-    assert_eq!(picker.models[0].routes.len(), 1);
-    assert_eq!(picker.models[0].routes[0].provider, "openrouter");
-    assert_eq!(picker.models[0].routes[0].api_method, "current");
-    assert!(picker.models[0].routes[0].available);
+    assert_eq!(picker.entries.len(), 1);
+    assert_eq!(picker.entries[0].name, "anthropic/claude-sonnet-4");
+    assert_eq!(picker.entries[0].options.len(), 1);
+    assert_eq!(picker.entries[0].options[0].provider, "openrouter");
+    assert_eq!(picker.entries[0].options[0].api_method, "current");
+    assert!(picker.entries[0].options[0].available);
 }
 
 #[test]
@@ -4247,15 +4247,15 @@ fn test_model_picker_copilot_models_have_copilot_route() {
     // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
     // so it should get a copilot route
     let grok_entry = picker
-        .models
+        .entries
         .iter()
         .find(|m| m.name == "grok-code-fast-1")
         .expect("grok-code-fast-1 should be in picker");
 
     assert!(
-        grok_entry.routes.iter().any(|r| r.api_method == "copilot"),
+        grok_entry.options.iter().any(|r| r.api_method == "copilot"),
         "grok-code-fast-1 should have a copilot route, got: {:?}",
-        grok_entry.routes
+        grok_entry.options
     );
 }
 
@@ -4271,32 +4271,32 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         .as_ref()
         .expect("model picker should be open");
 
-    let model_names: Vec<&str> = picker.models.iter().map(|m| m.name.as_str()).collect();
+    let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
 
     assert_eq!(model_names.first().copied(), Some("gpt-5.2"));
 
     let gpt54 = picker
-        .models
+        .entries
         .iter()
         .position(|model| model.name == "gpt-5.4")
         .expect("gpt-5.4 should be present");
     let gpt54_pro = picker
-        .models
+        .entries
         .iter()
         .position(|model| model.name == "gpt-5.4-pro")
         .expect("gpt-5.4-pro should be present");
     let claude_opus = picker
-        .models
+        .entries
         .iter()
         .position(|model| model.name == "claude-opus-4-6")
         .expect("claude-opus-4-6 should be present");
     let spark = picker
-        .models
+        .entries
         .iter()
         .position(|model| model.name == "gpt-5.3-codex-spark")
         .expect("gpt-5.3-codex-spark should be present");
     let codex = picker
-        .models
+        .entries
         .iter()
         .position(|model| model.name == "gpt-5.3-codex")
         .expect("gpt-5.3-codex should be present");
@@ -4317,11 +4317,11 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         model_names
     );
     assert!(
-        !picker.models[spark].recommended,
+        !picker.entries[spark].recommended,
         "gpt-5.3-codex-spark should not be recommended"
     );
     assert!(
-        !picker.models[codex].recommended,
+        !picker.entries[codex].recommended,
         "gpt-5.3-codex should not be recommended"
     );
 }
@@ -4340,7 +4340,7 @@ fn test_model_picker_copilot_selection_prefixes_model() {
 
     // Find grok-code-fast-1 (which should only be a copilot route)
     let grok_idx = picker
-        .models
+        .entries
         .iter()
         .position(|m| m.name == "grok-code-fast-1")
         .expect("grok-code-fast-1 should be in picker");
@@ -4384,18 +4384,18 @@ fn test_model_picker_cursor_models_have_cursor_route() {
         .expect("model picker should be open");
 
     let composer_entry = picker
-        .models
+        .entries
         .iter()
         .find(|m| m.name == "composer-2-fast")
         .expect("composer-2-fast should be in picker");
 
     assert!(
         composer_entry
-            .routes
+            .options
             .iter()
             .any(|r| r.api_method == "cursor"),
         "composer-2-fast should have a cursor route, got: {:?}",
-        composer_entry.routes
+        composer_entry.options
     );
 }
 
@@ -4412,7 +4412,7 @@ fn test_model_picker_cursor_selection_prefixes_model() {
         .expect("model picker should be open");
 
     let composer_idx = picker
-        .models
+        .entries
         .iter()
         .position(|m| m.name == "composer-2-fast")
         .expect("composer-2-fast should be in picker");
@@ -9567,8 +9567,8 @@ fn test_disconnected_key_handler_runs_model_picker_locally() {
     assert!(app.input.is_empty());
     assert!(app.queued_messages().is_empty());
     let picker = app.picker_state.as_ref().expect("model picker should open");
-    assert!(!picker.models.is_empty());
-    assert_eq!(picker.models[picker.selected].name, "gpt-5.3-codex");
+    assert!(!picker.entries.is_empty());
+    assert_eq!(picker.entries[picker.selected].name, "gpt-5.3-codex");
 }
 
 #[test]
