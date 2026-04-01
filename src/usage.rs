@@ -93,6 +93,13 @@ pub struct UsageData {
 impl UsageData {
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
+        if usage_reset_passed([
+            self.five_hour_resets_at.as_deref(),
+            self.seven_day_resets_at.as_deref(),
+        ]) {
+            return true;
+        }
+
         match self.fetched_at {
             Some(t) => {
                 let ttl = if self.is_rate_limited() {
@@ -185,6 +192,14 @@ pub struct OpenAIUsageData {
 
 impl OpenAIUsageData {
     pub fn is_stale(&self) -> bool {
+        if usage_reset_passed([
+            self.five_hour.as_ref().and_then(|w| w.resets_at.as_deref()),
+            self.seven_day.as_ref().and_then(|w| w.resets_at.as_deref()),
+            self.spark.as_ref().and_then(|w| w.resets_at.as_deref()),
+        ]) {
+            return true;
+        }
+
         match self.fetched_at {
             Some(t) => {
                 let ttl = if self.is_rate_limited() {
@@ -1750,27 +1765,31 @@ fn humanize_key(key: &str) -> String {
         .join(" ")
 }
 
-/// Format a reset timestamp into a human-readable relative time
-pub fn format_reset_time(timestamp: &str) -> String {
+fn parse_reset_timestamp(timestamp: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(reset) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-        let now = chrono::Utc::now();
-        let duration = reset.signed_duration_since(now);
-        if duration.num_seconds() <= 0 {
-            return "now".to_string();
-        }
-        let hours = duration.num_hours();
-        let minutes = duration.num_minutes() % 60;
-        if hours > 0 {
-            format!("{}h {}m", hours, minutes)
-        } else {
-            format!("{}m", minutes)
-        }
+        Some(reset.with_timezone(&chrono::Utc))
     } else if let Ok(reset) =
         chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.fZ")
     {
-        let reset_utc = reset.and_utc();
-        let now = chrono::Utc::now();
-        let duration = reset_utc.signed_duration_since(now);
+        Some(reset.and_utc())
+    } else {
+        None
+    }
+}
+
+fn usage_reset_passed<'a>(timestamps: impl IntoIterator<Item = Option<&'a str>>) -> bool {
+    let now = chrono::Utc::now();
+    timestamps
+        .into_iter()
+        .flatten()
+        .filter_map(parse_reset_timestamp)
+        .any(|reset| reset <= now)
+}
+
+/// Format a reset timestamp into a human-readable relative time
+pub fn format_reset_time(timestamp: &str) -> String {
+    if let Some(reset) = parse_reset_timestamp(timestamp) {
+        let duration = reset.signed_duration_since(chrono::Utc::now());
         if duration.num_seconds() <= 0 {
             return "now".to_string();
         }
@@ -2222,6 +2241,39 @@ mod tests {
         assert!(
             result.is_ok(),
             "get_openai_usage_sync should not require a Tokio runtime"
+        );
+    }
+
+    #[test]
+    fn test_usage_data_becomes_stale_when_reset_time_has_passed() {
+        let data = UsageData {
+            five_hour: 0.42,
+            five_hour_resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+
+        assert!(
+            data.is_stale(),
+            "usage data should refresh once a reset window has passed"
+        );
+    }
+
+    #[test]
+    fn test_openai_usage_data_becomes_stale_when_reset_time_has_passed() {
+        let data = OpenAIUsageData {
+            five_hour: Some(OpenAIUsageWindow {
+                name: "5-hour".to_string(),
+                usage_ratio: 0.42,
+                resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+            }),
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+
+        assert!(
+            data.is_stale(),
+            "OpenAI usage data should refresh once a reset window has passed"
         );
     }
 
