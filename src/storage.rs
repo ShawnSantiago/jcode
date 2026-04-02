@@ -112,6 +112,27 @@ pub fn harden_secret_file_permissions(path: &Path) {
     }
 }
 
+/// Validate an external auth file managed by another tool before reading it.
+///
+/// jcode intentionally avoids mutating these files. We also reject obvious risky
+/// cases like symlinks so a remembered trust decision stays bound to a real file
+/// path rather than an arbitrary redirect.
+pub fn validate_external_auth_file(path: &Path) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| anyhow::anyhow!("Failed to inspect external auth file {}: {}", path.display(), e))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "Refusing to read external auth file via symlink: {}",
+            path.display()
+        );
+    }
+    if !metadata.is_file() {
+        anyhow::bail!("External auth path is not a regular file: {}", path.display());
+    }
+    std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Failed to canonicalize external auth file {}: {}", path.display(), e))
+}
+
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> &'static Mutex<()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -185,6 +206,21 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_external_auth_file_rejects_symlink() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let target = dir.path().join("auth.json");
+        let link = dir.path().join("auth-link.json");
+        std::fs::write(&target, "{}\n").expect("write target");
+        unix_fs::symlink(&target, &link).expect("create symlink");
+
+        let err = validate_external_auth_file(&link).expect_err("symlink should be rejected");
+        assert!(err.to_string().contains("symlink"));
     }
 
     #[test]

@@ -123,7 +123,10 @@ pub fn legacy_auth_file_path() -> Result<PathBuf> {
 }
 
 pub fn trust_legacy_auth_for_future_use() -> Result<()> {
-    crate::config::Config::allow_external_auth_source(LEGACY_CODEX_AUTH_SOURCE_ID)?;
+    crate::config::Config::allow_external_auth_source_for_path(
+        LEGACY_CODEX_AUTH_SOURCE_ID,
+        &legacy_auth_path()?,
+    )?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }
@@ -138,7 +141,10 @@ pub fn legacy_auth_allowed() -> bool {
             )
         })
         .unwrap_or(false)
-        || crate::config::Config::external_auth_source_allowed(LEGACY_CODEX_AUTH_SOURCE_ID)
+        || legacy_auth_path()
+            .ok()
+            .map(|path| crate::config::Config::external_auth_source_allowed_for_path(LEGACY_CODEX_AUTH_SOURCE_ID, &path))
+            .unwrap_or(false)
 }
 
 pub fn legacy_auth_source_exists() -> bool {
@@ -424,7 +430,7 @@ fn load_legacy_api_key_credentials() -> Result<CodexCredentials> {
 }
 
 fn load_legacy_auth_file() -> Result<LegacyAuthFile> {
-    let path = legacy_auth_path()?;
+    let path = crate::storage::validate_external_auth_file(&legacy_auth_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
     serde_json::from_str(&content).context("Could not parse Codex credentials")

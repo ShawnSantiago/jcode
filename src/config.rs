@@ -149,6 +149,9 @@ pub struct Config {
 pub struct AuthConfig {
     /// External auth source ids that the user has approved jcode to read/use.
     pub trusted_external_sources: Vec<String>,
+    /// Path-bound approvals for external auth sources managed by other tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_external_source_paths: Vec<String>,
 }
 
 /// Agent-specific model defaults.
@@ -994,11 +997,21 @@ impl Config {
         }
 
         if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
-            self.auth.trusted_external_sources = parse_env_list(&v)
-                .into_iter()
-                .map(|value| value.trim().to_ascii_lowercase())
-                .filter(|value| !value.is_empty())
-                .collect();
+            let mut source_ids = Vec::new();
+            let mut source_paths = Vec::new();
+            for value in parse_env_list(&v) {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed.contains('|') {
+                    source_paths.push(trimmed.to_ascii_lowercase());
+                } else {
+                    source_ids.push(trimmed.to_ascii_lowercase());
+                }
+            }
+            self.auth.trusted_external_sources = source_ids;
+            self.auth.trusted_external_source_paths = source_paths;
         }
 
         // Autoreview
@@ -1300,8 +1313,21 @@ impl Config {
         Ok(())
     }
 
+    fn normalize_external_auth_source_id(source_id: &str) -> String {
+        source_id.trim().to_ascii_lowercase()
+    }
+
+    fn trusted_external_auth_path_entry(source_id: &str, path: &std::path::Path) -> anyhow::Result<String> {
+        let source_id = Self::normalize_external_auth_source_id(source_id);
+        if source_id.is_empty() {
+            anyhow::bail!("External auth source id cannot be empty");
+        }
+        let canonical = crate::storage::validate_external_auth_file(path)?;
+        Ok(format!("{}|{}", source_id, canonical.to_string_lossy().to_ascii_lowercase()))
+    }
+
     pub fn external_auth_source_allowed(source_id: &str) -> bool {
-        let source_id = source_id.trim().to_ascii_lowercase();
+        let source_id = Self::normalize_external_auth_source_id(source_id);
         if source_id.is_empty() {
             return false;
         }
@@ -1313,8 +1339,23 @@ impl Config {
             .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
     }
 
+    pub fn external_auth_source_allowed_for_path(source_id: &str, path: &std::path::Path) -> bool {
+        if Self::external_auth_source_allowed(source_id) {
+            return true;
+        }
+        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
+            return false;
+        };
+
+        let cfg = Self::load();
+        cfg.auth
+            .trusted_external_source_paths
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+    }
+
     pub fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
-        let source_id = source_id.trim().to_ascii_lowercase();
+        let source_id = Self::normalize_external_auth_source_id(source_id);
         if source_id.is_empty() {
             anyhow::bail!("External auth source id cannot be empty");
         }
@@ -1336,6 +1377,27 @@ impl Config {
             "Saved trusted external auth source to config: {}",
             source_id
         ));
+        Ok(())
+    }
+
+    pub fn allow_external_auth_source_for_path(
+        source_id: &str,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
+        let mut cfg = Self::load();
+        if !cfg
+            .auth
+            .trusted_external_source_paths
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+        {
+            cfg.auth.trusted_external_source_paths.push(entry.clone());
+            cfg.auth.trusted_external_source_paths.sort();
+            cfg.auth.trusted_external_source_paths.dedup();
+            cfg.save()?;
+        }
+        crate::logging::info(&format!("Saved trusted external auth source path: {}", entry));
         Ok(())
     }
 
@@ -1899,6 +1961,7 @@ fn parse_env_list(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{AmbientConfig, Config, DisplayConfig};
+    use std::path::PathBuf;
 
     #[test]
     fn test_ambient_visible_defaults_to_true() {
@@ -1958,6 +2021,72 @@ mod tests {
             crate::env::set_var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR", prev);
         } else {
             crate::env::remove_var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR");
+        }
+    }
+
+    #[test]
+    fn test_env_override_trusted_external_auth_splits_source_and_path_entries() {
+        let _guard = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
+        crate::env::set_var(
+            "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
+            "legacy_source,claude_code_credentials|/tmp/auth.json",
+        );
+
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+
+        assert_eq!(cfg.auth.trusted_external_sources, vec!["legacy_source"]);
+        assert_eq!(
+            cfg.auth.trusted_external_source_paths,
+            vec!["claude_code_credentials|/tmp/auth.json"]
+        );
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", prev);
+        } else {
+            crate::env::remove_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
+        }
+    }
+
+    #[test]
+    fn test_external_auth_source_allowed_for_path_matches_saved_entry() {
+        let _guard = crate::storage::lock_test_env();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("auth.json");
+        std::fs::write(&path, "{}\n").expect("write auth file");
+
+        let canonical = std::fs::canonicalize(&path).expect("canonical path");
+        let mut cfg = Config::default();
+        cfg.auth.trusted_external_source_paths = vec![format!(
+            "test_source|{}",
+            canonical.to_string_lossy().to_ascii_lowercase()
+        )];
+
+        assert!(cfg.external_auth_source_allowed_for_path_config("test_source", &path));
+    }
+
+    impl Config {
+        fn external_auth_source_allowed_for_path_config(
+            &self,
+            source_id: &str,
+            path: &PathBuf,
+        ) -> bool {
+            if self
+                .auth
+                .trusted_external_sources
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(source_id))
+            {
+                return true;
+            }
+            let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
+                return false;
+            };
+            self.auth
+                .trusted_external_source_paths
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(&entry))
         }
     }
 }

@@ -131,12 +131,18 @@ pub fn gemini_cli_auth_source_exists() -> bool {
 }
 
 pub fn has_unconsented_cli_auth() -> bool {
-    gemini_cli_auth_source_exists()
-        && !crate::config::Config::external_auth_source_allowed(GEMINI_CLI_AUTH_SOURCE_ID)
+    gemini_cli_oauth_path()
+        .ok()
+        .filter(|path| path.exists())
+        .map(|path| !crate::config::Config::external_auth_source_allowed_for_path(GEMINI_CLI_AUTH_SOURCE_ID, &path))
+        .unwrap_or(false)
 }
 
 pub fn trust_cli_auth_for_future_use() -> Result<()> {
-    crate::config::Config::allow_external_auth_source(GEMINI_CLI_AUTH_SOURCE_ID)?;
+    crate::config::Config::allow_external_auth_source_for_path(
+        GEMINI_CLI_AUTH_SOURCE_ID,
+        &gemini_cli_oauth_path()?,
+    )?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }
@@ -151,9 +157,10 @@ pub fn load_tokens() -> Result<GeminiTokens> {
 
     let cli_path = gemini_cli_oauth_path()?;
     if cli_path.exists()
-        && crate::config::Config::external_auth_source_allowed(GEMINI_CLI_AUTH_SOURCE_ID)
+        && crate::config::Config::external_auth_source_allowed_for_path(GEMINI_CLI_AUTH_SOURCE_ID, &cli_path)
     {
-        let raw = std::fs::read_to_string(&cli_path)
+        let safe_path = crate::storage::validate_external_auth_file(&cli_path)?;
+        let raw = std::fs::read_to_string(&safe_path)
             .with_context(|| format!("Failed to read {}", cli_path.display()))?;
         let imported: GeminiCliOAuthCredentials = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse {}", cli_path.display()))?;

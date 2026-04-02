@@ -355,7 +355,12 @@ pub fn preferred_external_auth_source() -> Option<ExternalClaudeAuthSource> {
 
 pub fn has_unconsented_external_auth() -> Option<ExternalClaudeAuthSource> {
     let source = preferred_external_auth_source()?;
-    if crate::config::Config::external_auth_source_allowed(source.source_id()) {
+    let allowed = source
+        .path()
+        .ok()
+        .map(|path| crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path))
+        .unwrap_or(false);
+    if allowed {
         None
     } else {
         Some(source)
@@ -363,7 +368,7 @@ pub fn has_unconsented_external_auth() -> Option<ExternalClaudeAuthSource> {
 }
 
 pub fn trust_external_auth_source(source: ExternalClaudeAuthSource) -> Result<()> {
-    crate::config::Config::allow_external_auth_source(source.source_id())?;
+    crate::config::Config::allow_external_auth_source_for_path(source.source_id(), &source.path()?)?;
     super::AuthStatus::invalidate_cache();
     Ok(())
 }
@@ -396,7 +401,10 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("jcode", creds));
     }
 
-    if crate::config::Config::external_auth_source_allowed(CLAUDE_CODE_AUTH_SOURCE_ID)
+    if claude_code_path()
+        .ok()
+        .map(|path| crate::config::Config::external_auth_source_allowed_for_path(CLAUDE_CODE_AUTH_SOURCE_ID, &path))
+        .unwrap_or(false)
         && let Ok(creds) = load_claude_code_credentials()
     {
         if creds.expires_at > now_ms {
@@ -405,7 +413,10 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("claude", creds));
     }
 
-    if crate::config::Config::external_auth_source_allowed(OPENCODE_AUTH_SOURCE_ID)
+    if opencode_path()
+        .ok()
+        .map(|path| crate::config::Config::external_auth_source_allowed_for_path(OPENCODE_AUTH_SOURCE_ID, &path))
+        .unwrap_or(false)
         && let Ok(creds) = load_opencode_credentials()
     {
         if creds.expires_at > now_ms {
@@ -472,7 +483,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
 }
 
 fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
-    let path = claude_code_path()?;
+    let path = crate::storage::validate_external_auth_file(&claude_code_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
 
@@ -492,7 +503,7 @@ fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
 }
 
 pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
-    let path = opencode_path()?;
+    let path = crate::storage::validate_external_auth_file(&opencode_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read OpenCode credentials from {:?}", path))?;
 
