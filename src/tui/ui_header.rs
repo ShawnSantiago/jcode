@@ -202,7 +202,10 @@ pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Lin
             provider_label("antigravity", auth.antigravity, None),
             auth.antigravity,
         ),
-    ];
+    ]
+    .into_iter()
+    .filter(|(_, state)| *state != AuthState::NotConfigured)
+    .collect();
 
     let compact_specs: Vec<(String, AuthState)> = vec![
         (
@@ -218,7 +221,10 @@ pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Lin
             provider_label("ag", auth.antigravity, None),
             auth.antigravity,
         ),
-    ];
+    ]
+    .into_iter()
+    .filter(|(_, state)| *state != AuthState::NotConfigured)
+    .collect();
 
     let full: Vec<&str> = full_specs.iter().map(|(label, _)| label.as_str()).collect();
     let compact: Vec<&str> = compact_specs
@@ -634,6 +640,7 @@ fn multi_status_badge_no_leading_space(items: &[(&str, Color)]) -> Vec<Span<'sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{AuthState, AuthStatus, ProviderAuth};
     use crate::message::Message;
     use crate::provider::{EventStream, Provider};
     use crate::tool::Registry;
@@ -727,5 +734,42 @@ mod tests {
                 .all(|line| line.alignment == Some(Alignment::Center)),
             "header detail lines should remain centered in left-aligned mode: {non_empty:?}"
         );
+    }
+
+    #[test]
+    fn auth_status_line_hides_not_configured_providers() {
+        let auth = AuthStatus {
+            anthropic: ProviderAuth {
+                state: AuthState::Expired,
+                has_oauth: true,
+                has_api_key: false,
+            },
+            openai: AuthState::Available,
+            openai_has_oauth: false,
+            openai_has_api_key: true,
+            ..AuthStatus::default()
+        };
+
+        let line = build_auth_status_line(&auth, 120);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(
+            rendered.contains("anthropic(oauth)"),
+            "rendered: {rendered}"
+        );
+        assert!(rendered.contains("openai(key)"), "rendered: {rendered}");
+        assert!(!rendered.contains("openrouter"), "rendered: {rendered}");
+        assert!(!rendered.contains("copilot"), "rendered: {rendered}");
+        assert!(!rendered.contains("cursor"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn auth_status_line_is_empty_when_nothing_was_attempted() {
+        let line = build_auth_status_line(&AuthStatus::default(), 120);
+        assert!(line.spans.is_empty(), "line should be empty: {line:?}");
     }
 }
