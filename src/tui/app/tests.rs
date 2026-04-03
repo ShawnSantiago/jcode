@@ -6539,7 +6539,40 @@ fn test_observe_marks_large_tool_results() {
 
     let page = app.side_panel.focused_page().expect("missing observe page");
     assert!(page.content.contains("12k tok"));
-    assert!(page.content.contains("very large"));
+    assert!(page.content.contains("[very large]"));
+    assert!(!page.content.contains('🔴'));
+    assert!(!page.content.contains('⚠'));
+}
+
+#[test]
+fn test_observe_repaint_does_not_leave_severity_badge_artifact() {
+    let _lock = scroll_render_test_lock();
+
+    let mut app = create_test_app();
+    app.input = "/observe on".to_string();
+    app.submit_input();
+
+    let backend = ratatui::backend::TestBackend::new(90, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+
+    let tool_call = crate::message::ToolCall {
+        id: "tool_big".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"file_path": "large.txt"}),
+        intent: None,
+    };
+
+    let large_output = "x".repeat(48_000);
+    app.observe_tool_result(&tool_call, &large_output, false, Some("read"));
+    let first = render_and_snap(&app, &mut terminal);
+    assert!(first.contains("[very large]"));
+
+    app.observe_tool_result(&tool_call, "ok", false, Some("read"));
+    let second = render_and_snap(&app, &mut terminal);
+
+    assert!(!second.contains("[very large]"));
+    assert!(!second.contains('🔴'));
+    assert!(!second.contains('⚠'));
 }
 
 #[test]

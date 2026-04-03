@@ -133,10 +133,24 @@ fn build_observe_tool_result_markdown(
     is_error: bool,
     title: Option<&str>,
 ) -> String {
+    let token_count = crate::util::estimate_tokens(output);
+    let token_label = crate::util::format_approx_token_count(token_count);
+    let output_chars = crate::util::format_number(output.len());
+    // Keep these severity badges ASCII-only. Emoji/variation-selector glyphs
+    // like ⚠️ and 🔴 are prone to width mismatches in terminal emulators and can
+    // leave stale cells behind when the observe pane repaints.
+    let size_note = match crate::util::approx_tool_output_token_severity(token_count) {
+        crate::util::ApproxTokenSeverity::Normal => None,
+        crate::util::ApproxTokenSeverity::Warning => Some(" [large]"),
+        crate::util::ApproxTokenSeverity::Danger => Some(" [very large]"),
+    };
     let mut markdown = format!(
-        "# Observe\n\nLatest tool result added to context.\n\n- Tool: `{}`\n- Status: {}\n",
+        "# Observe\n\nLatest tool result added to context.\n\n- Tool: `{}`\n- Status: {}\n- Returned to context: `{}` · `{} chars`{}\n",
         tool_call.name,
-        if is_error { "error" } else { "completed" }
+        if is_error { "error" } else { "completed" },
+        token_label,
+        output_chars,
+        size_note.unwrap_or("")
     );
     if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
         markdown.push_str(&format!("- Title: `{}`\n", title.trim()));
