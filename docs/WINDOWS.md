@@ -14,6 +14,16 @@ This document describes how jcode achieves cross-platform support for Linux, mac
 
 **Zero cost on Unix.** The abstraction layer uses `#[cfg]` compile-time gates and type aliases so that Linux and macOS code paths compile to the exact same binary as before. Windows gets its own implementations behind `#[cfg(windows)]`. No traits, no dynamic dispatch, no runtime branching.
 
+## Install Paths
+
+Current Windows install paths from `scripts/install.ps1`:
+
+- Launcher: `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe`
+- Stable channel binary: `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe`
+- Immutable versioned binaries: `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe`
+
+Unlike the current Unix self-dev/local-build flow, the PowerShell installer currently installs the stable channel rather than a separate `current` channel.
+
 ## Transport Layer (`src/transport/`)
 
 The transport layer abstracts IPC (Inter-Process Communication). On Unix, jcode uses Unix domain sockets. On Windows, jcode uses named pipes.

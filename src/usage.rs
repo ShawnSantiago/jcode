@@ -1077,18 +1077,16 @@ fn parse_bool_value(value: &serde_json::Value) -> Option<bool> {
         return Some(b);
     }
 
-    value.as_str().and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    })
+    value
+        .as_str()
+        .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
 }
 
-fn object_contains_key_with_bool(
-    value: &serde_json::Value,
-    key: &str,
-    expected: bool,
-) -> bool {
+fn object_contains_key_with_bool(value: &serde_json::Value, key: &str, expected: bool) -> bool {
     match value {
         serde_json::Value::Object(map) => {
             map.get(key).and_then(parse_bool_value) == Some(expected)

@@ -396,7 +396,7 @@ impl Registry {
 
     /// Estimate token count for a string (chars / 4, matching compaction heuristic)
     fn estimate_tokens(s: &str) -> usize {
-        s.len() / 4
+        crate::util::estimate_tokens(s)
     }
 
     /// Maximum fraction of context budget a single tool output may consume.
