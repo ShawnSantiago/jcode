@@ -1011,6 +1011,7 @@ pub struct MemoryManager {
     project_dir: Option<PathBuf>,
     /// When true, use isolated test storage instead of real memory
     test_mode: bool,
+    include_skills: bool,
 }
 
 impl MemoryManager {
@@ -1018,6 +1019,7 @@ impl MemoryManager {
         Self {
             project_dir: None,
             test_mode: false,
+            include_skills: true,
         }
     }
 
@@ -1026,11 +1028,17 @@ impl MemoryManager {
         self
     }
 
+    pub fn with_skills(mut self, include_skills: bool) -> Self {
+        self.include_skills = include_skills;
+        self
+    }
+
     /// Create a memory manager in test mode (isolated storage)
     pub fn new_test() -> Self {
         Self {
             project_dir: None,
             test_mode: true,
+            include_skills: true,
         }
     }
 
@@ -1474,6 +1482,63 @@ impl MemoryManager {
         Ok(entries)
     }
 
+    fn synthetic_skill_entries(&self) -> Vec<MemoryEntry> {
+        if !self.include_skills {
+            return Vec::new();
+        }
+
+        crate::skill::SkillRegistry::shared_snapshot()
+            .list()
+            .into_iter()
+            .map(|skill| skill.as_memory_entry())
+            .collect()
+    }
+
+    fn collect_retrieval_candidates_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
+        let mut entries = self.collect_memories_scoped(scope)?;
+        if scope.includes_global() {
+            entries.extend(self.synthetic_skill_entries());
+        }
+        Ok(entries)
+    }
+
+    fn collect_retrieval_candidates_with_embeddings_scoped(
+        &self,
+        scope: MemoryScope,
+    ) -> Result<Vec<MemoryEntry>> {
+        let mut entries = self.collect_memories_with_embeddings_scoped(scope)?;
+        if scope.includes_global() {
+            entries.extend(
+                self.synthetic_skill_entries()
+                    .into_iter()
+                    .filter_map(|mut entry| entry.ensure_embedding().then_some(entry)),
+            );
+        }
+        Ok(entries)
+    }
+
+    fn find_retrieval_candidates_similar_scoped(
+        &self,
+        text: &str,
+        threshold: f32,
+        limit: usize,
+        scope: MemoryScope,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        let query_embedding = match crate::embedding::embed(text) {
+            Ok(emb) => emb,
+            Err(e) => {
+                crate::logging::info(&format!(
+                    "Embedding failed for retrieval candidates, falling back to keyword search: {}",
+                    e
+                ));
+                return Ok(Vec::new());
+            }
+        };
+
+        let entries = self.collect_retrieval_candidates_with_embeddings_scoped(scope)?;
+        Self::score_and_filter(entries, &query_embedding, threshold, limit)
+    }
+
     fn score_and_filter(
         entries: Vec<MemoryEntry>,
         query_embedding: &[f32],
@@ -1762,7 +1827,7 @@ impl MemoryManager {
     ) -> Result<Vec<MemoryEntry>> {
         // Get top candidate memories by score
         let candidates: Vec<_> = top_k_by_score(
-            self.collect_memories_scoped(MemoryScope::All)?
+            self.collect_retrieval_candidates_scoped(MemoryScope::All)?
                 .into_iter()
                 .filter(|entry| entry.active)
                 .map(|entry| {
@@ -1897,6 +1962,7 @@ impl MemoryManager {
             let manager = MemoryManager {
                 project_dir: project_dir.or_else(|| std::env::current_dir().ok()),
                 test_mode: false,
+                include_skills: true,
             };
 
             match manager
@@ -1975,71 +2041,75 @@ impl MemoryManager {
         emit_memory_activity(event_tx.as_ref());
 
         let embedding_start = Instant::now();
-        let candidates =
-            match self.find_similar(&context, EMBEDDING_SIMILARITY_THRESHOLD, EMBEDDING_MAX_HITS) {
-                Ok(hits) => {
-                    let latency_ms = embedding_start.elapsed().as_millis() as u64;
-                    if hits.is_empty() {
-                        add_event(MemoryEventKind::EmbeddingComplete {
-                            latency_ms,
-                            hits: 0,
-                        });
-                        pipeline_update(|p| {
-                            p.search = StepStatus::Done;
-                            p.search_result = Some(StepResult {
-                                summary: "0 hits".to_string(),
-                                latency_ms,
-                            });
-                            p.verify = StepStatus::Skipped;
-                            p.inject = StepStatus::Skipped;
-                            p.maintain = StepStatus::Skipped;
-                        });
-                        set_state(MemoryState::Idle);
-                        emit_memory_activity(event_tx.as_ref());
-                        return Ok((None, Vec::new(), None));
-                    }
+        let candidates = match self.find_retrieval_candidates_similar_scoped(
+            &context,
+            EMBEDDING_SIMILARITY_THRESHOLD,
+            EMBEDDING_MAX_HITS,
+            MemoryScope::All,
+        ) {
+            Ok(hits) => {
+                let latency_ms = embedding_start.elapsed().as_millis() as u64;
+                if hits.is_empty() {
+                    add_event(MemoryEventKind::EmbeddingComplete {
+                        latency_ms,
+                        hits: 0,
+                    });
                     pipeline_update(|p| {
                         p.search = StepStatus::Done;
                         p.search_result = Some(StepResult {
-                            summary: format!("{} hits", hits.len()),
+                            summary: "0 hits".to_string(),
                             latency_ms,
                         });
+                        p.verify = StepStatus::Skipped;
+                        p.inject = StepStatus::Skipped;
+                        p.maintain = StepStatus::Skipped;
                     });
-                    add_event(MemoryEventKind::EmbeddingComplete {
-                        latency_ms,
-                        hits: hits.len(),
-                    });
-                    hits
-                }
-                Err(e) => {
-                    crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
-                    add_event(MemoryEventKind::Error {
-                        message: e.to_string(),
-                    });
-                    pipeline_update(|p| {
-                        p.search = StepStatus::Error;
-                        p.search_result = Some(StepResult {
-                            summary: "fallback".to_string(),
-                            latency_ms: embedding_start.elapsed().as_millis() as u64,
-                        });
-                    });
+                    set_state(MemoryState::Idle);
                     emit_memory_activity(event_tx.as_ref());
-
-                    top_k_by_score(
-                        self.collect_memories_scoped(MemoryScope::All)?
-                            .into_iter()
-                            .filter(|entry| entry.active)
-                            .map(|entry| {
-                                let score = memory_score(&entry) as f32;
-                                (entry, score)
-                            }),
-                        MEMORY_RELEVANCE_MAX_CANDIDATES,
-                    )
-                    .into_iter()
-                    .map(|(entry, _)| (entry, 0.0))
-                    .collect()
+                    return Ok((None, Vec::new(), None));
                 }
-            };
+                pipeline_update(|p| {
+                    p.search = StepStatus::Done;
+                    p.search_result = Some(StepResult {
+                        summary: format!("{} hits", hits.len()),
+                        latency_ms,
+                    });
+                });
+                add_event(MemoryEventKind::EmbeddingComplete {
+                    latency_ms,
+                    hits: hits.len(),
+                });
+                hits
+            }
+            Err(e) => {
+                crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
+                add_event(MemoryEventKind::Error {
+                    message: e.to_string(),
+                });
+                pipeline_update(|p| {
+                    p.search = StepStatus::Error;
+                    p.search_result = Some(StepResult {
+                        summary: "fallback".to_string(),
+                        latency_ms: embedding_start.elapsed().as_millis() as u64,
+                    });
+                });
+                emit_memory_activity(event_tx.as_ref());
+
+                top_k_by_score(
+                    self.collect_retrieval_candidates_scoped(MemoryScope::All)?
+                        .into_iter()
+                        .filter(|entry| entry.active)
+                        .map(|entry| {
+                            let score = memory_score(&entry) as f32;
+                            (entry, score)
+                        }),
+                    MEMORY_RELEVANCE_MAX_CANDIDATES,
+                )
+                .into_iter()
+                .map(|(entry, _)| (entry, 0.0))
+                .collect()
+            }
+        };
 
         // Filter out memories that have already been injected in this session
         let pre_filter_count = candidates.len();
@@ -3010,6 +3080,44 @@ mod tests {
             assert_eq!(project_search[0].content, "project zebra compile notes");
             assert_eq!(global_search.len(), 1);
             assert_eq!(global_search[0].content, "global coffee preference");
+        });
+    }
+
+    #[test]
+    fn retrieval_candidates_include_local_skills() {
+        with_temp_home(|home| {
+            let project_dir = home.join("project-with-skill");
+            fs::create_dir_all(project_dir.join(".jcode/skills/firefox-browser"))
+                .expect("create skills dir");
+            fs::write(
+                project_dir.join(".jcode/skills/firefox-browser/SKILL.md"),
+                "---\nname: firefox-browser\ndescription: Control Firefox browser sessions\nallowed-tools: bash, read, write\n---\n\nUse this skill to open sites and click buttons.",
+            )
+            .expect("write skill");
+
+            let old_cwd = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(&project_dir).expect("set current dir");
+
+            let manager = MemoryManager::new()
+                .with_project_dir(&project_dir)
+                .with_skills(true);
+            let candidates = manager
+                .collect_retrieval_candidates_scoped(MemoryScope::All)
+                .expect("collect retrieval candidates");
+
+            std::env::set_current_dir(old_cwd).expect("restore current dir");
+
+            assert!(
+                candidates
+                    .iter()
+                    .any(|entry| entry.id == "skill:firefox-browser")
+            );
+            assert!(candidates.iter().any(|entry| {
+                matches!(
+                    entry.category,
+                    MemoryCategory::Custom(ref name) if name == "Skills"
+                )
+            }));
         });
     }
 }

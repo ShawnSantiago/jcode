@@ -1,39 +1,6 @@
 use super::*;
 
 impl App {
-    fn build_auto_skill_prompt(
-        &self,
-        messages: &[Message],
-    ) -> Option<crate::skill::SkillRecallPrompt> {
-        if self.active_skill.is_some() {
-            return None;
-        }
-
-        let recalled = self.skills.relevant_prompt_for_messages(messages);
-        if let Some(recalled) = recalled.as_ref() {
-            crate::logging::info(&format!(
-                "TUI auto-recalled skill(s): {}",
-                recalled.skill_names.join(", ")
-            ));
-        }
-        recalled
-    }
-
-    fn append_auto_skill_prompt(
-        &self,
-        split: &mut crate::prompt::SplitSystemPrompt,
-        recalled: Option<&crate::skill::SkillRecallPrompt>,
-    ) {
-        let Some(recalled) = recalled else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str(&recalled.prompt);
-    }
-
     fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
         let Some(reminder) = self
             .current_turn_system_reminder
@@ -80,11 +47,9 @@ impl App {
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
-            let auto_skill_prompt = self.build_auto_skill_prompt(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let mut split_prompt =
+            let split_prompt =
                 self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
-            self.append_auto_skill_prompt(&mut split_prompt, auto_skill_prompt.as_ref());
             if let Some(pending) = &memory_pending {
                 let age_ms = pending.computed_at.elapsed().as_millis() as u64;
                 self.show_injected_memory_context(
@@ -646,11 +611,9 @@ impl App {
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
-            let auto_skill_prompt = self.build_auto_skill_prompt(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let mut split_prompt =
+            let split_prompt =
                 self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
-            self.append_auto_skill_prompt(&mut split_prompt, auto_skill_prompt.as_ref());
             if let Some(pending) = &memory_pending {
                 let age_ms = pending.computed_at.elapsed().as_millis() as u64;
                 self.show_injected_memory_context(
@@ -1721,8 +1684,14 @@ impl App {
             .session
             .working_dir
             .as_deref()
-            .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-            .unwrap_or_else(crate::memory::MemoryManager::new);
+            .map(|dir| {
+                crate::memory::MemoryManager::new()
+                    .with_project_dir(dir)
+                    .with_skills(self.active_skill.is_none())
+            })
+            .unwrap_or_else(|| {
+                crate::memory::MemoryManager::new().with_skills(self.active_skill.is_none())
+            });
         match manager.relevant_prompt_for_messages(messages).await {
             Ok(prompt) => prompt,
             Err(e) => {
@@ -1792,8 +1761,14 @@ impl App {
             .session
             .working_dir
             .as_deref()
-            .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-            .unwrap_or_else(crate::memory::MemoryManager::new);
+            .map(|dir| {
+                crate::memory::MemoryManager::new()
+                    .with_project_dir(dir)
+                    .with_skills(self.active_skill.is_none())
+            })
+            .unwrap_or_else(|| {
+                crate::memory::MemoryManager::new().with_skills(self.active_skill.is_none())
+            });
         let existing: Vec<String> = manager
             .list_all()
             .unwrap_or_default()

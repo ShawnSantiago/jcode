@@ -1506,10 +1506,8 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&messages, None);
-            let auto_skill_prompt = self.build_auto_skill_prompt(&messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let mut split_prompt = self.build_system_prompt_split(None);
-            self.append_auto_skill_prompt(&mut split_prompt, auto_skill_prompt.as_ref());
+            let split_prompt = self.build_system_prompt_split(None);
 
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
@@ -2285,10 +2283,8 @@ impl Agent {
                     }
                 })),
             );
-            let auto_skill_prompt = self.build_auto_skill_prompt(&messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let mut split_prompt = self.build_system_prompt_split(None);
-            self.append_auto_skill_prompt(&mut split_prompt, auto_skill_prompt.as_ref());
+            let split_prompt = self.build_system_prompt_split(None);
 
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
@@ -3052,10 +3048,8 @@ impl Agent {
                     }
                 })),
             );
-            let auto_skill_prompt = self.build_auto_skill_prompt(&messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let mut split_prompt = self.build_system_prompt_split(None);
-            self.append_auto_skill_prompt(&mut split_prompt, auto_skill_prompt.as_ref());
+            let split_prompt = self.build_system_prompt_split(None);
 
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause

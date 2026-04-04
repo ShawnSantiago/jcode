@@ -1,17 +1,13 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
+use chrono::Utc;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::OnceLock;
-
-pub const SKILL_RECALL_SIMILARITY_THRESHOLD: f32 = 0.42;
-pub const SKILL_RECALL_MAX_RESULTS: usize = 1;
-const SKILL_RECALL_MIN_KEYWORD_OVERLAP: usize = 2;
-const SKILL_RECALL_MIN_TERM_LEN: usize = 4;
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
@@ -22,12 +18,6 @@ pub struct Skill {
     pub content: String,
     pub path: PathBuf,
     search_text: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SkillRecallPrompt {
-    pub skill_names: Vec<String>,
-    pub prompt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,125 +374,6 @@ impl SkillRegistry {
             None
         }
     }
-
-    pub fn relevant_prompt_for_messages(
-        &self,
-        messages: &[crate::message::Message],
-    ) -> Option<SkillRecallPrompt> {
-        let context = crate::memory::format_context_for_relevance(messages);
-        self.relevant_prompt_for_context(&context)
-    }
-
-    pub fn relevant_prompt_for_context(&self, context: &str) -> Option<SkillRecallPrompt> {
-        let context = context.trim();
-        if context.is_empty() || self.skills.is_empty() {
-            return None;
-        }
-
-        #[cfg(test)]
-        let matches = self.find_relevant_by_keywords(context);
-
-        #[cfg(not(test))]
-        let matches = match self.find_relevant_by_embedding(context) {
-            Ok(matches) if !matches.is_empty() => matches,
-            Ok(_) => self.find_relevant_by_keywords(context),
-            Err(error) => {
-                crate::logging::info(&format!(
-                    "Skill auto-recall embedding search unavailable, falling back to keywords: {}",
-                    error
-                ));
-                self.find_relevant_by_keywords(context)
-            }
-        };
-
-        if matches.is_empty() {
-            return None;
-        }
-
-        let skill_names = matches
-            .iter()
-            .map(|(skill, _)| skill.name.clone())
-            .collect();
-        let prompt = format_auto_recalled_skill_prompt(&matches);
-
-        Some(SkillRecallPrompt {
-            skill_names,
-            prompt,
-        })
-    }
-
-    fn find_relevant_by_embedding(&self, context: &str) -> Result<Vec<(&Skill, f32)>> {
-        let query_embedding = crate::embedding::embed(context)?;
-
-        let mut candidates = Vec::new();
-        for skill in self.skills.values() {
-            if let Ok(embedding) = crate::embedding::embed(skill.search_text.as_str()) {
-                candidates.push((skill, embedding));
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let candidate_refs: Vec<&[f32]> = candidates
-            .iter()
-            .map(|(_, embedding)| embedding.as_slice())
-            .collect();
-        let scores = crate::embedding::batch_cosine_similarity(&query_embedding, &candidate_refs);
-
-        let mut scored: Vec<_> = candidates
-            .into_iter()
-            .zip(scores)
-            .filter_map(|((skill, _), score)| {
-                (score >= SKILL_RECALL_SIMILARITY_THRESHOLD).then_some((skill, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        scored.truncate(SKILL_RECALL_MAX_RESULTS);
-        Ok(scored)
-    }
-
-    fn find_relevant_by_keywords(&self, context: &str) -> Vec<(&Skill, f32)> {
-        let normalized_context = normalize_skill_search_text(context);
-        if normalized_context.is_empty() {
-            return Vec::new();
-        }
-
-        let query_terms: HashSet<&str> = normalized_context
-            .split_whitespace()
-            .filter(|term| is_meaningful_skill_term(term))
-            .collect();
-        let mut scored: Vec<_> = self
-            .skills
-            .values()
-            .filter_map(|skill| {
-                let skill_terms: HashSet<&str> = skill
-                    .search_text
-                    .split_whitespace()
-                    .filter(|term| is_meaningful_skill_term(term))
-                    .collect();
-                let overlap = query_terms
-                    .iter()
-                    .filter(|term| skill_terms.contains(**term))
-                    .count();
-                let normalized_name = normalize_skill_search_text(&skill.name);
-                let exact_name_match = !normalized_name.is_empty()
-                    && normalized_context.contains(normalized_name.as_str());
-                if !exact_name_match && overlap < SKILL_RECALL_MIN_KEYWORD_OVERLAP {
-                    return None;
-                }
-                let mut score = overlap as f32;
-                if exact_name_match {
-                    score += 3.0;
-                }
-                Some((skill, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        scored.truncate(SKILL_RECALL_MAX_RESULTS);
-        scored
-    }
 }
 
 impl Skill {
@@ -522,6 +393,32 @@ impl Skill {
             .ok_or_else(|| anyhow::anyhow!("No parent dir"))?;
         let file_path = skill_dir.join(filename);
         Ok(std::fs::read_to_string(file_path)?)
+    }
+
+    pub fn as_memory_entry(&self) -> crate::memory::MemoryEntry {
+        let now = Utc::now() - chrono::Duration::days(365);
+        crate::memory::MemoryEntry {
+            id: format!("skill:{}", self.name),
+            category: crate::memory::MemoryCategory::Custom("Skills".to_string()),
+            content: format!(
+                "Use skill `/{} ` when relevant.\n\n{}",
+                self.name,
+                self.get_prompt()
+            ),
+            tags: vec!["skill".to_string(), self.name.clone()],
+            search_text: self.search_text.clone(),
+            created_at: now,
+            updated_at: now,
+            access_count: 0,
+            source: Some("skill_registry".to_string()),
+            trust: crate::memory::TrustLevel::Medium,
+            strength: 1,
+            active: true,
+            superseded_by: None,
+            reinforcements: Vec::new(),
+            embedding: None,
+            confidence: 1.0,
+        }
     }
 }
 
@@ -545,27 +442,6 @@ fn normalize_skill_search_text(text: &str) -> String {
         .join(" ")
 }
 
-fn is_meaningful_skill_term(term: &str) -> bool {
-    term.len() >= SKILL_RECALL_MIN_TERM_LEN && !term.chars().all(|c| c.is_ascii_digit())
-}
-
-fn format_auto_recalled_skill_prompt(matches: &[(&Skill, f32)]) -> String {
-    let mut output = String::from(
-        "# Auto-Recalled Skill\n\nA skill matched the current conversation context. Use it if it helps complete the task.\n",
-    );
-
-    for (idx, (skill, _score)) in matches.iter().enumerate() {
-        output.push_str(&format!(
-            "\n\n## Suggested Skill {}: /{}\n\n{}",
-            idx + 1,
-            skill.name,
-            skill.get_prompt()
-        ));
-    }
-
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,38 +458,22 @@ mod tests {
     }
 
     #[test]
-    fn relevant_prompt_for_context_keyword_matches_skill() {
-        let mut registry = SkillRegistry::default();
+    fn skill_as_memory_entry_formats_invocation_and_prompt() {
         let skill = test_skill(
             "firefox-browser",
             "Control Firefox browser sessions and logged-in pages",
             "Use this skill when you need to open websites, click buttons, or interact with browser pages.",
         );
-        registry.skills.insert(skill.name.clone(), skill);
 
-        let recalled = registry
-            .relevant_prompt_for_context("Open Firefox and click the login button on the website")
-            .expect("expected a recalled skill");
+        let entry = skill.as_memory_entry();
 
-        assert_eq!(recalled.skill_names, vec!["firefox-browser".to_string()]);
-        assert!(recalled.prompt.contains("# Auto-Recalled Skill"));
-        assert!(recalled.prompt.contains("/firefox-browser"));
-    }
-
-    #[test]
-    fn relevant_prompt_for_context_returns_none_when_no_skill_matches() {
-        let mut registry = SkillRegistry::default();
-        let skill = test_skill(
-            "firefox-browser",
-            "Control Firefox browser sessions and logged-in pages",
-            "Use this skill when you need to open websites, click buttons, or interact with browser pages.",
-        );
-        registry.skills.insert(skill.name.clone(), skill);
-
-        let recalled = registry.relevant_prompt_for_context(
-            "Refactor the Rust parser and improve error handling in the compiler pipeline",
-        );
-
-        assert!(recalled.is_none());
+        assert_eq!(entry.id, "skill:firefox-browser");
+        assert!(matches!(
+            entry.category,
+            crate::memory::MemoryCategory::Custom(ref name) if name == "Skills"
+        ));
+        assert!(entry.content.contains("/firefox-browser"));
+        assert!(entry.content.contains("# Skill: firefox-browser"));
+        assert_eq!(entry.source.as_deref(), Some("skill_registry"));
     }
 }

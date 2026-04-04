@@ -3,39 +3,6 @@ use crate::logging;
 use crate::message::Message;
 
 impl Agent {
-    pub(super) fn build_auto_skill_prompt(
-        &self,
-        messages: &[Message],
-    ) -> Option<crate::skill::SkillRecallPrompt> {
-        if self.active_skill.is_some() {
-            return None;
-        }
-
-        let recalled = self.skills.relevant_prompt_for_messages(messages);
-        if let Some(recalled) = recalled.as_ref() {
-            logging::info(&format!(
-                "Auto-recalled skill(s): {}",
-                recalled.skill_names.join(", ")
-            ));
-        }
-        recalled
-    }
-
-    pub(super) fn append_auto_skill_prompt(
-        &self,
-        split: &mut crate::prompt::SplitSystemPrompt,
-        recalled: Option<&crate::skill::SkillRecallPrompt>,
-    ) {
-        let Some(recalled) = recalled else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str(&recalled.prompt);
-    }
-
     fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
         let Some(reminder) = self
             .current_turn_system_reminder
@@ -118,8 +85,14 @@ impl Agent {
             .session
             .working_dir
             .as_deref()
-            .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-            .unwrap_or_default();
+            .map(|dir| {
+                crate::memory::MemoryManager::new()
+                    .with_project_dir(dir)
+                    .with_skills(self.active_skill.is_none())
+            })
+            .unwrap_or_else(|| {
+                crate::memory::MemoryManager::new().with_skills(self.active_skill.is_none())
+            });
         let shared_messages: std::sync::Arc<[Message]> = messages.to_vec().into();
         manager.spawn_relevance_check(session_id, shared_messages.clone(), memory_event_tx);
 
@@ -139,8 +112,14 @@ impl Agent {
             .session
             .working_dir
             .as_deref()
-            .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-            .unwrap_or_default();
+            .map(|dir| {
+                crate::memory::MemoryManager::new()
+                    .with_project_dir(dir)
+                    .with_skills(self.active_skill.is_none())
+            })
+            .unwrap_or_else(|| {
+                crate::memory::MemoryManager::new().with_skills(self.active_skill.is_none())
+            });
         match manager.relevant_prompt_for_messages(messages).await {
             Ok(prompt) => prompt,
             Err(error) => {

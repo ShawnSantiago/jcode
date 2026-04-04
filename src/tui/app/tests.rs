@@ -409,6 +409,10 @@ fn session_picker_resume_action_keeps_overlay_open() {
                 search_index: "keep-open keep open".to_string(),
                 server_name: None,
                 server_icon: None,
+                source: crate::tui::session_picker::SessionSource::Jcode,
+                resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
+                    session_id: "session_keep_open".to_string(),
+                },
             },
         ]),
     ));
