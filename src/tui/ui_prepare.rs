@@ -79,21 +79,44 @@ fn default_message_alignment(role: &str, centered: bool) -> ratatui::layout::Ali
     }
 }
 
+fn is_error_copy_content(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("Error:") || trimmed.starts_with("error:") || trimmed.starts_with("Failed:")
+}
+
+fn error_copy_target(content: &str, rendered_line_count: usize) -> Option<RawCopyTarget> {
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+
+    Some(RawCopyTarget {
+        kind: CopyTargetKind::Error,
+        content: content.to_string(),
+        start_raw_line: 0,
+        end_raw_line: rendered_line_count.max(1),
+        badge_raw_line: 0,
+    })
+}
+
+fn offset_copy_target(target: RawCopyTarget, line_offset: usize) -> RawCopyTarget {
+    RawCopyTarget {
+        kind: target.kind,
+        content: target.content,
+        start_raw_line: target.start_raw_line + line_offset,
+        end_raw_line: target.end_raw_line + line_offset,
+        badge_raw_line: target.badge_raw_line + line_offset,
+    }
+}
+
 fn assistant_message_copy_targets(
     content: &str,
     rendered_lines: &[Line<'static>],
 ) -> Vec<RawCopyTarget> {
-    if content.starts_with("Error:")
-        || content.starts_with("error:")
-        || content.starts_with("Failed:")
-    {
-        return vec![RawCopyTarget {
-            kind: CopyTargetKind::Error,
-            content: content.trim_end().to_string(),
-            start_raw_line: 0,
-            end_raw_line: rendered_lines.len().max(1),
-            badge_raw_line: 0,
-        }];
+    if is_error_copy_content(content) {
+        return error_copy_target(content, rendered_lines.len())
+            .into_iter()
+            .collect();
     }
 
     crate::tui::markdown::extract_copy_targets_from_rendered_lines(rendered_lines)
@@ -782,13 +805,7 @@ fn prepare_body_incremental(
                 );
                 let cached_copy_targets = assistant_message_copy_targets(&msg.content, &cached);
                 for target in cached_copy_targets {
-                    new_copy_targets.push(RawCopyTarget {
-                        kind: target.kind,
-                        content: target.content,
-                        start_raw_line: new_lines.len() + target.start_raw_line,
-                        end_raw_line: new_lines.len() + target.end_raw_line,
-                        badge_raw_line: new_lines.len() + target.badge_raw_line,
-                    });
+                    new_copy_targets.push(offset_copy_target(target, new_lines.len()));
                 }
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
@@ -823,6 +840,11 @@ fn prepare_body_incremental(
                 let tool_start_line = new_lines.len();
                 let cached =
                     get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
+                if is_error_copy_content(&msg.content) {
+                    if let Some(target) = error_copy_target(&msg.content, cached.len()) {
+                        new_copy_targets.push(offset_copy_target(target, tool_start_line));
+                    }
+                }
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
                     new_line_raw_overrides.push(None);
@@ -981,6 +1003,10 @@ fn prepare_body_incremental(
                 new_line_copy_offsets.push(prefix_width);
             }
             "error" => {
+                let error_start_line = new_lines.len();
+                if let Some(target) = error_copy_target(&msg.content, 1) {
+                    new_copy_targets.push(offset_copy_target(target, error_start_line));
+                }
                 let raw_line = new_raw_plain_lines.len();
                 new_raw_plain_lines.push(msg.content.clone());
                 let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
@@ -1221,13 +1247,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 );
                 let message_copy_targets = assistant_message_copy_targets(&msg.content, &cached);
                 for target in message_copy_targets {
-                    copy_targets.push(RawCopyTarget {
-                        kind: target.kind,
-                        content: target.content,
-                        start_raw_line: lines.len() + target.start_raw_line,
-                        end_raw_line: lines.len() + target.end_raw_line,
-                        badge_raw_line: lines.len() + target.badge_raw_line,
-                    });
+                    copy_targets.push(offset_copy_target(target, lines.len()));
                 }
                 let content_lines = markdown::render_markdown_with_width(
                     &msg.content,
@@ -1296,6 +1316,11 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let tool_start_line = lines.len();
                 let cached =
                     get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
+                if is_error_copy_content(&msg.content) {
+                    if let Some(target) = error_copy_target(&msg.content, cached.len()) {
+                        copy_targets.push(offset_copy_target(target, tool_start_line));
+                    }
+                }
                 for line in cached {
                     lines.push(align_if_unset(line, align));
                     line_raw_overrides.push(None);
@@ -1454,6 +1479,10 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 line_copy_offsets.push(prefix_width);
             }
             "error" => {
+                let error_start_line = lines.len();
+                if let Some(target) = error_copy_target(&msg.content, 1) {
+                    copy_targets.push(offset_copy_target(target, error_start_line));
+                }
                 let raw_line = raw_plain_lines.len();
                 raw_plain_lines.push(msg.content.clone());
                 let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());

@@ -8621,6 +8621,52 @@ fn create_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBacke
     (app, terminal)
 }
 
+fn create_error_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("Show me the last error"),
+        DisplayMessage::error("permission denied while opening ~/.jcode/config.toml"),
+    ];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    (app, terminal)
+}
+
+fn create_tool_error_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("Run the command"),
+        DisplayMessage::tool(
+            "Error: permission denied",
+            crate::message::ToolCall {
+                id: "tool_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "cat /root/secret"}),
+                intent: None,
+            },
+        ),
+    ];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    (app, terminal)
+}
+
 /// Get the configured scroll up key binding (code, modifiers).
 fn scroll_up_key(app: &App) -> (KeyCode, KeyModifiers) {
     (
@@ -9240,6 +9286,56 @@ fn test_remote_copy_badge_shortcut_supported() {
         "expected copy notice, got: {}",
         notice
     );
+
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("Copied!"),
+        "expected inline copied feedback: {}",
+        text
+    );
+}
+
+#[test]
+fn test_local_error_copy_badge_shortcut_supported() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_error_copy_test_app();
+
+    let initial = render_and_snap(&app, &mut terminal);
+    assert!(
+        initial.contains("[S]"),
+        "expected visible error copy badge: {}",
+        initial
+    );
+
+    app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
+        .unwrap();
+
+    assert_eq!(app.status_notice(), Some("Copied error".to_string()));
+
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        text.contains("Copied!"),
+        "expected inline copied feedback: {}",
+        text
+    );
+}
+
+#[test]
+fn test_local_tool_error_copy_badge_shortcut_supported() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_tool_error_copy_test_app();
+
+    let initial = render_and_snap(&app, &mut terminal);
+    assert!(
+        initial.contains("[S]"),
+        "expected visible tool error copy badge: {}",
+        initial
+    );
+
+    app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
+        .unwrap();
+
+    assert_eq!(app.status_notice(), Some("Copied error".to_string()));
 
     let text = render_and_snap(&app, &mut terminal);
     assert!(
