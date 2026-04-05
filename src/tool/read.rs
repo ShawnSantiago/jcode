@@ -64,12 +64,6 @@ fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
         ));
     }
 
-    if params.end_line.is_some() && params.limit.is_some() {
-        return Err(anyhow::anyhow!(
-            "Use either end_line or limit with start_line, not both."
-        ));
-    }
-
     if has_start_end {
         let start_line = params.start_line.unwrap_or(1);
         if start_line == 0 {
@@ -128,7 +122,7 @@ impl Tool for ReadTool {
         json!({
             "type": "object",
             "required": ["file_path"],
-            "description": "Read file contents by line range. Use either start_line/end_line (1-based, inclusive) or offset/limit (0-based). Do not combine offset with start_line or end_line. If end_line is provided, omit limit.",
+            "description": "Read file contents by line range. Use either start_line/end_line (1-based, inclusive) or offset/limit (0-based). Do not combine offset with start_line or end_line. If both end_line and limit are provided, end_line takes precedence.",
             "properties": {
                 "file_path": {
                     "type": "string",
@@ -140,7 +134,7 @@ impl Tool for ReadTool {
                 },
                 "end_line": {
                     "type": "integer",
-                    "description": "1-based line number to stop reading at (inclusive). Use only with start_line, and omit limit when end_line is provided."
+                    "description": "1-based line number to stop reading at (inclusive). Use only with start_line. If limit is also provided, end_line takes precedence."
                 },
                 "offset": {
                     "type": "integer",
@@ -148,7 +142,7 @@ impl Tool for ReadTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read (default 5000). With start_line, use this only when end_line is omitted."
+                    "description": "Maximum number of lines to read (default 5000). With start_line, this is used when end_line is omitted."
                 }
             }
         })
@@ -316,6 +310,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_read_range_prefers_end_line_over_limit() {
+        let params: ReadInput = serde_json::from_value(json!({
+            "file_path": "src/lib.rs",
+            "start_line": 10,
+            "end_line": 20,
+            "limit": 999
+        }))
+        .expect("deserialize params");
+
+        let range = normalize_read_range(&params).expect("end_line should take precedence");
+        assert_eq!(
+            range,
+            NormalizedReadRange {
+                offset: 9,
+                limit: 11,
+                style: ReadRangeStyle::StartEnd,
+            }
+        );
+    }
+
+    #[test]
     fn normalize_read_range_rejects_start_line_and_offset() {
         let params: ReadInput = serde_json::from_value(json!({
             "file_path": "src/lib.rs",
@@ -443,6 +458,48 @@ mod tests {
                     "file_path": "sample.txt",
                     "start_line": 2,
                     "limit": 2
+                }),
+                make_ctx(temp.path().to_path_buf()),
+            )
+            .await
+            .expect("read execution should succeed");
+
+        assert!(
+            output.output.contains("2\ttwo"),
+            "output={:?}",
+            output.output
+        );
+        assert!(
+            output.output.contains("3\tthree"),
+            "output={:?}",
+            output.output
+        );
+        assert!(
+            !output.output.contains("4\tfour"),
+            "output={:?}",
+            output.output
+        );
+        assert!(
+            output.output.contains("use start_line=4 to continue"),
+            "output={:?}",
+            output.output
+        );
+    }
+
+    #[tokio::test]
+    async fn read_tool_prefers_end_line_over_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").expect("write sample file");
+
+        let tool = ReadTool::new();
+        let output = tool
+            .execute(
+                json!({
+                    "file_path": "sample.txt",
+                    "start_line": 2,
+                    "end_line": 3,
+                    "limit": 50
                 }),
                 make_ctx(temp.path().to_path_buf()),
             )
