@@ -2675,18 +2675,18 @@ pub fn active_session_ids() -> Vec<String> {
 /// try to find a session whose short name matches.
 /// Returns the full session ID if found.
 pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
-    // If it looks like a full session ID (contains session_), try loading directly first
-    if name_or_id.starts_with("session_") {
-        match Session::load(name_or_id) {
-            Ok(_) => return Ok(name_or_id.to_string()),
-            Err(e) => {
-                if session_exists(name_or_id) {
-                    anyhow::bail!(
-                        "Session '{}' exists but failed to load (possibly corrupt):\n  {}",
-                        name_or_id,
-                        e
-                    );
-                }
+    // Try loading directly first so stable imported IDs like `imported_codex_*`
+    // or other explicit session ids can be resumed without going through the
+    // short-name matcher.
+    match Session::load(name_or_id) {
+        Ok(_) => return Ok(name_or_id.to_string()),
+        Err(e) => {
+            if session_exists(name_or_id) {
+                anyhow::bail!(
+                    "Session '{}' exists but failed to load (possibly corrupt):\n  {}",
+                    name_or_id,
+                    e
+                );
             }
         }
     }
@@ -2739,5 +2739,23 @@ mod batch_crash_tests {
         assert_eq!(info.session_ids.len(), 2);
         assert_eq!(info.display_names.len(), 2);
         assert_eq!(info.display_names[0], "fox");
+    }
+
+    #[test]
+    fn find_session_by_name_or_id_accepts_imported_session_ids() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp dir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let imported_id = "imported_codex_test_resume";
+        let mut session =
+            Session::create_with_id(imported_id.to_string(), None, Some("Imported".to_string()));
+        session.status = SessionStatus::Closed;
+        session.save().expect("save imported session");
+
+        let resolved = find_session_by_name_or_id(imported_id).expect("resolve imported id");
+        assert_eq!(resolved, imported_id);
+
+        crate::env::remove_var("JCODE_HOME");
     }
 }
