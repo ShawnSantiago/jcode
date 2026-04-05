@@ -222,9 +222,18 @@ fn connection_phase_label(phase: &ConnectionPhase) -> String {
     match phase {
         ConnectionPhase::Authenticating => "refreshing auth".to_string(),
         ConnectionPhase::Connecting => "connecting".to_string(),
-        ConnectionPhase::WaitingForResponse => "waiting for first token".to_string(),
+        ConnectionPhase::WaitingForResponse => "waiting for response".to_string(),
         ConnectionPhase::Streaming => "streaming".to_string(),
         ConnectionPhase::Retrying { attempt, max } => format!("retrying {}/{}", attempt, max),
+    }
+}
+
+fn display_connection_type(connection_type: &str) -> String {
+    match connection_type.trim() {
+        "https/sse" => "https".to_string(),
+        "websocket/persistent-fresh" => "websocket".to_string(),
+        "websocket/persistent-reuse" => "websocket reuse".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -235,15 +244,23 @@ fn append_stream_route(status_text: &mut String, app: &dyn TuiState) {
 }
 
 fn append_transport_context(status_text: &mut String, app: &dyn TuiState) {
-    if let Some(conn) = app.connection_type() {
-        status_text.push_str(&format!(" · {}", conn));
-    }
-    if let Some(detail) = app
+    let detail = app
         .status_detail()
         .map(|detail| detail.trim().to_string())
-        .filter(|detail| !detail.is_empty())
-    {
+        .filter(|detail| !detail.is_empty());
+    let connection = app
+        .connection_type()
+        .map(|conn| display_connection_type(&conn))
+        .filter(|conn| !conn.is_empty());
+
+    if let Some(detail) = detail.as_deref() {
         status_text.push_str(&format!(" · {}", detail));
+    }
+    if let Some(connection) = connection
+        .as_deref()
+        .filter(|conn| detail.as_deref() != Some(*conn))
+    {
+        status_text.push_str(&format!(" · {}", connection));
     }
     append_stream_route(status_text, app);
 }
@@ -764,6 +781,27 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].content.as_ref(), " · 0/3 done");
         assert_eq!(spans[1].content.as_ref(), " · running: #1 bash +2");
+    }
+
+    #[test]
+    fn connection_phase_waiting_label_is_generic_response_wait() {
+        assert_eq!(
+            connection_phase_label(&ConnectionPhase::WaitingForResponse),
+            "waiting for response"
+        );
+    }
+
+    #[test]
+    fn display_connection_type_uses_reader_friendly_labels() {
+        assert_eq!(display_connection_type("https/sse"), "https");
+        assert_eq!(
+            display_connection_type("websocket/persistent-fresh"),
+            "websocket"
+        );
+        assert_eq!(
+            display_connection_type("websocket/persistent-reuse"),
+            "websocket reuse"
+        );
     }
 
     #[test]
