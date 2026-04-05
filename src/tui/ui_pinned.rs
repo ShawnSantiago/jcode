@@ -1503,6 +1503,13 @@ fn render_side_panel_markdown_cached(
         text_lines.push(align_if_unset(line.clone(), align));
     }
 
+    if centered {
+        crate::tui::markdown::recenter_structured_blocks_for_display(
+            &mut text_lines,
+            inner.width as usize,
+        );
+    }
+
     if text_lines.is_empty() {
         text_lines.push(Line::from(Span::styled(
             "No side panel content yet",

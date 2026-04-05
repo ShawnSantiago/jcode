@@ -799,6 +799,88 @@ fn center_structured_block_ranges(
     }
 }
 
+fn leading_raw_padding_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .take_while(|span| {
+            span.style == Style::default()
+                && !span.content.is_empty()
+                && span.content.chars().all(|ch| ch == ' ')
+        })
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn strip_leading_raw_padding(line: &mut Line<'static>, trim_width: usize) {
+    if trim_width == 0 {
+        return;
+    }
+
+    let mut remaining = trim_width;
+    while remaining > 0 && !line.spans.is_empty() {
+        let span = &line.spans[0];
+        let is_raw_padding = span.style == Style::default()
+            && !span.content.is_empty()
+            && span.content.chars().all(|ch| ch == ' ');
+        if !is_raw_padding {
+            break;
+        }
+
+        let span_width = UnicodeWidthStr::width(span.content.as_ref());
+        if span_width <= remaining {
+            line.spans.remove(0);
+            remaining -= span_width;
+            continue;
+        }
+
+        let keep = span_width.saturating_sub(remaining);
+        line.spans[0].content = " ".repeat(keep).into();
+        remaining = 0;
+    }
+}
+
+pub(crate) fn recenter_structured_blocks_for_display(lines: &mut [Line<'static>], width: usize) {
+    if width == 0 {
+        return;
+    }
+
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let is_structured =
+            !line_is_blank(&lines[idx]) && lines[idx].alignment == Some(Alignment::Left);
+        if !is_structured {
+            idx += 1;
+            continue;
+        }
+
+        let start = idx;
+        while idx < lines.len()
+            && !line_is_blank(&lines[idx])
+            && lines[idx].alignment == Some(Alignment::Left)
+        {
+            idx += 1;
+        }
+
+        let run = &mut lines[start..idx];
+        let common_pad = run.iter().map(leading_raw_padding_width).min().unwrap_or(0);
+        if common_pad > 0 {
+            for line in run.iter_mut() {
+                strip_leading_raw_padding(line, common_pad);
+            }
+        }
+
+        let max_line_width = run.iter().map(Line::width).max().unwrap_or(0);
+        let pad = width.saturating_sub(max_line_width) / 2;
+        if pad > 0 {
+            let pad_str = " ".repeat(pad);
+            for line in run.iter_mut() {
+                line.spans.insert(0, Span::raw(pad_str.clone()));
+                line.alignment = Some(Alignment::Left);
+            }
+        }
+    }
+}
+
 fn structured_markdown_alignment(
     blockquote_depth: usize,
     list_stack: &[ListRenderState],
@@ -4179,7 +4261,26 @@ mod tests {
             .filter(|line| !line.is_empty())
             .collect();
 
-        assert_eq!(rendered, vec!["• one", "• two"]);
+        assert_eq!(
+            rendered.len(),
+            2,
+            "expected rendered list items: {rendered:?}"
+        );
+        let first_pad = leading_spaces(&rendered[0]);
+        let second_pad = leading_spaces(&rendered[1]);
+        assert_eq!(
+            first_pad, second_pad,
+            "list items should share the same block pad: {rendered:?}"
+        );
+        assert!(
+            first_pad > 0,
+            "list block should be centered in centered mode: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|line| line[first_pad..].starts_with("• "))
+        );
     }
 
     #[test]

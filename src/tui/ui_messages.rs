@@ -117,6 +117,9 @@ pub(crate) fn render_assistant_message(
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width, centered, 96);
     let mut lines = markdown::render_markdown_with_width(&msg.content, Some(wrap_width));
+    if centered {
+        markdown::recenter_structured_blocks_for_display(&mut lines, width as usize);
+    }
     if !msg.tool_calls.is_empty() {
         lines.extend(render_assistant_tool_call_lines(
             &msg.tool_calls,
@@ -972,6 +975,17 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 mod tests {
     use super::*;
 
+    fn extract_line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn leading_spaces(text: &str) -> usize {
+        text.chars().take_while(|c| *c == ' ').count()
+    }
+
     #[test]
     fn render_system_message_forces_system_color_on_all_spans() {
         let msg = DisplayMessage::system("**Reload complete** — continuing.");
@@ -1159,6 +1173,41 @@ mod tests {
         assert_eq!(
             content_line.alignment, None,
             "assistant render should leave centered prose alignment unset for outer centering"
+        );
+
+        crate::tui::markdown::set_center_code_blocks(saved);
+    }
+
+    #[test]
+    fn render_assistant_message_recenters_structured_markdown_to_actual_width() {
+        let saved = crate::tui::markdown::center_code_blocks();
+        crate::tui::markdown::set_center_code_blocks(true);
+        let msg = DisplayMessage::assistant("- one\n- two");
+
+        let lines = render_assistant_message(&msg, 140, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+        let bullets: Vec<&String> = rendered.iter().filter(|line| line.contains("• ")).collect();
+
+        assert_eq!(
+            bullets.len(),
+            2,
+            "expected two rendered bullet lines: {rendered:?}"
+        );
+        let first_pad = leading_spaces(bullets[0]);
+        let second_pad = leading_spaces(bullets[1]);
+        assert_eq!(
+            first_pad, second_pad,
+            "simple list should share a block pad: {rendered:?}"
+        );
+        assert!(
+            first_pad > 45,
+            "list should be re-centered to the full display width: {rendered:?}"
+        );
+        assert!(
+            bullets
+                .iter()
+                .all(|line| line[leading_spaces(line)..].starts_with("• ")),
+            "bullet markers should remain flush-left within the centered block: {rendered:?}"
         );
 
         crate::tui::markdown::set_center_code_blocks(saved);
