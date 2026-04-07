@@ -537,6 +537,43 @@ impl PickerState {
         self.selected_entry_index()
             .and_then(|index| self.entries.get_mut(index))
     }
+
+    pub fn is_agent_target_picker(&self) -> bool {
+        self.kind == PickerKind::Model
+            && !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.action, PickerAction::AgentTarget(_)))
+    }
+
+    pub fn primary_label(&self) -> &'static str {
+        if self.is_agent_target_picker() {
+            "TARGET"
+        } else {
+            self.kind.primary_label()
+        }
+    }
+
+    pub fn secondary_label(&self, preview: bool) -> &'static str {
+        if self.is_agent_target_picker() {
+            "MODEL"
+        } else {
+            self.kind.secondary_label(preview)
+        }
+    }
+
+    pub fn tertiary_label(&self) -> &'static str {
+        if self.is_agent_target_picker() {
+            "CONFIG"
+        } else {
+            self.kind.tertiary_label()
+        }
+    }
+
+    pub fn shows_default_shortcut_hint(&self) -> bool {
+        !self.is_agent_target_picker() && self.kind.shows_default_shortcut_hint()
+    }
 }
 
 /// A reusable picker entry with one or more available actions/options.

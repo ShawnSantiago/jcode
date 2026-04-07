@@ -144,9 +144,9 @@ fn picker_render_width(picker: &crate::tui::PickerState, max_width: usize) -> us
         return marker_width + title_width + state_width;
     }
 
-    let mut max_model_len = display_width(picker.kind.primary_label());
-    let mut max_provider_len = display_width("PROVIDER");
-    let mut max_via_len = display_width(picker.kind.tertiary_label());
+    let mut max_model_len = display_width(picker.primary_label());
+    let mut max_provider_len = display_width(picker.secondary_label(is_preview));
+    let mut max_via_len = display_width(picker.tertiary_label());
 
     for &fi in &picker.filtered {
         let entry = &picker.entries[fi];
@@ -312,21 +312,24 @@ pub(super) fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect
     let account_title_width = width.saturating_sub(marker_width + account_state_width);
     let model_width = width.saturating_sub(marker_width + provider_width + via_width);
 
-    let kind = picker.kind;
     let (col_widths, col_labels, col_logical): ([usize; 3], [&str; 3], [usize; 3]) =
         if is_account_picker {
             (
                 [account_title_width, account_state_width, 0],
-                [kind.primary_label(), kind.secondary_label(is_preview), ""],
+                [
+                    picker.primary_label(),
+                    picker.secondary_label(is_preview),
+                    "",
+                ],
                 [0, 0, 0],
             )
         } else if is_preview {
             (
                 [provider_width, model_width, via_width],
                 [
-                    kind.secondary_label(true),
-                    kind.primary_label(),
-                    kind.tertiary_label(),
+                    picker.secondary_label(true),
+                    picker.primary_label(),
+                    picker.tertiary_label(),
                 ],
                 [1, 0, 2],
             )
@@ -334,9 +337,9 @@ pub(super) fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect
             (
                 [model_width, provider_width, via_width],
                 [
-                    kind.primary_label(),
-                    kind.secondary_label(false),
-                    kind.tertiary_label(),
+                    picker.primary_label(),
+                    picker.secondary_label(false),
+                    picker.tertiary_label(),
                 ],
                 [0, 1, 2],
             )
@@ -404,7 +407,7 @@ pub(super) fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect
             picker.kind.active_submit_hint(),
             Style::default().fg(rgb(60, 60, 80)),
         ));
-        if picker.kind.shows_default_shortcut_hint() {
+        if picker.shows_default_shortcut_hint() {
             header_spans.push(Span::styled(
                 "  ^D=default",
                 Style::default().fg(rgb(60, 60, 80)).italic(),
@@ -780,6 +783,36 @@ mod tests {
         }
     }
 
+    fn sample_agent_target_picker() -> crate::tui::PickerState {
+        crate::tui::PickerState {
+            kind: crate::tui::PickerKind::Model,
+            filtered: vec![0],
+            selected: 0,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+            entries: vec![crate::tui::PickerEntry {
+                name: "Swarm / subagent".to_string(),
+                options: vec![crate::tui::PickerOption {
+                    provider: "gpt-5 default".to_string(),
+                    api_method: "agents.swarm_model".to_string(),
+                    available: true,
+                    detail: "/agents swarm".to_string(),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm),
+                selected_option: 0,
+                is_current: false,
+                is_default: false,
+                recommended: false,
+                recommendation_rank: usize::MAX,
+                old: false,
+                created_date: None,
+                effort: None,
+            }],
+        }
+    }
+
     #[test]
     fn picker_render_width_uses_intrinsic_content_width() {
         let picker = sample_picker();
@@ -828,5 +861,16 @@ mod tests {
         let (single_title, _) = account_picker_entry_title(&single.entries[0], false);
         assert!(mixed_title.starts_with("Claude · "));
         assert_eq!(single_title, "work");
+    }
+
+    #[test]
+    fn agent_target_picker_uses_specific_column_labels() {
+        let picker = sample_agent_target_picker();
+
+        assert!(picker.is_agent_target_picker());
+        assert_eq!(picker.primary_label(), "TARGET");
+        assert_eq!(picker.secondary_label(false), "MODEL");
+        assert_eq!(picker.tertiary_label(), "CONFIG");
+        assert!(!picker.shows_default_shortcut_hint());
     }
 }
