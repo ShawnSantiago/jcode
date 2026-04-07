@@ -59,7 +59,7 @@ impl Client {
 
     /// Subscribe to events
     pub async fn subscribe(&mut self) -> Result<u64> {
-        self.subscribe_with_info(None, None, None, false).await
+        self.subscribe_with_info(None, None, None, false, false).await
     }
 
     pub async fn subscribe_with_info(
@@ -68,6 +68,7 @@ impl Client {
         selfdev: Option<bool>,
         target_session_id: Option<String>,
         client_has_local_history: bool,
+        allow_session_takeover: bool,
     ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
@@ -78,6 +79,7 @@ impl Client {
             selfdev,
             target_session_id,
             client_has_local_history,
+            allow_session_takeover,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
@@ -179,13 +181,14 @@ impl Client {
     }
 
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
-        self.resume_session_with_options(session_id, false).await
+        self.resume_session_with_options(session_id, false, false).await
     }
 
     pub async fn resume_session_with_options(
         &mut self,
         session_id: &str,
         client_has_local_history: bool,
+        allow_session_takeover: bool,
     ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
@@ -194,6 +197,7 @@ impl Client {
             id,
             session_id: session_id.to_string(),
             client_has_local_history,
+            allow_session_takeover,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

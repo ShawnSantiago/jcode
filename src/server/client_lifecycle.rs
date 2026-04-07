@@ -121,6 +121,7 @@ pub(super) async fn handle_client(
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
     let client_connection_id = id::new_id("conn");
     let connected_at = Instant::now();
+    let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
 
     {
         let mut connections = client_connections.write().await;
@@ -132,6 +133,7 @@ pub(super) async fn handle_client(
                 debug_client_id: None,
                 connected_at,
                 last_seen: connected_at,
+                disconnect_tx: disconnect_tx.clone(),
             },
         );
     }
@@ -370,6 +372,16 @@ pub(super) async fn handle_client(
                 }
                 continue;
             }
+            disconnect_signal = disconnect_rx.recv() => {
+                if disconnect_signal.is_some() {
+                    crate::logging::info(&format!(
+                        "Client connection {} was superseded; disconnecting old owner of session {}",
+                        client_connection_id, client_session_id
+                    ));
+                    break;
+                }
+                continue;
+            }
             n = reader.read_line(&mut line) => {
                 let n = match n {
                     Ok(n) => n,
@@ -546,6 +558,7 @@ pub(super) async fn handle_client(
                 selfdev,
                 target_session_id,
                 client_has_local_history,
+                allow_session_takeover,
             } => {
                 if let Some(target_session_id) = target_session_id {
                     if crate::session::session_exists(&target_session_id) {
@@ -554,6 +567,7 @@ pub(super) async fn handle_client(
                             id,
                             target_session_id.clone(),
                             client_has_local_history,
+                            allow_session_takeover,
                             &mut client_selfdev,
                             &mut client_session_id,
                             &client_connection_id,
@@ -564,6 +578,7 @@ pub(super) async fn handle_client(
                             &shutdown_signals,
                             &soft_interrupt_queues,
                             &client_connections,
+                            &client_debug_state,
                             &swarm_members,
                             &swarms_by_id,
                             &file_touches,
@@ -707,11 +722,13 @@ pub(super) async fn handle_client(
                 id,
                 session_id,
                 client_has_local_history,
+                allow_session_takeover,
             } => {
                 if handle_resume_session(
                     id,
                     session_id,
                     client_has_local_history,
+                    allow_session_takeover,
                     &mut client_selfdev,
                     &mut client_session_id,
                     &client_connection_id,
@@ -722,6 +739,7 @@ pub(super) async fn handle_client(
                     &shutdown_signals,
                     &soft_interrupt_queues,
                     &client_connections,
+                    &client_debug_state,
                     &swarm_members,
                     &swarms_by_id,
                     &file_touches,

@@ -864,6 +864,7 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
         let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
@@ -962,6 +963,7 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
         let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();

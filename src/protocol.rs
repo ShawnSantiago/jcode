@@ -176,6 +176,8 @@ pub enum Request {
         target_session_id: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         client_has_local_history: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_session_takeover: bool,
     },
 
     /// Get full conversation history (for TUI sync on connect)
@@ -193,6 +195,8 @@ pub enum Request {
         session_id: String,
         #[serde(default)]
         client_has_local_history: bool,
+        #[serde(default)]
+        allow_session_takeover: bool,
     },
 
     /// Deliver a scheduled task to a currently live session.

@@ -1159,6 +1159,7 @@ mod tests {
                 selfdev: None,
                 target_session_id: None,
                 client_has_local_history: false,
+                allow_session_takeover: false,
             })
             .await?;
             self.read_until(

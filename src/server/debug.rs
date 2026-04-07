@@ -40,6 +40,7 @@ pub(super) struct ClientConnectionInfo {
     pub(super) debug_client_id: Option<String>,
     pub(super) connected_at: Instant,
     pub(super) last_seen: Instant,
+    pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
 }
 
 impl ClientDebugState {
@@ -573,6 +574,7 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
         let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
@@ -606,6 +608,7 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
         let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
@@ -628,6 +631,7 @@ mod tests {
                 debug_client_id: None,
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
         let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
@@ -665,6 +669,7 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
         let client_debug_state = Arc::new(RwLock::new(ClientDebugState {

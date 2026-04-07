@@ -890,6 +890,7 @@ mod tests {
                 debug_client_id: None,
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
 
@@ -1026,6 +1027,7 @@ mod tests {
                 debug_client_id: None,
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
 
