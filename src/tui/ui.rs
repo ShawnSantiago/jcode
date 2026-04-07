@@ -37,6 +37,8 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_header.rs"]
 mod header;
+#[path = "ui_inline.rs"]
+mod inline_ui;
 #[path = "ui_input.rs"]
 mod input_ui;
 #[path = "ui_memory.rs"]
@@ -80,6 +82,7 @@ use file_diff_ui::{
     FileDiffCacheKey, FileDiffViewCacheEntry, file_content_signature, file_diff_cache,
 };
 pub(crate) use header::capitalize;
+use inline_ui::{draw_inline_ui, inline_ui_height};
 #[cfg(test)]
 use memory_ui::{
     MemoryTileItem, choose_memory_tile_span, parse_memory_display_entries, plan_memory_tile,
@@ -90,7 +93,6 @@ pub(crate) use messages::{
     render_assistant_message, render_background_task_message, render_swarm_message,
     render_system_message, render_tool_message,
 };
-use picker_ui::draw_picker_line;
 pub use pinned_ui::SidePanelDebugStats;
 pub(crate) use pinned_ui::{
     clear_side_panel_render_caches, prewarm_focused_side_panel, reset_side_panel_debug_stats,
@@ -2532,15 +2534,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
-    let picker_height: u16 = if let Some(picker) = app.picker_state() {
-        let visible_models = picker.filtered.len() as u16;
-        let rows_needed = visible_models + 1 + 2; // +1 for header, +2 for rounded border
-        let max_height: u16 = 20;
-        rows_needed.min(max_height)
-    } else {
-        0
-    };
-    let picker_gap_height: u16 = if picker_height > 0 { 1 } else { 0 };
+    let inline_block_height: u16 = inline_ui_height(app);
+    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
     let input_height = base_input_height + hint_line_height;
 
     let total_start = Instant::now();
@@ -2564,10 +2559,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let fixed_height = 1
         + queued_height
         + notification_height
-        + picker_height
-        + picker_gap_height
+        + inline_block_height
+        + inline_ui_gap_height
         + input_height
-        + donut_height; // status + queued + notification + picker + gap + input + donut
+        + donut_height; // status + queued + notification + inline UI + gap + input + donut
     let available_height = chat_area.height;
 
     let initial_content_height = prepared_full_width.wrapped_lines.len().max(1) as u16;
@@ -2603,7 +2598,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Layout: messages (includes header), queued, status, notification, picker, gap, input, donut
+    // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2613,21 +2608,21 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(queued_height),         // Queued messages (above status)
                 Constraint::Length(1),                     // Status line
                 Constraint::Length(notification_height),   // Notification line
-                Constraint::Length(picker_height),         // Picker
-                Constraint::Length(picker_gap_height),     // Picker/input spacing
+                Constraint::Length(inline_block_height),   // Inline UI
+                Constraint::Length(inline_ui_gap_height),  // Inline UI/input spacing
                 Constraint::Length(input_height),          // Input
                 Constraint::Length(donut_height),          // Donut animation
             ]
         } else {
             vec![
-                Constraint::Min(3),                      // Messages (scrollable)
-                Constraint::Length(queued_height),       // Queued messages (above status)
-                Constraint::Length(1),                   // Status line
-                Constraint::Length(notification_height), // Notification line
-                Constraint::Length(picker_height),       // Picker
-                Constraint::Length(picker_gap_height),   // Picker/input spacing
-                Constraint::Length(input_height),        // Input
-                Constraint::Length(donut_height),        // Donut animation
+                Constraint::Min(3),                       // Messages (scrollable)
+                Constraint::Length(queued_height),        // Queued messages (above status)
+                Constraint::Length(1),                    // Status line
+                Constraint::Length(notification_height),  // Notification line
+                Constraint::Length(inline_block_height),  // Inline UI
+                Constraint::Length(inline_ui_gap_height), // Inline UI/input spacing
+                Constraint::Length(input_height),         // Input
+                Constraint::Length(donut_height),         // Donut animation
             ]
         })
         .split(chat_area);
@@ -2798,9 +2793,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_input".to_string());
     }
-    // Draw picker line if active
-    if picker_height > 0 {
-        draw_picker_line(frame, app, chunks[4]);
+    // Draw inline UI if active
+    if inline_block_height > 0 {
+        draw_inline_ui(frame, app, chunks[4]);
     }
 
     input_ui::draw_input(
@@ -2910,8 +2905,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 }
 
-fn picker_input_gap_height(app: &dyn TuiState) -> u16 {
-    if app.picker_state().is_some() { 1 } else { 0 }
+fn inline_ui_gap_height(app: &dyn TuiState) -> u16 {
+    if app.inline_ui_state().is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 fn extract_line_text(line: &Line) -> String {
@@ -3297,6 +3296,7 @@ mod tests {
         anim_elapsed: f32,
         time_since_activity: Option<Duration>,
         remote_startup_phase_active: bool,
+        inline_view_state: Option<crate::tui::InlineViewState>,
         picker_state: Option<crate::tui::PickerState>,
     }
 
@@ -3520,6 +3520,9 @@ mod tests {
         fn picker_state(&self) -> Option<&crate::tui::PickerState> {
             self.picker_state.as_ref()
         }
+        fn inline_view_state(&self) -> Option<&crate::tui::InlineViewState> {
+            self.inline_view_state.as_ref()
+        }
         fn changelog_scroll(&self) -> Option<usize> {
             None
         }
@@ -3630,9 +3633,9 @@ mod tests {
     }
 
     #[test]
-    fn test_picker_input_gap_height_only_when_picker_visible() {
+    fn test_inline_ui_gap_height_only_when_inline_ui_visible() {
         let state = TestState::default();
-        assert_eq!(picker_input_gap_height(&state), 0);
+        assert_eq!(inline_ui_gap_height(&state), 0);
 
         let picker_state = crate::tui::PickerState {
             kind: crate::tui::PickerKind::Model,
@@ -3647,7 +3650,17 @@ mod tests {
             picker_state: Some(picker_state),
             ..Default::default()
         };
-        assert_eq!(picker_input_gap_height(&state_with_picker), 1);
+        assert_eq!(inline_ui_gap_height(&state_with_picker), 1);
+
+        let state_with_inline_view = TestState {
+            inline_view_state: Some(crate::tui::InlineViewState {
+                title: "USAGE".to_string(),
+                status: Some("refreshing".to_string()),
+                lines: vec!["Refreshing usage".to_string()],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(inline_ui_gap_height(&state_with_inline_view), 1);
     }
 
     #[test]

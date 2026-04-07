@@ -24,56 +24,27 @@ impl App {
     }
 
     pub(super) fn open_usage_overlay_loading(&mut self) {
+        self.inline_view_state = None;
+        self.picker_state = None;
         self.usage_overlay = Some(std::cell::RefCell::new(
             crate::tui::usage_overlay::UsageOverlay::loading(),
         ));
         self.set_status_notice("Usage → refreshing");
     }
 
-    pub(super) fn open_usage_picker_loading(&mut self) {
-        use crate::tui::usage_overlay::UsageOverlayStatus;
-        use crate::tui::{PickerAction, PickerEntry, PickerKind, PickerOption, PickerState};
-
-        let detail_lines = vec![
-            "## Refreshing usage".to_string(),
-            "Fetching usage limits from all connected providers...".to_string(),
-            "".to_string(),
-            "This picker will update automatically when the usage report returns.".to_string(),
-        ];
-
+    pub(super) fn open_usage_inline_loading(&mut self) {
         self.usage_overlay = None;
-        self.picker_state = Some(PickerState {
-            kind: PickerKind::Usage,
-            entries: vec![PickerEntry {
-                name: "Refreshing usage".to_string(),
-                options: vec![PickerOption {
-                    provider: "loading".to_string(),
-                    api_method: "wait".to_string(),
-                    available: true,
-                    detail: "Fetching limits from connected providers".to_string(),
-                    estimated_reference_cost_micros: None,
-                }],
-                action: PickerAction::Usage {
-                    id: "loading".to_string(),
-                    title: "Refreshing usage".to_string(),
-                    subtitle: "Fetching limits from connected providers".to_string(),
-                    status: UsageOverlayStatus::Loading,
-                    detail_lines,
-                },
-                selected_option: 0,
-                is_current: false,
-                is_default: false,
-                recommended: false,
-                recommendation_rank: usize::MAX,
-                old: false,
-                created_date: None,
-                effort: None,
-            }],
-            filtered: vec![0],
-            selected: 0,
-            column: 0,
-            filter: String::new(),
-            preview: false,
+        self.picker_state = None;
+        self.inline_view_state = Some(crate::tui::InlineViewState {
+            title: "USAGE".to_string(),
+            status: Some("refreshing".to_string()),
+            lines: vec![
+                "Refreshing usage".to_string(),
+                "Fetching usage limits from all connected providers...".to_string(),
+                "".to_string(),
+                "This inline view will update automatically when the usage report returns."
+                    .to_string(),
+            ],
         });
         self.input.clear();
         self.cursor_pos = 0;

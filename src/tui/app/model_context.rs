@@ -657,6 +657,7 @@ impl App {
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
         self.usage_report_refreshing = false;
         self.usage_overlay = None;
+        self.inline_view_state = None;
         if self
             .picker_state
             .as_ref()

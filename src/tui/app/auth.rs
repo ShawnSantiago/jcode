@@ -832,6 +832,7 @@ impl App {
             _ => unreachable!(),
         };
 
+        self.inline_view_state = None;
         self.picker_state = Some(crate::tui::PickerState {
             kind: crate::tui::PickerKind::Account,
             filtered: (0..models.len()).collect(),

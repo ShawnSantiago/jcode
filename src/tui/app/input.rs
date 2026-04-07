@@ -1001,6 +1001,10 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 .unwrap_or(false)
             {
                 app.picker_state = None;
+                app.inline_view_state = None;
+                clear_input_for_escape(app);
+            } else if app.inline_view_state.is_some() {
+                app.inline_view_state = None;
                 clear_input_for_escape(app);
             } else if app.is_processing {
                 app.cancel_requested = true;

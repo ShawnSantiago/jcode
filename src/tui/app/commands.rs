@@ -3149,7 +3149,7 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    app.set_status_notice("Usage → refreshing");
+    app.open_usage_inline_loading();
     app.request_usage_report();
     true
 }

@@ -1074,6 +1074,10 @@ impl crate::tui::TuiState for App {
         self.picker_state.as_ref()
     }
 
+    fn inline_view_state(&self) -> Option<&crate::tui::InlineViewState> {
+        self.inline_view_state.as_ref()
+    }
+
     fn changelog_scroll(&self) -> Option<usize> {
         self.changelog_scroll
     }

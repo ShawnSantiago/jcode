@@ -583,6 +583,8 @@ pub struct App {
     chat_native_scrollbar: bool,
     // Show a native terminal scrollbar in the side panel.
     side_panel_native_scrollbar: bool,
+    // Passive inline UI (informational blocks shown above input).
+    inline_view_state: Option<super::InlineViewState>,
     // Interactive model/provider picker
     picker_state: Option<super::PickerState>,
     // Pending model switch from picker (for remote mode async processing)

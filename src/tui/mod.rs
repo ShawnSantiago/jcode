@@ -266,8 +266,18 @@ pub trait TuiState {
     fn side_panel_native_scrollbar(&self) -> bool;
     /// Whether to wrap lines in the pinned diff pane
     fn diff_line_wrap(&self) -> bool;
-    /// Interactive model/provider picker state (shown as inline row above input)
+    /// Interactive inline UI state (picker-like flows shown above input)
     fn picker_state(&self) -> Option<&PickerState>;
+    /// Passive inline UI state (informational views shown above input)
+    fn inline_view_state(&self) -> Option<&InlineViewState> {
+        None
+    }
+    /// General inline UI state shown above input.
+    fn inline_ui_state(&self) -> Option<InlineUiStateRef<'_>> {
+        self.picker_state()
+            .map(InlineUiStateRef::Interactive)
+            .or_else(|| self.inline_view_state().map(InlineUiStateRef::View))
+    }
     /// Changelog overlay scroll offset (None = not showing)
     fn changelog_scroll(&self) -> Option<usize>;
     /// Help overlay scroll offset (None = not showing)
@@ -367,6 +377,21 @@ pub enum PickerKind {
     Account,
     Login,
     Usage,
+}
+
+pub type InlineInteractiveState = PickerState;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InlineViewState {
+    pub title: String,
+    pub status: Option<String>,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum InlineUiStateRef<'a> {
+    View(&'a InlineViewState),
+    Interactive(&'a InlineInteractiveState),
 }
 
 impl PickerKind {
@@ -650,7 +675,7 @@ pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
         && state.queued_messages().is_empty()
         && state.interleave_message().is_none()
         && state.pending_soft_interrupts().is_empty()
-        && state.picker_state().is_none()
+        && state.inline_ui_state().is_none()
 }
 
 pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {

@@ -54,7 +54,7 @@ impl InlinePickerPreviewRequest {
         match self {
             Self::Model { .. } => app.open_model_picker(),
             Self::Usage { .. } => {
-                app.open_usage_picker_loading();
+                app.open_usage_inline_loading();
                 app.request_usage_report();
             }
             Self::Login { .. } => app.open_login_picker_inline(),
@@ -506,6 +506,7 @@ impl App {
         })
         .collect();
 
+        self.inline_view_state = None;
         self.picker_state = Some(PickerState {
             kind: PickerKind::Model,
             filtered: (0..5).collect(),
@@ -554,6 +555,7 @@ impl App {
             })
             .collect::<Vec<_>>();
 
+        self.inline_view_state = None;
         self.picker_state = Some(PickerState {
             kind: PickerKind::Login,
             filtered: (0..models.len()).collect(),
@@ -916,6 +918,7 @@ impl App {
                 .then(a.name.cmp(&b.name))
         });
 
+        self.inline_view_state = None;
         self.picker_state = Some(PickerState {
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),

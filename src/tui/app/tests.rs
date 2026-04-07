@@ -1204,18 +1204,19 @@ fn test_usage_report_shows_no_connected_providers_when_results_empty() {
 }
 
 #[test]
-fn test_usage_command_requests_usage_report_without_picker() {
+fn test_usage_command_requests_usage_report_with_inline_view() {
     let mut app = create_test_app();
 
     assert!(super::commands::handle_usage_command(&mut app, "/usage"));
 
     assert!(app.picker_state.is_none());
     assert!(app.usage_overlay.is_none());
+    assert!(app.inline_view_state.is_some());
     assert!(app.usage_report_refreshing);
 }
 
 #[test]
-fn test_usage_submit_input_requests_usage_report_without_picker() {
+fn test_usage_submit_input_requests_usage_report_with_inline_view() {
     let mut app = create_test_app();
     app.input = "/usage".to_string();
 
@@ -1223,6 +1224,7 @@ fn test_usage_submit_input_requests_usage_report_without_picker() {
 
     assert!(app.picker_state.is_none());
     assert!(app.usage_overlay.is_none());
+    assert!(app.inline_view_state.is_some());
     assert!(app.display_messages().is_empty());
     assert!(app.usage_report_refreshing);
 }
@@ -1242,7 +1244,7 @@ fn test_usage_typing_does_not_open_picker_preview() {
 }
 
 #[test]
-fn test_usage_enter_requests_report_without_opening_picker() {
+fn test_usage_enter_requests_report_with_inline_view() {
     let mut app = create_test_app();
 
     for c in "/usage".chars() {
@@ -1255,6 +1257,7 @@ fn test_usage_enter_requests_report_without_opening_picker() {
 
     assert!(app.picker_state.is_none());
     assert!(app.usage_overlay.is_none());
+    assert!(app.inline_view_state.is_some());
     assert_eq!(app.input(), "");
     assert!(app.usage_report_refreshing);
 }
@@ -1276,6 +1279,7 @@ fn test_usage_report_pushes_system_message() {
     }]);
 
     assert!(!app.usage_report_refreshing);
+    assert!(app.inline_view_state.is_none());
     let msg = app
         .display_messages()
         .last()
