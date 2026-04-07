@@ -398,7 +398,7 @@ pub struct InlineInteractiveSchema {
     pub preview_activation_column: usize,
 }
 
-pub type InlineInteractiveState = PickerState;
+pub type PickerState = InlineInteractiveState;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InlineViewState {
@@ -465,55 +465,6 @@ impl PickerKind {
 
     pub fn uses_compact_navigation(&self) -> bool {
         self.schema().layout == InlineInteractiveLayout::Compact
-    }
-
-    pub fn supports_option_columns(&self) -> bool {
-        !self.uses_compact_navigation()
-    }
-
-    pub fn primary_label(&self) -> &'static str {
-        match self {
-            Self::Account => "ACCOUNT",
-            _ => "ITEM",
-        }
-    }
-
-    pub fn secondary_label(&self, preview: bool) -> &'static str {
-        match (self, preview) {
-            (Self::Account, _) => "STATE",
-            (Self::Usage, true) => "ITEM",
-            (Self::Usage, false) => "STATUS",
-            (_, _) => "PROVIDER",
-        }
-    }
-
-    pub fn tertiary_label(&self) -> &'static str {
-        match self {
-            Self::Usage => "WINDOW",
-            Self::Login => "ACTION",
-            Self::Account => "",
-            Self::Model => "ACTION",
-        }
-    }
-
-    pub fn preview_submit_hint(&self) -> &'static str {
-        match self {
-            Self::Usage => "  ↵ inspect",
-            Self::Account => "  ↵ select",
-            _ => "  ↵ open",
-        }
-    }
-
-    pub fn active_submit_hint(&self) -> &'static str {
-        if self.uses_compact_navigation() {
-            "  ↑↓/jk ↵ Esc"
-        } else {
-            "  ↑↓ ←→ ↵ Esc"
-        }
-    }
-
-    pub fn shows_default_shortcut_hint(&self) -> bool {
-        matches!(self, Self::Model | Self::Login)
     }
 
     pub fn filter_text(&self, entry: &PickerEntry) -> String {
@@ -599,7 +550,7 @@ pub enum PickerAction {
 
 /// Unified inline picker with three columns.
 #[derive(Debug, Clone)]
-pub struct PickerState {
+pub struct InlineInteractiveState {
     /// Which inline picker is currently active.
     pub kind: PickerKind,
     /// All visible picker entries and their available actions/options.
@@ -616,7 +567,7 @@ pub struct PickerState {
     pub preview: bool,
 }
 
-impl PickerState {
+impl InlineInteractiveState {
     pub fn schema(&self) -> InlineInteractiveSchema {
         if self.is_agent_target_picker() {
             InlineInteractiveSchema {
