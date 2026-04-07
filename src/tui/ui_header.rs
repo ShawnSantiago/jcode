@@ -453,6 +453,74 @@ fn summary_display_candidates(
     ]
 }
 
+fn build_version_line(text: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    if let Some((prefix, version)) = text.split_once(' ') {
+        if !prefix.is_empty() {
+            spans.push(Span::styled(
+                format!("{} ", prefix),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        if !version.is_empty() {
+            spans.push(Span::styled(
+                version.to_string(),
+                Style::default().fg(rgb(150, 185, 255)).bold(),
+            ));
+        }
+    } else {
+        spans.push(Span::styled(
+            text.to_string(),
+            Style::default().fg(rgb(150, 185, 255)).bold(),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn build_provider_model_line(text: &str) -> Line<'static> {
+    if let Some((provider, model)) = text.split_once(" · ") {
+        return Line::from(vec![
+            Span::styled(
+                provider.to_string(),
+                Style::default().fg(rgb(130, 190, 220)),
+            ),
+            Span::styled(" · ", Style::default().fg(dim_color())),
+            Span::styled(
+                model.to_string(),
+                Style::default().fg(header_session_color()).bold(),
+            ),
+        ]);
+    }
+
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(header_session_color()).bold(),
+    ))
+}
+
+fn build_summary_line(text: &str) -> Line<'static> {
+    let colors = [
+        rgb(190, 150, 255),
+        rgb(120, 210, 170),
+        rgb(120, 190, 255),
+        rgb(255, 210, 120),
+    ];
+    let parts: Vec<&str> = text.split(" · ").collect();
+    let mut spans = Vec::new();
+
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+        }
+        spans.push(Span::styled(
+            (*part).to_string(),
+            Style::default().fg(colors[index.min(colors.len() - 1)]),
+        ));
+    }
+
+    Line::from(spans)
+}
+
 pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let align = Alignment::Center;
     let mut lines: Vec<Line> = Vec::new();
@@ -470,22 +538,14 @@ pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Lin
     }
 
     let version_text = choose_header_candidate(w, version_display_candidates());
-    lines.push(
-        Line::from(Span::styled(version_text, Style::default().fg(dim_color()))).alignment(align),
-    );
+    lines.push(build_version_line(&version_text).alignment(align));
 
     let provider_model_text = choose_header_candidate(
         w,
         provider_model_display_candidates(&app.provider_name(), &app.provider_model()),
     );
     if !provider_model_text.is_empty() {
-        lines.push(
-            Line::from(Span::styled(
-                provider_model_text,
-                Style::default().fg(header_session_color()),
-            ))
-            .alignment(align),
-        );
+        lines.push(build_provider_model_line(&provider_model_text).alignment(align));
     }
 
     lines
@@ -510,10 +570,7 @@ pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'st
     if summary_text.is_empty() {
         Vec::new()
     } else {
-        vec![
-            Line::from(Span::styled(summary_text, Style::default().fg(dim_color())))
-                .alignment(align),
-        ]
+        vec![build_summary_line(&summary_text).alignment(align)]
     }
 }
 
