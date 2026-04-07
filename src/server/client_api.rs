@@ -179,13 +179,21 @@ impl Client {
     }
 
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
+        self.resume_session_with_options(session_id, false).await
+    }
+
+    pub async fn resume_session_with_options(
+        &mut self,
+        session_id: &str,
+        client_has_local_history: bool,
+    ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
 
         let request = Request::ResumeSession {
             id,
             session_id: session_id.to_string(),
-            client_has_local_history: false,
+            client_has_local_history,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

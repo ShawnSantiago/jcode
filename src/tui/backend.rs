@@ -293,25 +293,34 @@ impl RemoteConnection {
             id: conn.next_request_id,
             working_dir,
             selfdev,
-            target_session_id: resume_target.clone(),
-            client_has_local_history,
+            target_session_id: None,
+            client_has_local_history: false,
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();
         conn.next_request_id += 1;
 
-        // If resuming a session, the target-aware Subscribe attaches directly to
-        // that session and returns History, so avoid a second bootstrap request.
+        // If resuming a session, use the explicit ResumeSession request so the
+        // server follows the proven resume path while still allowing a
+        // metadata-only History payload when the client already restored local
+        // transcript state.
         let bootstrap_request_start = Instant::now();
         let mut bootstrap_request = "get_history";
-        if resume_target.is_none() {
+        if let Some(session_id) = resume_target {
+            conn.send_request(Request::ResumeSession {
+                id: conn.next_request_id,
+                session_id,
+                client_has_local_history,
+            })
+            .await?;
+            conn.next_request_id += 1;
+            bootstrap_request = "resume_session";
+        } else {
             conn.send_request(Request::GetHistory {
                 id: conn.next_request_id,
             })
             .await?;
             conn.next_request_id += 1;
-        } else {
-            bootstrap_request = "subscribe_resume";
         }
         let bootstrap_request_ms = bootstrap_request_start.elapsed().as_millis();
 
