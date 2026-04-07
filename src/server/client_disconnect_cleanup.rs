@@ -34,6 +34,17 @@ fn disconnect_disposition(disconnected_while_processing: bool) -> DisconnectDisp
     }
 }
 
+async fn session_has_live_successor(
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    session_id: &str,
+) -> bool {
+    client_connections
+        .read()
+        .await
+        .values()
+        .any(|info| info.session_id == session_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cleanup_client_connection(
     sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
@@ -67,6 +78,32 @@ pub(super) async fn cleanup_client_connection(
             .map(|handle| !handle.is_finished())
             .unwrap_or(false);
     let disposition = disconnect_disposition(disconnected_while_processing);
+
+    {
+        let mut debug_state = client_debug_state.write().await;
+        debug_state.unregister(client_debug_id);
+    }
+    {
+        let mut connections = client_connections.write().await;
+        connections.remove(client_connection_id);
+    }
+
+    // Release stale live ownership before slower cleanup so a reconnecting TUI can
+    // reclaim the same session without tripping duplicate-attach guards.
+    tokio::task::yield_now().await;
+
+    let successor_connected = session_has_live_successor(client_connections, client_session_id).await;
+    if successor_connected {
+        crate::logging::info(&format!(
+            "Skipping destructive disconnect cleanup for {} because a replacement client is already connected",
+            client_session_id
+        ));
+        if let Some(handle) = processing_task.take() {
+            handle.abort();
+        }
+        event_handle.abort();
+        return Ok(());
+    }
 
     {
         let mut sessions_guard = sessions.write().await;
@@ -179,14 +216,6 @@ pub(super) async fn cleanup_client_connection(
             .await;
     }
 
-    {
-        let mut debug_state = client_debug_state.write().await;
-        debug_state.unregister(client_debug_id);
-    }
-    {
-        let mut connections = client_connections.write().await;
-        connections.remove(client_connection_id);
-    }
     {
         let mut signals = shutdown_signals.write().await;
         signals.remove(client_session_id);

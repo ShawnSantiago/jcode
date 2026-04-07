@@ -163,7 +163,7 @@ pub fn server_icon(name: &str) -> &'static str {
 
 /// Generate a memorable server name
 /// Returns (full_id, short_name) where:
-/// - full_id is the storage identifier like "server_blazing_1234567890"
+/// - full_id is the storage identifier like "server_blazing_1234567890_deadbeefcafebabe"
 /// - short_name is the memorable part like "blazing"
 pub fn new_memorable_server_id() -> (String, String) {
     let ts = Utc::now().timestamp_millis();
@@ -174,18 +174,18 @@ pub fn new_memorable_server_id() -> (String, String) {
     let (word, _) = SERVER_MODIFIERS[idx];
 
     let short_name = word.to_string();
-    let full_id = format!("server_{}_{}", word, ts);
+    let full_id = format!("server_{}_{ts}_{rand:016x}", word);
 
     (full_id, short_name)
 }
 
 /// Try to extract the memorable name from a server ID
-/// e.g., "server_blazing_1234567890" -> Some("blazing")
+/// e.g., "server_blazing_1234567890_deadbeefcafebabe" -> Some("blazing")
 #[allow(dead_code)]
 pub fn extract_server_name(server_id: &str) -> Option<&str> {
     if server_id.starts_with("server_") {
         let rest = &server_id[7..]; // Skip "server_"
-        if let Some(pos) = rest.rfind('_') {
+        if let Some(pos) = rest.find('_') {
             return Some(&rest[..pos]);
         }
     }
@@ -194,7 +194,7 @@ pub fn extract_server_name(server_id: &str) -> Option<&str> {
 
 /// Generate a memorable session name
 /// Returns (full_id, short_name) where:
-/// - full_id is the storage identifier like "session_fox_1234567890"
+/// - full_id is the storage identifier like "session_fox_1234567890_deadbeefcafebabe"
 /// - short_name is the memorable part like "fox"
 pub fn new_memorable_session_id() -> (String, String) {
     let ts = Utc::now().timestamp_millis();
@@ -205,18 +205,20 @@ pub fn new_memorable_session_id() -> (String, String) {
     let (word, _) = SESSION_NAMES[idx];
 
     let short_name = word.to_string();
-    let full_id = format!("session_{}_{}", word, ts);
+    let full_id = format!("session_{}_{ts}_{rand:016x}", word);
 
     (full_id, short_name)
 }
 
 /// Try to extract the memorable name from a session ID
-/// e.g., "session_fox_1234567890" -> Some("fox")
+/// e.g., "session_fox_1234567890_deadbeefcafebabe" -> Some("fox")
 pub fn extract_session_name(session_id: &str) -> Option<&str> {
     if session_id.starts_with("session_") {
         let rest = &session_id[8..]; // Skip "session_"
-        // Find the last underscore (before timestamp)
-        if let Some(pos) = rest.rfind('_') {
+        // Session names are the first token after the prefix.
+        // This supports both old IDs (session_name_ts) and new IDs
+        // with an added random suffix (session_name_ts_rand).
+        if let Some(pos) = rest.find('_') {
             return Some(&rest[..pos]);
         }
     }
@@ -253,7 +255,15 @@ mod tests {
     fn test_extract_session_name() {
         assert_eq!(extract_session_name("session_fox_1234567890"), Some("fox"));
         assert_eq!(
+            extract_session_name("session_fox_1234567890_deadbeefcafebabe"),
+            Some("fox")
+        );
+        assert_eq!(
             extract_session_name("session_blue-whale_1234567890"),
+            Some("blue-whale")
+        );
+        assert_eq!(
+            extract_session_name("session_blue-whale_1234567890_deadbeefcafebabe"),
             Some("blue-whale")
         );
         assert_eq!(
@@ -266,13 +276,10 @@ mod tests {
 
     #[test]
     fn test_unique_session_ids() {
-        let (id1, _) = new_memorable_session_id();
-        // Small sleep to ensure timestamp differs
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let (id2, _) = new_memorable_session_id();
-
-        // Even with same word, timestamps should differ
-        assert_ne!(id1, id2);
+        let ids: std::collections::HashSet<String> = (0..512)
+            .map(|_| new_memorable_session_id().0)
+            .collect();
+        assert_eq!(ids.len(), 512, "session IDs should stay unique in tight bursts");
     }
 
     #[test]
@@ -313,11 +320,23 @@ mod tests {
             Some("blazing")
         );
         assert_eq!(
+            extract_server_name("server_blazing_1234567890_deadbeefcafebabe"),
+            Some("blazing")
+        );
+        assert_eq!(
             extract_server_name("server_rising_1234567890"),
             Some("rising")
         );
         assert_eq!(extract_server_name("invalid"), None);
         assert_eq!(extract_server_name("server_"), None);
+    }
+
+    #[test]
+    fn test_unique_server_ids() {
+        let ids: std::collections::HashSet<String> = (0..256)
+            .map(|_| new_memorable_server_id().0)
+            .collect();
+        assert_eq!(ids.len(), 256, "server IDs should stay unique in tight bursts");
     }
 
     #[test]
