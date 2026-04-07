@@ -276,10 +276,13 @@ mod tests {
 
     #[test]
     fn test_unique_session_ids() {
-        let ids: std::collections::HashSet<String> = (0..512)
-            .map(|_| new_memorable_session_id().0)
-            .collect();
-        assert_eq!(ids.len(), 512, "session IDs should stay unique in tight bursts");
+        let ids: std::collections::HashSet<String> =
+            (0..512).map(|_| new_memorable_session_id().0).collect();
+        assert_eq!(
+            ids.len(),
+            512,
+            "session IDs should stay unique in tight bursts"
+        );
     }
 
     #[test]
@@ -333,10 +336,13 @@ mod tests {
 
     #[test]
     fn test_unique_server_ids() {
-        let ids: std::collections::HashSet<String> = (0..256)
-            .map(|_| new_memorable_server_id().0)
-            .collect();
-        assert_eq!(ids.len(), 256, "server IDs should stay unique in tight bursts");
+        let ids: std::collections::HashSet<String> =
+            (0..256).map(|_| new_memorable_server_id().0).collect();
+        assert_eq!(
+            ids.len(),
+            256,
+            "server IDs should stay unique in tight bursts"
+        );
     }
 
     #[test]

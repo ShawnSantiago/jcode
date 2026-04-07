@@ -13,7 +13,7 @@ use syntect::highlighting::{Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::{config, DiagramDisplayMode, MarkdownSpacingMode};
+use crate::config::{DiagramDisplayMode, MarkdownSpacingMode, config};
 use crate::tui::mermaid;
 use crate::tui::ui::{CopyTargetKind, RawCopyTarget};
 
@@ -3996,9 +3996,11 @@ mod tests {
         let lines = render_markdown(md);
         let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
 
-        assert!(rendered
-            .iter()
-            .any(|l| l.contains('│') && l.contains('A') && l.contains('B')));
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains('│') && l.contains('A') && l.contains('B'))
+        );
         assert!(rendered.iter().any(|l| l.contains('─') && l.contains('┼')));
     }
 
@@ -4478,9 +4480,11 @@ mod tests {
             first_pad > 0,
             "list block should be centered in centered mode: {rendered:?}"
         );
-        assert!(rendered
-            .iter()
-            .all(|line| line[first_pad..].starts_with("• ")));
+        assert!(
+            rendered
+                .iter()
+                .all(|line| line[first_pad..].starts_with("• "))
+        );
     }
 
     #[test]
@@ -4659,7 +4663,9 @@ mod tests {
 
         assert_eq!(
             rendered,
-            vec!["Intro", "", "Body", "", "• one", "• two", "", "Next", "", "Body"]
+            vec![
+                "Intro", "", "Body", "", "• one", "• two", "", "Next", "", "Body"
+            ]
         );
     }
 

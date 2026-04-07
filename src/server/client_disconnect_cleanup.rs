@@ -92,7 +92,8 @@ pub(super) async fn cleanup_client_connection(
     // reclaim the same session without tripping duplicate-attach guards.
     tokio::task::yield_now().await;
 
-    let successor_connected = session_has_live_successor(client_connections, client_session_id).await;
+    let successor_connected =
+        session_has_live_successor(client_connections, client_session_id).await;
     if successor_connected {
         crate::logging::info(&format!(
             "Skipping destructive disconnect cleanup for {} because a replacement client is already connected",

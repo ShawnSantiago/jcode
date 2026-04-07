@@ -59,7 +59,8 @@ impl Client {
 
     /// Subscribe to events
     pub async fn subscribe(&mut self) -> Result<u64> {
-        self.subscribe_with_info(None, None, None, false, false).await
+        self.subscribe_with_info(None, None, None, false, false)
+            .await
     }
 
     pub async fn subscribe_with_info(
@@ -181,7 +182,8 @@ impl Client {
     }
 
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
-        self.resume_session_with_options(session_id, false, false).await
+        self.resume_session_with_options(session_id, false, false)
+            .await
     }
 
     pub async fn resume_session_with_options(

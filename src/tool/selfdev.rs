@@ -1285,7 +1285,11 @@ impl SelfDevTool {
         let mut request = BuildRequest::load(&request_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing queued build request {}", request_id))?;
         request.completed_at = Some(Utc::now().to_rfc3339());
-        request.state = match result.status.as_ref().unwrap_or(&BackgroundTaskStatus::Failed) {
+        request.state = match result
+            .status
+            .as_ref()
+            .unwrap_or(&BackgroundTaskStatus::Failed)
+        {
             BackgroundTaskStatus::Completed => BuildRequestState::Completed,
             BackgroundTaskStatus::Superseded => BuildRequestState::Superseded,
             BackgroundTaskStatus::Failed => BuildRequestState::Failed,
@@ -2815,14 +2819,18 @@ mod tests {
         let mut request = BuildRequest::load("superseded-request")
             .expect("load superseded request")
             .expect("request exists");
-        assert!(!request
-            .reconcile_pending_state()
-            .expect("reconcile superseded request"));
+        assert!(
+            !request
+                .reconcile_pending_state()
+                .expect("reconcile superseded request")
+        );
         assert_eq!(request.state, BuildRequestState::Superseded);
-        assert!(request
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("source changed before activation"));
+        assert!(
+            request
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("source changed before activation")
+        );
     }
 }
