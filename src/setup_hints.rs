@@ -1151,8 +1151,18 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
     state.launch_count += 1;
     let _ = state.save();
 
-    if !state.desktop_shortcut_created {
-        let _ = create_desktop_shortcut(&mut state);
+    #[cfg(target_os = "macos")]
+    {
+        if should_refresh_macos_app_launcher(&state) {
+            let _ = create_desktop_shortcut(&mut state);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if !state.desktop_shortcut_created {
+            let _ = create_desktop_shortcut(&mut state);
+        }
     }
 
     let startup_hints = startup_hints_for_launch(&state);
@@ -1215,6 +1225,31 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
 fn macos_app_launcher_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join("Applications").join("Jcode.app"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn legacy_macos_app_launcher_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    Ok(home.join("Applications").join("jcode.app"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn should_refresh_macos_app_launcher_paths(
+    state: &SetupHintsState,
+    app_dir: &std::path::Path,
+    legacy_app_dir: &std::path::Path,
+) -> bool {
+    !state.desktop_shortcut_created || !app_dir.exists() || legacy_app_dir.exists()
+}
+
+#[cfg(target_os = "macos")]
+fn should_refresh_macos_app_launcher(state: &SetupHintsState) -> bool {
+    match (macos_app_launcher_dir(), legacy_macos_app_launcher_dir()) {
+        (Ok(app_dir), Ok(legacy_app_dir)) => {
+            should_refresh_macos_app_launcher_paths(state, &app_dir, &legacy_app_dir)
+        }
+        _ => !state.desktop_shortcut_created,
+    }
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -1287,6 +1322,7 @@ exit 0
 #[cfg(target_os = "macos")]
 fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)> {
     let app_dir = macos_app_launcher_dir()?;
+    let legacy_app_dir = legacy_macos_app_launcher_dir()?;
     let contents_dir = app_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
     std::fs::create_dir_all(&macos_dir)?;
@@ -1331,6 +1367,10 @@ fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)> {
         version = env!("JCODE_VERSION")
     );
     std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
+
+    if legacy_app_dir != app_dir && legacy_app_dir.exists() {
+        let _ = std::fs::remove_dir_all(&legacy_app_dir);
+    }
 
     let _ = std::process::Command::new("touch").arg(&app_dir).status();
     save_preferred_macos_terminal(terminal)?;
@@ -1535,5 +1575,59 @@ mod tests {
         assert!(script.contains("jcode setup-launcher"));
         assert!(script.contains("/usr/bin/open -na Ghostty"));
         assert!(script.contains("macos-launcher.log"));
+    }
+
+    #[test]
+    fn macos_launcher_refreshes_when_new_bundle_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_dir = temp.path().join("Jcode.app");
+        let legacy_app_dir = temp.path().join("jcode.app");
+        let state = SetupHintsState {
+            desktop_shortcut_created: true,
+            ..SetupHintsState::default()
+        };
+
+        assert!(should_refresh_macos_app_launcher_paths(
+            &state,
+            &app_dir,
+            &legacy_app_dir,
+        ));
+    }
+
+    #[test]
+    fn macos_launcher_refreshes_when_legacy_bundle_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_dir = temp.path().join("Jcode.app");
+        let legacy_app_dir = temp.path().join("jcode.app");
+        std::fs::create_dir_all(&app_dir).expect("create new app dir");
+        std::fs::create_dir_all(&legacy_app_dir).expect("create legacy app dir");
+        let state = SetupHintsState {
+            desktop_shortcut_created: true,
+            ..SetupHintsState::default()
+        };
+
+        assert!(should_refresh_macos_app_launcher_paths(
+            &state,
+            &app_dir,
+            &legacy_app_dir,
+        ));
+    }
+
+    #[test]
+    fn macos_launcher_does_not_refresh_when_new_bundle_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_dir = temp.path().join("Jcode.app");
+        let legacy_app_dir = temp.path().join("jcode.app");
+        std::fs::create_dir_all(&app_dir).expect("create new app dir");
+        let state = SetupHintsState {
+            desktop_shortcut_created: true,
+            ..SetupHintsState::default()
+        };
+
+        assert!(!should_refresh_macos_app_launcher_paths(
+            &state,
+            &app_dir,
+            &legacy_app_dir,
+        ));
     }
 }
