@@ -480,10 +480,7 @@ fn build_version_line(text: &str) -> Line<'static> {
 fn build_provider_model_line(text: &str) -> Line<'static> {
     if let Some((provider, model)) = text.split_once(" · ") {
         return Line::from(vec![
-            Span::styled(
-                provider.to_string(),
-                Style::default().fg(rgb(130, 190, 220)),
-            ),
+            Span::styled(provider.to_string(), Style::default().fg(dim_color())),
             Span::styled(" · ", Style::default().fg(dim_color())),
             Span::styled(
                 model.to_string(),
@@ -499,12 +496,6 @@ fn build_provider_model_line(text: &str) -> Line<'static> {
 }
 
 fn build_summary_line(text: &str) -> Line<'static> {
-    let colors = [
-        rgb(190, 150, 255),
-        rgb(120, 210, 170),
-        rgb(120, 190, 255),
-        rgb(255, 210, 120),
-    ];
     let parts: Vec<&str> = text.split(" · ").collect();
     let mut spans = Vec::new();
 
@@ -514,7 +505,7 @@ fn build_summary_line(text: &str) -> Line<'static> {
         }
         spans.push(Span::styled(
             (*part).to_string(),
-            Style::default().fg(colors[index.min(colors.len() - 1)]),
+            Style::default().fg(dim_color()),
         ));
     }
 
