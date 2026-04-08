@@ -6910,3 +6910,6 @@ mod tests {
         }
     }
 }
+pub(crate) fn format_inline_interactive_elapsed(secs: f32) -> String {
+    inline_interactive_ui::format_elapsed(secs)
+}

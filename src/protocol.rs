@@ -234,6 +234,9 @@ pub enum Request {
         direction: i8,
     },
 
+    #[serde(rename = "refresh_models")]
+    RefreshModels { id: u64 },
+
     /// Set the active model by name
     #[serde(rename = "set_model")]
     SetModel { id: u64, model: String },
@@ -1163,6 +1166,7 @@ impl Request {
             Request::Transcript { id, .. } => *id,
             Request::InputShell { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
+            Request::RefreshModels { id } => *id,
             Request::SetModel { id, .. } => *id,
             Request::SetSubagentModel { id, .. } => *id,
             Request::RunSubagent { id, .. } => *id,

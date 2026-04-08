@@ -412,6 +412,15 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Trigger a background refresh of available models on the server.
+    pub async fn refresh_models(&mut self) -> Result<()> {
+        let request = Request::RefreshModels {
+            id: self.next_request_id,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Set the active model on the server
     pub async fn set_model(&mut self, model: &str) -> Result<()> {
         let request = Request::SetModel {

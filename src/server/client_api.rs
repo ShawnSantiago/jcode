@@ -262,6 +262,16 @@ impl Client {
         Ok(id)
     }
 
+    pub async fn refresh_models(&mut self) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::RefreshModels { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
+
     pub async fn debug_command(&mut self, command: &str, session_id: Option<&str>) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;

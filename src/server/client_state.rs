@@ -22,11 +22,7 @@ const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 static LAST_ATTACH_MODEL_PREFETCH: LazyLock<StdMutex<HashMap<String, Instant>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
-fn should_debounce_attach_model_prefetch(provider_name: &str, has_initial_models: bool) -> bool {
-    if !has_initial_models {
-        return false;
-    }
-
+fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {
     let Ok(mut guard) = LAST_ATTACH_MODEL_PREFETCH.lock() else {
         return false;
     };
@@ -349,7 +345,11 @@ pub(super) fn spawn_model_prefetch_update(
             )
         };
 
-        if should_debounce_attach_model_prefetch(&provider_name, !initial_models.is_empty()) {
+        if !initial_models.is_empty() {
+            return;
+        }
+
+        if should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
                 "Skipping attach-time model prefetch for {} because a recent refresh already ran",
                 provider_name

@@ -23,8 +23,9 @@ use super::comm_plan::{
 use super::comm_session::{handle_comm_spawn, handle_comm_stop};
 use super::comm_sync::{handle_comm_read_context, handle_comm_resync_plan, handle_comm_summary};
 use super::provider_control::{
-    handle_cycle_model, handle_notify_auth_changed, handle_set_compaction_mode, handle_set_model,
-    handle_set_premium_mode, handle_set_reasoning_effort, handle_set_service_tier,
+    handle_cycle_model, handle_notify_auth_changed, handle_refresh_models,
+    handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
+    handle_set_reasoning_effort, handle_set_service_tier,
     handle_set_transport, handle_switch_anthropic_account, handle_switch_openai_account,
 };
 use super::{
@@ -859,6 +860,10 @@ pub(super) async fn handle_client(
 
             Request::CycleModel { id, direction } => {
                 handle_cycle_model(id, direction, &agent, &client_event_tx).await;
+            }
+
+            Request::RefreshModels { id } => {
+                handle_refresh_models(id, &provider, &agent, &client_event_tx).await;
             }
 
             Request::SetPremiumMode { id, mode } => {

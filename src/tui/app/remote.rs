@@ -3259,6 +3259,8 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/model" || trimmed == "/models" {
+                    let _ = remote.refresh_models().await;
+                    app.set_status_notice("Refreshing model catalog...");
                     app.open_model_picker();
                     return Ok(());
                 }

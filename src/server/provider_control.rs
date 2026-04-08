@@ -161,6 +161,44 @@ pub(super) async fn handle_set_model(
     }
 }
 
+pub(super) async fn handle_refresh_models(
+    id: u64,
+    provider: &Arc<dyn Provider>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let provider_clone = provider.clone();
+    let agent_clone = agent.clone();
+    let client_event_tx_clone = client_event_tx.clone();
+    tokio::spawn(async move {
+        let result = provider_clone.prefetch_models().await;
+        match result {
+            Ok(()) => {
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                let (models, model_routes) = {
+                    let agent_guard = agent_clone.lock().await;
+                    (
+                        agent_guard.available_models_display(),
+                        agent_guard.model_routes(),
+                    )
+                };
+                let _ = client_event_tx_clone.send(ServerEvent::AvailableModelsUpdated {
+                    available_models: models,
+                    available_model_routes: model_routes,
+                });
+            }
+            Err(err) => {
+                let _ = client_event_tx_clone.send(ServerEvent::Error {
+                    id,
+                    message: format!("Failed to refresh models: {}", err),
+                    retry_after_secs: None,
+                });
+            }
+        }
+    });
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 pub(super) async fn handle_set_reasoning_effort(
     id: u64,
     effort: String,
@@ -459,6 +497,53 @@ mod tests {
         );
         assert!(available_model_routes.iter().any(|route| {
             route.model == "logged-in-model"
+                && route.provider == "MockAuth"
+                && route.api_method == "mock-auth"
+        }));
+    }
+
+    #[tokio::test]
+    async fn refresh_models_emits_available_models_updated_after_prefetch() {
+        let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+        let registry = Registry::empty();
+        let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+        handle_refresh_models(7, &provider, &agent, &client_event_tx).await;
+
+        let mut saw_done = false;
+        let mut saw_models = None;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let event = tokio::time::timeout(remaining, client_event_rx.recv())
+                .await
+                .expect("receive server event before timeout");
+            match event.expect("channel open") {
+                ServerEvent::Done { id } => {
+                    assert_eq!(id, 7);
+                    saw_done = true;
+                }
+                ServerEvent::AvailableModelsUpdated {
+                    available_models,
+                    available_model_routes,
+                } => {
+                    saw_models = Some((available_models, available_model_routes));
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_done, "expected immediate Done ack");
+        let (available_models, available_model_routes) =
+            saw_models.expect("expected AvailableModelsUpdated event");
+        assert_eq!(
+            available_models,
+            vec!["logged-out-model".to_string()]
+        );
+        assert!(available_model_routes.iter().any(|route| {
+            route.model == "logged-out-model"
                 && route.provider == "MockAuth"
                 && route.api_method == "mock-auth"
         }));
