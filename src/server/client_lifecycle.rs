@@ -51,6 +51,17 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+async fn refresh_runtime_handles(
+    agent: &Arc<Mutex<Agent>>,
+) -> (SoftInterruptQueue, InterruptSignal, InterruptSignal) {
+    let agent_guard = agent.lock().await;
+    (
+        agent_guard.soft_interrupt_queue(),
+        agent_guard.background_tool_signal(),
+        agent_guard.graceful_shutdown_signal(),
+    )
+}
+
 pub(super) async fn handle_client(
     stream: Stream,
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
@@ -151,15 +162,15 @@ pub(super) async fn handle_client(
 
     // Get a handle to the soft interrupt queue BEFORE wrapping in Mutex
     // This allows queueing interrupts while the agent is processing
-    let soft_interrupt_queue = new_agent.soft_interrupt_queue();
+    let mut soft_interrupt_queue = new_agent.soft_interrupt_queue();
 
     // Get a handle to the background tool signal BEFORE wrapping in Mutex
     // This allows signaling "move to background" while the agent is processing
-    let background_tool_signal = new_agent.background_tool_signal();
+    let mut background_tool_signal = new_agent.background_tool_signal();
 
     // Get a handle to the graceful shutdown signal BEFORE wrapping in Mutex
     // This allows signaling cancel (checkpoint partial response) without needing the lock
-    let cancel_signal = new_agent.graceful_shutdown_signal();
+    let mut cancel_signal = new_agent.graceful_shutdown_signal();
 
     // Register the shutdown signal in the server-level map so
     // graceful_shutdown_sessions can signal it without locking the agent mutex
@@ -540,6 +551,7 @@ pub(super) async fn handle_client(
                     &provider,
                     &registry,
                     &sessions,
+                    &shutdown_signals,
                     &soft_interrupt_queues,
                     &client_connections,
                     &swarm_members,
@@ -555,6 +567,8 @@ pub(super) async fn handle_client(
                     &client_event_tx,
                 )
                 .await;
+                (soft_interrupt_queue, background_tool_signal, cancel_signal) =
+                    refresh_runtime_handles(&agent).await;
             }
 
             Request::Ping { id } => {
@@ -638,6 +652,8 @@ pub(super) async fn handle_client(
                         {
                             break;
                         }
+                        (soft_interrupt_queue, background_tool_signal, cancel_signal) =
+                            refresh_runtime_handles(&agent).await;
                         if client_session_id == target_session_id {
                             handle_subscribe(
                                 id,
@@ -830,6 +846,8 @@ pub(super) async fn handle_client(
                 {
                     break;
                 }
+                (soft_interrupt_queue, background_tool_signal, cancel_signal) =
+                    refresh_runtime_handles(&agent).await;
                 let snapshot = {
                     let agent_guard = agent.lock().await;
                     let models = agent_guard.available_models_display();
