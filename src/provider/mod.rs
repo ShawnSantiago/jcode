@@ -34,6 +34,24 @@ pub use jcode_provider_core::{
     RouteCostSource, shared_http_client,
 };
 
+pub(crate) fn anthropic_oauth_route_availability(model: &str) -> (bool, String) {
+    if model.ends_with("[1m]") && !crate::usage::has_extra_usage() {
+        (false, "requires extra usage".to_string())
+    } else if model.contains("opus") && !crate::auth::claude::is_max_subscription() {
+        (false, "requires Max subscription".to_string())
+    } else {
+        (true, String::new())
+    }
+}
+
+pub(crate) fn anthropic_api_key_route_availability(model: &str) -> (bool, String) {
+    if model.ends_with("[1m]") && !crate::usage::has_extra_usage() {
+        (false, "requires extra usage".to_string())
+    } else {
+        (true, String::new())
+    }
+}
+
 /// Stream of events from a provider
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
@@ -2045,20 +2063,12 @@ impl Provider for MultiProvider {
         let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
 
         // Anthropic models (oauth and/or api-key)
-        let is_max = crate::auth::claude::is_max_subscription();
         for model in known_anthropic_model_ids() {
-            let is_1m = model.ends_with("[1m]");
-            let is_opus = model.contains("opus");
-
-            let model_defaults_1m = crate::provider::anthropic::effectively_1m(&model);
-            let (available, detail) =
-                if is_1m && !model_defaults_1m && !crate::usage::has_extra_usage() {
-                    (false, "requires extra usage".to_string())
-                } else if is_opus && !is_max && has_oauth && !has_api_key {
-                    (false, "requires Max subscription".to_string())
-                } else {
-                    (true, String::new())
-                };
+            let (available, detail) = if has_oauth && !has_api_key {
+                anthropic_oauth_route_availability(&model)
+            } else {
+                (true, String::new())
+            };
 
             if has_oauth {
                 routes.push(ModelRoute {
@@ -2071,13 +2081,7 @@ impl Provider for MultiProvider {
                 });
             }
             if has_api_key {
-                // API key = pay-per-token, no subscription tier restriction on Opus
-                // but 1M context still requires extra usage
-                let (ak_available, ak_detail) = if is_1m && !crate::usage::has_extra_usage() {
-                    (false, "requires extra usage".to_string())
-                } else {
-                    (true, String::new())
-                };
+                let (ak_available, ak_detail) = anthropic_api_key_route_availability(&model);
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Anthropic".to_string(),
@@ -3174,6 +3178,63 @@ mod tests {
                     && route.api_method == "claude-oauth"
                     && route.available
             }));
+        });
+    }
+
+    #[test]
+    fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
+        with_clean_provider_test_env(|| {
+            let runtime = enter_test_runtime();
+            let _enter = runtime.enter();
+
+            let provider = MultiProvider {
+                claude: RwLock::new(None),
+                anthropic: RwLock::new(None),
+                openai: RwLock::new(None),
+                copilot_api: RwLock::new(None),
+                gemini: RwLock::new(None),
+                cursor: RwLock::new(None),
+                openrouter: RwLock::new(None),
+                active: RwLock::new(ActiveProvider::Claude),
+                use_claude_cli: false,
+                startup_notices: RwLock::new(Vec::new()),
+                forced_provider: Some(ActiveProvider::Claude),
+            };
+
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: "claude-1".to_string(),
+                access: "test-access-token".to_string(),
+                refresh: "test-refresh-token".to_string(),
+                expires: i64::MAX,
+                email: None,
+                subscription_type: None,
+            })
+            .expect("save test Claude auth");
+
+            provider.on_auth_changed();
+
+            let routes = provider.model_routes();
+            let plain_opus = routes
+                .iter()
+                .find(|route| {
+                    route.provider == "Anthropic"
+                        && route.api_method == "claude-oauth"
+                        && route.model == "claude-opus-4-6"
+                })
+                .expect("plain opus route");
+            assert!(plain_opus.available);
+            assert!(plain_opus.detail.is_empty());
+
+            let opus_1m = routes
+                .iter()
+                .find(|route| {
+                    route.provider == "Anthropic"
+                        && route.api_method == "claude-oauth"
+                        && route.model == "claude-opus-4-6[1m]"
+                })
+                .expect("1m opus route");
+            assert!(!opus_1m.available);
+            assert_eq!(opus_1m.detail, "requires extra usage");
         });
     }
 
