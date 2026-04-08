@@ -783,7 +783,6 @@ pub(super) async fn handle_resume_session(
             spawn_model_prefetch_update(
                 Arc::clone(provider),
                 Arc::clone(agent),
-                Arc::clone(writer),
             );
         }
         Err(error) => {

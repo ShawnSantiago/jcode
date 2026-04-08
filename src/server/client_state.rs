@@ -1,12 +1,13 @@
 use super::server_has_newer_binary;
 use crate::agent::Agent;
+use crate::bus::{Bus, BusEvent};
 use crate::protocol::{ServerEvent, encode_event};
 use crate::provider::Provider;
 use crate::transport::WriteHalf;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HistoryPayloadMode {
@@ -16,7 +17,30 @@ pub(super) enum HistoryPayloadMode {
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
-const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
+const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
+
+static LAST_ATTACH_MODEL_PREFETCH: LazyLock<StdMutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn should_debounce_attach_model_prefetch(provider_name: &str, has_initial_models: bool) -> bool {
+    if !has_initial_models {
+        return false;
+    }
+
+    let Ok(mut guard) = LAST_ATTACH_MODEL_PREFETCH.lock() else {
+        return false;
+    };
+
+    let now = Instant::now();
+    if let Some(last_run) = guard.get(provider_name)
+        && now.duration_since(*last_run) < Duration::from_secs(ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS)
+    {
+        return true;
+    }
+
+    guard.insert(provider_name.to_string(), now);
+    false
+}
 
 pub(super) async fn handle_get_state(
     id: u64,
@@ -70,7 +94,7 @@ pub(super) async fn handle_get_history(
     let send_history_ms = history_start.elapsed().as_millis();
 
     let prefetch_start = Instant::now();
-    spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent), Arc::clone(writer));
+    spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
     crate::logging::info(&format!(
         "[TIMING] handle_get_history: session={}, send_history={}ms, prefetch_spawn={}ms, total={}ms",
         client_session_id,
@@ -315,13 +339,23 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
 pub(super) fn spawn_model_prefetch_update(
     provider: Arc<dyn Provider>,
     agent: Arc<Mutex<Agent>>,
-    writer: Arc<Mutex<WriteHalf>>,
 ) {
     tokio::spawn(async move {
-        let initial_models = {
+        let (provider_name, initial_models) = {
             let agent_guard = agent.lock().await;
-            agent_guard.available_models_display()
+            (
+                agent_guard.provider_name(),
+                agent_guard.available_models_display(),
+            )
         };
+
+        if should_debounce_attach_model_prefetch(&provider_name, !initial_models.is_empty()) {
+            crate::logging::info(&format!(
+                "Skipping attach-time model prefetch for {} because a recent refresh already ran",
+                provider_name
+            ));
+            return;
+        }
 
         if provider.prefetch_models().await.is_err() {
             return;
@@ -339,20 +373,7 @@ pub(super) fn spawn_model_prefetch_update(
             return;
         }
 
-        let event = ServerEvent::AvailableModelsUpdated {
-            available_models: refreshed.0,
-            available_model_routes: refreshed.1,
-        };
-        let json = encode_event(&event);
-        if json.len() > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
-            crate::logging::warn(&format!(
-                "Skipping oversized direct AvailableModelsUpdated frame ({} bytes)",
-                json.len()
-            ));
-            return;
-        }
-
-        let mut writer = writer.lock().await;
-        let _ = writer.write_all(json.as_bytes()).await;
+        let _ = refreshed;
+        Bus::global().publish(BusEvent::ModelsUpdated);
     });
 }
