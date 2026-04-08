@@ -744,6 +744,7 @@ pub(super) async fn handle_resume_session(
                 },
             )
             .await?;
+            let _ = client_event_tx.send(ServerEvent::Done { id });
             spawn_model_prefetch_update(
                 Arc::clone(provider),
                 Arc::clone(agent),

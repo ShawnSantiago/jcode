@@ -316,22 +316,10 @@ pub(super) fn spawn_model_prefetch_update(
     writer: Arc<Mutex<WriteHalf>>,
 ) {
     tokio::spawn(async move {
-        let initial = {
+        let initial_models = {
             let agent_guard = agent.lock().await;
-            (
-                agent_guard.available_models_display(),
-                agent_guard.model_routes(),
-            )
+            agent_guard.available_models_display()
         };
-
-        let _ = write_event(
-            &writer,
-            &ServerEvent::AvailableModelsUpdated {
-                available_models: initial.0.clone(),
-                available_model_routes: initial.1.clone(),
-            },
-        )
-        .await;
 
         if provider.prefetch_models().await.is_err() {
             return;
@@ -345,7 +333,7 @@ pub(super) fn spawn_model_prefetch_update(
             )
         };
 
-        if refreshed == initial {
+        if refreshed.0 == initial_models && refreshed.1.is_empty() {
             return;
         }
 
