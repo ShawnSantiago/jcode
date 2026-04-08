@@ -160,6 +160,7 @@ if [ "$IS_WINDOWS" = true ]; then
   fi
 else
   PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
+  SHELL_NAME="$(basename "${SHELL:-}")"
 
   if [ "$(uname -s)" = "Darwin" ]; then
     DEFAULT_RC="$HOME/.zshrc"
@@ -169,14 +170,24 @@ else
 
   if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     added_to=""
+    path_files=()
 
-    if [ ! -f "$DEFAULT_RC" ] || ! grep -qF "$INSTALL_DIR" "$DEFAULT_RC" 2>/dev/null; then
-      printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$DEFAULT_RC"
-      added_to="$added_to $DEFAULT_RC"
+    if [ "$(uname -s)" = "Darwin" ] || [ "$SHELL_NAME" = "zsh" ]; then
+      # Keep PATH available for non-interactive zsh invocations too, such as
+      # `ssh host 'jcode --version'`, without depending on .zshrc/.zprofile.
+      path_files+=("$HOME/.zshenv")
     fi
 
+    path_files+=("$DEFAULT_RC")
+
     for rc in "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do
-      if [ -f "$rc" ] && ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+      if [ -f "$rc" ]; then
+        path_files+=("$rc")
+      fi
+    done
+
+    for rc in "${path_files[@]}"; do
+      if [ ! -f "$rc" ] || ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
         printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$rc"
         added_to="$added_to $rc"
       fi
