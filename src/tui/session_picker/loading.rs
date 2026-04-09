@@ -5,10 +5,13 @@ use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus};
 use crate::storage;
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::{
     DEFAULT_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT, MIN_SESSION_SCAN_LIMIT, PreviewMessage,
@@ -23,6 +26,27 @@ fn session_scan_limit() -> usize {
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .map(|n| n.clamp(MIN_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT))
         .unwrap_or(DEFAULT_SESSION_SCAN_LIMIT)
+}
+
+fn session_candidate_window(scan_limit: usize) -> usize {
+    scan_limit
+        .saturating_mul(20)
+        .clamp(scan_limit.max(1), 20_000)
+}
+
+const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct SessionListCacheEntry {
+    loaded_at: Instant,
+    sessions_dir: PathBuf,
+    scan_limit: usize,
+    sessions: Vec<SessionInfo>,
+}
+
+fn session_list_cache() -> &'static Mutex<Option<SessionListCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<SessionListCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
@@ -326,13 +350,27 @@ fn is_empty_session_file(path: &Path) -> bool {
     };
     let head = &buf[..n];
     head.windows(13).any(|w| w == b"\"messages\":[]")
+        || head.windows(14).any(|w| w == b"\"messages\": []")
 }
 
-pub(super) fn collect_recent_session_stems(
+fn session_has_history(sessions_dir: &Path, stem: &str) -> bool {
+    let snapshot_path = sessions_dir.join(format!("{stem}.json"));
+    if !is_empty_session_file(&snapshot_path) {
+        return true;
+    }
+
+    let journal_path = sessions_dir.join(format!("{stem}.journal.jsonl"));
+    journal_path
+        .metadata()
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false)
+}
+
+fn collect_recent_session_candidates(
     sessions_dir: &Path,
-    scan_limit: usize,
+    candidate_limit: usize,
 ) -> Result<Vec<String>> {
-    let mut candidates: Vec<(u64, String)> = Vec::new();
+    let mut candidates: BinaryHeap<Reverse<(u64, String)>> = BinaryHeap::new();
 
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
@@ -343,24 +381,58 @@ pub(super) fn collect_recent_session_stems(
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        candidates.push((session_sort_key(stem), stem.to_string()));
-    }
-
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-
-    let mut recent = Vec::with_capacity(scan_limit);
-    for (_, stem) in candidates {
-        let path = sessions_dir.join(format!("{stem}.json"));
-        if is_empty_session_file(&path) {
+        if stem.starts_with("imported_") {
             continue;
         }
-        recent.push(stem);
-        if recent.len() >= scan_limit {
-            break;
+
+        let key = (session_sort_key(stem), stem.to_string());
+        if candidates.len() < candidate_limit {
+            candidates.push(Reverse(key));
+            continue;
+        }
+
+        let should_replace = candidates
+            .peek()
+            .map(|smallest| key > smallest.0)
+            .unwrap_or(true);
+        if should_replace {
+            candidates.pop();
+            candidates.push(Reverse(key));
         }
     }
 
-    Ok(recent)
+    let mut out: Vec<(u64, String)> = candidates.into_iter().map(|entry| entry.0).collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    Ok(out.into_iter().map(|(_, stem)| stem).collect())
+}
+
+pub(super) fn collect_recent_session_stems(
+    sessions_dir: &Path,
+    scan_limit: usize,
+) -> Result<Vec<String>> {
+    let mut candidate_limit = session_candidate_window(scan_limit);
+
+    loop {
+        let candidates = collect_recent_session_candidates(sessions_dir, candidate_limit)?;
+        let mut recent = Vec::with_capacity(scan_limit);
+        for stem in candidates {
+            if !session_has_history(sessions_dir, &stem) {
+                continue;
+            }
+            recent.push(stem);
+            if recent.len() >= scan_limit {
+                break;
+            }
+        }
+
+        if recent.len() >= scan_limit || candidate_limit >= MAX_SESSION_SCAN_LIMIT {
+            return Ok(recent);
+        }
+
+        candidate_limit = candidate_limit
+            .saturating_mul(2)
+            .min(MAX_SESSION_SCAN_LIMIT);
+    }
 }
 
 #[derive(Deserialize)]
@@ -567,6 +639,18 @@ pub(super) fn crashed_sessions_from_all_sessions(
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
+
+    if let Ok(cache) = session_list_cache().lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.sessions_dir == sessions_dir
+                && entry.scan_limit == scan_limit
+                && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
+            {
+                return Ok(entry.sessions.clone());
+            }
+        }
+    }
+
     let mut sessions: Vec<SessionInfo> = Vec::new();
 
     let candidates = if sessions_dir.exists() {
@@ -670,6 +754,15 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     sessions.extend(load_external_opencode_sessions(scan_limit));
 
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+
+    if let Ok(mut cache) = session_list_cache().lock() {
+        *cache = Some(SessionListCacheEntry {
+            loaded_at: Instant::now(),
+            sessions_dir,
+            scan_limit,
+            sessions: sessions.clone(),
+        });
+    }
 
     Ok(sessions)
 }
@@ -1420,6 +1513,7 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -1442,6 +1536,46 @@ mod tests {
                 crate::env::remove_var(self.key);
             }
         }
+    }
+
+    fn write_picker_snapshot(path: &Path, has_messages: bool) {
+        let body = if has_messages {
+            "{\"messages\":[{\"role\":\"user\"}]}"
+        } else {
+            "{\"messages\": []}"
+        };
+        std::fs::write(path, body).expect("write picker snapshot");
+    }
+
+    #[test]
+    fn collect_recent_session_stems_keeps_empty_snapshot_with_journal_history() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let stem = "session_alpha_1770000000000";
+        write_picker_snapshot(&temp.path().join(format!("{stem}.json")), false);
+        std::fs::write(
+            temp.path().join(format!("{stem}.journal.jsonl")),
+            "{\"append_messages\":[{\"role\":\"user\"}]}",
+        )
+        .expect("write journal");
+
+        let stems = collect_recent_session_stems(temp.path(), 1).expect("collect stems");
+        assert_eq!(stems, vec![stem.to_string()]);
+    }
+
+    #[test]
+    fn collect_recent_session_stems_expands_candidate_window_past_recent_empty_stubs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        for idx in 0..30 {
+            let stem = format!("session_empty_{}", 1770000000030u64 - idx as u64);
+            write_picker_snapshot(&temp.path().join(format!("{stem}.json")), false);
+        }
+
+        let older_stem = "session_full_1770000000000";
+        write_picker_snapshot(&temp.path().join(format!("{older_stem}.json")), true);
+
+        let stems = collect_recent_session_stems(temp.path(), 1).expect("collect stems");
+        assert_eq!(stems, vec![older_stem.to_string()]);
     }
 
     #[test]
