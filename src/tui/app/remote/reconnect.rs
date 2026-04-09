@@ -168,8 +168,12 @@ fn set_disconnect_status_message(app: &mut App, state: &mut RemoteRunState, cont
     }
 }
 
-fn disconnected_redraw_interval() -> tokio::time::Interval {
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
+fn disconnected_redraw_interval(initial_connect: bool) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(Duration::from_millis(if initial_connect {
+        1000
+    } else {
+        250
+    }));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval
 }
@@ -256,7 +260,7 @@ async fn wait_for_reload_handoff_before_reconnect(
             ));
             let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
             tokio::pin!(wait);
-            let mut redraw = disconnected_redraw_interval();
+            let mut redraw = disconnected_redraw_interval(false);
             loop {
                 tokio::select! {
                     _ = &mut wait => break,
@@ -358,7 +362,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
         allow_session_takeover,
     ));
     tokio::pin!(connect);
-    let mut redraw = disconnected_redraw_interval();
+    let mut redraw = disconnected_redraw_interval(state.reconnect_attempts == 0);
 
     match loop {
         tokio::select! {
@@ -482,7 +486,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
                         ));
                         let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
                         tokio::pin!(wait);
-                        let mut redraw = disconnected_redraw_interval();
+                        let mut redraw = disconnected_redraw_interval(false);
                         loop {
                             tokio::select! {
                                 _ = &mut wait => break,
@@ -517,7 +521,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             };
             let sleep = tokio::time::sleep(backoff);
             tokio::pin!(sleep);
-            let mut redraw = disconnected_redraw_interval();
+            let mut redraw = disconnected_redraw_interval(false);
             loop {
                 tokio::select! {
                     _ = &mut sleep => break,

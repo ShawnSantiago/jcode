@@ -81,7 +81,8 @@ impl CacheTracker {
         let current_count = prefix_hashes.len();
         let current_full_hash = prefix_hashes.last().copied();
         let previous_count = self.previous_message_count;
-        let prefix_hash_at_previous_count = if previous_count == 0 || previous_count > current_count {
+        let prefix_hash_at_previous_count = if previous_count == 0 || previous_count > current_count
+        {
             None
         } else {
             Some(prefix_hashes[previous_count - 1])

@@ -429,30 +429,39 @@ impl Agent {
             return;
         }
 
-        let fast_snapshot = if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
-            let previous_count = self.cache_tracker.previous_message_count();
-            let prefix_hashes = self.session.provider_message_prefix_hashes();
-            let current_count = prefix_hashes.len();
-            let current_full_hash = prefix_hashes.last().copied();
-            let prefix_hash_at_previous_count = if previous_count == 0 || previous_count > current_count {
-                None
+        let fast_snapshot =
+            if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
+                let previous_count = self.cache_tracker.previous_message_count();
+                let prefix_hashes = self.session.provider_message_prefix_hashes();
+                let current_count = prefix_hashes.len();
+                let current_full_hash = prefix_hashes.last().copied();
+                let prefix_hash_at_previous_count =
+                    if previous_count == 0 || previous_count > current_count {
+                        None
+                    } else {
+                        Some(prefix_hashes[previous_count - 1])
+                    };
+                Some((
+                    current_count,
+                    prefix_hash_at_previous_count,
+                    current_full_hash,
+                ))
             } else {
-                Some(prefix_hashes[previous_count - 1])
+                None
             };
-            Some((current_count, prefix_hash_at_previous_count, current_full_hash))
-        } else {
-            None
-        };
 
-        let violation = if let Some((current_count, prefix_hash_at_previous_count, current_full_hash)) = fast_snapshot {
-            self.cache_tracker.record_prefix_hash_snapshot(
-                current_count,
-                prefix_hash_at_previous_count,
-                current_full_hash,
-            )
-        } else {
-            self.cache_tracker.record_request(messages)
-        };
+        let violation =
+            if let Some((current_count, prefix_hash_at_previous_count, current_full_hash)) =
+                fast_snapshot
+            {
+                self.cache_tracker.record_prefix_hash_snapshot(
+                    current_count,
+                    prefix_hash_at_previous_count,
+                    current_full_hash,
+                )
+            } else {
+                self.cache_tracker.record_request(messages)
+            };
 
         if let Some(violation) = violation {
             logging::warn(&format!(
