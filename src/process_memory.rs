@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 #[cfg(feature = "jemalloc-prof")]
 use std::ffi::CString;
 use std::path::Path;
-#[cfg(feature = "jemalloc-prof")]
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 

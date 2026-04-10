@@ -10,21 +10,42 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-pub(super) async fn broadcast_swarm_status(
+const SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD: usize = 16;
+const SWARM_STATUS_DEBOUNCE_MS: u64 = 15;
+
+#[derive(Default, Clone, Copy)]
+struct PendingSwarmStatusBroadcast {
+    scheduled: bool,
+    dirty: bool,
+}
+
+fn pending_swarm_status_broadcasts()
+-> &'static StdMutex<HashMap<String, PendingSwarmStatusBroadcast>> {
+    static PENDING: OnceLock<StdMutex<HashMap<String, PendingSwarmStatusBroadcast>>> =
+        OnceLock::new();
+    PENDING.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn swarm_broadcast_key(
     swarm_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) -> String {
+    format!(
+        "{:p}:{:p}:{swarm_id}",
+        Arc::as_ptr(swarm_members),
+        Arc::as_ptr(swarms_by_id)
+    )
+}
+
+async fn broadcast_swarm_status_now(
+    session_ids: Vec<String>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) {
-    let session_ids: Vec<String> = {
-        let swarms = swarms_by_id.read().await;
-        swarms
-            .get(swarm_id)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default()
-    };
     if session_ids.is_empty() {
         return;
     }
@@ -53,6 +74,78 @@ pub(super) async fn broadcast_swarm_status(
             let _ = member.event_tx.send(event.clone());
         }
     }
+}
+
+pub(super) async fn broadcast_swarm_status(
+    swarm_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    let session_ids: Vec<String> = {
+        let swarms = swarms_by_id.read().await;
+        swarms
+            .get(swarm_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    };
+    if session_ids.is_empty() {
+        return;
+    }
+
+    if session_ids.len() < SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD {
+        broadcast_swarm_status_now(session_ids, swarm_members).await;
+        return;
+    }
+
+    let key = swarm_broadcast_key(swarm_id, swarm_members, swarms_by_id);
+    let should_spawn = {
+        let mut pending = pending_swarm_status_broadcasts()
+            .lock()
+            .expect("pending swarm status broadcasts lock poisoned");
+        let entry = pending.entry(key.clone()).or_default();
+        if entry.scheduled {
+            entry.dirty = true;
+            false
+        } else {
+            entry.scheduled = true;
+            entry.dirty = false;
+            true
+        }
+    };
+
+    if !should_spawn {
+        return;
+    }
+
+    let swarm_id = swarm_id.to_string();
+    let swarm_members = Arc::clone(swarm_members);
+    let swarms_by_id = Arc::clone(swarms_by_id);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(SWARM_STATUS_DEBOUNCE_MS)).await;
+            let session_ids: Vec<String> = {
+                let swarms = swarms_by_id.read().await;
+                swarms
+                    .get(&swarm_id)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default()
+            };
+            broadcast_swarm_status_now(session_ids, &swarm_members).await;
+
+            let mut pending = pending_swarm_status_broadcasts()
+                .lock()
+                .expect("pending swarm status broadcasts lock poisoned");
+            let Some(entry) = pending.get_mut(&key) else {
+                break;
+            };
+            if entry.dirty {
+                entry.dirty = false;
+                continue;
+            }
+            pending.remove(&key);
+            break;
+        }
+    });
 }
 
 /// Broadcast the authoritative swarm plan snapshot.
@@ -450,13 +543,14 @@ pub(super) async fn update_member_status(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
-    let (swarm_id, agent_name, member_changed, status_changed, old_status) = {
+    let (swarm_id, agent_name, member_changed, status_changed, detail_is_none, old_status) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
             let member_changed = status_changed || detail_changed;
+            let detail_is_none = detail.is_none();
             if status_changed {
                 member.last_status_change = Instant::now();
             }
@@ -468,10 +562,11 @@ pub(super) async fn update_member_status(
                 name,
                 member_changed,
                 status_changed,
+                detail_is_none,
                 previous_status,
             )
         } else {
-            (None, None, false, false, String::new())
+            (None, None, false, false, true, String::new())
         }
     };
     if let Some(ref id) = swarm_id {
