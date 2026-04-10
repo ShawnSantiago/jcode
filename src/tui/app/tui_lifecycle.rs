@@ -18,7 +18,7 @@ impl App {
         if let Some((title, message)) = restored.startup_display_message {
             self.push_display_message(DisplayMessage::system(message).with_title(title));
         }
-        self.interleave_message = restored.interleave_message;
+        self.interleave_message = None;
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
         self.observe_page_markdown = restored.observe_page_markdown;
@@ -26,22 +26,26 @@ impl App {
         self.set_observe_mode_enabled(restored.observe_mode_enabled, restored.observe_mode_enabled);
 
         let mut queued_messages = restored.queued_messages;
-        let mut recovered_interrupts = restored
+        let mut recovered_followups = Vec::new();
+        if let Some(interleave_message) = restored.interleave_message {
+            if !interleave_message.trim().is_empty() {
+                recovered_followups.push(interleave_message);
+            }
+        }
+        let recovered_interrupts = restored
             .pending_soft_interrupt_resend
             .unwrap_or(restored.pending_soft_interrupts);
         if !recovered_interrupts.is_empty() {
             crate::logging::info(&format!(
-                "Recovered {} pending soft interrupt(s) after reload; re-queueing them for resend",
+                "Recovered {} pending soft interrupt(s) after reload; re-queueing them as normal follow-ups",
                 recovered_interrupts.len()
             ));
-            if self.interleave_message.is_none() {
-                self.interleave_message = Some(recovered_interrupts.remove(0));
-            }
-            if !recovered_interrupts.is_empty() {
-                let mut recovered_queue = recovered_interrupts;
-                recovered_queue.append(&mut queued_messages);
-                queued_messages = recovered_queue;
-            }
+            recovered_followups.extend(recovered_interrupts);
+        }
+        if !recovered_followups.is_empty() {
+            let mut recovered_queue = recovered_followups;
+            recovered_queue.append(&mut queued_messages);
+            queued_messages = recovered_queue;
             self.set_status_notice("Recovered pending prompts after reload");
         }
 

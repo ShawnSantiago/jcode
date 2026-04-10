@@ -6602,13 +6602,10 @@ fn test_new_for_remote_requeues_restored_pending_soft_interrupts() {
     app.save_input_for_reload(&session_id);
 
     let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(
-        restored.interleave_message.as_deref(),
-        Some("local interleave")
-    );
+    assert!(restored.interleave_message.is_none());
     assert_eq!(
         restored.queued_messages(),
-        &["sent one", "sent two", "queued later"]
+        &["local interleave", "sent one", "sent two", "queued later"]
     );
 }
 
@@ -6621,10 +6618,8 @@ fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
     app.save_input_for_reload(&session_id);
 
     let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(
-        restored.interleave_message.as_deref(),
-        Some("interrupt after reload")
-    );
+    assert!(restored.interleave_message.is_none());
+    assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
     assert!(restored.pending_queued_dispatch);
     assert!(restored.is_processing);
     assert!(matches!(restored.status, ProcessingStatus::Sending));
@@ -6640,11 +6635,8 @@ fn test_new_for_remote_restored_soft_interrupt_resend_triggers_dispatch_state() 
     app.save_input_for_reload(&session_id);
 
     let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(
-        restored.interleave_message.as_deref(),
-        Some("sent interrupt")
-    );
-    assert!(restored.queued_messages().is_empty());
+    assert!(restored.interleave_message.is_none());
+    assert_eq!(restored.queued_messages(), &["sent interrupt"]);
     assert!(restored.pending_queued_dispatch);
     assert!(restored.is_processing);
     assert!(matches!(restored.status, ProcessingStatus::Sending));
@@ -6726,13 +6718,14 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
             &mut remote,
         );
 
-        assert_eq!(
-            restored.interleave_message.as_deref(),
-            Some("interrupt after reload")
-        );
+        assert!(restored.interleave_message.is_none());
         assert_eq!(
             restored.queued_messages(),
-            &["already sent interrupt", "queued followup"]
+            &[
+                "interrupt after reload",
+                "already sent interrupt",
+                "queued followup"
+            ]
         );
         assert!(
             restored.pending_soft_interrupts.is_empty(),
