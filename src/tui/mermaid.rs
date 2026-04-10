@@ -63,6 +63,18 @@ static CACHE_EVICTED: OnceLock<()> = OnceLock::new();
 static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
     LazyLock::new(|| Mutex::new(MermaidCache::new()));
 
+/// Background mermaid renders currently in flight, keyed by (content hash, target width).
+static PENDING_RENDER_KEYS: LazyLock<Mutex<HashSet<(u64, u32)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Serialize the actual Mermaid parse/layout/png pipeline.
+///
+/// The render path temporarily swaps the panic hook around the renderer for
+/// defense-in-depth, so we keep only one active render at a time. This also
+/// prevents duplicate expensive work when a background streaming render and a
+/// foreground final render race for the same diagram.
+static RENDER_WORK_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 /// Maximum number of StatefulProtocol entries to keep in IMAGE_STATE.
 /// Each entry holds the full decoded+encoded image data and can consume
 /// several MB of RAM (e.g. a 1440×1080 RGBA image ≈ 6 MB, plus protocol
@@ -1039,6 +1051,12 @@ pub fn clear_cache() -> Result<(), String> {
     }
     if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
         diagrams.clear();
+    }
+    if let Ok(mut pending) = PENDING_RENDER_KEYS.lock() {
+        pending.clear();
+    }
+    if let Ok(mut errors) = RENDER_ERRORS.lock() {
+        errors.clear();
     }
     clear_streaming_preview_diagram();
 
@@ -2034,6 +2052,61 @@ pub fn render_mermaid_untracked(content: &str, terminal_width: Option<u16>) -> R
     render_mermaid_sized_internal(content, terminal_width, false)
 }
 
+/// Streaming-friendly Mermaid rendering.
+///
+/// If the diagram is already cached, returns it immediately. Otherwise this
+/// queues the heavy render work onto a background thread and returns `None`
+/// so the caller can keep the UI responsive with a lightweight placeholder.
+pub fn render_mermaid_deferred(content: &str, terminal_width: Option<u16>) -> Option<RenderResult> {
+    let hash = hash_content(content);
+    let (node_count, edge_count) = estimate_diagram_size(content);
+
+    if node_count > MAX_NODES || edge_count > MAX_EDGES {
+        return Some(RenderResult::Error(format!(
+            "Diagram too complex ({} nodes, {} edges). Max: {} nodes, {} edges.",
+            node_count, edge_count, MAX_NODES, MAX_EDGES
+        )));
+    }
+
+    let (target_width, _) = calculate_render_size(node_count, edge_count, terminal_width);
+    let target_width_u32 = target_width as u32;
+
+    if let Some(cached) = get_cached_diagram(hash, Some(target_width_u32)) {
+        return Some(RenderResult::Image {
+            hash,
+            path: cached.path,
+            width: cached.width,
+            height: cached.height,
+        });
+    }
+
+    if let Some(err) = RENDER_ERRORS
+        .lock()
+        .ok()
+        .and_then(|errors| errors.get(&hash).cloned())
+    {
+        return Some(RenderResult::Error(err));
+    }
+
+    let render_key = (hash, target_width_u32);
+    let should_spawn = match PENDING_RENDER_KEYS.lock() {
+        Ok(mut pending) => pending.insert(render_key),
+        Err(_) => return Some(render_mermaid_untracked(content, terminal_width)),
+    };
+
+    if should_spawn {
+        let owned = content.to_string();
+        std::thread::spawn(move || {
+            let _ = render_mermaid_sized_internal(&owned, terminal_width, false);
+            if let Ok(mut pending) = PENDING_RENDER_KEYS.lock() {
+                pending.remove(&render_key);
+            }
+        });
+    }
+
+    None
+}
+
 fn render_mermaid_sized_internal(
     content: &str,
     terminal_width: Option<u16>,
@@ -2105,6 +2178,31 @@ fn render_mermaid_sized_internal(
     };
     let png_path_clone = png_path.clone();
 
+    let _render_guard = RENDER_WORK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Re-check cache after taking the render lock so a background worker that
+    // just finished can satisfy this request without doing duplicate work.
+    if let Some(cached) = get_cached_diagram(hash, Some(target_width_u32)) {
+        if let Ok(mut errors) = RENDER_ERRORS.lock() {
+            errors.remove(&hash);
+        }
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.cache_hits += 1;
+            state.stats.last_hash = Some(format!("{:016x}", hash));
+        }
+        if register_active {
+            register_active_diagram(hash, cached.width, cached.height, None);
+        }
+        return RenderResult::Image {
+            hash,
+            path: cached.path,
+            width: cached.width,
+            height: cached.height,
+        };
+    }
+
     // Wrap mermaid library calls in catch_unwind for defense-in-depth
     let content_owned = content.to_string();
 
@@ -2164,12 +2262,18 @@ fn render_mermaid_sized_internal(
     let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
     match render_result {
         Ok(Ok(())) => {
+            if let Ok(mut errors) = RENDER_ERRORS.lock() {
+                errors.remove(&hash);
+            }
             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                 state.stats.render_success += 1;
                 state.stats.last_render_ms = Some(render_ms);
             }
         }
         Ok(Err(e)) => {
+            if let Ok(mut errors) = RENDER_ERRORS.lock() {
+                errors.insert(hash, e.clone());
+            }
             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                 state.stats.render_errors += 1;
                 state.stats.last_render_ms = Some(render_ms);
@@ -2185,6 +2289,9 @@ fn render_mermaid_sized_internal(
             } else {
                 "unknown panic in mermaid renderer".to_string()
             };
+            if let Ok(mut errors) = RENDER_ERRORS.lock() {
+                errors.insert(hash, format!("Renderer panic: {}", msg));
+            }
             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                 state.stats.render_errors += 1;
                 state.stats.last_render_ms = Some(render_ms);
@@ -4374,6 +4481,36 @@ mod tests {
             "large render should approach wide target width, got {}",
             large_w
         );
+    }
+
+    #[test]
+    fn test_render_mermaid_deferred_returns_pending_then_cached_image() {
+        let _lock = mermaid_render_test_lock();
+        clear_cache().ok();
+
+        let content = "flowchart LR\n    A[Deferred Start] --> B[Deferred End]";
+        let first = render_mermaid_deferred(content, Some(80));
+        assert!(first.is_none(), "expected background render to be queued");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let result = loop {
+            if let Some(result) = render_mermaid_deferred(content, Some(80)) {
+                break result;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for deferred mermaid render"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        match result {
+            RenderResult::Image { width, height, .. } => {
+                assert!(width > 0);
+                assert!(height > 0);
+            }
+            RenderResult::Error(err) => panic!("expected deferred render success, got {err}"),
+        }
     }
 
     #[test]

@@ -1799,29 +1799,50 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         ));
                         continue;
                     }
-                    let result = if streaming_mode || !mermaid_should_register_active() {
-                        mermaid::render_mermaid_untracked(&code_block_content, terminal_width)
+                    let result = if streaming_mode {
+                        mermaid::render_mermaid_deferred(&code_block_content, terminal_width)
+                    } else if !mermaid_should_register_active() {
+                        Some(mermaid::render_mermaid_untracked(
+                            &code_block_content,
+                            terminal_width,
+                        ))
                     } else {
-                        mermaid::render_mermaid_sized(&code_block_content, terminal_width)
+                        Some(mermaid::render_mermaid_sized(
+                            &code_block_content,
+                            terminal_width,
+                        ))
                     };
-                    if streaming_mode {
-                        if let mermaid::RenderResult::Image {
-                            hash,
-                            width,
-                            height,
-                            ..
-                        } = &result
-                        {
-                            mermaid::set_streaming_preview_diagram(*hash, *width, *height, None);
-                        }
-                    }
                     match result {
-                        mermaid::RenderResult::Image { .. } if side_only => {
-                            lines.push(mermaid_sidebar_placeholder("↗ mermaid diagram (sidebar)"));
+                        Some(result) => {
+                            if streaming_mode {
+                                if let mermaid::RenderResult::Image {
+                                    hash,
+                                    width,
+                                    height,
+                                    ..
+                                } = &result
+                                {
+                                    mermaid::set_streaming_preview_diagram(
+                                        *hash, *width, *height, None,
+                                    );
+                                }
+                            }
+                            match result {
+                                mermaid::RenderResult::Image { .. } if side_only => {
+                                    lines.push(mermaid_sidebar_placeholder(
+                                        "↗ mermaid diagram (sidebar)",
+                                    ));
+                                }
+                                other => {
+                                    let mermaid_lines = mermaid::result_to_lines(other, max_width);
+                                    lines.extend(mermaid_lines);
+                                }
+                            }
                         }
-                        other => {
-                            let mermaid_lines = mermaid::result_to_lines(other, max_width);
-                            lines.extend(mermaid_lines);
+                        None => {
+                            lines.push(mermaid_sidebar_placeholder(
+                                "↻ rendering mermaid diagram...",
+                            ));
                         }
                     }
                 } else {
@@ -4857,6 +4878,36 @@ mod tests {
             "Expected streamed code-block content before closing fence: {}",
             rendered
         );
+    }
+
+    #[test]
+    fn test_incremental_renderer_defers_mermaid_render_until_background_ready() {
+        crate::tui::mermaid::clear_cache().ok();
+
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let text = "Plan:\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n";
+        let lines = renderer.update(text);
+        let rendered = lines_to_string(&lines);
+
+        assert!(
+            rendered.contains("rendering mermaid diagram"),
+            "expected deferred mermaid placeholder on first completed streaming render: {}",
+            rendered
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rerendered = lines_to_string(&renderer.update(text));
+            if rerendered.contains("[Image:") || rerendered.contains("Diagram:") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for deferred mermaid background render: {}",
+                rerendered
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
