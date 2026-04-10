@@ -369,11 +369,7 @@ pub fn load_credentials() -> Result<CodexCredentials> {
         });
     }
 
-    if let Some((source, creds)) = expired_candidates.into_iter().next() {
-        crate::logging::info(&format!(
-            "{} OpenAI OAuth token expired; will attempt refresh.",
-            source
-        ));
+    if let Some((_source, creds)) = expired_candidates.into_iter().next() {
         return Ok(creds);
     }
 

@@ -457,11 +457,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("opencode", creds));
     }
 
-    if let Some((source, creds)) = expired_candidates.into_iter().next() {
-        crate::logging::info(&format!(
-            "{} Claude OAuth token expired; will attempt refresh.",
-            source
-        ));
+    if let Some((_source, creds)) = expired_candidates.into_iter().next() {
         return Ok(creds);
     }
 

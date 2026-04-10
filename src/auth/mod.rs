@@ -24,8 +24,11 @@ use std::time::Instant;
 
 static AUTH_STATUS_CACHE: std::sync::LazyLock<RwLock<Option<(AuthStatus, Instant)>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
+static AUTH_STATUS_FAST_CACHE: std::sync::LazyLock<RwLock<Option<(AuthStatus, Instant)>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
 
 const AUTH_STATUS_CACHE_TTL_SECS: u64 = 30;
+const AUTH_STATUS_FAST_CACHE_TTL_SECS: u64 = 5;
 
 /// Per-process cache for command existence lookups.
 /// CLI tools don't get installed/uninstalled while jcode is running, so caching
@@ -45,6 +48,10 @@ fn env_truthy(key: &str) -> bool {
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false)
+}
+
+fn auth_timing_logging_enabled() -> bool {
+    env_truthy("JCODE_AUTH_TIMING")
 }
 
 /// Authentication status for all supported providers
@@ -262,6 +269,9 @@ impl AuthStatus {
         if let Ok(mut cache) = AUTH_STATUS_CACHE.write() {
             *cache = Some((status.clone(), Instant::now()));
         }
+        if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
+            *cache = Some((status.clone(), Instant::now()));
+        }
 
         status
     }
@@ -278,7 +288,19 @@ impl AuthStatus {
             return status.clone();
         }
 
-        Self::check_uncached_fast()
+        if let Ok(cache) = AUTH_STATUS_FAST_CACHE.read()
+            && let Some((ref status, ref when)) = *cache
+            && when.elapsed().as_secs() < AUTH_STATUS_FAST_CACHE_TTL_SECS
+        {
+            return status.clone();
+        }
+
+        let status = Self::check_uncached_fast();
+        if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
+            *cache = Some((status.clone(), Instant::now()));
+        }
+
+        status
     }
 
     /// Returns true if at least one provider has usable credentials.
@@ -614,6 +636,9 @@ impl AuthStatus {
         if let Ok(mut cache) = AUTH_STATUS_CACHE.write() {
             *cache = None;
         }
+        if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
+            *cache = None;
+        }
         crate::auth::copilot::invalidate_github_token_cache();
     }
 
@@ -908,11 +933,13 @@ impl AuthStatus {
             .filter(|(_, ms)| *ms > 0)
             .map(|(name, ms)| format!("{name}={ms}ms"))
             .collect();
-        crate::logging::info(&format!(
-            "[TIMING] auth_check_fast: total={}ms, nonzero=[{}]",
-            total_start.elapsed().as_millis(),
-            nonzero.join(", ")
-        ));
+        if auth_timing_logging_enabled() {
+            crate::logging::info(&format!(
+                "[TIMING] auth_check_fast: total={}ms, nonzero=[{}]",
+                total_start.elapsed().as_millis(),
+                nonzero.join(", ")
+            ));
+        }
 
         status
     }
