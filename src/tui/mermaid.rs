@@ -1711,6 +1711,9 @@ const RENDER_CACHE_MAX: usize = 64;
 /// Reuse a cached PNG only if it's at least this fraction of requested width.
 /// This avoids visibly blurry upscaling after terminal/pane resizes.
 const CACHE_WIDTH_MATCH_PERCENT: u32 = 85;
+/// Quantize requested Mermaid render widths so tiny pane-width changes, like a
+/// 1-cell scrollbar reservation, reuse the same cold render/cache entry.
+const RENDER_WIDTH_BUCKET_CELLS: u32 = 4;
 
 /// Mermaid rendering cache
 struct MermaidCache {
@@ -1957,11 +1960,25 @@ fn calculate_render_size(
         _ => 1.1,
     };
 
-    let width = (base_width * complexity_factor * RENDER_SUPERSAMPLE)
+    let raw_width = (base_width * complexity_factor * RENDER_SUPERSAMPLE)
         .clamp(400.0, DEFAULT_RENDER_WIDTH as f64);
+    let width = normalize_render_target_width(raw_width) as f64;
     let height = (width * 0.75).clamp(300.0, DEFAULT_RENDER_HEIGHT as f64);
 
     (width, height)
+}
+
+fn normalize_render_target_width(width: f64) -> u32 {
+    let width = width.max(1.0).round() as u32;
+    let font_width = get_font_size()
+        .map(|(w, _)| u32::from(w))
+        .unwrap_or(8)
+        .max(1);
+    let bucket = font_width
+        .saturating_mul(RENDER_WIDTH_BUCKET_CELLS)
+        .max(font_width);
+    let rounded = ((width + (bucket / 2)) / bucket).saturating_mul(bucket);
+    rounded.clamp(400, DEFAULT_RENDER_WIDTH)
 }
 
 fn extract_xml_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
@@ -4308,6 +4325,13 @@ mod tests {
         let (w2, h2) = calculate_render_size(50, 80, Some(100));
         assert!(w2 > w1);
         assert!(h2 > h1);
+    }
+
+    #[test]
+    fn test_adjacent_terminal_widths_share_render_bucket() {
+        let (w1, _) = calculate_render_size(5, 6, Some(99));
+        let (w2, _) = calculate_render_size(5, 6, Some(100));
+        assert_eq!(w1, w2);
     }
 
     #[test]
