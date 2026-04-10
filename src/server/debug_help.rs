@@ -118,6 +118,7 @@ CLIENT COMMANDS (client: prefix):
   client:mermaid:memory    - Mermaid memory profile (RSS + cache estimates)
   client:mermaid:memory-bench [n] - Synthetic Mermaid memory benchmark
   client:mermaid:flicker-bench [n] - Benchmark viewport protocol churn / flicker risk
+  client:mermaid:ui-bench[:<j>] - Benchmark live Mermaid UI render path
   client:mermaid:cache     - List mermaid cache entries
   client:mermaid:state     - Get image state (resize modes)
   client:mermaid:test      - Render test diagram
@@ -152,6 +153,7 @@ TESTER COMMANDS (tester: prefix):
   tester:<id>:scroll-test  - Run offscreen scroll+diagram test
   tester:<id>:scroll-suite - Run scroll+diagram test suite
   tester:<id>:side-panel-latency - Benchmark headless side-panel input->frame latency
+  tester:<id>:mermaid-ui-bench - Benchmark live Mermaid UI render path
   tester:<id>:stop         - Stop tester
 
 Examples:

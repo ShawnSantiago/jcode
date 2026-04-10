@@ -10,6 +10,71 @@ fn percentile_ms(samples_ms: &[f64], percentile: f64) -> f64 {
     samples_ms[rank.min(samples_ms.len() - 1)]
 }
 
+fn summarize_mermaid_ui_bench(
+    samples: &[MermaidUiBenchSample],
+    protocol_supported: bool,
+    protocol: Option<String>,
+) -> MermaidUiBenchSummary {
+    let mut elapsed_ms = 0.0;
+    let mut first_worker_render_frame = None;
+    let mut first_protocol_render_frame = None;
+    let mut first_deferred_idle_frame = None;
+    let mut pending_frames = 0usize;
+    let mut protocol_render_frames = 0usize;
+    let mut protocol_rebuild_frames = 0usize;
+    let mut saw_pending = false;
+    let mut time_to_first_worker_render_ms = None;
+    let mut time_to_first_protocol_render_ms = None;
+    let mut time_to_deferred_idle_ms = None;
+
+    for sample in samples {
+        elapsed_ms += sample.frame_ms;
+        if sample.deferred_pending_after > 0 {
+            saw_pending = true;
+            pending_frames += 1;
+        }
+        if first_worker_render_frame.is_none() && sample.deferred_worker_renders > 0 {
+            first_worker_render_frame = Some(sample.frame);
+            time_to_first_worker_render_ms = Some(elapsed_ms);
+        }
+        let protocol_rendered = sample.image_state_hits > 0
+            || sample.image_state_misses > 0
+            || sample.fit_state_reuse_hits > 0
+            || sample.fit_protocol_rebuilds > 0
+            || sample.viewport_state_reuse_hits > 0
+            || sample.viewport_protocol_rebuilds > 0;
+        if protocol_rendered {
+            protocol_render_frames += 1;
+            if first_protocol_render_frame.is_none() {
+                first_protocol_render_frame = Some(sample.frame);
+                time_to_first_protocol_render_ms = Some(elapsed_ms);
+            }
+        }
+        if sample.fit_protocol_rebuilds > 0 || sample.viewport_protocol_rebuilds > 0 {
+            protocol_rebuild_frames += 1;
+        }
+        if saw_pending && first_deferred_idle_frame.is_none() && sample.deferred_pending_after == 0
+        {
+            first_deferred_idle_frame = Some(sample.frame);
+            time_to_deferred_idle_ms = Some(elapsed_ms);
+        }
+    }
+
+    MermaidUiBenchSummary {
+        protocol_supported,
+        protocol,
+        pending_frames,
+        protocol_render_frames,
+        protocol_rebuild_frames,
+        first_worker_render_frame,
+        first_protocol_render_frame,
+        first_deferred_idle_frame,
+        time_to_first_worker_render_ms,
+        time_to_first_protocol_render_ms,
+        time_to_deferred_idle_ms,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct DebugSnapshot {
     state: serde_json::Value,
@@ -148,6 +213,19 @@ pub(super) struct SidePanelLatencyConfig {
     include_samples: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct MermaidUiBenchConfig {
+    width: Option<u16>,
+    height: Option<u16>,
+    frames: Option<usize>,
+    warmup_frames: Option<usize>,
+    padding: Option<usize>,
+    diagrams: Option<usize>,
+    include_samples: Option<bool>,
+    keep_mermaid_cache: Option<bool>,
+    sleep_between_frames_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct SidePanelLatencySample {
     iteration: usize,
@@ -160,6 +238,39 @@ pub(super) struct SidePanelLatencySample {
     frame_id_before: Option<u64>,
     frame_id_after: Option<u64>,
     scroll_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct MermaidUiBenchSample {
+    frame: usize,
+    frame_ms: f64,
+    render_ms: Option<f32>,
+    image_regions: usize,
+    deferred_pending_after: usize,
+    deferred_enqueued: u64,
+    deferred_deduped: u64,
+    deferred_worker_renders: u64,
+    image_state_hits: u64,
+    image_state_misses: u64,
+    fit_state_reuse_hits: u64,
+    fit_protocol_rebuilds: u64,
+    viewport_state_reuse_hits: u64,
+    viewport_protocol_rebuilds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct MermaidUiBenchSummary {
+    protocol_supported: bool,
+    protocol: Option<String>,
+    pending_frames: usize,
+    protocol_render_frames: usize,
+    protocol_rebuild_frames: usize,
+    first_worker_render_frame: Option<usize>,
+    first_protocol_render_frame: Option<usize>,
+    first_deferred_idle_frame: Option<usize>,
+    time_to_first_worker_render_ms: Option<f64>,
+    time_to_first_protocol_render_ms: Option<f64>,
+    time_to_deferred_idle_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -696,6 +807,239 @@ impl App {
                 "notes": [
                     "This is a headless end-to-end app benchmark: injected side-panel mouse scroll event -> event classification -> redraw scheduling -> offscreen frame update.",
                     "It does not include terminal emulator/compositor/image protocol wall-clock paint latency outside jcode."
+                ]
+            }))
+        })();
+
+        saved_state.restore(self);
+        crate::tui::markdown::set_diagram_mode_override(saved_diagram_override);
+        crate::tui::mermaid::restore_active_diagrams(saved_active_diagrams);
+        if !was_visual_debug {
+            crate::tui::visual_debug::disable();
+        }
+
+        match result {
+            Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string()),
+            Err(e) => e,
+        }
+    }
+
+    fn run_mermaid_ui_bench(&mut self, raw: Option<&str>) -> String {
+        let cfg: MermaidUiBenchConfig = if let Some(raw) = raw {
+            if raw.trim().is_empty() {
+                MermaidUiBenchConfig {
+                    width: None,
+                    height: None,
+                    frames: None,
+                    warmup_frames: None,
+                    padding: None,
+                    diagrams: None,
+                    include_samples: None,
+                    keep_mermaid_cache: None,
+                    sleep_between_frames_ms: None,
+                }
+            } else {
+                match serde_json::from_str(raw) {
+                    Ok(cfg) => cfg,
+                    Err(e) => return format!("mermaid:ui-bench parse error: {}", e),
+                }
+            }
+        } else {
+            MermaidUiBenchConfig {
+                width: None,
+                height: None,
+                frames: None,
+                warmup_frames: None,
+                padding: None,
+                diagrams: None,
+                include_samples: None,
+                keep_mermaid_cache: None,
+                sleep_between_frames_ms: None,
+            }
+        };
+
+        let width = cfg.width.unwrap_or(100).max(40);
+        let height = cfg.height.unwrap_or(40).max(20);
+        let frames = cfg.frames.unwrap_or(24).clamp(4, 240);
+        let warmup_frames = cfg.warmup_frames.unwrap_or(0).min(frames.saturating_sub(1));
+        let padding = cfg.padding.unwrap_or(24).max(8);
+        let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 4);
+        let include_samples = cfg.include_samples.unwrap_or(true);
+        let keep_mermaid_cache = cfg.keep_mermaid_cache.unwrap_or(false);
+        let sleep_between_frames_ms = cfg.sleep_between_frames_ms.unwrap_or(0).min(1_000);
+
+        let saved_state = ScrollTestState::capture(self);
+        let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
+        let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
+        let was_visual_debug = crate::tui::visual_debug::is_enabled();
+        crate::tui::visual_debug::enable();
+        crate::tui::mermaid::init_picker();
+
+        self.display_messages = vec![
+            DisplayMessage {
+                role: "user".to_string(),
+                content: "Live Mermaid UI benchmark".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+            DisplayMessage {
+                role: "assistant".to_string(),
+                content: "Benchmarking deferred Mermaid render and image protocol reuse."
+                    .to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+        ];
+        self.bump_display_messages_version();
+        self.side_panel = Self::build_side_panel_latency_snapshot(diagrams, padding);
+        self.diff_mode = crate::config::DiffDisplayMode::Off;
+        self.diff_pane_scroll = 0;
+        self.diff_pane_scroll_x = 0;
+        self.diff_pane_focus = false;
+        self.diff_pane_auto_scroll = false;
+        self.follow_chat_bottom();
+        self.is_processing = false;
+        self.clear_streaming_render_state();
+        self.queued_messages.clear();
+        self.interleave_message = None;
+        self.pending_soft_interrupts.clear();
+        self.status = ProcessingStatus::Idle;
+        self.processing_started = None;
+        self.status_notice = None;
+        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram_mode));
+        crate::tui::clear_side_panel_render_caches();
+        crate::tui::reset_side_panel_debug_stats();
+        crate::tui::markdown::reset_debug_stats();
+        crate::tui::mermaid::reset_debug_stats();
+        crate::tui::mermaid::clear_active_diagrams();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
+        if !keep_mermaid_cache {
+            let _ = crate::tui::mermaid::clear_cache();
+        }
+
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let result = (|| -> Result<serde_json::Value, String> {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend)
+                .map_err(|e| format!("mermaid:ui-bench terminal error: {}", e))?;
+
+            let protocol = crate::tui::mermaid::protocol_type().map(|p| format!("{:?}", p));
+            let protocol_supported = protocol.is_some();
+
+            let mut samples = Vec::with_capacity(frames.saturating_sub(warmup_frames));
+            let mut frame_times = Vec::with_capacity(frames);
+            let mut render_values = Vec::with_capacity(frames.saturating_sub(warmup_frames));
+
+            for frame_idx in 0..frames {
+                let before_stats = crate::tui::mermaid::debug_stats();
+                let frame_started = Instant::now();
+                terminal
+                    .draw(|f| crate::tui::ui::draw(f, self))
+                    .map_err(|e| format!("mermaid:ui-bench draw error: {}", e))?;
+                let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+                frame_times.push(frame_ms);
+
+                let after_stats = crate::tui::mermaid::debug_stats();
+                let latest_frame = crate::tui::visual_debug::latest_frame();
+                let render_ms = latest_frame
+                    .as_ref()
+                    .and_then(|frame| frame.render_timing.as_ref().map(|timing| timing.total_ms));
+                let image_regions = latest_frame
+                    .as_ref()
+                    .map(|frame| frame.image_regions.len())
+                    .unwrap_or(0);
+
+                if frame_idx >= warmup_frames {
+                    if let Some(render_ms) = render_ms {
+                        render_values.push(render_ms as f64);
+                    }
+                    samples.push(MermaidUiBenchSample {
+                        frame: frame_idx - warmup_frames,
+                        frame_ms,
+                        render_ms,
+                        image_regions,
+                        deferred_pending_after: after_stats.deferred_pending,
+                        deferred_enqueued: after_stats
+                            .deferred_enqueued
+                            .saturating_sub(before_stats.deferred_enqueued),
+                        deferred_deduped: after_stats
+                            .deferred_deduped
+                            .saturating_sub(before_stats.deferred_deduped),
+                        deferred_worker_renders: after_stats
+                            .deferred_worker_renders
+                            .saturating_sub(before_stats.deferred_worker_renders),
+                        image_state_hits: after_stats
+                            .image_state_hits
+                            .saturating_sub(before_stats.image_state_hits),
+                        image_state_misses: after_stats
+                            .image_state_misses
+                            .saturating_sub(before_stats.image_state_misses),
+                        fit_state_reuse_hits: after_stats
+                            .fit_state_reuse_hits
+                            .saturating_sub(before_stats.fit_state_reuse_hits),
+                        fit_protocol_rebuilds: after_stats
+                            .fit_protocol_rebuilds
+                            .saturating_sub(before_stats.fit_protocol_rebuilds),
+                        viewport_state_reuse_hits: after_stats
+                            .viewport_state_reuse_hits
+                            .saturating_sub(before_stats.viewport_state_reuse_hits),
+                        viewport_protocol_rebuilds: after_stats
+                            .viewport_protocol_rebuilds
+                            .saturating_sub(before_stats.viewport_protocol_rebuilds),
+                    });
+                }
+
+                if sleep_between_frames_ms > 0 && frame_idx + 1 < frames {
+                    std::thread::sleep(std::time::Duration::from_millis(sleep_between_frames_ms));
+                }
+            }
+
+            let summary = summarize_mermaid_ui_bench(&samples, protocol_supported, protocol);
+            let mut sorted_frames = frame_times.clone();
+            sorted_frames.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mut sorted_render = render_values.clone();
+            sorted_render.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "config": {
+                    "width": width,
+                    "height": height,
+                    "frames": frames,
+                    "warmup_frames": warmup_frames,
+                    "padding": padding,
+                    "diagrams": diagrams,
+                    "keep_mermaid_cache": keep_mermaid_cache,
+                    "sleep_between_frames_ms": sleep_between_frames_ms,
+                },
+                "summary": summary,
+                "timing": {
+                    "frame_ms": {
+                        "p50": percentile_ms(&sorted_frames, 0.50),
+                        "p95": percentile_ms(&sorted_frames, 0.95),
+                        "p99": percentile_ms(&sorted_frames, 0.99),
+                        "max": sorted_frames.last().copied().unwrap_or(0.0),
+                        "avg": if frame_times.is_empty() { 0.0 } else { frame_times.iter().sum::<f64>() / frame_times.len() as f64 },
+                    },
+                    "render_ms": {
+                        "p50": percentile_ms(&sorted_render, 0.50),
+                        "p95": percentile_ms(&sorted_render, 0.95),
+                        "p99": percentile_ms(&sorted_render, 0.99),
+                        "max": sorted_render.last().copied().unwrap_or(0.0),
+                        "avg": if render_values.is_empty() { 0.0 } else { render_values.iter().sum::<f64>() / render_values.len() as f64 },
+                    }
+                },
+                "final_mermaid_stats": crate::tui::mermaid::debug_stats(),
+                "samples": if include_samples { serde_json::to_value(&samples).unwrap_or(serde_json::Value::Null) } else { serde_json::Value::Null },
+                "notes": [
+                    "Runs inside the live TUI client process, so Mermaid protocol capability comes from the attached terminal session.",
+                    "Uses an offscreen TestBackend for repeatable frame timing while still exercising the app's real Mermaid markdown, cache, deferred render, and image protocol paths."
                 ]
             }))
         })();
@@ -1568,6 +1912,9 @@ impl App {
             };
             let result = crate::tui::mermaid::debug_flicker_benchmark(steps);
             serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "mermaid:ui-bench" || cmd.starts_with("mermaid:ui-bench:") {
+            let raw = cmd.strip_prefix("mermaid:ui-bench:");
+            self.run_mermaid_ui_bench(raw)
         } else if cmd.starts_with("mermaid:memory-bench ") {
             let raw_iterations = cmd
                 .strip_prefix("mermaid:memory-bench ")
@@ -1800,6 +2147,7 @@ impl App {
                  - mermaid:stats - dump mermaid debug stats\n\
                  - mermaid:memory - dump mermaid memory profile\n\
                  - mermaid:flicker-bench [n] - benchmark viewport protocol churn / flicker risk\n\
+                 - mermaid:ui-bench[:<json>] - benchmark live mermaid UI render path\n\
                  - mermaid:cache - list mermaid cache entries\n\
                  - mermaid:evict - clear mermaid cache\n\
                  - markdown:stats - dump markdown debug stats\n\
