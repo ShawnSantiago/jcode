@@ -391,6 +391,10 @@ pub struct MermaidDebugStats {
     pub render_success: u64,
     pub render_errors: u64,
     pub last_render_ms: Option<f32>,
+    pub last_parse_ms: Option<f32>,
+    pub last_layout_ms: Option<f32>,
+    pub last_svg_ms: Option<f32>,
+    pub last_png_ms: Option<f32>,
     pub last_error: Option<String>,
     pub last_hash: Option<String>,
     pub last_nodes: Option<usize>,
@@ -410,6 +414,8 @@ pub struct MermaidDebugStats {
     pub protocol: Option<String>,
     pub last_png_width: Option<u32>,
     pub last_png_height: Option<u32>,
+    pub last_target_width: Option<u32>,
+    pub last_target_height: Option<u32>,
     pub deferred_pending: usize,
     pub deferred_epoch: u64,
 }
@@ -432,6 +438,14 @@ struct DeferredRenderTask {
     content: String,
     terminal_width: Option<u16>,
     render_key: (u64, u32),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RenderStageBreakdown {
+    parse_ms: f32,
+    layout_ms: f32,
+    svg_ms: f32,
+    png_ms: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2206,10 +2220,14 @@ pub fn render_mermaid_deferred_with_registration(
     let render_key = (hash, target_width_u32);
     let should_enqueue = match PENDING_RENDER_REQUESTS.lock() {
         Ok(mut pending) => {
-            if let Some((_, existing_request)) = pending.iter_mut().find(|((pending_hash, pending_width), _)| {
-                *pending_hash == hash
-                    && cached_width_satisfies(*pending_width, Some(target_width_u32))
-            }) {
+            if let Some((_, existing_request)) =
+                pending
+                    .iter_mut()
+                    .find(|((pending_hash, pending_width), _)| {
+                        *pending_hash == hash
+                            && cached_width_satisfies(*pending_width, Some(target_width_u32))
+                    })
+            {
                 if register_active {
                     existing_request.register_active = true;
                 }
@@ -2219,22 +2237,22 @@ pub fn render_mermaid_deferred_with_registration(
                 false
             } else {
                 match pending.entry(render_key) {
-            Entry::Occupied(mut occupied) => {
-                if register_active {
-                    occupied.get_mut().register_active = true;
-                }
-                if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                    state.stats.deferred_deduped += 1;
-                }
-                false
-            }
-            Entry::Vacant(vacant) => {
-                vacant.insert(PendingDeferredRender { register_active });
-                if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                    state.stats.deferred_enqueued += 1;
-                }
-                true
-            }
+                    Entry::Occupied(mut occupied) => {
+                        if register_active {
+                            occupied.get_mut().register_active = true;
+                        }
+                        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                            state.stats.deferred_deduped += 1;
+                        }
+                        false
+                    }
+                    Entry::Vacant(vacant) => {
+                        vacant.insert(PendingDeferredRender { register_active });
+                        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                            state.stats.deferred_enqueued += 1;
+                        }
+                        true
+                    }
                 }
             }
         }
@@ -2277,6 +2295,10 @@ fn render_mermaid_sized_internal(
         state.stats.total_requests += 1;
         state.stats.last_content_len = Some(content.len());
         state.stats.last_error = None;
+        state.stats.last_parse_ms = None;
+        state.stats.last_layout_ms = None;
+        state.stats.last_svg_ms = None;
+        state.stats.last_png_ms = None;
     }
 
     // Calculate content hash for caching
@@ -2308,6 +2330,12 @@ fn render_mermaid_sized_internal(
     let (target_width, target_height) =
         calculate_render_size(node_count, edge_count, terminal_width);
     let target_width_u32 = target_width as u32;
+    let target_height_u32 = target_height as u32;
+
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.last_target_width = Some(target_width_u32);
+        state.stats.last_target_height = Some(target_height_u32);
+    }
 
     // Check cache (memory + on-disk fallback, width-aware).
     if let Some(cached) = get_cached_diagram(hash, Some(target_width_u32)) {
@@ -2373,9 +2401,11 @@ fn render_mermaid_sized_internal(
     }));
 
     let render_start = Instant::now();
-    let render_result = panic::catch_unwind(move || -> Result<(), String> {
+    let render_result = panic::catch_unwind(move || -> Result<RenderStageBreakdown, String> {
+        let parse_start = Instant::now();
         // Parse mermaid
         let parsed = parse_mermaid(&content_owned).map_err(|e| format!("Parse error: {}", e))?;
+        let parse_ms = parse_start.elapsed().as_secs_f32() * 1000.0;
 
         // Configure theme for terminal (dark background friendly)
         let theme = terminal_theme();
@@ -2390,12 +2420,16 @@ fn render_mermaid_sized_internal(
             ..Default::default()
         };
 
+        let layout_start = Instant::now();
         // Compute layout
         let layout = compute_layout(&parsed.graph, &theme, &layout_config);
+        let layout_ms = layout_start.elapsed().as_secs_f32() * 1000.0;
 
+        let svg_start = Instant::now();
         // Render to SVG
         let svg = render_svg(&layout, &theme, &layout_config);
         let svg = retarget_svg_for_png(&svg, target_width, target_height);
+        let svg_ms = svg_start.elapsed().as_secs_f32() * 1000.0;
 
         // Convert SVG to PNG with adaptive dimensions
         let render_config = RenderConfig {
@@ -2410,10 +2444,17 @@ fn render_mermaid_sized_internal(
                 .map_err(|e| format!("Failed to create cache directory: {}", e))?;
         }
 
+        let png_start = Instant::now();
         write_output_png(&svg, &png_path_clone, &render_config, &theme)
             .map_err(|e| format!("Render error: {}", e))?;
+        let png_ms = png_start.elapsed().as_secs_f32() * 1000.0;
 
-        Ok(())
+        Ok(RenderStageBreakdown {
+            parse_ms,
+            layout_ms,
+            svg_ms,
+            png_ms,
+        })
     });
 
     // Restore the original panic hook
@@ -2422,13 +2463,17 @@ fn render_mermaid_sized_internal(
     // Handle the result
     let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
     match render_result {
-        Ok(Ok(())) => {
+        Ok(Ok(stage_breakdown)) => {
             if let Ok(mut errors) = RENDER_ERRORS.lock() {
                 errors.remove(&hash);
             }
             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                 state.stats.render_success += 1;
                 state.stats.last_render_ms = Some(render_ms);
+                state.stats.last_parse_ms = Some(stage_breakdown.parse_ms);
+                state.stats.last_layout_ms = Some(stage_breakdown.layout_ms);
+                state.stats.last_svg_ms = Some(stage_breakdown.svg_ms);
+                state.stats.last_png_ms = Some(stage_breakdown.png_ms);
             }
         }
         Ok(Err(e)) => {
