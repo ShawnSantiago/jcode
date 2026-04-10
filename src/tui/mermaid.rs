@@ -2205,7 +2205,20 @@ pub fn render_mermaid_deferred_with_registration(
 
     let render_key = (hash, target_width_u32);
     let should_enqueue = match PENDING_RENDER_REQUESTS.lock() {
-        Ok(mut pending) => match pending.entry(render_key) {
+        Ok(mut pending) => {
+            if let Some((_, existing_request)) = pending.iter_mut().find(|((pending_hash, pending_width), _)| {
+                *pending_hash == hash
+                    && cached_width_satisfies(*pending_width, Some(target_width_u32))
+            }) {
+                if register_active {
+                    existing_request.register_active = true;
+                }
+                if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                    state.stats.deferred_deduped += 1;
+                }
+                false
+            } else {
+                match pending.entry(render_key) {
             Entry::Occupied(mut occupied) => {
                 if register_active {
                     occupied.get_mut().register_active = true;
@@ -2222,7 +2235,9 @@ pub fn render_mermaid_deferred_with_registration(
                 }
                 true
             }
-        },
+                }
+            }
+        }
         Err(_) => {
             return Some(render_mermaid_sized_internal(
                 content,
