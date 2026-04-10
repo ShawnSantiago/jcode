@@ -10,12 +10,13 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-const SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD: usize = 16;
-const SWARM_STATUS_DEBOUNCE_MS: u64 = 15;
+const DEFAULT_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD: usize = 16;
+const DEFAULT_SWARM_STATUS_DEBOUNCE_MS: u64 = 30;
 
 #[derive(Default, Clone, Copy)]
 struct PendingSwarmStatusBroadcast {
@@ -28,6 +29,34 @@ fn pending_swarm_status_broadcasts()
     static PENDING: OnceLock<StdMutex<HashMap<String, PendingSwarmStatusBroadcast>>> =
         OnceLock::new();
     PENDING.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn swarm_status_debounce_member_threshold() -> usize {
+    static CACHED: OnceLock<AtomicUsize> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let configured = std::env::var("JCODE_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD);
+            AtomicUsize::new(configured)
+        })
+        .load(Ordering::Relaxed)
+}
+
+fn swarm_status_debounce_ms() -> u64 {
+    static CACHED: OnceLock<AtomicU64> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let configured = std::env::var("JCODE_SWARM_STATUS_DEBOUNCE_MS")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_SWARM_STATUS_DEBOUNCE_MS);
+            AtomicU64::new(configured)
+        })
+        .load(Ordering::Relaxed)
 }
 
 fn swarm_broadcast_key(
@@ -92,7 +121,7 @@ pub(super) async fn broadcast_swarm_status(
         return;
     }
 
-    if session_ids.len() < SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD {
+    if session_ids.len() < swarm_status_debounce_member_threshold() {
         broadcast_swarm_status_now(session_ids, swarm_members).await;
         return;
     }
@@ -122,7 +151,7 @@ pub(super) async fn broadcast_swarm_status(
     let swarms_by_id = Arc::clone(swarms_by_id);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(SWARM_STATUS_DEBOUNCE_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(swarm_status_debounce_ms())).await;
             let session_ids: Vec<String> = {
                 let swarms = swarms_by_id.read().await;
                 swarms
@@ -543,14 +572,13 @@ pub(super) async fn update_member_status(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
-    let (swarm_id, agent_name, member_changed, status_changed, detail_is_none, old_status) = {
+    let (swarm_id, agent_name, member_changed, status_changed, old_status) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
             let member_changed = status_changed || detail_changed;
-            let detail_is_none = detail.is_none();
             if status_changed {
                 member.last_status_change = Instant::now();
             }
@@ -562,11 +590,10 @@ pub(super) async fn update_member_status(
                 name,
                 member_changed,
                 status_changed,
-                detail_is_none,
                 previous_status,
             )
         } else {
-            (None, None, false, false, true, String::new())
+            (None, None, false, false, String::new())
         }
     };
     if let Some(ref id) = swarm_id {
