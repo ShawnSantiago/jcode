@@ -276,6 +276,11 @@ async fn build_server_memory_payload(
     let mut session_json_bytes = 0u64;
     let mut session_payload_text_bytes = 0u64;
     let mut session_message_count = 0u64;
+    let mut session_provider_cache_json_bytes = 0u64;
+    let mut session_tool_result_bytes = 0u64;
+    let mut session_provider_cache_tool_result_bytes = 0u64;
+    let mut session_large_blob_bytes = 0u64;
+    let mut session_provider_cache_large_blob_bytes = 0u64;
     let mut locked_session_count = 0usize;
     let mut contended_session_count = 0usize;
     for (session_id, agent_arc) in sessions_guard.iter() {
@@ -285,6 +290,10 @@ async fn build_server_memory_payload(
             let session_profile = profile.get("session").cloned().unwrap_or_default();
             let totals = session_profile.get("totals").cloned().unwrap_or_default();
             let messages = session_profile.get("messages").cloned().unwrap_or_default();
+            let provider_cache = session_profile
+                .get("provider_messages_cache")
+                .cloned()
+                .unwrap_or_default();
             let json_bytes = totals
                 .get("json_bytes")
                 .and_then(|value| value.as_u64())
@@ -297,9 +306,63 @@ async fn build_server_memory_payload(
                 .get("count")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
+            let provider_cache_json_bytes = totals
+                .get("provider_cache_json_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_else(|| {
+                    provider_cache
+                        .get("json_bytes")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                });
+            let tool_result_bytes = totals
+                .get("canonical_tool_result_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_else(|| {
+                    messages
+                        .get("memory")
+                        .and_then(|value| value.get("tool_result_bytes"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                });
+            let provider_cache_tool_result_bytes = totals
+                .get("provider_cache_tool_result_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_else(|| {
+                    provider_cache
+                        .get("memory")
+                        .and_then(|value| value.get("tool_result_bytes"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                });
+            let large_blob_bytes = totals
+                .get("canonical_large_blob_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_else(|| {
+                    messages
+                        .get("memory")
+                        .and_then(|value| value.get("large_block_bytes"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                });
+            let provider_cache_large_blob_bytes = totals
+                .get("provider_cache_large_blob_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_else(|| {
+                    provider_cache
+                        .get("memory")
+                        .and_then(|value| value.get("large_block_bytes"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                });
             session_json_bytes += json_bytes;
             session_payload_text_bytes += payload_bytes;
             session_message_count += message_count;
+            session_provider_cache_json_bytes += provider_cache_json_bytes;
+            session_tool_result_bytes += tool_result_bytes;
+            session_provider_cache_tool_result_bytes += provider_cache_tool_result_bytes;
+            session_large_blob_bytes += large_blob_bytes;
+            session_provider_cache_large_blob_bytes += provider_cache_large_blob_bytes;
             locked_session_profiles.push(serde_json::json!({
                 "session_id": session_id,
                 "provider": agent.provider_name(),
@@ -307,6 +370,11 @@ async fn build_server_memory_payload(
                 "messages": message_count,
                 "json_bytes": json_bytes,
                 "payload_text_bytes": payload_bytes,
+                "provider_cache_json_bytes": provider_cache_json_bytes,
+                "tool_result_bytes": tool_result_bytes,
+                "provider_cache_tool_result_bytes": provider_cache_tool_result_bytes,
+                "large_blob_bytes": large_blob_bytes,
+                "provider_cache_large_blob_bytes": provider_cache_large_blob_bytes,
                 "working_dir": agent.working_dir(),
             }));
         } else {
@@ -512,6 +580,11 @@ async fn build_server_memory_payload(
             "total_message_count": session_message_count,
             "total_json_bytes": session_json_bytes,
             "total_payload_text_bytes": session_payload_text_bytes,
+            "total_provider_cache_json_bytes": session_provider_cache_json_bytes,
+            "total_tool_result_bytes": session_tool_result_bytes,
+            "total_provider_cache_tool_result_bytes": session_provider_cache_tool_result_bytes,
+            "total_large_blob_bytes": session_large_blob_bytes,
+            "total_provider_cache_large_blob_bytes": session_provider_cache_large_blob_bytes,
             "top_by_json_bytes": top_sessions,
         },
         "swarm": {

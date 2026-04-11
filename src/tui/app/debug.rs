@@ -308,6 +308,114 @@ impl DebugTrace {
     }
 }
 
+const LARGE_DISPLAY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
+
+#[derive(Default)]
+struct ProviderMessageMemoryStats {
+    content_blocks: usize,
+    text_bytes: usize,
+    reasoning_bytes: usize,
+    tool_use_input_json_bytes: usize,
+    tool_result_bytes: usize,
+    image_data_bytes: usize,
+    openai_compaction_bytes: usize,
+    large_blob_count: usize,
+    large_blob_bytes: usize,
+    large_tool_result_count: usize,
+    large_tool_result_bytes: usize,
+    max_block_bytes: usize,
+}
+
+impl ProviderMessageMemoryStats {
+    fn record_bytes(&mut self, bytes: usize) {
+        self.max_block_bytes = self.max_block_bytes.max(bytes);
+        if bytes >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
+            self.large_blob_count += 1;
+            self.large_blob_bytes += bytes;
+        }
+    }
+
+    fn record_message(&mut self, message: &crate::message::Message) {
+        for block in &message.content {
+            self.content_blocks += 1;
+            match block {
+                crate::message::ContentBlock::Text { text, .. } => {
+                    self.text_bytes += text.len();
+                    self.record_bytes(text.len());
+                }
+                crate::message::ContentBlock::Reasoning { text } => {
+                    self.reasoning_bytes += text.len();
+                    self.record_bytes(text.len());
+                }
+                crate::message::ContentBlock::ToolUse { input, .. } => {
+                    let bytes = crate::process_memory::estimate_json_bytes(input);
+                    self.tool_use_input_json_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
+                crate::message::ContentBlock::ToolResult { content, .. } => {
+                    self.tool_result_bytes += content.len();
+                    if content.len() >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
+                        self.large_tool_result_count += 1;
+                        self.large_tool_result_bytes += content.len();
+                    }
+                    self.record_bytes(content.len());
+                }
+                crate::message::ContentBlock::Image { data, .. } => {
+                    self.image_data_bytes += data.len();
+                    self.record_bytes(data.len());
+                }
+                crate::message::ContentBlock::OpenAICompaction { encrypted_content } => {
+                    self.openai_compaction_bytes += encrypted_content.len();
+                    self.record_bytes(encrypted_content.len());
+                }
+            }
+        }
+    }
+
+    fn payload_text_bytes(&self) -> usize {
+        self.text_bytes
+            + self.reasoning_bytes
+            + self.tool_result_bytes
+            + self.image_data_bytes
+            + self.openai_compaction_bytes
+    }
+}
+
+#[derive(Default)]
+struct DisplayMessageMemoryStats {
+    role_bytes: usize,
+    content_bytes: usize,
+    tool_call_text_bytes: usize,
+    title_bytes: usize,
+    tool_data_json_bytes: usize,
+    large_content_count: usize,
+    large_content_bytes: usize,
+    max_content_bytes: usize,
+}
+
+impl DisplayMessageMemoryStats {
+    fn record_message(&mut self, message: &DisplayMessage) {
+        self.role_bytes += message.role.len();
+        self.content_bytes += message.content.len();
+        self.tool_call_text_bytes += message
+            .tool_calls
+            .iter()
+            .map(|call| call.len())
+            .sum::<usize>();
+        self.title_bytes += message.title.as_ref().map(|title| title.len()).unwrap_or(0);
+        self.tool_data_json_bytes += message
+            .tool_data
+            .as_ref()
+            .map(crate::process_memory::estimate_json_bytes)
+            .unwrap_or(0);
+        self.max_content_bytes = self.max_content_bytes.max(message.content.len());
+        if message.content.len() >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
+            self.large_content_count += 1;
+            self.large_content_bytes += message.content.len();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ScrollTestState {
     display_messages: Vec<DisplayMessage>,
@@ -435,11 +543,19 @@ impl App {
             .iter()
             .map(crate::process_memory::estimate_json_bytes)
             .sum();
+        let mut provider_message_memory = ProviderMessageMemoryStats::default();
+        for message in &self.messages {
+            provider_message_memory.record_message(message);
+        }
         let display_messages_bytes: usize = self
             .display_messages
             .iter()
             .map(estimate_display_message_bytes)
             .sum();
+        let mut display_message_memory = DisplayMessageMemoryStats::default();
+        for message in &self.display_messages {
+            display_message_memory.record_message(message);
+        }
         let streaming_tool_calls_json_bytes: usize = self
             .streaming_tool_calls
             .iter()
@@ -466,10 +582,31 @@ impl App {
                 "provider_messages": {
                     "count": self.messages.len(),
                     "json_bytes": provider_messages_json_bytes,
+                    "content_blocks": provider_message_memory.content_blocks,
+                    "payload_text_bytes": provider_message_memory.payload_text_bytes(),
+                    "text_bytes": provider_message_memory.text_bytes,
+                    "reasoning_bytes": provider_message_memory.reasoning_bytes,
+                    "tool_use_input_json_bytes": provider_message_memory.tool_use_input_json_bytes,
+                    "tool_result_bytes": provider_message_memory.tool_result_bytes,
+                    "image_data_bytes": provider_message_memory.image_data_bytes,
+                    "openai_compaction_bytes": provider_message_memory.openai_compaction_bytes,
+                    "large_blob_count": provider_message_memory.large_blob_count,
+                    "large_blob_bytes": provider_message_memory.large_blob_bytes,
+                    "large_tool_result_count": provider_message_memory.large_tool_result_count,
+                    "large_tool_result_bytes": provider_message_memory.large_tool_result_bytes,
+                    "max_block_bytes": provider_message_memory.max_block_bytes,
                 },
                 "display_messages": {
                     "count": self.display_messages.len(),
                     "estimate_bytes": display_messages_bytes,
+                    "role_bytes": display_message_memory.role_bytes,
+                    "content_bytes": display_message_memory.content_bytes,
+                    "tool_call_text_bytes": display_message_memory.tool_call_text_bytes,
+                    "title_bytes": display_message_memory.title_bytes,
+                    "tool_data_json_bytes": display_message_memory.tool_data_json_bytes,
+                    "large_content_count": display_message_memory.large_content_count,
+                    "large_content_bytes": display_message_memory.large_content_bytes,
+                    "max_content_bytes": display_message_memory.max_content_bytes,
                 },
                 "input": {
                     "text_bytes": self.input.len(),
@@ -2186,7 +2323,7 @@ impl App {
     }
 
     /// Check for new stable version and trigger migration if at safe point
-    pub(super) fn check_stable_version(&mut self) {
+    pub(super) fn check_stable_version(&mut self) -> bool {
         // Only check every 5 seconds to avoid excessive file reads
         let should_check = self
             .last_version_check
@@ -2194,20 +2331,20 @@ impl App {
             .unwrap_or(true);
 
         if !should_check {
-            return;
+            return false;
         }
 
         self.last_version_check = Some(Instant::now());
 
         // Don't migrate if we're a canary session (we test changes, not receive them)
         if self.session.is_canary {
-            return;
+            return false;
         }
 
         // Read current stable version
         let current_stable = match crate::build::read_stable_version() {
             Ok(Some(v)) => v,
-            _ => return,
+            _ => return false,
         };
 
         // Check if it changed
@@ -2218,7 +2355,7 @@ impl App {
             .unwrap_or(true);
 
         if !version_changed {
-            return;
+            return false;
         }
 
         // New stable version detected
@@ -2230,7 +2367,10 @@ impl App {
         if at_safe_point {
             // Trigger migration
             self.pending_migration = Some(current_stable);
+            return true;
         }
+
+        false
     }
 
     /// Execute pending migration to new stable version

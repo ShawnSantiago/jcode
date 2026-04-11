@@ -236,6 +236,14 @@ pub fn maybe_unload_if_idle(idle_for: Duration) -> bool {
             idle_secs
         ));
 
+        #[cfg(feature = "jemalloc")]
+        if let Err(err) = crate::process_memory::purge_allocator() {
+            crate::logging::info(&format!(
+                "jemalloc purge after model unload failed: {}",
+                err
+            ));
+        }
+
         #[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
         {
             unsafe extern "C" {
@@ -271,6 +279,14 @@ pub fn unload_now() -> bool {
 
     if unloaded {
         crate::logging::info("Embedding model force-unloaded");
+
+        #[cfg(feature = "jemalloc")]
+        if let Err(err) = crate::process_memory::purge_allocator() {
+            crate::logging::info(&format!(
+                "jemalloc purge after force unload failed: {}",
+                err
+            ));
+        }
 
         #[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
         {

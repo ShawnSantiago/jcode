@@ -220,6 +220,129 @@ impl StoredMessage {
     }
 }
 
+const LARGE_MEMORY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
+
+#[derive(Default)]
+struct ContentBlockMemoryStats {
+    block_count: usize,
+    text_blocks: usize,
+    text_bytes: usize,
+    reasoning_blocks: usize,
+    reasoning_bytes: usize,
+    tool_use_blocks: usize,
+    tool_use_input_json_bytes: usize,
+    tool_result_blocks: usize,
+    tool_result_bytes: usize,
+    image_blocks: usize,
+    image_data_bytes: usize,
+    openai_compaction_blocks: usize,
+    openai_compaction_bytes: usize,
+    large_block_count: usize,
+    large_block_bytes: usize,
+    large_tool_result_count: usize,
+    large_tool_result_bytes: usize,
+    max_block_bytes: usize,
+    max_tool_result_bytes: usize,
+}
+
+impl ContentBlockMemoryStats {
+    fn record_bytes(&mut self, bytes: usize) {
+        self.max_block_bytes = self.max_block_bytes.max(bytes);
+        if bytes >= LARGE_MEMORY_BLOB_THRESHOLD_BYTES {
+            self.large_block_count += 1;
+            self.large_block_bytes += bytes;
+        }
+    }
+
+    fn record_block(&mut self, block: &ContentBlock) {
+        self.block_count += 1;
+        match block {
+            ContentBlock::Text { text, .. } => {
+                self.text_blocks += 1;
+                self.text_bytes += text.len();
+                self.record_bytes(text.len());
+            }
+            ContentBlock::Reasoning { text } => {
+                self.reasoning_blocks += 1;
+                self.reasoning_bytes += text.len();
+                self.record_bytes(text.len());
+            }
+            ContentBlock::ToolUse { input, .. } => {
+                self.tool_use_blocks += 1;
+                let input_bytes = estimate_json_bytes(input);
+                self.tool_use_input_json_bytes += input_bytes;
+                self.record_bytes(input_bytes);
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                self.tool_result_blocks += 1;
+                self.tool_result_bytes += content.len();
+                self.max_tool_result_bytes = self.max_tool_result_bytes.max(content.len());
+                if content.len() >= LARGE_MEMORY_BLOB_THRESHOLD_BYTES {
+                    self.large_tool_result_count += 1;
+                    self.large_tool_result_bytes += content.len();
+                }
+                self.record_bytes(content.len());
+            }
+            ContentBlock::Image { data, .. } => {
+                self.image_blocks += 1;
+                self.image_data_bytes += data.len();
+                self.record_bytes(data.len());
+            }
+            ContentBlock::OpenAICompaction { encrypted_content } => {
+                self.openai_compaction_blocks += 1;
+                self.openai_compaction_bytes += encrypted_content.len();
+                self.record_bytes(encrypted_content.len());
+            }
+        }
+    }
+
+    fn payload_text_bytes(&self) -> usize {
+        self.text_bytes
+            + self.reasoning_bytes
+            + self.tool_result_bytes
+            + self.image_data_bytes
+            + self.openai_compaction_bytes
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "content_blocks": self.block_count,
+            "text_blocks": self.text_blocks,
+            "text_bytes": self.text_bytes,
+            "reasoning_blocks": self.reasoning_blocks,
+            "reasoning_bytes": self.reasoning_bytes,
+            "tool_use_blocks": self.tool_use_blocks,
+            "tool_use_input_json_bytes": self.tool_use_input_json_bytes,
+            "tool_result_blocks": self.tool_result_blocks,
+            "tool_result_bytes": self.tool_result_bytes,
+            "image_blocks": self.image_blocks,
+            "image_data_bytes": self.image_data_bytes,
+            "openai_compaction_blocks": self.openai_compaction_blocks,
+            "openai_compaction_bytes": self.openai_compaction_bytes,
+            "large_block_count": self.large_block_count,
+            "large_block_bytes": self.large_block_bytes,
+            "large_tool_result_count": self.large_tool_result_count,
+            "large_tool_result_bytes": self.large_tool_result_bytes,
+            "max_block_bytes": self.max_block_bytes,
+            "max_tool_result_bytes": self.max_tool_result_bytes,
+            "payload_text_bytes": self.payload_text_bytes(),
+        })
+    }
+}
+
+fn summarize_message_content<'a, I>(messages: I) -> ContentBlockMemoryStats
+where
+    I: IntoIterator<Item = &'a Vec<ContentBlock>>,
+{
+    let mut stats = ContentBlockMemoryStats::default();
+    for blocks in messages {
+        for block in blocks {
+            stats.record_block(block);
+        }
+    }
+    stats
+}
+
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
 }
@@ -563,53 +686,15 @@ impl Session {
     }
 
     pub fn debug_memory_profile(&self) -> serde_json::Value {
-        let mut message_block_count = 0usize;
-        let mut text_blocks = 0usize;
-        let mut text_bytes = 0usize;
-        let mut reasoning_blocks = 0usize;
-        let mut reasoning_bytes = 0usize;
-        let mut tool_use_blocks = 0usize;
-        let mut tool_use_input_json_bytes = 0usize;
-        let mut tool_result_blocks = 0usize;
-        let mut tool_result_bytes = 0usize;
-        let mut image_blocks = 0usize;
-        let mut image_data_bytes = 0usize;
-        let mut openai_compaction_blocks = 0usize;
-        let mut openai_compaction_bytes = 0usize;
-
-        for message in &self.messages {
-            message_block_count += message.content.len();
-            for block in &message.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        text_blocks += 1;
-                        text_bytes += text.len();
-                    }
-                    ContentBlock::Reasoning { text } => {
-                        reasoning_blocks += 1;
-                        reasoning_bytes += text.len();
-                    }
-                    ContentBlock::ToolUse { input, .. } => {
-                        tool_use_blocks += 1;
-                        tool_use_input_json_bytes += estimate_json_bytes(input);
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        tool_result_blocks += 1;
-                        tool_result_bytes += content.len();
-                    }
-                    ContentBlock::Image { data, .. } => {
-                        image_blocks += 1;
-                        image_data_bytes += data.len();
-                    }
-                    ContentBlock::OpenAICompaction { encrypted_content } => {
-                        openai_compaction_blocks += 1;
-                        openai_compaction_bytes += encrypted_content.len();
-                    }
-                }
-            }
-        }
+        let message_stats =
+            summarize_message_content(self.messages.iter().map(|message| &message.content));
 
         let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
+        let provider_cache_stats = summarize_message_content(
+            self.provider_messages_cache
+                .iter()
+                .map(|message| &message.content),
+        );
         let provider_messages_cache_json_bytes: usize = self
             .provider_messages_cache
             .iter()
@@ -642,20 +727,8 @@ impl Session {
             "session_id": self.id,
             "messages": {
                 "count": self.messages.len(),
-                "content_blocks": message_block_count,
                 "json_bytes": session_message_json_bytes,
-                "text_blocks": text_blocks,
-                "text_bytes": text_bytes,
-                "reasoning_blocks": reasoning_blocks,
-                "reasoning_bytes": reasoning_bytes,
-                "tool_use_blocks": tool_use_blocks,
-                "tool_use_input_json_bytes": tool_use_input_json_bytes,
-                "tool_result_blocks": tool_result_blocks,
-                "tool_result_bytes": tool_result_bytes,
-                "image_blocks": image_blocks,
-                "image_data_bytes": image_data_bytes,
-                "openai_compaction_blocks": openai_compaction_blocks,
-                "openai_compaction_bytes": openai_compaction_bytes,
+                "memory": message_stats.to_json(),
             },
             "compaction": {
                 "present": self.compaction.is_some(),
@@ -680,19 +753,22 @@ impl Session {
                 "source_len": self.provider_messages_cache_len,
                 "mode": persist_vector_mode_label(self.provider_messages_cache_mode),
                 "json_bytes": provider_messages_cache_json_bytes,
+                "memory": provider_cache_stats.to_json(),
             },
             "totals": {
-                "payload_text_bytes": text_bytes
-                    + reasoning_bytes
-                    + tool_result_bytes
-                    + image_data_bytes
-                    + openai_compaction_bytes,
+                "payload_text_bytes": message_stats.payload_text_bytes(),
                 "json_bytes": session_message_json_bytes
                     + provider_messages_cache_json_bytes
                     + env_snapshots_json_bytes
                     + memory_injections_json_bytes
                     + replay_events_json_bytes
                     + compaction_json_bytes,
+                "canonical_transcript_json_bytes": session_message_json_bytes,
+                "provider_cache_json_bytes": provider_messages_cache_json_bytes,
+                "canonical_tool_result_bytes": message_stats.tool_result_bytes,
+                "provider_cache_tool_result_bytes": provider_cache_stats.tool_result_bytes,
+                "canonical_large_blob_bytes": message_stats.large_block_bytes,
+                "provider_cache_large_blob_bytes": provider_cache_stats.large_block_bytes,
             }
         })
     }
@@ -2050,9 +2126,9 @@ mod tests {
         let profile = session.debug_memory_profile();
 
         assert_eq!(profile["messages"]["count"], 2);
-        assert_eq!(profile["messages"]["text_blocks"], 1);
-        assert_eq!(profile["messages"]["tool_use_blocks"], 1);
-        assert_eq!(profile["messages"]["tool_result_blocks"], 1);
+        assert_eq!(profile["messages"]["memory"]["text_blocks"], 1);
+        assert_eq!(profile["messages"]["memory"]["tool_use_blocks"], 1);
+        assert_eq!(profile["messages"]["memory"]["tool_result_blocks"], 1);
         assert!(profile["messages"]["json_bytes"].as_u64().unwrap_or(0) > 0);
         assert_eq!(profile["provider_messages_cache"]["count"], 2);
         assert!(

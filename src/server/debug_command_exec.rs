@@ -328,6 +328,39 @@ pub(super) async fn execute_debug_command(
         return Ok(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()));
     }
 
+    if trimmed == "allocator:purge" {
+        let tuning = crate::process_memory::purge_allocator()?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "action": "purge",
+            "tuning": tuning,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    if let Some(ms) = trimmed.strip_prefix("allocator:decay:") {
+        let ms = ms.trim();
+        if ms.is_empty() {
+            return Err(anyhow::anyhow!(
+                "allocator:decay:<ms> requires a decay value in milliseconds"
+            ));
+        }
+        let decay_ms: isize = ms.parse().map_err(|_| {
+            anyhow::anyhow!("allocator:decay:<ms> requires an integer millisecond value")
+        })?;
+        let tuning = crate::process_memory::set_allocator_decay_ms(decay_ms, decay_ms)?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "action": "set_decay",
+            "dirty_decay_ms": decay_ms,
+            "muzzy_decay_ms": decay_ms,
+            "tuning": tuning,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
     if trimmed == "allocator:profile:on" {
         crate::process_memory::set_allocator_profiling_active(true)?;
         let payload = serde_json::json!({

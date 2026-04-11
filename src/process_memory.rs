@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
+#[cfg(feature = "jemalloc")]
+use libc::c_char;
 use serde::Serialize;
 use std::collections::VecDeque;
-#[cfg(feature = "jemalloc-prof")]
+#[cfg(feature = "jemalloc")]
 use std::ffi::CString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -55,6 +57,8 @@ pub struct AllocatorInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<AllocatorStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<AllocatorTuningInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub profiling: Option<AllocatorProfilingInfo>,
 }
 
@@ -72,6 +76,20 @@ pub struct AllocatorStats {
 pub struct AllocatorProfilingInfo {
     pub available: bool,
     pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AllocatorTuningInfo {
+    pub available: bool,
+    pub background_thread: Option<bool>,
+    pub max_background_threads: Option<u64>,
+    pub arena_count: Option<u64>,
+    pub initialized_arenas: Option<u64>,
+    pub dirty_decay_ms: Option<i64>,
+    pub muzzy_decay_ms: Option<i64>,
+    pub retain: Option<bool>,
+    pub tcache_enabled: Option<bool>,
+    pub tcache_max_bytes: Option<u64>,
 }
 
 impl Default for AllocatorInfo {
@@ -145,6 +163,7 @@ pub fn allocator_info() -> AllocatorInfo {
             name: "jemalloc",
             stats_available: stats.is_some(),
             stats,
+            tuning: jemalloc_tuning_info(),
             profiling,
         };
     }
@@ -155,8 +174,78 @@ pub fn allocator_info() -> AllocatorInfo {
             name: "system",
             stats_available: false,
             stats: None,
+            tuning: None,
             profiling: None,
         }
+    }
+}
+
+pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
+    #[cfg(feature = "jemalloc")]
+    {
+        let _ = jemalloc_void_ctl("thread.idle");
+        let arena_count = tikv_jemalloc_ctl::arenas::narenas::read()
+            .map_err(|e| anyhow!("failed to read jemalloc arena count: {}", e))?;
+        let mut initialized_arenas = 0u64;
+        for arena_idx in 0..arena_count {
+            if jemalloc_read_dynamic::<bool>(&format!("arena.{arena_idx}.initialized"))
+                .unwrap_or(false)
+            {
+                initialized_arenas += 1;
+                jemalloc_void_ctl(&format!("arena.{arena_idx}.purge"))?;
+            }
+        }
+
+        Ok(jemalloc_tuning_info().unwrap_or(AllocatorTuningInfo {
+            available: true,
+            initialized_arenas: Some(initialized_arenas),
+            ..AllocatorTuningInfo::default()
+        }))
+    }
+
+    #[cfg(not(feature = "jemalloc"))]
+    {
+        Err(anyhow!(
+            "allocator purge unavailable: rebuild with --features jemalloc"
+        ))
+    }
+}
+
+pub fn set_allocator_decay_ms(dirty_ms: isize, muzzy_ms: isize) -> Result<AllocatorTuningInfo> {
+    #[cfg(feature = "jemalloc")]
+    {
+        unsafe {
+            tikv_jemalloc_ctl::raw::write(b"arenas.dirty_decay_ms\0", dirty_ms)
+                .map_err(|e| anyhow!("failed to update arenas.dirty_decay_ms: {}", e))?;
+            tikv_jemalloc_ctl::raw::write(b"arenas.muzzy_decay_ms\0", muzzy_ms)
+                .map_err(|e| anyhow!("failed to update arenas.muzzy_decay_ms: {}", e))?;
+        }
+
+        let arena_count = tikv_jemalloc_ctl::arenas::narenas::read()
+            .map_err(|e| anyhow!("failed to read jemalloc arena count: {}", e))?;
+        for arena_idx in 0..arena_count {
+            if jemalloc_read_dynamic::<bool>(&format!("arena.{arena_idx}.initialized"))
+                .unwrap_or(false)
+            {
+                jemalloc_write_dynamic(&format!("arena.{arena_idx}.dirty_decay_ms"), dirty_ms)?;
+                jemalloc_write_dynamic(&format!("arena.{arena_idx}.muzzy_decay_ms"), muzzy_ms)?;
+            }
+        }
+
+        Ok(jemalloc_tuning_info().unwrap_or(AllocatorTuningInfo {
+            available: true,
+            dirty_decay_ms: Some(dirty_ms as i64),
+            muzzy_decay_ms: Some(muzzy_ms as i64),
+            ..AllocatorTuningInfo::default()
+        }))
+    }
+
+    #[cfg(not(feature = "jemalloc"))]
+    {
+        let _ = (dirty_ms, muzzy_ms);
+        Err(anyhow!(
+            "allocator decay controls unavailable: rebuild with --features jemalloc"
+        ))
     }
 }
 
@@ -319,6 +408,83 @@ fn jemalloc_stats() -> Option<AllocatorStats> {
         mapped_bytes: mibs.mapped.read().ok().map(|value| value as u64),
         retained_bytes: mibs.retained.read().ok().map(|value| value as u64),
     })
+}
+
+#[cfg(feature = "jemalloc")]
+fn jemalloc_tuning_info() -> Option<AllocatorTuningInfo> {
+    let arena_count = tikv_jemalloc_ctl::arenas::narenas::read().ok()?;
+    let mut initialized_arenas = 0u64;
+    for arena_idx in 0..arena_count {
+        if jemalloc_read_dynamic::<bool>(&format!("arena.{arena_idx}.initialized")).unwrap_or(false)
+        {
+            initialized_arenas += 1;
+        }
+    }
+
+    Some(AllocatorTuningInfo {
+        available: true,
+        background_thread: tikv_jemalloc_ctl::background_thread::read().ok(),
+        max_background_threads: tikv_jemalloc_ctl::max_background_threads::read()
+            .ok()
+            .map(|value| value as u64),
+        arena_count: Some(arena_count as u64),
+        initialized_arenas: Some(initialized_arenas),
+        dirty_decay_ms: unsafe {
+            tikv_jemalloc_ctl::raw::read::<isize>(b"arenas.dirty_decay_ms\0")
+        }
+        .ok()
+        .map(|value| value as i64),
+        muzzy_decay_ms: unsafe {
+            tikv_jemalloc_ctl::raw::read::<isize>(b"arenas.muzzy_decay_ms\0")
+        }
+        .ok()
+        .map(|value| value as i64),
+        retain: unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.retain\0") }.ok(),
+        tcache_enabled: unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.tcache\0") }.ok(),
+        tcache_max_bytes: unsafe { tikv_jemalloc_ctl::raw::read::<usize>(b"arenas.tcache_max\0") }
+            .ok()
+            .map(|value| value as u64),
+    })
+}
+
+#[cfg(feature = "jemalloc")]
+fn jemalloc_read_dynamic<T: Copy>(name: &str) -> Result<T> {
+    let c_name = CString::new(name).map_err(|_| anyhow!("mallctl name contains NUL byte"))?;
+    unsafe {
+        tikv_jemalloc_ctl::raw::read(c_name.as_bytes_with_nul())
+            .map_err(|e| anyhow!("failed to read jemalloc mallctl {}: {}", name, e))
+    }
+}
+
+#[cfg(feature = "jemalloc")]
+fn jemalloc_write_dynamic<T>(name: &str, value: T) -> Result<()> {
+    let c_name = CString::new(name).map_err(|_| anyhow!("mallctl name contains NUL byte"))?;
+    unsafe {
+        tikv_jemalloc_ctl::raw::write(c_name.as_bytes_with_nul(), value)
+            .map_err(|e| anyhow!("failed to update jemalloc mallctl {}: {}", name, e))
+    }
+}
+
+#[cfg(feature = "jemalloc")]
+fn jemalloc_void_ctl(name: &str) -> Result<()> {
+    let c_name = CString::new(name).map_err(|_| anyhow!("mallctl name contains NUL byte"))?;
+    unsafe {
+        let err = tikv_jemalloc_sys::mallctl(
+            c_name.as_ptr() as *const c_char,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if err != 0 {
+            return Err(anyhow!(
+                "failed to invoke jemalloc mallctl {}: {}",
+                name,
+                err
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "jemalloc")]
