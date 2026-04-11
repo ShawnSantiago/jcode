@@ -448,7 +448,7 @@ fn spawn_command_in_new_terminal(
     let resume_terminal_candidates = resume_terminal_candidates_windows();
 
     for term in resume_terminal_candidates {
-        let mut cmd = Command::new(&term);
+        let mut cmd = Command::new(term.as_str());
         cmd.current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -560,12 +560,19 @@ fn sh_escape(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
-#[cfg(unix)]
 fn shell_command(args: &[String]) -> String {
-    args.iter()
-        .map(|arg| sh_escape(arg))
-        .collect::<Vec<_>>()
-        .join(" ")
+    #[cfg(unix)]
+    {
+        args.iter()
+            .map(|arg| sh_escape(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[cfg(not(unix))]
+    {
+        args.join(" ")
+    }
 }
 
 fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
@@ -578,50 +585,65 @@ fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
     }
 }
 
-#[cfg(unix)]
 fn detected_resume_terminal() -> Option<&'static str> {
-    if std::env::var("HANDTERM_SESSION").is_ok() || std::env::var("HANDTERM_PID").is_ok() {
-        return Some("handterm");
-    }
-    if std::env::var("TERM_PROGRAM")
-        .ok()
-        .map(|value| value.eq_ignore_ascii_case("handterm"))
-        .unwrap_or(false)
+    #[cfg(unix)]
     {
-        return Some("handterm");
-    }
-    if std::env::var("KITTY_PID").is_ok() {
-        return Some("kitty");
-    }
-    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
-        return Some("wezterm");
-    }
-    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
-        return Some("alacritty");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let term_program = std::env::var("TERM_PROGRAM")
+        if std::env::var("HANDTERM_SESSION").is_ok() || std::env::var("HANDTERM_PID").is_ok() {
+            return Some("handterm");
+        }
+        if std::env::var("TERM_PROGRAM")
             .ok()
-            .map(|value| value.to_ascii_lowercase());
-        return match term_program.as_deref() {
-            Some("kitty") => Some("kitty"),
-            Some("wezterm") => Some("wezterm"),
-            Some("alacritty") => Some("alacritty"),
-            Some("iterm.app") | Some("iterm2") => Some("iterm2"),
-            Some("apple_terminal") | Some("terminal") => Some("terminal"),
-            _ => None,
-        };
+            .map(|value| value.eq_ignore_ascii_case("handterm"))
+            .unwrap_or(false)
+        {
+            return Some("handterm");
+        }
+        if std::env::var("KITTY_PID").is_ok() {
+            return Some("kitty");
+        }
+        if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
+            return Some("wezterm");
+        }
+        if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
+            return Some("alacritty");
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let term_program = std::env::var("TERM_PROGRAM")
+                .ok()
+                .map(|value| value.to_ascii_lowercase());
+            return match term_program.as_deref() {
+                Some("kitty") => Some("kitty"),
+                Some("wezterm") => Some("wezterm"),
+                Some("alacritty") => Some("alacritty"),
+                Some("iterm.app") | Some("iterm2") => Some("iterm2"),
+                Some("apple_terminal") | Some("terminal") => Some("terminal"),
+                _ => None,
+            };
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
+        if std::env::var("WT_SESSION").is_ok() {
+            return Some("wt");
+        }
+        if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
+            return Some("wezterm");
+        }
+        if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
+            return Some("alacritty");
+        }
         None
     }
 }
 
-#[cfg(unix)]
 fn resume_terminal_candidates_unix() -> Vec<String> {
     let mut candidates = Vec::new();
     if let Ok(term) = std::env::var("JCODE_TERMINAL") {
@@ -654,6 +676,21 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
         }
     }
 
+    candidates
+}
+
+#[cfg(not(unix))]
+fn resume_terminal_candidates_windows() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+        push_unique_terminal(&mut candidates, term);
+    }
+    if let Some(term) = detected_resume_terminal() {
+        push_unique_terminal(&mut candidates, term);
+    }
+    for term in ["wezterm", "wt", "alacritty"] {
+        push_unique_terminal(&mut candidates, term);
+    }
     candidates
 }
 
