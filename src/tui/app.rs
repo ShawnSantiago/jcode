@@ -648,6 +648,8 @@ pub struct App {
     autojudge_after_current_turn: bool,
     // Startup message to preload into the next spawned split window.
     pending_split_startup_message: Option<String>,
+    // Parent/original session that feedback flows should report back to after a split launch.
+    pending_split_parent_session_id: Option<String>,
     // Startup user prompt to auto-submit in the next spawned split window.
     pending_split_prompt: Option<PendingSplitPrompt>,
     // Optional model override to apply before opening the next spawned split window.

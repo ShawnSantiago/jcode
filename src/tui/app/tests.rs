@@ -4663,6 +4663,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 None,
                 None,
                 Some(title.to_string()),
+                Some(parent_id.clone()),
             );
 
             let prepared = crate::session::Session::load(&child_id).expect("reload child session");
@@ -4684,8 +4685,46 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
             assert!(transcript.contains("git diff --stat"));
             assert!(!transcript.contains("SECRET_TOOL_OUTPUT_SHOULD_NOT_APPEAR"));
             assert!(!transcript.contains("hidden reasoning should never leak"));
+            assert_eq!(prepared.parent_id.as_deref(), Some(parent_id.as_str()));
             assert!(prepared.compaction.is_none());
         }
+    });
+}
+
+#[test]
+fn test_queue_autojudge_remote_targets_original_non_judge_session() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+
+        let mut root = crate::session::Session::create(None, Some("task".to_string()));
+        root.save().expect("save root session");
+
+        let mut review =
+            crate::session::Session::create(Some(root.id.clone()), Some("review".to_string()));
+        review.save().expect("save review session");
+
+        let mut judge =
+            crate::session::Session::create(Some(review.id.clone()), Some("judge".to_string()));
+        judge.save().expect("save judge session");
+
+        app.session = judge.clone();
+        app.remote_session_id = Some(judge.id.clone());
+        app.autojudge_enabled = true;
+
+        super::commands::queue_autojudge_remote(&mut app);
+
+        assert_eq!(
+            app.pending_split_parent_session_id.as_deref(),
+            Some(root.id.as_str())
+        );
+        let startup = app
+            .pending_split_startup_message
+            .as_deref()
+            .expect("autojudge startup message");
+        assert!(startup.contains(root.id.as_str()));
+        assert!(!startup.contains(review.id.as_str()));
+        assert!(!startup.contains(judge.id.as_str()));
     });
 }
 
@@ -4808,7 +4847,10 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
 
         assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
         assert_eq!(app.display_messages().len(), 1);
-        assert_eq!(app.display_messages()[0].content, "persisted transcript should render once");
+        assert_eq!(
+            app.display_messages()[0].content,
+            "persisted transcript should render once"
+        );
         assert!(app.session.messages.is_empty());
         assert!(app.session.compaction.is_none());
     });
@@ -6245,9 +6287,12 @@ fn test_restore_session_adds_reload_message() {
             .contains("Reload complete — continuing.")
     );
 
-    // Messages for API should only have the original message (no reload msg to avoid breaking alternation)
-    assert_eq!(app.messages.len(), 1);
-    assert_eq!(app.session.debug_memory_profile()["provider_messages_cache"]["count"], 0);
+    // Local restore keeps provider messages lazy until the next active turn.
+    assert_eq!(app.messages.len(), 0);
+    assert_eq!(
+        app.session.debug_memory_profile()["provider_messages_cache"]["count"],
+        0
+    );
 
     // Provider session ID should be cleared (Claude sessions don't persist across restarts)
     assert!(app.provider_session_id.is_none());
@@ -7142,6 +7187,55 @@ fn test_handle_post_connect_dispatches_hidden_reload_followup_immediately() {
     assert!(reminder.contains("Continue immediately from where you left off"));
 
     cleanup_reload_context_file(session_id);
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_handle_post_connect_requests_client_reload_after_server_reload_even_without_newer_binary() {
+    use std::time::{Duration, SystemTime};
+
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let mut app = create_test_app();
+    app.client_binary_mtime = Some(SystemTime::now() + Duration::from_secs(3600));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _enter = rt.enter();
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.remote_session_id = Some("session_reload_after_reconnect".to_string());
+
+    let mut state = super::remote::RemoteRunState {
+        reconnect_attempts: 1,
+        server_reload_in_progress: true,
+        ..Default::default()
+    };
+
+    let outcome = rt
+        .block_on(super::remote::handle_post_connect(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            Some("session_reload_after_reconnect"),
+        ))
+        .expect("post connect should succeed");
+
+    assert!(matches!(outcome, super::remote::PostConnectOutcome::Quit));
+    assert_eq!(
+        app.reload_requested.as_deref(),
+        Some("session_reload_after_reconnect")
+    );
+    assert!(app.should_quit);
+
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {

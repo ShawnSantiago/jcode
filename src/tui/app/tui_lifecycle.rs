@@ -338,6 +338,7 @@ impl App {
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
+            pending_split_parent_session_id: None,
             pending_split_prompt: None,
             pending_split_model_override: None,
             pending_split_provider_key_override: None,
@@ -622,6 +623,7 @@ impl App {
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
+            pending_split_parent_session_id: None,
             pending_split_prompt: None,
             pending_split_model_override: None,
             pending_split_provider_key_override: None,
@@ -1043,8 +1045,6 @@ impl App {
                 &self.session.id,
                 &self.session.injected_memory_ids(),
             );
-            let provider_messages = self.session.messages_for_provider_uncached();
-            self.replace_provider_messages(provider_messages);
             // Clear the saved provider_session_id since it's no longer valid
             self.session.provider_session_id = None;
             let mut restored_model = false;

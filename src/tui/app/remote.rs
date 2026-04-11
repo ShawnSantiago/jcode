@@ -811,6 +811,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         if let Err(error) = remote.split().await {
             finish_remote_split_launch(app);
             let had_startup = app.pending_split_startup_message.take().is_some();
+            app.pending_split_parent_session_id = None;
             let had_prompt = app.pending_split_prompt.take().is_some();
             let label = app.pending_split_label.take();
             app.pending_split_model_override = None;
@@ -2329,6 +2330,7 @@ pub(super) fn handle_server_event(
                 finish_remote_split_launch(app);
                 app.pending_split_request = false;
                 app.pending_split_startup_message = None;
+                app.pending_split_parent_session_id = None;
                 app.pending_split_prompt = None;
                 app.pending_split_model_override = None;
                 app.pending_split_provider_key_override = None;
@@ -2343,6 +2345,7 @@ pub(super) fn handle_server_event(
             finish_remote_split_launch(app);
             app.pending_split_request = false;
             let startup_message = app.pending_split_startup_message.take();
+            let parent_session_id_override = app.pending_split_parent_session_id.take();
             let startup_prompt = app.pending_split_prompt.take();
             let model_override = app.pending_split_model_override.take();
             let provider_key_override = app.pending_split_provider_key_override.take();
@@ -2354,6 +2357,7 @@ pub(super) fn handle_server_event(
                     model_override,
                     provider_key_override,
                     split_label.clone().map(|label| label.to_ascii_lowercase()),
+                    parent_session_id_override,
                 );
             } else if let Some(startup_prompt) = startup_prompt {
                 App::save_startup_submission_for_session(
@@ -3585,12 +3589,13 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/autoreview now" {
+                    let parent_session_id =
+                        super::commands::current_feedback_target_session_id(app);
                     super::commands::queue_review_spawn_remote(
                         app,
                         "Autoreview",
-                        super::commands::build_autoreview_startup_message(
-                            super::commands::active_session_id(app).as_str(),
-                        ),
+                        parent_session_id.clone(),
+                        super::commands::build_autoreview_startup_message(&parent_session_id),
                         crate::config::config().autoreview.model.clone(),
                         None,
                     );
@@ -3602,6 +3607,7 @@ async fn handle_remote_key_internal(
                         if let Err(error) = remote.split().await {
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
+                            app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
@@ -3641,12 +3647,13 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/autojudge now" {
+                    let parent_session_id =
+                        super::commands::current_feedback_target_session_id(app);
                     super::commands::queue_review_spawn_remote(
                         app,
                         "Autojudge",
-                        super::commands::build_autojudge_startup_message(
-                            super::commands::active_session_id(app).as_str(),
-                        ),
+                        parent_session_id.clone(),
+                        super::commands::build_autojudge_startup_message(&parent_session_id),
                         crate::config::config().autojudge.model.clone(),
                         None,
                     );
@@ -3658,6 +3665,7 @@ async fn handle_remote_key_internal(
                         if let Err(error) = remote.split().await {
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
+                            app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
@@ -3679,12 +3687,13 @@ async fn handle_remote_key_internal(
                             .unwrap_or_else(|| {
                                 (crate::config::config().autoreview.model.clone(), None)
                             });
+                    let parent_session_id =
+                        super::commands::current_feedback_target_session_id(app);
                     super::commands::queue_review_spawn_remote(
                         app,
                         "Review",
-                        super::commands::build_review_startup_message(
-                            super::commands::active_session_id(app).as_str(),
-                        ),
+                        parent_session_id.clone(),
+                        super::commands::build_review_startup_message(&parent_session_id),
                         model_override,
                         provider_key_override,
                     );
@@ -3696,6 +3705,7 @@ async fn handle_remote_key_internal(
                         if let Err(error) = remote.split().await {
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
+                            app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
@@ -3717,12 +3727,13 @@ async fn handle_remote_key_internal(
                             .unwrap_or_else(|| {
                                 (crate::config::config().autojudge.model.clone(), None)
                             });
+                    let parent_session_id =
+                        super::commands::current_feedback_target_session_id(app);
                     super::commands::queue_review_spawn_remote(
                         app,
                         "Judge",
-                        super::commands::build_judge_startup_message(
-                            super::commands::active_session_id(app).as_str(),
-                        ),
+                        parent_session_id.clone(),
+                        super::commands::build_judge_startup_message(&parent_session_id),
                         model_override,
                         provider_key_override,
                     );
@@ -3734,6 +3745,7 @@ async fn handle_remote_key_internal(
                         if let Err(error) = remote.split().await {
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
+                            app.pending_split_parent_session_id = None;
                             app.pending_split_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
