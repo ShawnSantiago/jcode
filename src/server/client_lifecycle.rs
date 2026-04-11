@@ -149,6 +149,8 @@ pub(super) async fn handle_client(
                 debug_client_id: None,
                 connected_at,
                 last_seen: connected_at,
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -199,8 +201,30 @@ pub(super) async fn handle_client(
     // Spawn event forwarder for this client only
     let writer_clone = Arc::clone(&writer);
     let client_connection_id_for_events = client_connection_id.clone();
+    let client_connections_for_events = Arc::clone(&client_connections);
     let event_handle = tokio::spawn(async move {
         while let Some(event) = client_event_rx.recv().await {
+            {
+                let mut connections = client_connections_for_events.write().await;
+                if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
+                    match &event {
+                        ServerEvent::ToolStart { name, .. } => {
+                            info.is_processing = true;
+                            info.current_tool_name = Some(name.clone());
+                        }
+                        ServerEvent::ToolDone { .. } => {
+                            info.current_tool_name = None;
+                        }
+                        ServerEvent::Done { .. }
+                        | ServerEvent::Error { .. }
+                        | ServerEvent::Interrupted => {
+                            info.is_processing = false;
+                            info.current_tool_name = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let json = encode_event(&event);
             let mut w = writer_clone.lock().await;
             if let Err(error) = w.write_all(json.as_bytes()).await {
@@ -356,6 +380,13 @@ pub(super) async fn handle_client(
                     processing_message_id = None;
                     processing_task = None;
                     client_is_processing = false;
+                    {
+                        let mut connections = client_connections.write().await;
+                        if let Some(info) = connections.get_mut(&client_connection_id) {
+                            info.is_processing = false;
+                            info.current_tool_name = None;
+                        }
+                    }
 
                     let done_session = processing_session_id.take();
                     match result {
@@ -474,6 +505,13 @@ pub(super) async fn handle_client(
                 images,
                 system_reminder,
             } => {
+                if !client_is_processing {
+                    let mut connections = client_connections.write().await;
+                    if let Some(info) = connections.get_mut(&client_connection_id) {
+                        info.is_processing = true;
+                        info.current_tool_name = None;
+                    }
+                }
                 start_processing_message(
                     id,
                     content,
@@ -512,6 +550,13 @@ pub(super) async fn handle_client(
                     &swarm_event_tx,
                 )
                 .await;
+                if !client_is_processing {
+                    let mut connections = client_connections.write().await;
+                    if let Some(info) = connections.get_mut(&client_connection_id) {
+                        info.is_processing = false;
+                        info.current_tool_name = None;
+                    }
+                }
             }
 
             Request::SoftInterrupt {
@@ -761,9 +806,11 @@ pub(super) async fn handle_client(
                 if handle_get_history(
                     id,
                     &client_session_id,
+                    client_is_processing,
                     &agent,
                     &provider,
                     &sessions,
+                    &client_connections,
                     &client_count,
                     &writer,
                     &server_name,
@@ -793,7 +840,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Reload { id } => {
-                handle_reload(id, &agent, &client_event_tx).await;
+                handle_reload(id, &agent, &swarm_members, &client_event_tx).await;
             }
 
             Request::ResumeSession {

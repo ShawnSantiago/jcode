@@ -2112,6 +2112,10 @@ fn render_memory_step_line(
 }
 
 fn current_memory_spinner_frame() -> &'static str {
+    if !crate::perf::tui_policy().enable_decorative_animations {
+        return "•";
+    }
+
     const FRAMES: [&str; 4] = ["/", "-", "\\", "|"];
     let frame = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

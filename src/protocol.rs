@@ -98,6 +98,13 @@ pub struct HistoryMessage {
     pub tool_data: Option<ToolCall>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionActivitySnapshot {
+    pub is_processing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool_name: Option<String>,
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -831,6 +838,9 @@ pub enum ServerEvent {
         /// Active compaction mode for this session
         #[serde(default)]
         compaction_mode: crate::config::CompactionMode,
+        /// Current live processing state for this session, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activity: Option<SessionActivitySnapshot>,
         /// Session-scoped side panel pages and active focus state
         #[serde(default, skip_serializing_if = "crate::side_panel::snapshot_is_empty")]
         side_panel: SidePanelSnapshot,

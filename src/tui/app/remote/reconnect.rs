@@ -390,7 +390,6 @@ pub(in crate::tui::app) async fn connect_with_retry(
             }
             state.disconnect_start = None;
             state.last_disconnect_reason = None;
-            state.server_reload_in_progress = false;
             state.reload_recovery_attempted = false;
             state.last_reload_pid = None;
             Ok(ConnectOutcome::Connected(remote))
@@ -588,9 +587,11 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
             }
         }
 
-        if app.has_newer_binary() {
+        let must_reload_client = state.server_reload_in_progress || app.has_newer_binary();
+
+        if must_reload_client {
             app.push_display_message(DisplayMessage::system(
-                "Server reloaded. Reloading client with newer binary...".to_string(),
+                "Server reloaded. Reloading client binary...".to_string(),
             ));
             terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
             let session_id = app
@@ -643,6 +644,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
 
     state.reconnect_attempts = 0;
     state.initial_server_start = false;
+    state.server_reload_in_progress = false;
 
     if same_session_reload_fast_path {
         crate::logging::info(

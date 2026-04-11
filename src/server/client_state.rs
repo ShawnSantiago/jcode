@@ -1,7 +1,8 @@
+use super::ClientConnectionInfo;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
-use crate::protocol::{ServerEvent, encode_event};
+use crate::protocol::{ServerEvent, SessionActivitySnapshot, encode_event};
 use crate::provider::Provider;
 use crate::transport::WriteHalf;
 use anyhow::Result;
@@ -65,15 +66,20 @@ pub(super) async fn handle_get_state(
 pub(super) async fn handle_get_history(
     id: u64,
     client_session_id: &str,
+    client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
     sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     client_count: &Arc<RwLock<usize>>,
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
 ) -> Result<()> {
     let history_start = Instant::now();
+    let activity =
+        session_activity_snapshot(client_connections, client_session_id, client_is_processing)
+            .await;
     send_history(
         id,
         client_session_id,
@@ -84,6 +90,7 @@ pub(super) async fn handle_get_history(
         server_name,
         server_icon,
         None,
+        activity,
         HistoryPayloadMode::Full,
         true,
     )
@@ -112,6 +119,7 @@ pub(super) async fn send_history(
     server_name: &str,
     server_icon: &str,
     was_interrupted: Option<bool>,
+    activity: Option<SessionActivitySnapshot>,
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
 ) -> Result<()> {
@@ -309,6 +317,7 @@ pub(super) async fn send_history(
         reasoning_effort,
         service_tier,
         compaction_mode,
+        activity,
         side_panel,
     };
     let encode_start = Instant::now();
@@ -332,6 +341,47 @@ pub(super) async fn send_history(
     ));
 
     result.map_err(Into::into)
+}
+
+pub(super) async fn session_activity_snapshot(
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    session_id: &str,
+    fallback_processing: bool,
+) -> Option<SessionActivitySnapshot> {
+    let snapshot = {
+        let connections = client_connections.read().await;
+        let mut processing_without_tool = false;
+        let mut tool_name = None;
+        for info in connections.values() {
+            if info.session_id != session_id || !info.is_processing {
+                continue;
+            }
+            if let Some(current_tool_name) = info.current_tool_name.clone() {
+                tool_name = Some(current_tool_name);
+                break;
+            }
+            processing_without_tool = true;
+        }
+
+        tool_name
+            .map(|current_tool_name| SessionActivitySnapshot {
+                is_processing: true,
+                current_tool_name: Some(current_tool_name),
+            })
+            .or_else(|| {
+                processing_without_tool.then_some(SessionActivitySnapshot {
+                    is_processing: true,
+                    current_tool_name: None,
+                })
+            })
+    };
+
+    snapshot.or_else(|| {
+        fallback_processing.then_some(SessionActivitySnapshot {
+            is_processing: true,
+            current_tool_name: None,
+        })
+    })
 }
 
 async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Result<()> {
@@ -382,4 +432,69 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         let _ = refreshed;
         Bus::global().publish(BusEvent::ModelsUpdated);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_activity_snapshot;
+    use crate::server::ClientConnectionInfo;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::{RwLock, mpsc};
+
+    #[tokio::test]
+    async fn session_activity_snapshot_prefers_live_tool_name_for_target_session() {
+        let now = Instant::now();
+        let client_connections = Arc::new(RwLock::new(HashMap::from([
+            (
+                "conn-idle".to_string(),
+                ClientConnectionInfo {
+                    client_id: "conn-idle".to_string(),
+                    session_id: "other-session".to_string(),
+                    client_instance_id: None,
+                    debug_client_id: None,
+                    connected_at: now,
+                    last_seen: now,
+                    is_processing: true,
+                    current_tool_name: Some("bash".to_string()),
+                    disconnect_tx: mpsc::unbounded_channel().0,
+                },
+            ),
+            (
+                "conn-target".to_string(),
+                ClientConnectionInfo {
+                    client_id: "conn-target".to_string(),
+                    session_id: "target-session".to_string(),
+                    client_instance_id: None,
+                    debug_client_id: None,
+                    connected_at: now,
+                    last_seen: now,
+                    is_processing: true,
+                    current_tool_name: Some("batch".to_string()),
+                    disconnect_tx: mpsc::unbounded_channel().0,
+                },
+            ),
+        ])));
+
+        let snapshot = session_activity_snapshot(&client_connections, "target-session", false)
+            .await
+            .expect("activity snapshot");
+
+        assert!(snapshot.is_processing);
+        assert_eq!(snapshot.current_tool_name.as_deref(), Some("batch"));
+    }
+
+    #[tokio::test]
+    async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_marked_busy() {
+        let client_connections =
+            Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
+
+        let snapshot = session_activity_snapshot(&client_connections, "target-session", true)
+            .await
+            .expect("fallback snapshot");
+
+        assert!(snapshot.is_processing);
+        assert_eq!(snapshot.current_tool_name, None);
+    }
 }

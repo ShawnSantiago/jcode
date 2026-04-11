@@ -1,8 +1,10 @@
-use super::client_state::{HistoryPayloadMode, send_history, spawn_model_prefetch_update};
+use super::client_state::{
+    HistoryPayloadMode, send_history, session_activity_snapshot, spawn_model_prefetch_update,
+};
 use super::{
     ClientConnectionInfo, ClientDebugState, FileAccess, SessionInterruptQueues, SwarmEvent,
-    SwarmMember, VersionedPlan, broadcast_swarm_status, register_session_event_sender,
-    register_session_interrupt_queue, remove_plan_participant,
+    SwarmMember, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
+    register_session_event_sender, register_session_interrupt_queue, remove_plan_participant,
     remove_session_channel_subscriptions, remove_session_file_touches, remove_session_from_swarm,
     remove_session_interrupt_queue, rename_plan_participant, rename_session_interrupt_queue,
     swarm_id_for_dir, unregister_session_event_sender, update_member_status,
@@ -495,11 +497,11 @@ pub(super) async fn handle_subscribe(
 pub(super) async fn handle_reload(
     id: u64,
     agent: &Arc<Mutex<Agent>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let request_id = crate::id::new_id("reload");
     mark_remote_reload_started(&request_id);
-    let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
 
     let (triggering_session, prefer_selfdev_binary) = {
         let agent_guard = agent.lock().await;
@@ -508,13 +510,46 @@ pub(super) async fn handle_reload(
             agent_guard.is_canary(),
         )
     };
+
+    let live_sessions = {
+        let members = swarm_members.read().await;
+        members
+            .iter()
+            .filter_map(|(session_id, member)| {
+                if member.event_txs.is_empty() {
+                    None
+                } else {
+                    Some(session_id.clone())
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut delivered = 0;
+    for session_id in &live_sessions {
+        delivered += fanout_live_client_event(
+            swarm_members,
+            session_id,
+            ServerEvent::Reloading { new_socket: None },
+        )
+        .await;
+    }
+    if delivered == 0 {
+        let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
+    }
+
     let hash = env!("JCODE_GIT_HASH").to_string();
     let signal_request_id =
         crate::server::send_reload_signal(hash, triggering_session.clone(), prefer_selfdev_binary);
 
     crate::logging::info(&format!(
-        "handle_reload: queued reload signal {} from remote client request {} (triggering_session={:?}, prefer_selfdev_binary={})",
-        signal_request_id, request_id, triggering_session, prefer_selfdev_binary
+        "handle_reload: queued reload signal {} from remote client request {} (triggering_session={:?}, prefer_selfdev_binary={}, reload_notified_sessions={}, reload_notified_clients={})",
+        signal_request_id,
+        request_id,
+        triggering_session,
+        prefer_selfdev_binary,
+        live_sessions.len(),
+        delivered
     ));
 
     let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -706,6 +741,8 @@ pub(super) async fn handle_resume_session(
 
         *client_session_id = session_id.clone();
 
+        let activity = session_activity_snapshot(client_connections, &session_id, false).await;
+
         send_history(
             id,
             &session_id,
@@ -716,6 +753,7 @@ pub(super) async fn handle_resume_session(
             server_name,
             server_icon,
             None,
+            activity,
             if client_has_local_history {
                 HistoryPayloadMode::MetadataOnly
             } else {
@@ -770,15 +808,33 @@ pub(super) async fn handle_resume_session(
                 session_id, client_connection_id, conflict.client_id
             ));
 
-            let (disconnect_tx, debug_client_id) = {
+            let (disconnect_tx, debug_client_id, transferred_processing, transferred_tool_name) = {
                 let mut connections = client_connections.write().await;
                 let removed = connections.remove(&conflict.client_id);
                 if let Some(info) = removed {
-                    (Some(info.disconnect_tx), info.debug_client_id)
+                    (
+                        Some(info.disconnect_tx),
+                        info.debug_client_id,
+                        info.is_processing,
+                        info.current_tool_name,
+                    )
                 } else {
-                    (None, conflict.debug_client_id)
+                    (
+                        None,
+                        conflict.debug_client_id,
+                        conflict.is_processing,
+                        conflict.current_tool_name,
+                    )
                 }
             };
+
+            {
+                let mut connections = client_connections.write().await;
+                if let Some(info) = connections.get_mut(client_connection_id) {
+                    info.is_processing = transferred_processing;
+                    info.current_tool_name = transferred_tool_name;
+                }
+            }
 
             if let Some(debug_client_id) = debug_client_id.as_deref() {
                 let mut debug_state = client_debug_state.write().await;
@@ -959,6 +1015,16 @@ pub(super) async fn handle_resume_session(
                 rename_plan_participant(&swarm_id, &old_session_id, &session_id, swarm_plans).await;
             }
 
+            register_session_event_sender(
+                swarm_members,
+                &session_id,
+                client_connection_id,
+                client_event_tx.clone(),
+            )
+            .await;
+
+            let activity = session_activity_snapshot(client_connections, &session_id, false).await;
+
             send_history(
                 id,
                 &session_id,
@@ -969,6 +1035,7 @@ pub(super) async fn handle_resume_session(
                 server_name,
                 server_icon,
                 if was_interrupted { Some(true) } else { None },
+                activity,
                 if client_has_local_history {
                     HistoryPayloadMode::MetadataOnly
                 } else {
@@ -979,13 +1046,6 @@ pub(super) async fn handle_resume_session(
             .await?;
             let _ = client_event_tx.send(ServerEvent::Done { id });
             spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
-            register_session_event_sender(
-                swarm_members,
-                &session_id,
-                client_connection_id,
-                client_event_tx.clone(),
-            )
-            .await;
         }
         Err(error) => {
             let _ = client_event_tx.send(ServerEvent::Error {
@@ -1216,11 +1276,53 @@ mod tests {
             agent.set_canary("self-dev");
             let agent = Arc::new(Mutex::new(agent));
             let (tx, mut events) = mpsc::unbounded_channel::<ServerEvent>();
+            let (peer_tx, mut peer_events) = mpsc::unbounded_channel::<ServerEvent>();
+            let now = Instant::now();
+            let swarm_members = Arc::new(RwLock::new(HashMap::from([
+                (
+                    "session_test_reload".to_string(),
+                    SwarmMember {
+                        session_id: "session_test_reload".to_string(),
+                        event_tx: tx.clone(),
+                        event_txs: HashMap::from([("conn-trigger".to_string(), tx.clone())]),
+                        working_dir: None,
+                        swarm_id: None,
+                        swarm_enabled: false,
+                        status: "ready".to_string(),
+                        detail: None,
+                        friendly_name: Some("trigger".to_string()),
+                        role: "agent".to_string(),
+                        joined_at: now,
+                        last_status_change: now,
+                        is_headless: false,
+                    },
+                ),
+                (
+                    "session_peer".to_string(),
+                    SwarmMember {
+                        session_id: "session_peer".to_string(),
+                        event_tx: peer_tx.clone(),
+                        event_txs: HashMap::from([("conn-peer".to_string(), peer_tx.clone())]),
+                        working_dir: None,
+                        swarm_id: None,
+                        swarm_enabled: false,
+                        status: "ready".to_string(),
+                        detail: None,
+                        friendly_name: Some("peer".to_string()),
+                        role: "agent".to_string(),
+                        joined_at: now,
+                        last_status_change: now,
+                        is_headless: false,
+                    },
+                ),
+            ])));
 
-            handle_reload(7, &agent, &tx).await;
+            handle_reload(7, &agent, &swarm_members, &tx).await;
 
             let reloading = events.recv().await.expect("reloading event");
             assert!(matches!(reloading, ServerEvent::Reloading { .. }));
+            let peer_reloading = peer_events.recv().await.expect("peer reloading event");
+            assert!(matches!(peer_reloading, ServerEvent::Reloading { .. }));
             let done = events.recv().await.expect("done event");
             assert!(matches!(done, ServerEvent::Done { id: 7 }));
 
@@ -1321,6 +1423,8 @@ mod tests {
                 debug_client_id: Some("debug_clear".to_string()),
                 connected_at: now,
                 last_seen: now,
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
@@ -1462,6 +1566,8 @@ mod tests {
                     debug_client_id: Some("debug_existing".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx: mpsc::unbounded_channel().0,
                 },
             ),
@@ -1474,6 +1580,8 @@ mod tests {
                     debug_client_id: Some("debug_new".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx: mpsc::unbounded_channel().0,
                 },
             ),
@@ -1637,6 +1745,8 @@ mod tests {
                     debug_client_id: Some("debug_existing".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx,
                 },
             ),
@@ -1649,6 +1759,8 @@ mod tests {
                     debug_client_id: Some("debug_new".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx: mpsc::unbounded_channel().0,
                 },
             ),
@@ -1804,6 +1916,8 @@ mod tests {
                     debug_client_id: Some("debug_existing".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx,
                 },
             ),
@@ -1816,6 +1930,8 @@ mod tests {
                     debug_client_id: Some("debug_new".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx: mpsc::unbounded_channel().0,
                 },
             ),
@@ -1985,6 +2101,8 @@ mod tests {
                     debug_client_id: Some("debug_existing".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx,
                 },
             ),
@@ -1997,6 +2115,8 @@ mod tests {
                     debug_client_id: Some("debug_new".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx: mpsc::unbounded_channel().0,
                 },
             ),
@@ -2113,6 +2233,219 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_resume_session_registers_live_events_before_history_replay() {
+        let _guard = crate::storage::lock_test_env();
+        let runtime = tempfile::TempDir::new().expect("create runtime dir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+
+        let target_session_id = "session_restore_target";
+        let temp_session_id = "session_restore_temp";
+
+        let mut persisted = crate::session::Session::create_with_id(
+            target_session_id.to_string(),
+            None,
+            Some("Resume Registration Ordering".to_string()),
+        );
+        persisted
+            .save()
+            .expect("persist resume registration ordering session");
+
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(build_test_agent_with_id(
+            provider.clone(),
+            registry.clone(),
+            temp_session_id,
+            Vec::new(),
+        )));
+
+        let sessions = Arc::new(RwLock::new(HashMap::from([(
+            temp_session_id.to_string(),
+            Arc::clone(&agent),
+        )])));
+        let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
+        let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let now = Instant::now();
+        let client_connections = Arc::new(RwLock::new(HashMap::from([(
+            "conn_restore".to_string(),
+            ClientConnectionInfo {
+                client_id: "conn_restore".to_string(),
+                session_id: temp_session_id.to_string(),
+                client_instance_id: None,
+                debug_client_id: Some("debug_restore".to_string()),
+                connected_at: now,
+                last_seen: now,
+                is_processing: false,
+                current_tool_name: None,
+                disconnect_tx: mpsc::unbounded_channel().0,
+            },
+        )])));
+        let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+        let (placeholder_event_tx, _placeholder_event_rx) =
+            mpsc::unbounded_channel::<ServerEvent>();
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            temp_session_id.to_string(),
+            SwarmMember {
+                session_id: temp_session_id.to_string(),
+                event_tx: placeholder_event_tx,
+                event_txs: HashMap::new(),
+                working_dir: None,
+                swarm_id: None,
+                swarm_enabled: false,
+                status: "ready".to_string(),
+                detail: None,
+                friendly_name: Some("restore".to_string()),
+                role: "agent".to_string(),
+                joined_at: now,
+                last_status_change: now,
+                is_headless: false,
+            },
+        )])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+        let file_touches = Arc::new(RwLock::new(HashMap::<PathBuf, Vec<FileAccess>>::new()));
+        let files_touched_by_session =
+            Arc::new(RwLock::new(HashMap::<String, HashSet<PathBuf>>::new()));
+        let channel_subscriptions = Arc::new(RwLock::new(HashMap::<
+            String,
+            HashMap<String, HashSet<String>>,
+        >::new()));
+        let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::<
+            String,
+            HashMap<String, HashSet<String>>,
+        >::new()));
+        let swarm_plans = Arc::new(RwLock::new(HashMap::<String, VersionedPlan>::new()));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::<String, String>::new()));
+        let client_count = Arc::new(RwLock::new(1usize));
+        let (stream_a, _stream_b) = crate::transport::stream_pair().expect("stream pair");
+        let (_reader, writer_half) = stream_a.into_split();
+        let writer = Arc::new(Mutex::new(writer_half));
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
+        let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+
+        let mut client_selfdev = false;
+        let mut client_session_id = temp_session_id.to_string();
+        let writer_guard = writer.lock().await;
+
+        let resume_task = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            let provider = Arc::clone(&provider);
+            let registry = registry.clone();
+            let sessions = Arc::clone(&sessions);
+            let shutdown_signals = Arc::clone(&shutdown_signals);
+            let soft_interrupt_queues = Arc::clone(&soft_interrupt_queues);
+            let client_connections = Arc::clone(&client_connections);
+            let client_debug_state = Arc::clone(&client_debug_state);
+            let swarm_members = Arc::clone(&swarm_members);
+            let swarms_by_id = Arc::clone(&swarms_by_id);
+            let file_touches = Arc::clone(&file_touches);
+            let files_touched_by_session = Arc::clone(&files_touched_by_session);
+            let channel_subscriptions = Arc::clone(&channel_subscriptions);
+            let channel_subscriptions_by_session = Arc::clone(&channel_subscriptions_by_session);
+            let swarm_plans = Arc::clone(&swarm_plans);
+            let swarm_coordinators = Arc::clone(&swarm_coordinators);
+            let client_count = Arc::clone(&client_count);
+            let writer = Arc::clone(&writer);
+            let client_event_tx = client_event_tx.clone();
+            let mcp_pool = Arc::clone(&mcp_pool);
+            let event_history = Arc::clone(&event_history);
+            let event_counter = Arc::clone(&event_counter);
+            let swarm_event_tx = swarm_event_tx.clone();
+            async move {
+                handle_resume_session(
+                    46,
+                    target_session_id.to_string(),
+                    None,
+                    false,
+                    false,
+                    &mut client_selfdev,
+                    &mut client_session_id,
+                    "conn_restore",
+                    &agent,
+                    &provider,
+                    &registry,
+                    &sessions,
+                    &shutdown_signals,
+                    &soft_interrupt_queues,
+                    &client_connections,
+                    &client_debug_state,
+                    &swarm_members,
+                    &swarms_by_id,
+                    &file_touches,
+                    &files_touched_by_session,
+                    &channel_subscriptions,
+                    &channel_subscriptions_by_session,
+                    &swarm_plans,
+                    &swarm_coordinators,
+                    &client_count,
+                    &writer,
+                    "test-server",
+                    "🌿",
+                    &client_event_tx,
+                    &mcp_pool,
+                    &event_history,
+                    &event_counter,
+                    &swarm_event_tx,
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let registered = {
+                    let members = swarm_members.read().await;
+                    members
+                        .get(target_session_id)
+                        .map(|member| member.event_txs.contains_key("conn_restore"))
+                        .unwrap_or(false)
+                };
+                if registered {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live event sender should register before history replay completes");
+
+        assert!(
+            !resume_task.is_finished(),
+            "resume should still be blocked on history replay while writer is locked"
+        );
+
+        drop(writer_guard);
+
+        resume_task
+            .await
+            .expect("resume task join")
+            .expect("restore resume should succeed");
+
+        let events = collect_events_until_done(&mut client_event_rx, 46).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Done { id } if *id == 46)),
+            "expected Done event for restore resume, got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Error { .. })),
+            "restore resume should not emit error events: {events:?}"
+        );
+
+        if let Some(prev_runtime) = prev_runtime {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+
+    #[tokio::test]
     async fn handle_resume_session_allows_same_client_instance_takeover_without_local_history() {
         let _guard = crate::storage::lock_test_env();
         let runtime = tempfile::TempDir::new().expect("create runtime dir");
@@ -2167,6 +2500,8 @@ mod tests {
                     debug_client_id: Some("debug_existing".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx,
                 },
             ),
@@ -2179,6 +2514,8 @@ mod tests {
                     debug_client_id: Some("debug_new".to_string()),
                     connected_at: now,
                     last_seen: now,
+                    is_processing: false,
+                    current_tool_name: None,
                     disconnect_tx: mpsc::unbounded_channel().0,
                 },
             ),

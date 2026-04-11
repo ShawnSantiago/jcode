@@ -567,6 +567,7 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) -> Result<()> {
+        let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
         let mut redraw_period = crate::tui::redraw_interval(self);
         let mut redraw_interval = interval(redraw_period);
 
@@ -924,6 +925,9 @@ impl App {
                                             self.broadcast_debug(crate::tui::backend::DebugEvent::TextDelta {
                                                 text: chunk.clone()
                                             });
+                                            if eager_stream_redraw {
+                                                self.redraw_now(terminal)?;
+                                            }
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
@@ -953,6 +957,9 @@ impl App {
                                             intent: None,
                                         });
                                         current_tool_input.clear();
+                                        if eager_stream_redraw {
+                                            self.redraw_now(terminal)?;
+                                        }
                                     }
                                     StreamEvent::ToolInputDelta(delta) => {
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ToolInput {
@@ -983,6 +990,9 @@ impl App {
 
                                             tool_calls.push(tool);
                                             current_tool_input.clear();
+                                            if eager_stream_redraw {
+                                                self.redraw_now(terminal)?;
+                                            }
                                         }
                                     }
                                     StreamEvent::TokenUsage {
@@ -1036,9 +1046,15 @@ impl App {
                                         } else {
                                             ProcessingStatus::Connecting(phase)
                                         };
+                                        if eager_stream_redraw {
+                                            self.redraw_now(terminal)?;
+                                        }
                                     }
                                     StreamEvent::StatusDetail { detail } => {
                                         self.status_detail = Some(detail);
+                                        if eager_stream_redraw {
+                                            self.redraw_now(terminal)?;
+                                        }
                                     }
                                     StreamEvent::MessageEnd { .. } => {
                                         self.pause_streaming_tps(true);
@@ -1061,6 +1077,9 @@ impl App {
                                         // Always show Thinking in status bar
                                         self.status = ProcessingStatus::Thinking(start);
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingStart);
+                                        if eager_stream_redraw {
+                                            self.redraw_now(terminal)?;
+                                        }
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
                                         // Buffer thinking content and emit with prefix only once

@@ -873,6 +873,8 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
@@ -974,6 +976,8 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));

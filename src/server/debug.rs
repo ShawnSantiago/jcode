@@ -42,6 +42,8 @@ pub(super) struct ClientConnectionInfo {
     pub(super) debug_client_id: Option<String>,
     pub(super) connected_at: Instant,
     pub(super) last_seen: Instant,
+    pub(super) is_processing: bool,
+    pub(super) current_tool_name: Option<String>,
     pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
 }
 
@@ -596,6 +598,8 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
@@ -631,6 +635,8 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
@@ -655,6 +661,8 @@ mod tests {
                 debug_client_id: None,
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
@@ -694,6 +702,8 @@ mod tests {
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
+                is_processing: false,
+                current_tool_name: None,
                 disconnect_tx: mpsc::unbounded_channel().0,
             },
         )])));
