@@ -241,7 +241,7 @@ fn display_connection_type(connection_type: &str) -> String {
     match connection_type.trim() {
         "https/sse" => "https".to_string(),
         "websocket/persistent-fresh" => "websocket".to_string(),
-        "websocket/persistent-reuse" => "reused websocket".to_string(),
+        "websocket/persistent-reuse" => "existing websocket".to_string(),
         other => other.to_string(),
     }
 }
@@ -254,9 +254,10 @@ fn normalize_status_detail(detail: &str) -> Option<String> {
 
     Some(
         match trimmed {
-            "fresh websocket" => "websocket",
-            "reusing websocket" => "reused websocket",
-            "websocket healthcheck" => "checking websocket",
+            "fresh websocket" => "opening websocket",
+            "reusing websocket" => "using existing websocket",
+            "websocket healthcheck" => "verifying websocket",
+            "https fallback" => "using https fallback",
             other => other,
         }
         .to_string(),
@@ -840,7 +841,7 @@ mod tests {
         );
         assert_eq!(
             display_connection_type("websocket/persistent-reuse"),
-            "reused websocket"
+            "existing websocket"
         );
     }
 
@@ -848,19 +849,19 @@ mod tests {
     fn normalize_status_detail_uses_reader_friendly_labels() {
         assert_eq!(
             normalize_status_detail("fresh websocket").as_deref(),
-            Some("websocket")
+            Some("opening websocket")
         );
         assert_eq!(
             normalize_status_detail("reusing websocket").as_deref(),
-            Some("reused websocket")
+            Some("using existing websocket")
         );
         assert_eq!(
             normalize_status_detail("websocket healthcheck").as_deref(),
-            Some("checking websocket")
+            Some("verifying websocket")
         );
         assert_eq!(
             normalize_status_detail("https fallback").as_deref(),
-            Some("https fallback")
+            Some("using https fallback")
         );
     }
 
@@ -872,7 +873,10 @@ mod tests {
                 Some(display_connection_type("websocket/persistent-reuse")),
                 Some("OpenRouter".to_string())
             ),
-            vec!["reused websocket".to_string(), "via OpenRouter".to_string()]
+            vec![
+                "using existing websocket".to_string(),
+                "via OpenRouter".to_string()
+            ]
         );
 
         assert_eq!(
@@ -881,7 +885,7 @@ mod tests {
                 Some(display_connection_type("https/sse")),
                 None,
             ),
-            vec!["https fallback".to_string()]
+            vec!["using https fallback".to_string()]
         );
     }
 
