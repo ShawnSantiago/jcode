@@ -728,9 +728,6 @@ impl App {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             return false;
         }
-        if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {
-            return scroll_only;
-        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         let layout = super::super::ui::last_layout_snapshot();
@@ -783,6 +780,18 @@ impl App {
                     self.set_diagram_focus(false);
                 }
             }
+        }
+
+        let clicked_main_chat = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && !over_diff_pane
+            && !over_diagram
+            && !on_diagram_border;
+        if clicked_main_chat {
+            self.set_diff_pane_focus(false);
+        }
+
+        if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {
+            return scroll_only;
         }
 
         let clicked_input_cursor = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))

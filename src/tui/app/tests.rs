@@ -11956,6 +11956,95 @@ fn test_disconnected_key_handler_runs_debug_command_locally() {
     assert_eq!(last.role, "system");
     assert_eq!(last.content, "Visual debugging disabled.");
 }
+#[test]
+fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.diff_pane_focus = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: String::new(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let messages_area = layout.messages_area;
+
+    let handled = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: messages_area.x + messages_area.width / 2,
+        row: messages_area.y + messages_area.height / 2,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(!handled, "clicks should request an immediate redraw");
+    assert!(
+        !app.diff_pane_focus,
+        "clicking chat should restore chat focus"
+    );
+    assert_eq!(app.status_notice(), Some("Focus: chat".to_string()));
+}
+
+#[test]
+fn test_mouse_click_in_input_switches_focus_from_side_panel() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.diff_pane_focus = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: String::new(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+    app.input = "hello world".to_string();
+    app.cursor_pos = app.input.len();
+    app.set_centered(false);
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(60, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let input_area = layout.input_area.expect("input area");
+    let next_prompt = crate::tui::ui::input_ui::next_input_prompt_number(&app);
+    let prompt_len = crate::tui::ui::input_ui::input_prompt_len(&app, next_prompt) as u16;
+
+    let handled = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: input_area.x + prompt_len + 2,
+        row: input_area.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(!handled, "clicks should request an immediate redraw");
+    assert_eq!(app.cursor_pos, 2);
+    assert!(
+        !app.diff_pane_focus,
+        "clicking input should restore chat focus"
+    );
+    assert_eq!(app.status_notice(), Some("Focus: chat".to_string()));
+}
+
 
 #[test]
 fn test_disconnected_key_handler_does_not_queue_server_commands() {
