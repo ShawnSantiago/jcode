@@ -82,49 +82,20 @@ struct GoalInput {
 fn goal_step_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["id", "content"],
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "ID."
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content."
-                },
-                "status": {
-                    "type": "string",
-                    "description": "Status."
-                }
-            },
-        "additionalProperties": false
+        "additionalProperties": true
     })
 }
 
 fn goal_milestone_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["id", "title"],
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "ID."
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Title."
-                },
-                "status": {
-                    "type": "string",
-                    "description": "Status."
-                },
-                "steps": {
-                    "type": "array",
-                    "items": goal_step_schema(),
-                    "description": "Steps."
-                }
-            },
-        "additionalProperties": false
+        "properties": {
+            "steps": {
+                "type": "array",
+                "items": goal_step_schema()
+            }
+        },
+        "additionalProperties": true
     })
 }
 
@@ -150,8 +121,8 @@ impl Tool for GoalTool {
                 },
                 "id": {"type": "string"},
                 "title": {"type": "string"},
-                "scope": {"type": "string", "enum": ["project", "global"]},
-                "status": {"type": "string", "enum": ["draft", "active", "paused", "blocked", "completed", "archived", "abandoned"]},
+                "scope": {"type": "string"},
+                "status": {"type": "string"},
                 "description": {"type": "string"},
                 "why": {"type": "string"},
                 "success_criteria": {"type": "array", "items": {"type": "string"}},
@@ -566,11 +537,11 @@ mod schema_tests {
         let milestone_items = &schema["properties"]["milestones"]["items"];
 
         assert_eq!(milestone_items["type"], "object");
-        assert_eq!(milestone_items["required"], json!(["id", "title"]));
+        assert_eq!(milestone_items["additionalProperties"], json!(true));
         assert_eq!(milestone_items["properties"]["steps"]["type"], "array");
         assert_eq!(
-            milestone_items["properties"]["steps"]["items"]["required"],
-            json!(["id", "content"])
+            milestone_items["properties"]["steps"]["items"]["additionalProperties"],
+            json!(true)
         );
     }
 
@@ -578,5 +549,12 @@ mod schema_tests {
     fn test_goal_schema_omits_display_override() {
         let schema = GoalTool::new().parameters_schema();
         assert!(schema["properties"]["display"].is_null());
+    }
+
+    #[test]
+    fn test_goal_schema_omits_public_enums_for_scope_and_status() {
+        let schema = GoalTool::new().parameters_schema();
+        assert!(schema["properties"]["scope"]["enum"].is_null());
+        assert!(schema["properties"]["status"]["enum"].is_null());
     }
 }

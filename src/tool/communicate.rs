@@ -345,14 +345,6 @@ impl Tool for CommunicateTool {
                 "message": {
                     "type": "string"
                 },
-                "wake": {
-                    "type": "boolean"
-                },
-                "delivery": {
-                    "type": "string",
-                    "enum": ["notify", "interrupt", "wake"],
-                    "description": "Delivery."
-                },
                 "to_session": { "type": "string" },
                 "channel": { "type": "string" },
                 "proposer_session": { "type": "string" },
@@ -362,39 +354,17 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["agent", "coordinator", "worktree_manager"]
                 },
-                "working_dir": { "type": "string" },
-                "initial_message": { "type": "string" },
                 "prompt": { "type": "string" },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max results."
-                },
                 "task_id": { "type": "string" },
-                "target_status": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                },
                 "session_ids": {
                     "type": "array",
                     "items": {"type": "string"}
                 },
-                "timeout_minutes": { "type": "integer" },
                 "plan_items": {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id"],
-                        "properties": {
-                            "content": { "type": "string" },
-                            "status": { "type": "string" },
-                            "priority": { "type": "string" },
-                            "id": { "type": "string" },
-                            "blocked_by": {
-                                "type": "array",
-                                "items": {"type": "string"}
-                            }
-                            ,"assigned_to": { "type": "string" }
-                        }
+                        "additionalProperties": true
                     }
                 }
             }
@@ -973,6 +943,40 @@ mod tests {
     fn schema_still_requires_action() {
         let schema = CommunicateTool::new().parameters_schema();
         assert_eq!(schema["required"], json!(["action"]));
+    }
+
+    #[test]
+    fn schema_only_advertises_core_swarm_fields() {
+        let schema = CommunicateTool::new().parameters_schema();
+        let props = schema["properties"]
+            .as_object()
+            .expect("swarm schema should have properties");
+
+        assert!(props.contains_key("action"));
+        assert!(props.contains_key("key"));
+        assert!(props.contains_key("value"));
+        assert!(props.contains_key("message"));
+        assert!(props.contains_key("to_session"));
+        assert!(props.contains_key("channel"));
+        assert!(props.contains_key("proposer_session"));
+        assert!(props.contains_key("reason"));
+        assert!(props.contains_key("target_session"));
+        assert!(props.contains_key("role"));
+        assert!(props.contains_key("prompt"));
+        assert!(props.contains_key("task_id"));
+        assert!(props.contains_key("session_ids"));
+        assert!(props.contains_key("plan_items"));
+        assert!(!props.contains_key("wake"));
+        assert!(!props.contains_key("delivery"));
+        assert!(!props.contains_key("working_dir"));
+        assert!(!props.contains_key("initial_message"));
+        assert!(!props.contains_key("limit"));
+        assert!(!props.contains_key("target_status"));
+        assert!(!props.contains_key("timeout_minutes"));
+        assert_eq!(
+            props["plan_items"]["items"]["additionalProperties"],
+            json!(true)
+        );
     }
 
     struct EnvGuard {
