@@ -137,7 +137,6 @@ pub(crate) use pinned_ui::{
 use pinned_ui::{
     collect_pinned_content_cached, draw_pinned_content_cached, draw_side_panel_markdown,
 };
-use tools_ui::summarize_batch_running_tools_compact;
 #[cfg(test)]
 use viewport::compute_visible_margins;
 use viewport::draw_messages;
@@ -283,6 +282,8 @@ pub(super) fn hash_text_for_cache(text: &str) -> u64 {
 
 #[path = "ui_layout.rs"]
 mod layout_support;
+#[path = "ui_status.rs"]
+mod status_support;
 #[path = "ui_theme.rs"]
 mod theme_support;
 use super::color_support::rgb;
@@ -290,6 +291,11 @@ pub(crate) use layout_support::align_if_unset;
 use layout_support::{
     centered_content_block_width, clear_area, draw_right_rail_chrome, left_aligned_content_inset,
     left_pad_lines_to_block_width, right_rail_border_style,
+};
+#[cfg(test)]
+pub(crate) use status_support::calculate_input_lines;
+use status_support::{
+    binary_age, format_status_for_debug, is_running_stable_release, semver, shorten_model_name,
 };
 use theme_support::{
     accent_color, activity_indicator, activity_indicator_frame_index, ai_color, ai_text,
@@ -299,51 +305,6 @@ use theme_support::{
     prompt_entry_bg_color, prompt_entry_color, prompt_entry_shimmer_color, queued_color,
     rainbow_prompt_color, system_message_color, tool_color, user_bg, user_color, user_text,
 };
-
-/// Extract semantic version for UI display/grouping.
-fn semver() -> &'static str {
-    static SEMVER: OnceLock<String> = OnceLock::new();
-    SEMVER.get_or_init(|| format!("v{}", env!("JCODE_SEMVER")))
-}
-
-/// True when this process is running from the stable release binary path.
-/// Only matches the explicit ~/.jcode/builds/stable/jcode path, NOT
-/// ~/.local/bin/jcode launcher path (which now points to current).
-fn is_running_stable_release() -> bool {
-    static IS_STABLE: OnceLock<bool> = OnceLock::new();
-    *IS_STABLE.get_or_init(|| {
-        // Use the raw symlink target (read_link), not canonicalize, to
-        // check whether we're on the stable channel link.
-        let current_exe = match std::env::current_exe().ok() {
-            Some(path) => path,
-            None => return false,
-        };
-
-        // Check if we were launched via the stable symlink
-        if let Ok(stable_path) = crate::build::stable_binary_path() {
-            // Compare the symlink target (not canonical) to distinguish
-            // direct stable-channel execution from launcher/current links.
-            let stable_target =
-                std::fs::read_link(&stable_path).unwrap_or_else(|_| stable_path.clone());
-            let current_target =
-                std::fs::read_link(&current_exe).unwrap_or_else(|_| current_exe.clone());
-            if stable_target == current_target {
-                return true;
-            }
-            // Also check canonical paths for when launched directly
-            if let (Ok(stable_canon), Ok(current_canon)) = (
-                std::fs::canonicalize(&stable_path),
-                std::fs::canonicalize(&current_exe),
-            ) && stable_canon == current_canon
-                && !current_exe.to_string_lossy().contains("target/release")
-            {
-                return true;
-            }
-        }
-
-        false
-    })
-}
 
 /// Render context window as vertical list with smart grouping
 /// Items < 5% are grouped by category (docs, msgs, etc.)
@@ -600,166 +561,6 @@ fn render_context_bar(
     }
 
     lines
-}
-
-/// Calculate rainbow color for prompt index with exponential decay to gray.
-/// `distance` is how many prompts back from the most recent (0 = most recent).
-/// Format seconds as a human-readable age string
-fn format_age(secs: i64) -> String {
-    if secs < 0 {
-        "future?".to_string()
-    } else if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}
-
-/// Get how long ago the binary was built and when the code was committed
-/// Shows both if they differ significantly, otherwise just the build time
-fn binary_age() -> Option<String> {
-    let git_date = env!("JCODE_GIT_DATE");
-
-    let now = chrono::Utc::now();
-
-    let build_date = crate::build::current_binary_built_at()?;
-    let build_secs = now.signed_duration_since(build_date).num_seconds();
-
-    // Parse git commit date
-    let git_commit_date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z")
-        .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-    let git_secs = git_commit_date.map(|d| now.signed_duration_since(d).num_seconds());
-
-    let build_age = format_age(build_secs);
-
-    // If git date is available and differs significantly (>5 min), show both
-    if let Some(git_secs) = git_secs {
-        let diff = (git_secs - build_secs).abs();
-        if diff > 300 {
-            // More than 5 minutes difference
-            let git_age = format_age(git_secs);
-            return Some(format!("{}, code {}", build_age, git_age));
-        }
-    }
-
-    Some(build_age)
-}
-
-/// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
-fn shorten_model_name(model: &str) -> String {
-    // Handle OpenRouter models (format: provider/model-name)
-    // Keep the full identifier for display
-    if model.contains('/') {
-        return model.to_string();
-    }
-    // Handle common Claude model patterns
-    if model.contains("opus") {
-        if model.contains("4-5") || model.contains("4.5") {
-            return "claude4.5opus".to_string();
-        }
-        return "claudeopus".to_string();
-    }
-    if model.contains("sonnet") {
-        if model.contains("3-5") || model.contains("3.5") {
-            return "claude3.5sonnet".to_string();
-        }
-        return "claudesonnet".to_string();
-    }
-    if model.contains("haiku") {
-        return "claudehaiku".to_string();
-    }
-    // Handle OpenAI models (gpt-5.2-codex -> gpt5.2codex)
-    if model.starts_with("gpt-5") {
-        // e.g., "gpt-5.2-codex" -> "gpt5.2codex"
-        return model.replace("gpt-", "gpt").replace("-", "");
-    }
-    if model.starts_with("gpt-4") {
-        return model.replace("gpt-", "").replace("-", "");
-    }
-    if model.starts_with("gpt-3") {
-        return "gpt3.5".to_string();
-    }
-    // Fallback: remove common suffixes and dashes
-    model.split('-').take(3).collect::<Vec<_>>().join("")
-}
-
-/// Calculate the number of visual lines an input string will occupy
-/// when wrapped to a given width, accounting for explicit newlines.
-fn calculate_input_lines(input: &str, line_width: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-
-    if line_width == 0 {
-        return 1;
-    }
-    if input.is_empty() {
-        return 1;
-    }
-
-    let mut total_lines = 0;
-    for line in input.split('\n') {
-        if line.is_empty() {
-            total_lines += 1;
-        } else {
-            let display_width: usize = line.chars().map(|c| c.width().unwrap_or(0)).sum();
-            total_lines += display_width.div_ceil(line_width);
-        }
-    }
-    total_lines.max(1)
-}
-
-/// Format status line content for visual debug capture
-fn format_status_for_debug(app: &dyn TuiState) -> String {
-    match app.status() {
-        ProcessingStatus::Idle => {
-            if let Some(notice) = app.status_notice() {
-                format!("Idle (notice: {})", notice)
-            } else if let Some((input, output)) = app.total_session_tokens() {
-                format!(
-                    "Idle (session: {}k in, {}k out)",
-                    input / 1000,
-                    output / 1000
-                )
-            } else if let Some(tip) =
-                info_widget::occasional_status_tip(120, app.animation_elapsed() as u64)
-            {
-                format!("Idle ({})", tip)
-            } else {
-                "Idle".to_string()
-            }
-        }
-        ProcessingStatus::Sending => "Sending...".to_string(),
-        ProcessingStatus::Connecting(ref phase) => format!("{}...", phase),
-        ProcessingStatus::Thinking(_start) => {
-            let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
-            format!("Thinking... ({:.1}s)", elapsed)
-        }
-        ProcessingStatus::Streaming => {
-            let (input, output) = app.streaming_tokens();
-            format!("Streaming (↑{} ↓{})", input, output)
-        }
-        ProcessingStatus::RunningTool(ref name) => {
-            if name == "batch"
-                && let Some(progress) = app.batch_progress()
-            {
-                let completed = progress.completed;
-                let total = progress.total;
-                let mut status = format!("Running batch: {}/{} done", completed, total);
-                if let Some(running) = summarize_batch_running_tools_compact(&progress.running) {
-                    status.push_str(&format!(", running: {}", running));
-                }
-                if let Some(last) = progress.last_completed.filter(|_| completed < total) {
-                    status.push_str(&format!(", last done: {}", last));
-                }
-                return status;
-            }
-            format!("Running tool: {}", name)
-        }
-    }
 }
 
 /// Pre-computed image region from line scanning
