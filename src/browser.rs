@@ -277,42 +277,51 @@ pub async fn ensure_browser_setup() -> Result<String> {
         }
         Ok(false) => {
             log.push_str("not connected\n");
-            log.push_str("       Firefox extension needs to be installed.\n");
+            if should_prompt_extension_install(&initial_status) {
+                log.push_str("       Firefox extension needs to be installed.\n");
 
-            match install_extension().await {
-                Ok(msg) => {
-                    log.push_str(&msg);
-                    // Check again after install attempt
-                    log.push_str("       Waiting for extension connection... ");
-                    match wait_for_ping(15).await {
-                        Ok(true) => {
-                            log.push_str("connected!\n");
-                            mark_setup_complete().ok();
-                        }
-                        Ok(false) => {
-                            log.push_str("timed out\n");
-                            log.push_str(
-                                "       Extension not detected. You can retry with: jcode browser setup\n",
-                            );
-                            log.push_str(
-                                "       Or manually install: Firefox > about:addons > Install from file > ",
-                            );
-                            log.push_str(&xpi_path().to_string_lossy());
-                            log.push('\n');
-                        }
-                        Err(e) => {
-                            log.push_str(&format!("error: {}\n", e));
+                match install_extension().await {
+                    Ok(msg) => {
+                        log.push_str(&msg);
+                        // Check again after install attempt
+                        log.push_str("       Waiting for extension connection... ");
+                        match wait_for_ping(15).await {
+                            Ok(true) => {
+                                log.push_str("connected!\n");
+                                mark_setup_complete().ok();
+                            }
+                            Ok(false) => {
+                                log.push_str("timed out\n");
+                                log.push_str(
+                                    "       Extension not detected. You can retry with: jcode browser setup\n",
+                                );
+                                log.push_str(
+                                    "       Or manually install: Firefox > about:addons > Install from file > ",
+                                );
+                                log.push_str(&xpi_path().to_string_lossy());
+                                log.push('\n');
+                            }
+                            Err(e) => {
+                                log.push_str(&format!("error: {}\n", e));
+                            }
                         }
                     }
+                    Err(e) => {
+                        log.push_str(&format!("       Could not auto-install extension: {}\n", e));
+                        log.push_str(
+                            "       Manually install: Firefox > about:addons > Install from file > ",
+                        );
+                        log.push_str(&xpi_path().to_string_lossy());
+                        log.push('\n');
+                    }
                 }
-                Err(e) => {
-                    log.push_str(&format!("       Could not auto-install extension: {}\n", e));
-                    log.push_str(
-                        "       Manually install: Firefox > about:addons > Install from file > ",
-                    );
-                    log.push_str(&xpi_path().to_string_lossy());
-                    log.push('\n');
-                }
+            } else {
+                log.push_str(
+                    "       Existing browser setup was already completed, so setup will not reopen the extension installer.\n",
+                );
+                log.push_str(
+                    "       Make sure Firefox is running with the Browser Agent Bridge extension enabled, then re-run `jcode browser status`.\n",
+                );
             }
         }
         Err(e) => {
@@ -750,6 +759,10 @@ async fn wait_for_ready(timeout_secs: u64) -> Result<bool> {
     Ok(false)
 }
 
+fn should_prompt_extension_install(status: &BrowserStatus) -> bool {
+    !status.setup_complete
+}
+
 async fn install_extension() -> Result<String> {
     let xpi = xpi_path();
     let mut msg = String::new();
@@ -851,6 +864,27 @@ mod tests {
         let name = get_platform_asset_name();
         assert!(name.starts_with("browser-"));
         assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_should_prompt_extension_install_only_before_setup_complete() {
+        let incomplete = BrowserStatus {
+            backend: "firefox_agent_bridge",
+            browser: "firefox",
+            setup_complete: false,
+            binary_installed: true,
+            responding: false,
+            compatible: false,
+            missing_actions: vec![],
+            ready: false,
+        };
+        assert!(should_prompt_extension_install(&incomplete));
+
+        let complete = BrowserStatus {
+            setup_complete: true,
+            ..incomplete
+        };
+        assert!(!should_prompt_extension_install(&complete));
     }
 
     #[tokio::test]
