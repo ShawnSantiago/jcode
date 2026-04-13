@@ -1,4 +1,3 @@
-
 use super::*;
 use std::path::Path;
 
@@ -564,36 +563,39 @@ fn test_draw_left_border_clamps_to_buffer_area() {
 #[test]
 fn test_extract_xml_attribute_reads_value() {
     let tag = r#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 400 300">"#;
-    assert_eq!(extract_xml_attribute(tag, "width"), Some("800"));
-    assert_eq!(extract_xml_attribute(tag, "height"), Some("600"));
-    assert_eq!(extract_xml_attribute(tag, "viewBox"), Some("0 0 400 300"));
-    assert_eq!(extract_xml_attribute(tag, "missing"), None);
+    assert_eq!(svg::extract_xml_attribute(tag, "width"), Some("800"));
+    assert_eq!(svg::extract_xml_attribute(tag, "height"), Some("600"));
+    assert_eq!(
+        svg::extract_xml_attribute(tag, "viewBox"),
+        Some("0 0 400 300")
+    );
+    assert_eq!(svg::extract_xml_attribute(tag, "missing"), None);
 }
 
 #[test]
 fn test_parse_svg_length_handles_variants() {
-    assert_eq!(parse_svg_length("800"), Some(800.0));
-    assert_eq!(parse_svg_length("640px"), Some(640.0));
-    assert_eq!(parse_svg_length("100%"), None);
-    assert_eq!(parse_svg_length(""), None);
-    assert_eq!(parse_svg_length("0"), None);
-    assert_eq!(parse_svg_length("-5"), None);
+    assert_eq!(svg::parse_svg_length("800"), Some(800.0));
+    assert_eq!(svg::parse_svg_length("640px"), Some(640.0));
+    assert_eq!(svg::parse_svg_length("100%"), None);
+    assert_eq!(svg::parse_svg_length(""), None);
+    assert_eq!(svg::parse_svg_length("0"), None);
+    assert_eq!(svg::parse_svg_length("-5"), None);
 }
 
 #[test]
 fn test_parse_svg_viewbox_size_extracts_wh() {
     let tag = r#"<svg viewBox="10 20 800 600">"#;
-    let result = parse_svg_viewbox_size(tag);
+    let result = svg::parse_svg_viewbox_size(tag);
     assert_eq!(result, Some((800.0, 600.0)));
 
     let tag_no_vb = r#"<svg width="400" height="300">"#;
-    assert_eq!(parse_svg_viewbox_size(tag_no_vb), None);
+    assert_eq!(svg::parse_svg_viewbox_size(tag_no_vb), None);
 }
 
 #[test]
 fn test_set_xml_attribute_updates_existing() {
     let tag = r#"<svg width="800" height="600">"#;
-    let updated = set_xml_attribute(tag, "width", "1200");
+    let updated = svg::set_xml_attribute(tag, "width", "1200");
     assert!(updated.contains(r#"width="1200""#), "got: {}", updated);
     assert!(!updated.contains(r#"width="800""#));
     assert!(updated.contains(r#"height="600""#));
@@ -622,10 +624,10 @@ fn test_retarget_svg_for_png_preserves_aspect_ratio_from_viewbox() {
     let svg = r#"<svg width="200" height="100" viewBox="0 0 200 100"></svg>"#;
     let rewritten = retarget_svg_for_png(svg, 400.0, 9999.0);
     // Parse actual width from the result
-    let w = extract_xml_attribute(&rewritten, "width")
+    let w = svg::extract_xml_attribute(&rewritten, "width")
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.0);
-    let h = extract_xml_attribute(&rewritten, "height")
+    let h = svg::extract_xml_attribute(&rewritten, "height")
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.0);
     assert!((w - 400.0).abs() < 1.0, "expected w≈400, got {}", w);
@@ -642,10 +644,10 @@ fn test_retarget_svg_for_png_respects_target_height_cap() {
     // fit the target height instead of preserving width and blowing past it.
     let svg = r#"<svg width="100" height="400" viewBox="0 0 100 400"></svg>"#;
     let rewritten = retarget_svg_for_png(svg, 800.0, 600.0);
-    let w = extract_xml_attribute(&rewritten, "width")
+    let w = svg::extract_xml_attribute(&rewritten, "width")
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.0);
-    let h = extract_xml_attribute(&rewritten, "height")
+    let h = svg::extract_xml_attribute(&rewritten, "height")
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.0);
     assert!((w - 150.0).abs() < 1.0, "expected w≈150, got {}", w);
