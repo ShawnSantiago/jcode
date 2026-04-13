@@ -45,6 +45,7 @@ pub(super) fn is_running_stable_release() -> bool {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn calculate_input_lines(input: &str, line_width: usize) -> usize {
     use unicode_width::UnicodeWidthChar;
 

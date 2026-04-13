@@ -774,10 +774,6 @@ pub(crate) fn get_tool_summary(tool: &ToolCall) -> String {
     get_tool_summary_with_budget(tool, 50, None)
 }
 
-pub(super) fn get_tool_summary_with_bash_limit(tool: &ToolCall, bash_max_chars: usize) -> String {
-    get_tool_summary_with_budget(tool, bash_max_chars, None)
-}
-
 pub(super) fn get_tool_summary_with_budget(
     tool: &ToolCall,
     bash_max_chars: usize,
@@ -1351,7 +1347,7 @@ pub(super) fn format_batch_running_tool(tool: &ToolCall, bash_max_chars: usize) 
     let prefix = batch_subcall_index(&tool.id)
         .map(|idx| format!("#{} ", idx))
         .unwrap_or_default();
-    let detail = get_tool_summary_with_bash_limit(tool, bash_max_chars);
+    let detail = get_tool_summary_with_budget(tool, bash_max_chars, None);
 
     if detail.is_empty() {
         format!("{}{}", prefix, tool.name)

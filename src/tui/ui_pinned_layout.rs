@@ -100,6 +100,7 @@ fn scaled_image_rows(image_h_cells: u32, zoom_percent: u8) -> u16 {
         .min(u16::MAX as u32) as u16
 }
 
+#[cfg(test)]
 pub(super) fn estimate_side_panel_image_rows_with_font(
     width: u32,
     height: u32,
