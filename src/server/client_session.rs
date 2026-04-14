@@ -49,6 +49,39 @@ fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
     })
 }
 
+fn restored_session_was_interrupted(
+    session_id: &str,
+    previous_status: &crate::session::SessionStatus,
+    agent: &Agent,
+) -> bool {
+    let last_is_user = agent
+        .last_message_role()
+        .as_ref()
+        .map(|role| *role == crate::message::Role::User)
+        .unwrap_or(false);
+    let last_is_reload_interrupted = session_was_interrupted_by_reload(agent);
+
+    if last_is_user && matches!(previous_status, crate::session::SessionStatus::Active) {
+        crate::logging::info(&format!(
+            "Session {} was Active with pending user message - treating as interrupted",
+            session_id
+        ));
+    }
+
+    if last_is_reload_interrupted {
+        crate::logging::info(&format!(
+            "Session {} contains reload interruption markers - will auto-resume",
+            session_id
+        ));
+    }
+
+    matches!(
+        previous_status,
+        crate::session::SessionStatus::Crashed { .. }
+    ) || (matches!(previous_status, crate::session::SessionStatus::Active) && last_is_user)
+        || last_is_reload_interrupted
+}
+
 fn mark_remote_reload_started(request_id: &str) {
     crate::server::write_reload_state(
         request_id,
@@ -892,32 +925,10 @@ pub(super) async fn handle_resume_session(
     };
 
     let was_interrupted = match &result {
-        Ok(status) => match status {
-            crate::session::SessionStatus::Crashed { .. } => true,
-            crate::session::SessionStatus::Active => {
-                let agent_guard = agent.lock().await;
-                let last_role = agent_guard.last_message_role();
-                let last_is_user = last_role
-                    .as_ref()
-                    .map(|role| *role == crate::message::Role::User)
-                    .unwrap_or(false);
-                let last_is_reload_interrupted = session_was_interrupted_by_reload(&agent_guard);
-                if last_is_user {
-                    crate::logging::info(&format!(
-                        "Session {} was Active with pending user message - treating as interrupted",
-                        session_id
-                    ));
-                }
-                if last_is_reload_interrupted {
-                    crate::logging::info(&format!(
-                        "Session {} was interrupted by reload - will auto-resume",
-                        session_id
-                    ));
-                }
-                last_is_user || last_is_reload_interrupted
-            }
-            _ => false,
-        },
+        Ok(status) => {
+            let agent_guard = agent.lock().await;
+            restored_session_was_interrupted(&session_id, status, &agent_guard)
+        }
         Err(_) => false,
     };
 
@@ -1061,7 +1072,8 @@ pub(super) async fn handle_resume_session(
 mod tests {
     use super::{
         handle_clear_session, handle_reload, handle_resume_session, mark_remote_reload_started,
-        rename_shutdown_signal, session_was_interrupted_by_reload,
+        rename_shutdown_signal, restored_session_was_interrupted,
+        session_was_interrupted_by_reload,
     };
     use crate::agent::Agent;
     use crate::message::ContentBlock;
@@ -1231,6 +1243,50 @@ mod tests {
         }]);
 
         assert!(!session_was_interrupted_by_reload(&agent));
+    }
+
+    #[test]
+    fn restored_closed_session_with_reload_marker_still_counts_as_interrupted() {
+        let agent = test_agent(vec![crate::session::StoredMessage {
+            id: "msg_5".to_string(),
+            role: crate::message::Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "partial\n\n[generation interrupted - server reloading]".to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }]);
+
+        assert!(restored_session_was_interrupted(
+            "session_test_reload",
+            &crate::session::SessionStatus::Closed,
+            &agent,
+        ));
+    }
+
+    #[test]
+    fn restored_closed_session_without_reload_marker_is_not_interrupted() {
+        let agent = test_agent(vec![crate::session::StoredMessage {
+            id: "msg_6".to_string(),
+            role: crate::message::Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "finished normally".to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }]);
+
+        assert!(!restored_session_was_interrupted(
+            "session_test_reload",
+            &crate::session::SessionStatus::Closed,
+            &agent,
+        ));
     }
 
     #[test]
