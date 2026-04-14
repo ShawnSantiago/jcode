@@ -175,30 +175,6 @@ pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
     hasher.finish()
 }
 
-#[allow(dead_code)]
-fn pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
-    let max_line_width = lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0);
-    let pad = (width as usize).saturating_sub(max_line_width) / 2;
-    if pad == 0 {
-        return;
-    }
-
-    let pad_str = " ".repeat(pad);
-    for line in lines {
-        line.spans.insert(0, Span::raw(pad_str.clone()));
-        line.alignment = Some(ratatui::layout::Alignment::Left);
-    }
-}
-
 fn prepare_active_batch_progress(
     app: &dyn TuiState,
     width: u16,

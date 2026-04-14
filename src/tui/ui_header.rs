@@ -205,7 +205,7 @@ fn abbreviate_home(path: &str) -> String {
     path.to_string()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn truncate_to_width(text: &str, width: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= width {
@@ -226,7 +226,7 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     truncated
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn choose_header_candidate(width: usize, candidates: Vec<String>) -> String {
     let mut last_non_empty = String::new();
     for candidate in candidates
@@ -242,28 +242,7 @@ fn choose_header_candidate(width: usize, candidates: Vec<String>) -> String {
     truncate_to_width(&last_non_empty, width)
 }
 
-#[allow(dead_code)]
-fn path_display_candidates(path: &str) -> Vec<String> {
-    let display = abbreviate_home(path);
-    let mut candidates = vec![display.clone()];
-
-    let parts: Vec<&str> = display.split('/').filter(|part| !part.is_empty()).collect();
-    if parts.len() >= 2 {
-        candidates.push(format!(
-            "…/{}/{}",
-            parts[parts.len() - 2],
-            parts[parts.len() - 1]
-        ));
-    }
-    if let Some(last) = parts.last() {
-        candidates.push((*last).to_string());
-    }
-
-    candidates.dedup();
-    candidates
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 fn semver_core() -> String {
     semver()
         .split('-')
@@ -292,41 +271,7 @@ fn version_display_candidates() -> Vec<String> {
     vec![full, core, minor, shortest]
 }
 
-#[allow(dead_code)]
-fn provider_model_display_candidates(provider_name: &str, model: &str) -> Vec<String> {
-    let trimmed_model = model.trim();
-    if trimmed_model.is_empty() {
-        return Vec::new();
-    }
-
-    let short_model = shorten_model_name(trimmed_model);
-    let nice_model = format_model_name(&short_model);
-    let provider = provider_name.trim().to_lowercase();
-    let mut candidates = Vec::new();
-
-    if !provider.is_empty() {
-        candidates.push(format!("{} · {}", provider, nice_model));
-        if short_model != nice_model {
-            candidates.push(format!("{} · {}", provider, short_model));
-        }
-    }
-
-    candidates.push(nice_model.clone());
-    if short_model != nice_model {
-        candidates.push(short_model);
-    }
-    if trimmed_model != model
-        || !candidates
-            .iter()
-            .any(|candidate| candidate == trimmed_model)
-    {
-        candidates.push(trimmed_model.to_string());
-    }
-
-    candidates
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 fn configured_auth_count(auth: &AuthStatus) -> usize {
     [
         auth.jcode,

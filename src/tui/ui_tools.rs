@@ -735,11 +735,6 @@ fn truncate_identifier_display(value: &str, max_width: usize) -> String {
     truncate_middle_display(value, max_width)
 }
 
-#[allow(dead_code)]
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    truncate_end_display(s, max_chars)
-}
-
 pub(super) fn batch_subcall_index(id: &str) -> Option<usize> {
     id.strip_prefix("batch-")?
         .split('-')
