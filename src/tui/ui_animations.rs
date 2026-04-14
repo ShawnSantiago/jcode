@@ -12,7 +12,7 @@ const LUMINANCE: &[u8] = b".,-~:;=!*#$@";
 
 const STARTUP_VARIANTS: &[&str] = &["donut", "globe", "cube", "octahedron", "lorenz", "rabbit"];
 
-const IDLE_VARIANTS: &[&str] = &["donut", "knot", "three_rings"];
+const IDLE_VARIANTS: &[&str] = &["donut", "pulse_donut", "three_rings", "orbit_rings"];
 
 struct RenderBuffers {
     output: Vec<Vec<u8>>,
@@ -139,7 +139,6 @@ fn render_startup_animation(
         "donut" => render_donut(elapsed, width, height),
         "globe" => render_globe(elapsed, width, height),
         "cube" => render_cube(elapsed, width, height),
-        "mobius" => render_mobius(elapsed, width, height),
         "octahedron" => render_octahedron(elapsed, width, height),
         "lorenz" => render_lorenz(elapsed, width, height),
         "rabbit" => render_rabbit(elapsed, width, height),
@@ -383,42 +382,6 @@ fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     })
 }
 
-fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    with_render_buffers(width, height, |output, zbuffer| {
-        let rot = elapsed * 0.6;
-        let cam_dist = 6.0;
-        let mut u: f32 = 0.0;
-        while u < std::f32::consts::TAU {
-            let mut v: f32 = -0.4;
-            while v <= 0.4 {
-                let half_u = u / 2.0;
-                let x = (1.0 + v * half_u.cos()) * u.cos();
-                let y = (1.0 + v * half_u.cos()) * u.sin();
-                let z = v * half_u.sin();
-                let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
-                if let Some((xp, yp, depth)) = project_3d(rx, ry, rz, width, height, cam_dist)
-                    && xp >= 0
-                    && (xp as usize) < width
-                    && yp >= 0
-                    && (yp as usize) < height
-                    && depth > zbuffer[yp as usize][xp as usize]
-                {
-                    zbuffer[yp as usize][xp as usize] = depth;
-                    let nx = half_u.cos() * u.cos();
-                    let ny = half_u.cos() * u.sin();
-                    let nz = half_u.sin();
-                    let (rnx, rny, _) = rotate_xyz(nx, ny, nz, elapsed * 0.3, rot, 0.0);
-                    let lum = (rnx * 0.5 + rny * 0.5 + 0.5).clamp(0.0, 1.0);
-                    let li = (lum * (LUMINANCE.len() - 1) as f32) as usize;
-                    output[yp as usize][xp as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
-                }
-                v += 0.04;
-            }
-            u += 0.03;
-        }
-    })
-}
-
 fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
         let ax = elapsed * 0.9;
@@ -647,12 +610,6 @@ where
         .map(|name| normalized_animation_name(name.as_ref()))
         .collect();
 
-    if disabled.contains("mobius") {
-        disabled.insert("knot".to_string());
-    }
-    if disabled.contains("knot") {
-        disabled.insert("mobius".to_string());
-    }
     if disabled.contains("three_rings") || disabled.contains("three-rings") {
         disabled.insert("three_rings".to_string());
         disabled.insert("gyroscope".to_string());
@@ -811,7 +768,15 @@ pub(super) fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: R
                 &mut bufs.lum_map,
                 &mut bufs.z_buf,
             ),
-            "knot" => sample_knot(
+            "pulse_donut" => sample_pulse_donut(
+                elapsed,
+                sw,
+                sh,
+                &mut bufs.hit,
+                &mut bufs.lum_map,
+                &mut bufs.z_buf,
+            ),
+            "orbit_rings" => sample_orbit_rings(
                 elapsed,
                 sw,
                 sh,
@@ -952,6 +917,71 @@ fn sample_donut(
             phi += 0.014;
         }
         theta += 0.04;
+    }
+}
+
+fn sample_pulse_donut(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let a_rot = elapsed * 1.05 + (elapsed * 0.75).sin() * 0.45;
+    let b_rot = elapsed * 0.48 + (elapsed * 0.55).cos() * 0.30;
+    let cos_a = a_rot.cos();
+    let sin_a = a_rot.sin();
+    let cos_b = b_rot.cos();
+    let sin_b = b_rot.sin();
+
+    let aspect = 0.5;
+    let base_r1 = 0.88f32 + 0.10 * (elapsed * 1.6).sin();
+    let base_r2 = 2.0f32 + 0.18 * (elapsed * 0.9).cos();
+    let k2 = 5.2f32;
+    let k1 = (sw as f32).min(sh as f32 / aspect) * k2 * 0.34 / (base_r1 + base_r2 + 0.25);
+
+    let mut theta: f32 = 0.0;
+    while theta < std::f32::consts::TAU {
+        let ct = theta.cos();
+        let st = theta.sin();
+        let ring_wobble = (elapsed * 1.25 + theta * 3.0).sin();
+        let r1 = base_r1 * (1.0 + 0.14 * ring_wobble);
+        let r2 = base_r2 + 0.16 * (elapsed * 0.8 + theta * 2.0).cos();
+
+        let mut phi: f32 = 0.0;
+        while phi < std::f32::consts::TAU {
+            let cp = phi.cos();
+            let sp = phi.sin();
+
+            let cx = r2 + r1 * ct;
+            let cy = r1 * st;
+
+            let x = cx * (cos_b * cp + sin_a * sin_b * sp) - cy * cos_a * sin_b;
+            let y = cx * (sin_b * cp - sin_a * cos_b * sp) + cy * cos_a * cos_b;
+            let z = k2 + cos_a * cx * sp + cy * sin_a;
+            let ooz = 1.0 / z;
+
+            let xp = (sw as f32 / 2.0 + k1 * ooz * x) as isize;
+            let yp = (sh as f32 / 2.0 - k1 * ooz * y * aspect) as isize;
+
+            let lum = (cp * ct * sin_b - cos_a * ct * sp - sin_a * st
+                + cos_b * (cos_a * st - ct * sin_a * sp)
+                + ring_wobble * 0.18)
+                .clamp(-1.0, 1.0);
+
+            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                let idx = yp as usize * sw + xp as usize;
+                if ooz > z_buf[idx] {
+                    z_buf[idx] = ooz;
+                    lum_map[idx] = lum;
+                    hit[idx] = true;
+                }
+            }
+
+            phi += 0.016;
+        }
+        theta += 0.038;
     }
 }
 
@@ -1125,7 +1155,7 @@ fn sample_gyroscope(
     }
 }
 
-fn sample_knot(
+fn sample_orbit_rings(
     elapsed: f32,
     sw: usize,
     sh: usize,
@@ -1133,79 +1163,105 @@ fn sample_knot(
     lum_map: &mut [f32],
     z_buf: &mut [f32],
 ) {
-    let rot_y = elapsed * 0.4;
-    let rot_x = elapsed * 0.2;
-    let cam_dist = 6.0f32;
+    let rot_x = elapsed * 0.32 + (elapsed * 0.45).sin() * 0.30;
+    let rot_y = elapsed * 0.56;
+    let rot_z = elapsed * 0.22 + (elapsed * 0.38).cos() * 0.22;
+    let cam_dist = 8.8f32;
     let aspect = 0.5;
-    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.28;
-    let tube_r = 0.35f32;
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.29;
 
-    let mut t: f32 = 0.0;
-    while t < std::f32::consts::TAU {
-        let kx = (2.0 + (2.0 * t).cos()) * t.cos();
-        let ky = (2.0 + (2.0 * t).cos()) * t.sin();
-        let kz = (2.0 * t).sin();
+    let rings = [
+        (0u8, 2.35f32, 0.10f32, 0.32f32, 0.0f32),
+        (1u8, 1.78f32, 0.11f32, 0.26f32, std::f32::consts::TAU / 3.0),
+        (
+            2u8,
+            1.22f32,
+            0.09f32,
+            0.20f32,
+            2.0 * std::f32::consts::TAU / 3.0,
+        ),
+        (1u8, 2.70f32, 0.08f32, 0.36f32, std::f32::consts::TAU / 6.0),
+    ];
 
-        let dt = 0.01f32;
-        let t2 = t + dt;
-        let dx = (2.0 + (2.0 * t2).cos()) * t2.cos() - kx;
-        let dy = (2.0 + (2.0 * t2).cos()) * t2.sin() - ky;
-        let dz = (2.0 * t2).sin() - kz;
-        let dl = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
-        let tx = dx / dl;
-        let ty = dy / dl;
-        let tz = dz / dl;
+    for (ring_idx, &(axis, major_r, tube_r, orbit_r, phase_offset)) in rings.iter().enumerate() {
+        let phase = elapsed * (0.30 + ring_idx as f32 * 0.10) + phase_offset;
+        let center_x = orbit_r * phase.cos() * 0.55;
+        let center_y = orbit_r * (phase * 0.7).sin() * 0.30;
+        let center_z = orbit_r * phase.sin() * 0.50;
+        let radius_pulse = 1.0 + 0.08 * (elapsed * 1.1 + phase_offset).sin();
 
-        let up_x = 0.0f32;
-        let up_y = 0.0f32;
-        let up_z = 1.0f32;
-        let bx = ty * up_z - tz * up_y;
-        let by = tz * up_x - tx * up_z;
-        let bz = tx * up_y - ty * up_x;
-        let bl = (bx * bx + by * by + bz * bz).sqrt().max(0.001);
-        let bx = bx / bl;
-        let by = by / bl;
-        let bz = bz / bl;
-        let nx = by * tz - bz * ty;
-        let ny = bz * tx - bx * tz;
-        let nz = bx * ty - by * tx;
+        let mut u: f32 = 0.0;
+        while u < std::f32::consts::TAU {
+            let uu = u + phase * 0.7;
+            let cu = uu.cos();
+            let su = uu.sin();
 
-        let mut phi: f32 = 0.0;
-        while phi < std::f32::consts::TAU {
-            let cp = phi.cos();
-            let sp = phi.sin();
-            let px = kx + tube_r * (cp * nx + sp * bx);
-            let py = ky + tube_r * (cp * ny + sp * by);
-            let pz = kz + tube_r * (cp * nz + sp * bz);
+            let mut v: f32 = 0.0;
+            while v < std::f32::consts::TAU {
+                let cv = v.cos();
+                let sv = v.sin();
+                let ring_r = major_r * radius_pulse + tube_r * cv;
 
-            let sn_x = cp * nx + sp * bx;
-            let sn_y = cp * ny + sp * by;
-            let sn_z = cp * nz + sp * bz;
+                let (x, y, z, nx, ny, nz) = match axis {
+                    0 => {
+                        let x = center_x + tube_r * sv;
+                        let y = center_y + ring_r * cu;
+                        let z = center_z + ring_r * su;
+                        let nx = sv;
+                        let ny = cv * cu;
+                        let nz = cv * su;
+                        (x, y, z, nx, ny, nz)
+                    }
+                    1 => {
+                        let x = center_x + ring_r * cu;
+                        let y = center_y + tube_r * sv;
+                        let z = center_z + ring_r * su;
+                        let nx = cv * cu;
+                        let ny = sv;
+                        let nz = cv * su;
+                        (x, y, z, nx, ny, nz)
+                    }
+                    _ => {
+                        let x = center_x + ring_r * cu;
+                        let y = center_y + ring_r * su;
+                        let z = center_z + tube_r * sv;
+                        let nx = cv * cu;
+                        let ny = cv * su;
+                        let nz = sv;
+                        (x, y, z, nx, ny, nz)
+                    }
+                };
 
-            let (rx, ry, rz) = rotate_xyz(px, py, pz, rot_x, rot_y, 0.0);
-            let d = cam_dist + rz;
-            if d < 0.1 {
-                phi += 0.08;
-                continue;
-            }
-            let proj = cam_dist / d;
-            let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
-            let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
-            let depth = 1.0 / d;
-
-            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
-                let idx = yp as usize * sw + xp as usize;
-                if depth > z_buf[idx] {
-                    z_buf[idx] = depth;
-                    let (rnx, rny, _) = rotate_xyz(sn_x, sn_y, sn_z, rot_x, rot_y, 0.0);
-                    let lum = (rnx * 0.4 + rny * 0.5 + 0.3).clamp(-1.0, 1.0);
-                    lum_map[idx] = lum;
-                    hit[idx] = true;
+                let (rx, ry, rz) = rotate_xyz(x, y, z, rot_x, rot_y, rot_z);
+                let d = cam_dist + rz;
+                if d < 0.1 {
+                    v += 0.22;
+                    continue;
                 }
+
+                let proj = cam_dist / d;
+                let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
+                let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
+                let depth = 1.0 / d;
+
+                if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                    let idx = yp as usize * sw + xp as usize;
+                    if depth > z_buf[idx] {
+                        z_buf[idx] = depth;
+                        let (rnx, rny, rnz) = rotate_xyz(nx, ny, nz, rot_x, rot_y, rot_z);
+                        let glow = (phase.cos() * 0.10 + ring_idx as f32 * 0.03).clamp(-0.2, 0.2);
+                        let lum =
+                            (rnx * 0.42 + rny * 0.33 + rnz * 0.25 + 0.18 + glow).clamp(-1.0, 1.0);
+                        lum_map[idx] = lum;
+                        hit[idx] = true;
+                    }
+                }
+
+                v += 0.22;
             }
-            phi += 0.08;
+
+            u += 0.032;
         }
-        t += 0.016;
     }
 }
 
@@ -1449,15 +1505,15 @@ mod tests {
     }
 
     #[test]
-    fn idle_variants_exclude_black_hole() {
+    fn idle_variants_exclude_retired_variants() {
+        assert!(!IDLE_VARIANTS.contains(&"knot"));
         assert!(!IDLE_VARIANTS.contains(&"black_hole"));
     }
 
     #[test]
-    fn disabling_mobius_also_disables_knot_alias() {
-        let disabled = expand_disabled_animation_names(["mobius"]);
-        assert!(disabled.contains("mobius"));
-        assert!(disabled.contains("knot"));
+    fn idle_variants_include_new_donut_and_ring_variants() {
+        assert!(IDLE_VARIANTS.contains(&"pulse_donut"));
+        assert!(IDLE_VARIANTS.contains(&"orbit_rings"));
     }
 
     #[test]
