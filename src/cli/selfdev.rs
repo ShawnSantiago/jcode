@@ -429,7 +429,10 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
                 "build".to_string(),
-                "--release".to_string(),
+                "--profile".to_string(),
+                "selfdev".to_string(),
+                "-p".to_string(),
+                "jcode".to_string(),
                 "--bin".to_string(),
                 "jcode".to_string(),
             ]
@@ -445,7 +448,10 @@ mod tests {
             build.args,
             vec![
                 "build".to_string(),
-                "--release".to_string(),
+                "--profile".to_string(),
+                "selfdev".to_string(),
+                "-p".to_string(),
+                "jcode".to_string(),
                 "--bin".to_string(),
                 "jcode".to_string(),
             ]

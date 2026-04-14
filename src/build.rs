@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
