@@ -19,6 +19,8 @@ use std::path::PathBuf;
 mod macos_launcher;
 #[cfg(any(test, target_os = "macos"))]
 mod macos_terminal;
+#[cfg(windows)]
+mod windows_setup;
 #[cfg(any(test, target_os = "macos"))]
 use macos_launcher::{install_macos_app_launcher, should_refresh_macos_app_launcher};
 #[cfg(target_os = "macos")]
@@ -27,6 +29,10 @@ use macos_terminal::launch_script_for_macos_terminal;
 use macos_terminal::{
     MacTerminalKind, effective_macos_terminal, escape_applescript_text, escape_shell_single_quotes,
     launch_command_for_macos_terminal, paused_jcode_shell_command, save_preferred_macos_terminal,
+};
+#[cfg(windows)]
+use windows_setup::{
+    create_windows_desktop_shortcut, maybe_show_windows_setup_hints, run_setup_hotkey_windows,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -112,78 +118,6 @@ fn is_ghostty_installed() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Detect which terminal the user is currently running in (Windows).
-#[cfg(windows)]
-fn detect_terminal() -> &'static str {
-    if std::env::var("WT_SESSION").is_ok() {
-        "windows-terminal"
-    } else if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
-        "wezterm"
-    } else if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
-        "alacritty"
-    } else {
-        "unknown"
-    }
-}
-
-/// Check if Alacritty is installed.
-#[cfg(windows)]
-fn is_alacritty_installed() -> bool {
-    std::process::Command::new("where")
-        .arg("alacritty")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Check if winget is available (Windows).
-#[cfg(windows)]
-fn is_winget_available() -> bool {
-    std::process::Command::new("where")
-        .arg("winget")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Find the full path to Alacritty binary.
-#[cfg(windows)]
-fn find_alacritty_path() -> Option<String> {
-    let candidates = [
-        r"C:\Program Files\Alacritty\alacritty.exe",
-        r"C:\Program Files (x86)\Alacritty\alacritty.exe",
-    ];
-    for c in &candidates {
-        if std::path::Path::new(c).exists() {
-            return Some(c.to_string());
-        }
-    }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let p = format!(r"{}\Microsoft\WinGet\Links\alacritty.exe", local);
-        if std::path::Path::new(&p).exists() {
-            return Some(p);
-        }
-    }
-    let output = std::process::Command::new("where")
-        .arg("alacritty")
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(line) = stdout.lines().next() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(target_os = "macos")]
@@ -522,195 +456,6 @@ fn read_choice() -> String {
     input.trim().to_lowercase()
 }
 
-/// Show the hotkey setup nudge. Returns true if something was set up.
-#[cfg(windows)]
-fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
-    let terminal = detect_terminal();
-    let using_alacritty = terminal == "alacritty" || is_alacritty_installed();
-
-    let terminal_name = if using_alacritty {
-        "Alacritty"
-    } else {
-        "Windows Terminal"
-    };
-
-    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    eprintln!(
-        "\x1b[36m│\x1b[0m \x1b[1m💡 Set up Alt+; to launch jcode from anywhere?\x1b[0m              \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    Creates a global hotkey - no extra software needed.       \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    Opens jcode in {:<39}    \x1b[36m│\x1b[0m",
-        format!("{}.", terminal_name)
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Set up   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again        \x1b[36m│\x1b[0m"
-    );
-    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-    eprint!("\x1b[36m  >\x1b[0m ");
-    let _ = io::stderr().flush();
-
-    let choice = read_choice();
-
-    match choice.as_str() {
-        "y" | "yes" => {
-            eprint!("\n");
-            match create_hotkey_shortcut(using_alacritty) {
-                Ok(()) => {
-                    state.hotkey_configured = true;
-                    let _ = state.save();
-                    eprintln!(
-                        "  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m) → {} + jcode",
-                        terminal_name
-                    );
-                    eprintln!();
-                    true
-                }
-                Err(e) => {
-                    eprintln!("  \x1b[31m✗\x1b[0m Failed to create hotkey: {}", e);
-                    eprintln!(
-                        "    You can set it up manually later with: \x1b[1mjcode setup-hotkey\x1b[0m"
-                    );
-                    eprintln!();
-                    false
-                }
-            }
-        }
-        "d" | "dont" => {
-            state.hotkey_dismissed = true;
-            let _ = state.save();
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Show the Alacritty install nudge. Returns true if Alacritty was installed.
-#[cfg(windows)]
-fn nudge_alacritty(state: &mut SetupHintsState) -> bool {
-    let terminal = detect_terminal();
-
-    let current_terminal = match terminal {
-        "windows-terminal" => "Windows Terminal",
-        "wezterm" => "WezTerm",
-        _ => "your current terminal",
-    };
-
-    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    eprintln!(
-        "\x1b[36m│\x1b[0m \x1b[1m💡 Alacritty: the fastest terminal for jcode\x1b[0m               \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    {:<55} \x1b[36m│\x1b[0m",
-        format!("You're using {}.", current_terminal)
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    Alacritty is GPU-accelerated with the lowest latency.    \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Install   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again       \x1b[36m│\x1b[0m"
-    );
-    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-    eprint!("\x1b[36m  >\x1b[0m ");
-    let _ = io::stderr().flush();
-
-    let choice = read_choice();
-
-    match choice.as_str() {
-        "y" | "yes" => {
-            eprint!("\n");
-            if !is_winget_available() {
-                eprintln!("  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:");
-                eprintln!("     https://alacritty.org/");
-                eprintln!();
-                eprintln!("     Or install winget first: https://aka.ms/getwinget");
-                eprintln!();
-                return false;
-            }
-
-            match install_alacritty() {
-                Ok(()) => {
-                    state.alacritty_configured = true;
-                    let _ = state.save();
-                    eprintln!("  \x1b[32m✓\x1b[0m Alacritty installed!");
-
-                    if state.hotkey_configured {
-                        eprintln!("  Updating hotkey to use Alacritty...");
-                        match create_hotkey_shortcut(true) {
-                            Ok(()) => {
-                                eprintln!(
-                                    "  \x1b[32m✓\x1b[0m Hotkey updated: \x1b[1mAlt+;\x1b[0m → Alacritty + jcode"
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("  \x1b[33m⚠\x1b[0m  Could not update hotkey: {}", e);
-                            }
-                        }
-                    }
-                    eprintln!();
-                    true
-                }
-                Err(e) => {
-                    eprintln!("  \x1b[31m✗\x1b[0m Failed to install Alacritty: {}", e);
-                    eprintln!("    Install manually: https://alacritty.org/");
-                    eprintln!();
-                    false
-                }
-            }
-        }
-        "d" | "dont" => {
-            state.alacritty_dismissed = true;
-            let _ = state.save();
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Prompt the user to try out their new hotkey.
-#[cfg(windows)]
-fn prompt_try_it_out(installed_alacritty: bool) {
-    eprintln!("\x1b[32m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    eprintln!(
-        "\x1b[32m│\x1b[0m \x1b[1m✨ All set! Try it out:\x1b[0m                                     \x1b[32m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[32m│\x1b[0m    Press \x1b[1mAlt+;\x1b[0m from anywhere to launch jcode.                \x1b[32m│\x1b[0m"
-    );
-    if installed_alacritty {
-        eprintln!(
-            "\x1b[32m│\x1b[0m    It will open in \x1b[1mAlacritty\x1b[0m for maximum performance.    \x1b[32m│\x1b[0m"
-        );
-    }
-    eprintln!(
-        "\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[32m│\x1b[0m    \x1b[90m(Starting jcode normally in 3 seconds...)\x1b[0m                 \x1b[32m│\x1b[0m"
-    );
-    eprintln!("\x1b[32m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-    eprintln!();
-
-    std::thread::sleep(std::time::Duration::from_secs(3));
-}
-
 #[cfg(target_os = "macos")]
 fn macos_guided_ghostty_message(current_terminal: MacTerminalKind) -> String {
     format!(
@@ -837,88 +582,7 @@ pub fn run_setup_hotkey(_listen_macos_hotkey: bool) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let mut state = SetupHintsState::load();
-        let terminal = detect_terminal();
-        let already_using_alacritty = terminal == "alacritty";
-
-        eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
-        eprintln!();
-
-        eprintln!(
-            "  Detected terminal: {}",
-            match terminal {
-                "windows-terminal" => "Windows Terminal",
-                "wezterm" => "WezTerm",
-                "alacritty" => "Alacritty",
-                _ => "Unknown",
-            }
-        );
-
-        if is_alacritty_installed() && !already_using_alacritty {
-            eprintln!("  Alacritty: \x1b[32minstalled\x1b[0m");
-        } else if already_using_alacritty {
-            eprintln!("  Alacritty: \x1b[32mactive\x1b[0m");
-        } else {
-            eprintln!("  Alacritty: \x1b[90mnot installed\x1b[0m");
-        }
-        eprintln!();
-
-        let mut installed_alacritty = false;
-        if !already_using_alacritty && !is_alacritty_installed() {
-            eprintln!(
-                "  Alacritty is the fastest terminal emulator (GPU-accelerated, lowest latency)."
-            );
-            eprint!("  Install Alacritty? \x1b[32m[y]\x1b[0m/\x1b[90m[n]\x1b[0m: ");
-            let _ = io::stderr().flush();
-            let choice = read_choice();
-            if choice == "y" || choice == "yes" {
-                if !is_winget_available() {
-                    eprintln!(
-                        "\n  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:"
-                    );
-                    eprintln!("     https://alacritty.org/\n");
-                } else {
-                    match install_alacritty() {
-                        Ok(()) => {
-                            state.alacritty_configured = true;
-                            installed_alacritty = true;
-                            eprintln!("  \x1b[32m✓\x1b[0m Alacritty installed!\n");
-                        }
-                        Err(e) => {
-                            eprintln!("  \x1b[31m✗\x1b[0m Install failed: {}\n", e);
-                        }
-                    }
-                }
-            }
-            eprintln!();
-        }
-
-        let use_alacritty = already_using_alacritty || is_alacritty_installed();
-        let terminal_name = if use_alacritty {
-            "Alacritty"
-        } else {
-            "Windows Terminal"
-        };
-
-        eprintln!(
-            "  Setting up \x1b[1mAlt+;\x1b[0m → {} + jcode...",
-            terminal_name
-        );
-
-        match create_hotkey_shortcut(use_alacritty) {
-            Ok(()) => {
-                state.hotkey_configured = true;
-                let _ = state.save();
-                eprintln!("  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m)");
-                eprintln!();
-                prompt_try_it_out(installed_alacritty);
-            }
-            Err(e) => {
-                eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
-            }
-        }
-
-        Ok(())
+        run_setup_hotkey_windows()
     }
 }
 
@@ -1002,35 +666,7 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
 
     #[cfg(windows)]
     {
-        if state.launch_count % 3 != 0 {
-            return startup_hints;
-        }
-
-        let terminal = detect_terminal();
-        let already_using_alacritty = terminal == "alacritty";
-
-        if already_using_alacritty {
-            state.alacritty_configured = true;
-            state.alacritty_dismissed = true;
-            let _ = state.save();
-        }
-
-        let mut did_setup_hotkey = false;
-        let mut did_install_alacritty = false;
-
-        if !state.hotkey_configured && !state.hotkey_dismissed {
-            did_setup_hotkey = nudge_hotkey(&mut state);
-        }
-
-        if !state.alacritty_configured && !state.alacritty_dismissed && !already_using_alacritty {
-            did_install_alacritty = nudge_alacritty(&mut state);
-        }
-
-        if did_setup_hotkey || (did_install_alacritty && state.hotkey_configured) {
-            prompt_try_it_out(did_install_alacritty);
-        }
-
-        return startup_hints;
+        return maybe_show_windows_setup_hints(&mut state, startup_hints);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1084,47 +720,7 @@ pub fn run_setup_launcher() -> Result<()> {
 fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
     #[cfg(windows)]
     {
-        let exe = std::env::current_exe()?;
-        let exe_path = exe.to_string_lossy();
-
-        let (target, args) = if is_alacritty_installed() {
-            let alacritty = find_alacritty_path().unwrap_or_else(|| "alacritty".to_string());
-            (alacritty, format!("-e \"{}\"", exe_path))
-        } else {
-            (exe_path.to_string(), String::new())
-        };
-
-        let desktop_dir =
-            std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".into());
-        let shortcut_path = format!("{}\\Desktop\\jcode.lnk", desktop_dir);
-
-        let ps_script = format!(
-            r#"
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut("{shortcut_path}")
-$shortcut.TargetPath = "{target}"
-$shortcut.Arguments = '{args}'
-$shortcut.Description = "jcode - AI coding agent"
-$shortcut.Save()
-Write-Output "OK"
-"#,
-            shortcut_path = shortcut_path,
-            target = target,
-            args = args,
-        );
-
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps_script])
-            .output()?;
-
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("OK") {
-                state.desktop_shortcut_created = true;
-                let _ = state.save();
-                crate::logging::info(&format!("Created desktop shortcut: {}", shortcut_path));
-            }
-        }
+        create_windows_desktop_shortcut(state)?;
     }
 
     #[cfg(any(test, target_os = "macos"))]
