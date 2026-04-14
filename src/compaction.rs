@@ -15,8 +15,6 @@
 //! - **Semantic**: compact based on embedding-detected topic shifts and
 //!   relevance scoring. Falls back to proactive if embeddings are unavailable.
 
-#![allow(dead_code)]
-
 use crate::message::{ContentBlock, Message, Role};
 use crate::provider::Provider;
 use anyhow::Result;
