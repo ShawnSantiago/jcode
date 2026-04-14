@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x07|\x1b\\))")
+PROBE = "jqx92"
 DEFAULT_TIMEOUT_S = 20.0
 DEFAULT_SETTLE_S = 1.0
 DEFAULT_TOOLS = [
@@ -46,8 +47,10 @@ class SessionLaunch:
     pgid: int
     master_fd: int
     ready: bool
+    input_ready: bool
     excerpt: str | None
     seconds_to_visible: float | None
+    seconds_to_input_ready: float | None
     buffer_excerpt: str | None
 
 
@@ -210,6 +213,8 @@ def launch_interactive(argv: list[str], cwd: Path, env: dict[str, str], timeout_
     start = time.perf_counter()
     buf = b""
     ready = False
+    input_ready = False
+    probe_sent = False
     excerpt = None
     while time.perf_counter() - start < timeout_s:
         rlist, _, _ = select.select([master_fd], [], [], 0.05)
@@ -225,18 +230,29 @@ def launch_interactive(argv: list[str], cwd: Path, env: dict[str, str], timeout_
                 excerpt = first_meaningful_line(plain)
                 if excerpt:
                     ready = True
+                    if not probe_sent:
+                        try:
+                            os.write(master_fd, PROBE.encode())
+                            probe_sent = True
+                        except OSError:
+                            break
+                if probe_sent and PROBE in plain:
+                    input_ready = True
                     break
         if proc.poll() is not None:
             break
-    if ready:
+    if input_ready or ready:
         time.sleep(settle_s)
+    elapsed = time.perf_counter() - start
     return SessionLaunch(
         root_pid=proc.pid,
         pgid=os.getpgid(proc.pid),
         master_fd=master_fd,
         ready=ready,
+        input_ready=input_ready,
         excerpt=excerpt,
-        seconds_to_visible=(time.perf_counter() - start) if ready else None,
+        seconds_to_visible=elapsed if ready else None,
+        seconds_to_input_ready=elapsed if input_ready else None,
         buffer_excerpt=(strip_ansi(buf.decode("utf-8", "replace"))[:300] or None),
     )
 
