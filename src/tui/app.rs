@@ -56,11 +56,12 @@ mod remote_notifications;
 mod replay;
 mod run_shell;
 mod state_ui;
+mod state_ui_storage;
 mod tui_lifecycle;
 mod tui_state;
 mod turn;
 
-pub(crate) use self::state_ui::compact_display_messages_for_storage;
+pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 
 pub(crate) fn extract_input_shell_command(input: &str) -> Option<&str> {
     self::input::extract_input_shell_command(input)
