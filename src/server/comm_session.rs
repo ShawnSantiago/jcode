@@ -57,7 +57,11 @@ fn spawn_visible_session_window(
 }
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
-    crate::tui::App::save_startup_message_for_session(session_id, message.to_string());
+    crate::tui::App::save_startup_submission_for_session(
+        session_id,
+        message.to_string(),
+        Vec::new(),
+    );
 }
 
 fn clear_headed_startup_message(session_id: &str) {
@@ -781,6 +785,10 @@ mod tests {
                 assert!(
                     data.contains(startup),
                     "startup payload should be written before launch"
+                );
+                assert!(
+                    data.contains(r#""submit_on_restore":true"#),
+                    "startup payload should auto-submit on restore"
                 );
                 Ok(true)
             },
