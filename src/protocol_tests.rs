@@ -108,7 +108,8 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         compaction_mode,
         side_panel,
         ..
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(provider_name.as_deref(), Some("openai"));
@@ -133,7 +134,8 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id,
         message,
         retry_after_secs,
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(id, 42);
@@ -150,7 +152,8 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
         id,
         message,
         retry_after_secs,
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(id, 7);
@@ -200,7 +203,8 @@ fn test_stdin_response_roundtrip() -> Result<()> {
     assert_eq!(decoded.id(), 99);
     let Request::StdinResponse {
         request_id, input, ..
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected StdinResponse"));
     };
     assert_eq!(request_id, "stdin-call_abc-1");
@@ -215,7 +219,8 @@ fn test_stdin_response_deserialize_from_json() -> Result<()> {
     assert_eq!(decoded.id(), 5);
     let Request::StdinResponse {
         request_id, input, ..
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected StdinResponse"));
     };
     assert_eq!(request_id, "req-42");
@@ -241,7 +246,8 @@ fn test_stdin_request_event_roundtrip() -> Result<()> {
         prompt,
         is_password,
         tool_call_id,
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected StdinRequest"));
     };
     assert_eq!(request_id, "stdin-xyz-1");
@@ -282,7 +288,8 @@ fn test_comm_await_members_roundtrip() -> Result<()> {
         session_ids,
         timeout_secs,
         ..
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected CommAwaitMembers"));
     };
     assert_eq!(session_id, "sess_waiter");
@@ -301,10 +308,14 @@ fn test_comm_await_members_defaults() -> Result<()> {
         session_ids,
         timeout_secs,
         ..
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected CommAwaitMembers"));
     };
-    assert!(session_ids.is_empty(), "session_ids should default to empty");
+    assert!(
+        session_ids.is_empty(),
+        "session_ids should default to empty"
+    );
     assert_eq!(timeout_secs, None, "timeout_secs should default to None");
     Ok(())
 }
@@ -338,7 +349,8 @@ fn test_comm_await_members_response_roundtrip() -> Result<()> {
         completed,
         members,
         summary,
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected CommAwaitMembersResponse"));
     };
     assert_eq!(id, 55);
@@ -398,7 +410,8 @@ fn test_transcript_request_roundtrip() -> Result<()> {
         mode,
         session_id,
         ..
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("expected Transcript request"));
     };
     assert_eq!(text, "hello from whisper");
@@ -458,7 +471,9 @@ fn test_memory_activity_event_roundtrip() -> Result<()> {
         MemoryStateSnapshot::SidecarChecking { count: 3 }
     );
     assert_eq!(activity.state_age_ms, 275);
-    let pipeline = activity.pipeline.ok_or_else(|| anyhow!("pipeline snapshot"))?;
+    let pipeline = activity
+        .pipeline
+        .ok_or_else(|| anyhow!("pipeline snapshot"))?;
     assert_eq!(pipeline.search, MemoryStepStatusSnapshot::Done);
     assert_eq!(pipeline.verify, MemoryStepStatusSnapshot::Running);
     assert_eq!(pipeline.verify_progress, Some((1, 3)));

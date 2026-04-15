@@ -1,5 +1,6 @@
 
 use super::*;
+use anyhow::{Result, anyhow};
 
 use tempfile::TempDir;
 
@@ -34,8 +35,8 @@ fn copilot_api_token_expiring_within_buffer() {
 }
 
 #[test]
-fn load_token_from_hosts_json() {
-    let dir = TempDir::new().unwrap();
+fn load_token_from_hosts_json() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let hosts_path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "github.com": {
@@ -43,45 +44,48 @@ fn load_token_from_hosts_json() {
             "user": "testuser"
         }
     });
-    std::fs::write(&hosts_path, serde_json::to_string(&data).unwrap()).unwrap();
+    std::fs::write(&hosts_path, serde_json::to_string(&data)?)?;
 
-    let token = load_token_from_json(&hosts_path.to_path_buf()).unwrap();
+    let token = load_token_from_json(&hosts_path.to_path_buf())?;
     assert_eq!(token, "gho_testtoken123");
+    Ok(())
 }
 
 #[test]
-fn load_token_from_apps_json() {
-    let dir = TempDir::new().unwrap();
+fn load_token_from_apps_json() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let apps_path = dir.path().join("apps.json");
     let data = serde_json::json!({
         "github.com": {
             "oauth_token": "ghu_vscodetoken456"
         }
     });
-    std::fs::write(&apps_path, serde_json::to_string(&data).unwrap()).unwrap();
+    std::fs::write(&apps_path, serde_json::to_string(&data)?)?;
 
-    let token = load_token_from_json(&apps_path.to_path_buf()).unwrap();
+    let token = load_token_from_json(&apps_path.to_path_buf())?;
     assert_eq!(token, "ghu_vscodetoken456");
+    Ok(())
 }
 
 #[test]
-fn load_token_missing_oauth_token_field() {
-    let dir = TempDir::new().unwrap();
+fn load_token_missing_oauth_token_field() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "github.com": {
             "user": "testuser"
         }
     });
-    std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_string(&data)?)?;
 
     let result = load_token_from_json(&path.to_path_buf());
     assert!(result.is_err());
+    Ok(())
 }
 
 #[test]
-fn load_token_empty_oauth_token() {
-    let dir = TempDir::new().unwrap();
+fn load_token_empty_oauth_token() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "github.com": {
@@ -89,10 +93,11 @@ fn load_token_empty_oauth_token() {
             "user": "testuser"
         }
     });
-    std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_string(&data)?)?;
 
     let result = load_token_from_json(&path.to_path_buf());
     assert!(result.is_err());
+    Ok(())
 }
 
 #[test]
@@ -103,18 +108,19 @@ fn load_token_nonexistent_file() {
 }
 
 #[test]
-fn load_token_invalid_json() {
-    let dir = TempDir::new().unwrap();
+fn load_token_invalid_json() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
-    std::fs::write(&path, "not valid json{{{").unwrap();
+    std::fs::write(&path, "not valid json{{{")?;
 
     let result = load_token_from_json(&path.to_path_buf());
     assert!(result.is_err());
+    Ok(())
 }
 
 #[test]
-fn load_token_from_copilot_config_json() {
-    let dir = TempDir::new().unwrap();
+fn load_token_from_copilot_config_json() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("config.json");
     std::fs::write(
         &path,
@@ -124,11 +130,11 @@ fn load_token_from_copilot_config_json() {
             }
         })
         .to_string(),
-    )
-    .unwrap();
+    )?;
 
-    let token = load_token_from_config_json(&path).unwrap();
+    let token = load_token_from_config_json(&path)?;
     assert_eq!(token, "ghu_config_token");
+    Ok(())
 }
 
 #[test]
@@ -150,10 +156,10 @@ fn normalize_candidate_token_rejects_empty_and_unknown_values() {
 }
 
 #[test]
-fn save_and_load_github_token() {
-    let dir = TempDir::new().unwrap();
+fn save_and_load_github_token() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let config_dir = dir.path().join("github-copilot");
-    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&config_dir)?;
 
     let hosts_path = config_dir.join("hosts.json");
 
@@ -163,23 +169,29 @@ fn save_and_load_github_token() {
     entry.insert("oauth_token".to_string(), "gho_saved_token".to_string());
     config.insert("github.com".to_string(), entry);
 
-    let json = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&hosts_path, json).unwrap();
+    let json = serde_json::to_string_pretty(&config)?;
+    std::fs::write(&hosts_path, json)?;
 
-    let loaded = load_token_from_json(&hosts_path.to_path_buf()).unwrap();
+    let loaded = load_token_from_json(&hosts_path.to_path_buf())?;
     assert_eq!(loaded, "gho_saved_token");
+    Ok(())
 }
 
 #[test]
-fn save_github_token_creates_config_dir() {
+fn save_github_token_creates_config_dir() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let config_dir = dir.path().join("github-copilot");
     let prev_jcode_home = std::env::var_os("JCODE_HOME");
     let prev_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
     crate::env::remove_var("JCODE_HOME");
-    crate::env::set_var("XDG_CONFIG_HOME", dir.path().to_str().unwrap());
+    crate::env::set_var(
+        "XDG_CONFIG_HOME",
+        dir.path()
+            .to_str()
+            .ok_or_else(|| anyhow!("temp dir path should be valid UTF-8"))?,
+    );
 
     let result = save_github_token("gho_newtoken", "testuser");
     assert!(result.is_ok());
@@ -187,7 +199,7 @@ fn save_github_token_creates_config_dir() {
     let hosts_path = config_dir.join("hosts.json");
     assert!(hosts_path.exists());
 
-    let loaded = load_token_from_json(&hosts_path).unwrap();
+    let loaded = load_token_from_json(&hosts_path)?;
     assert_eq!(loaded, "gho_newtoken");
 
     if let Some(prev) = prev_jcode_home {
@@ -201,12 +213,13 @@ fn save_github_token_creates_config_dir() {
     } else {
         crate::env::remove_var("XDG_CONFIG_HOME");
     }
+    Ok(())
 }
 
 #[test]
-fn legacy_copilot_config_dir_uses_jcode_home_external_dir() {
+fn legacy_copilot_config_dir_uses_jcode_home_external_dir() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 
@@ -224,19 +237,20 @@ fn legacy_copilot_config_dir_uses_jcode_home_external_dir() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+    Ok(())
 }
 
 #[test]
-fn save_github_token_makes_future_loads_available() {
+fn save_github_token_makes_future_loads_available() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let prev_jcode_home = std::env::var_os("JCODE_HOME");
     let prev_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::env::remove_var("XDG_CONFIG_HOME");
 
-    save_github_token("gho_persisted_token", "testuser").unwrap();
+    save_github_token("gho_persisted_token", "testuser")?;
 
     let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
     assert!(
@@ -245,7 +259,7 @@ fn save_github_token_makes_future_loads_available() {
             &hosts_path
         )
     );
-    assert_eq!(load_github_token().unwrap(), "gho_persisted_token");
+    assert_eq!(load_github_token()?, "gho_persisted_token");
 
     if let Some(prev) = prev_jcode_home {
         crate::env::set_var("JCODE_HOME", prev);
@@ -258,30 +272,32 @@ fn save_github_token_makes_future_loads_available() {
     } else {
         crate::env::remove_var("XDG_CONFIG_HOME");
     }
+    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn load_token_from_json_does_not_change_external_permissions() {
+fn load_token_from_json_does_not_change_external_permissions() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     std::fs::write(
         &path,
         r#"{"github.com":{"oauth_token":"gho_test","user":"tester"}}"#,
     )
-    .unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    ?;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
 
-    let token = load_token_from_json(&path).expect("load token");
+    let token = load_token_from_json(&path)?;
     assert_eq!(token, "gho_test");
 
-    let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
-    let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    let dir_mode = std::fs::metadata(dir.path())?.permissions().mode() & 0o777;
+    let file_mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
     assert_eq!(dir_mode, 0o755);
     assert_eq!(file_mode, 0o644);
+    Ok(())
 }
 
 #[test]
@@ -348,7 +364,7 @@ fn copilot_account_type_display() {
 }
 
 #[test]
-fn device_code_response_deserialize() {
+fn device_code_response_deserialize() -> Result<()> {
     let json = r#"{
             "device_code": "dc_1234",
             "user_code": "ABCD-1234",
@@ -356,61 +372,66 @@ fn device_code_response_deserialize() {
             "expires_in": 900,
             "interval": 5
         }"#;
-    let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
+    let resp: DeviceCodeResponse = serde_json::from_str(json)?;
     assert_eq!(resp.device_code, "dc_1234");
     assert_eq!(resp.user_code, "ABCD-1234");
     assert_eq!(resp.verification_uri, "https://github.com/login/device");
     assert_eq!(resp.expires_in, 900);
     assert_eq!(resp.interval, 5);
+    Ok(())
 }
 
 #[test]
-fn access_token_response_success() {
+fn access_token_response_success() -> Result<()> {
     let json = r#"{
             "access_token": "gho_xxx123",
             "token_type": "bearer",
             "scope": "read:user"
         }"#;
-    let resp: AccessTokenResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.access_token.unwrap(), "gho_xxx123");
+    let resp: AccessTokenResponse = serde_json::from_str(json)?;
+    assert_eq!(resp.access_token.ok_or_else(|| anyhow!("missing access token"))?, "gho_xxx123");
     assert!(resp.error.is_none());
+    Ok(())
 }
 
 #[test]
-fn access_token_response_pending() {
+fn access_token_response_pending() -> Result<()> {
     let json = r#"{
             "error": "authorization_pending",
             "error_description": "The authorization request is still pending."
         }"#;
-    let resp: AccessTokenResponse = serde_json::from_str(json).unwrap();
+    let resp: AccessTokenResponse = serde_json::from_str(json)?;
     assert!(resp.access_token.is_none());
-    assert_eq!(resp.error.unwrap(), "authorization_pending");
+    assert_eq!(resp.error.ok_or_else(|| anyhow!("missing error"))?, "authorization_pending");
+    Ok(())
 }
 
 #[test]
-fn access_token_response_expired() {
+fn access_token_response_expired() -> Result<()> {
     let json = r#"{
             "error": "expired_token",
             "error_description": "The device code has expired."
         }"#;
-    let resp: AccessTokenResponse = serde_json::from_str(json).unwrap();
-    assert_eq!(resp.error.unwrap(), "expired_token");
+    let resp: AccessTokenResponse = serde_json::from_str(json)?;
+    assert_eq!(resp.error.ok_or_else(|| anyhow!("missing error"))?, "expired_token");
+    Ok(())
 }
 
 #[test]
-fn copilot_token_response_roundtrip() {
+fn copilot_token_response_roundtrip() -> Result<()> {
     let resp = CopilotTokenResponse {
         token: "bearer_token_xxx".to_string(),
         expires_at: 1700000000,
     };
-    let json = serde_json::to_string(&resp).unwrap();
-    let parsed: CopilotTokenResponse = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&resp)?;
+    let parsed: CopilotTokenResponse = serde_json::from_str(&json)?;
     assert_eq!(parsed.token, "bearer_token_xxx");
     assert_eq!(parsed.expires_at, 1700000000);
+    Ok(())
 }
 
 #[test]
-fn copilot_model_info_deserialize() {
+fn copilot_model_info_deserialize() -> Result<()> {
     let json = r#"{
             "id": "claude-sonnet-4",
             "name": "Claude Sonnet 4",
@@ -422,24 +443,26 @@ fn copilot_model_info_deserialize() {
                 "family": "claude-sonnet-4"
             }
         }"#;
-    let model: CopilotModelInfo = serde_json::from_str(json).unwrap();
+    let model: CopilotModelInfo = serde_json::from_str(json)?;
     assert_eq!(model.id, "claude-sonnet-4");
     assert_eq!(model.vendor, "anthropic");
     assert!(model.model_picker_enabled);
+    Ok(())
 }
 
 #[test]
-fn copilot_model_info_minimal() {
+fn copilot_model_info_minimal() -> Result<()> {
     let json = r#"{"id": "gpt-4o"}"#;
-    let model: CopilotModelInfo = serde_json::from_str(json).unwrap();
+    let model: CopilotModelInfo = serde_json::from_str(json)?;
     assert_eq!(model.id, "gpt-4o");
     assert_eq!(model.name, "");
     assert!(!model.model_picker_enabled);
+    Ok(())
 }
 
 #[test]
-fn load_token_multiple_hosts() {
-    let dir = TempDir::new().unwrap();
+fn load_token_multiple_hosts() -> Result<()> {
+    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "api.github.com": {
@@ -455,10 +478,11 @@ fn load_token_multiple_hosts() {
             "user": "user3"
         }
     });
-    std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_string(&data)?)?;
 
-    let token = load_token_from_json(&path.to_path_buf()).unwrap();
+    let token = load_token_from_json(&path.to_path_buf())?;
     assert_eq!(token, "gho_primary");
+    Ok(())
 }
 
 #[test]
