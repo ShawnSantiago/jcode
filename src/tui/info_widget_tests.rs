@@ -4,6 +4,7 @@ use super::{
     UsageProvider, WidgetKind, calculate_placements, occasional_status_tip, render_memory_compact,
     render_memory_widget, render_model_widget, truncate_smart,
 };
+use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,15 @@ fn edge(source: usize, target: usize, kind: &str) -> GraphEdge {
         target,
         kind: kind.to_string(),
     }
+}
+
+fn lines_text(lines: &[ratatui::text::Line<'_>]) -> String {
+    lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -605,6 +615,73 @@ fn render_context_compact_prefers_observed_token_usage_for_label() {
         !text.contains("100k/200k"),
         "should not fall back to char estimate when observed tokens exist: {text}"
     );
+}
+
+#[test]
+fn swarm_widget_renders_member_roles_and_details() {
+    let data = InfoWidgetData {
+        swarm_info: Some(SwarmInfo {
+            session_count: 3,
+            client_count: Some(1),
+            members: vec![
+                SwarmMemberStatus {
+                    session_id: "coord-12345678".to_string(),
+                    friendly_name: Some("coord".to_string()),
+                    status: "running".to_string(),
+                    detail: Some("orchestrating patch".to_string()),
+                    role: Some("coordinator".to_string()),
+                },
+                SwarmMemberStatus {
+                    session_id: "tree-12345678".to_string(),
+                    friendly_name: Some("trees".to_string()),
+                    status: "ready".to_string(),
+                    detail: Some("worktree synced".to_string()),
+                    role: Some("worktree_manager".to_string()),
+                },
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let text = lines_text(&super::render_swarm_widget(&data, Rect::new(0, 0, 80, 4)));
+
+    assert!(text.contains("3s"), "got: {text}");
+    assert!(text.contains("1c"), "got: {text}");
+    assert!(text.contains("★"), "got: {text}");
+    assert!(text.contains("◆"), "got: {text}");
+    assert!(
+        text.contains("coord running — orchestrating patch"),
+        "got: {text}"
+    );
+    assert!(
+        text.contains("trees ready — worktree synced"),
+        "got: {text}"
+    );
+}
+
+#[test]
+fn background_widget_and_compact_share_summary_format() {
+    let info = BackgroundInfo {
+        running_count: 2,
+        running_tasks: vec!["bash".to_string(), "cargo".to_string()],
+        memory_agent_active: true,
+        memory_agent_turns: 4,
+    };
+    let data = InfoWidgetData {
+        background_info: Some(info.clone()),
+        ..Default::default()
+    };
+
+    let widget_text = lines_text(&super::render_background_widget(
+        &data,
+        Rect::new(0, 0, 40, 1),
+    ));
+    let compact_text = lines_text(&super::render_background_compact(&info));
+
+    assert_eq!(widget_text, compact_text);
+    assert!(widget_text.contains("mem:4"), "got: {widget_text}");
+    assert!(widget_text.contains("bg:bash,cargo"), "got: {widget_text}");
 }
 
 #[test]
