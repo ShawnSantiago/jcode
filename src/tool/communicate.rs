@@ -126,13 +126,56 @@ fn format_context_entries(entries: &[ContextEntry]) -> ToolOutput {
     }
 }
 
+fn duplicate_friendly_names<'a>(names: impl IntoIterator<Item = Option<&'a str>>) -> std::collections::HashSet<&'a str> {
+    let mut counts = std::collections::HashMap::<&'a str, usize>::new();
+    for name in names.into_iter().flatten() {
+        *counts.entry(name).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect()
+}
+
+fn session_display_suffix(session_id: &str) -> &str {
+    let suffix = session_id.rsplit('_').next().unwrap_or(session_id);
+    if suffix.len() > 6 {
+        &suffix[suffix.len() - 6..]
+    } else {
+        suffix
+    }
+}
+
+fn display_friendly_name(
+    friendly_name: Option<&str>,
+    session_id: &str,
+    duplicate_names: &std::collections::HashSet<&str>,
+) -> String {
+    match friendly_name {
+        Some(name) if duplicate_names.contains(name) => {
+            format!("{} [{}]", name, session_display_suffix(session_id))
+        }
+        Some(name) => name.to_string(),
+        None => session_id.to_string(),
+    }
+}
+
 fn format_members(ctx: &ToolContext, members: &[AgentInfo]) -> ToolOutput {
     if members.is_empty() {
         ToolOutput::new("No other agents in this codebase.")
     } else {
+        let duplicate_names = duplicate_friendly_names(
+            members
+                .iter()
+                .map(|member| member.friendly_name.as_deref()),
+        );
         let mut output = String::from("Agents in this codebase:\n\n");
         for member in members {
-            let name = member.friendly_name.as_deref().unwrap_or("unknown");
+            let name = display_friendly_name(
+                member.friendly_name.as_deref(),
+                &member.session_id,
+                &duplicate_names,
+            );
             let session = &member.session_id;
             let role = member.role.as_deref().unwrap_or("agent");
             let files = member.files_touched.join(", ");
@@ -210,12 +253,18 @@ fn format_awaited_members(
     };
 
     if !members.is_empty() {
+        let duplicate_names = duplicate_friendly_names(
+            members
+                .iter()
+                .map(|member| member.friendly_name.as_deref()),
+        );
         output.push_str("\nMember statuses:\n");
         for member in members {
-            let name = member
-                .friendly_name
-                .as_deref()
-                .unwrap_or(&member.session_id);
+            let name = display_friendly_name(
+                member.friendly_name.as_deref(),
+                &member.session_id,
+                &duplicate_names,
+            );
             let icon = if member.done { "✓" } else { "✗" };
             output.push_str(&format!("  {} {} ({})\n", icon, name, member.status));
         }
@@ -943,9 +992,12 @@ impl Tool for CommunicateTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommunicateInput, default_await_target_statuses, format_members};
+    use super::{
+        CommunicateInput, CommunicateTool, default_await_target_statuses,
+        format_awaited_members, format_members,
+    };
     use crate::message::{Message, StreamEvent, ToolDefinition};
-    use crate::protocol::{AgentInfo, Request, ServerEvent};
+    use crate::protocol::{AgentInfo, AwaitedMemberStatus, Request, ServerEvent};
     use crate::provider::{EventStream, Provider};
     use crate::server::Server;
     use crate::tool::{Tool, ToolContext, ToolExecutionMode};
@@ -959,7 +1011,6 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    use super::CommunicateTool;
 
     #[test]
     fn tool_is_named_swarm() {
@@ -1358,6 +1409,63 @@ mod tests {
 
         assert!(output.output.contains("Status: running — working on tests"));
         assert!(output.output.contains("Files: src/main.rs"));
+    }
+
+    #[test]
+    fn format_members_disambiguates_duplicate_friendly_names() {
+        let ctx = test_ctx(
+            "session_self_1234567890_deadbeefcafebabe",
+            std::path::Path::new("."),
+        );
+        let output = format_members(
+            &ctx,
+            &[
+                AgentInfo {
+                    session_id: "session_shark_1234567890_aaaaaaaaaaaa0001".to_string(),
+                    friendly_name: Some("shark".to_string()),
+                    files_touched: vec![],
+                    status: Some("ready".to_string()),
+                    detail: None,
+                    role: Some("agent".to_string()),
+                },
+                AgentInfo {
+                    session_id: "session_shark_1234567890_bbbbbbbbbbbb0002".to_string(),
+                    friendly_name: Some("shark".to_string()),
+                    files_touched: vec![],
+                    status: Some("ready".to_string()),
+                    detail: None,
+                    role: Some("agent".to_string()),
+                },
+            ],
+        );
+
+        assert!(output.output.contains("shark [aa0001]"));
+        assert!(output.output.contains("shark [bb0002]"));
+    }
+
+    #[test]
+    fn format_awaited_members_disambiguates_duplicate_friendly_names() {
+        let output = format_awaited_members(
+            true,
+            "done",
+            &[
+                AwaitedMemberStatus {
+                    session_id: "session_shark_1234567890_aaaaaaaaaaaa0001".to_string(),
+                    friendly_name: Some("shark".to_string()),
+                    status: "ready".to_string(),
+                    done: true,
+                },
+                AwaitedMemberStatus {
+                    session_id: "session_shark_1234567890_bbbbbbbbbbbb0002".to_string(),
+                    friendly_name: Some("shark".to_string()),
+                    status: "ready".to_string(),
+                    done: true,
+                },
+            ],
+        );
+
+        assert!(output.output.contains("✓ shark [aa0001] (ready)"));
+        assert!(output.output.contains("✓ shark [bb0002] (ready)"));
     }
 
     #[tokio::test]
