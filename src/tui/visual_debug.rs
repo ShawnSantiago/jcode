@@ -466,35 +466,81 @@ fn normalize_string(s: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
 
-    // Cached regex patterns for performance
-    static UUID_RE: OnceLock<Regex> = OnceLock::new();
-    static SESSION_ID_RE: OnceLock<Regex> = OnceLock::new();
-    static TIMESTAMP_RE: OnceLock<Regex> = OnceLock::new();
-    static ISO_DATE_RE: OnceLock<Regex> = OnceLock::new();
-    static DURATION_RE: OnceLock<Regex> = OnceLock::new();
-    static PATH_RE: OnceLock<Regex> = OnceLock::new();
-    static ELAPSED_RE: OnceLock<Regex> = OnceLock::new();
-    static TOKENS_RE: OnceLock<Regex> = OnceLock::new();
+    fn compile_regex(pattern: &str) -> Option<Regex> {
+        match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "visual_debug: failed to compile normalization regex: {}",
+                    err
+                ));
+                None
+            }
+        }
+    }
 
-    let uuid_re = UUID_RE.get_or_init(|| {
-        Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-            .expect("valid uuid regex")
-    });
-    let session_id_re = SESSION_ID_RE
-        .get_or_init(|| Regex::new(r"session_[0-9a-zA-Z_]+").expect("valid session_id regex"));
-    let timestamp_re =
-        TIMESTAMP_RE.get_or_init(|| Regex::new(r"\d{10,13}").expect("valid timestamp regex"));
-    let iso_date_re = ISO_DATE_RE.get_or_init(|| {
-        Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").expect("valid iso_date regex")
-    });
-    let duration_re =
-        DURATION_RE.get_or_init(|| Regex::new(r"\d+(\.\d+)?s").expect("valid duration regex"));
-    let path_re =
-        PATH_RE.get_or_init(|| Regex::new(r"/(?:home|Users)/[^/\s]+").expect("valid path regex"));
-    let elapsed_re =
-        ELAPSED_RE.get_or_init(|| Regex::new(r"\d+m?\d*s").expect("valid elapsed regex"));
-    let tokens_re =
-        TOKENS_RE.get_or_init(|| Regex::new(r"\d+[kK]? tokens?").expect("valid tokens regex"));
+    // Cached regex patterns for performance
+    static UUID_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static SESSION_ID_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static TIMESTAMP_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static ISO_DATE_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static DURATION_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static PATH_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static ELAPSED_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static TOKENS_RE: OnceLock<Option<Regex>> = OnceLock::new();
+
+    let Some(uuid_re) = UUID_RE
+        .get_or_init(|| {
+            compile_regex(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            )
+        })
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(session_id_re) = SESSION_ID_RE
+        .get_or_init(|| compile_regex(r"session_[0-9a-zA-Z_]+"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(timestamp_re) = TIMESTAMP_RE
+        .get_or_init(|| compile_regex(r"\d{10,13}"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(iso_date_re) = ISO_DATE_RE
+        .get_or_init(|| compile_regex(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(duration_re) = DURATION_RE
+        .get_or_init(|| compile_regex(r"\d+(\.\d+)?s"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(path_re) = PATH_RE
+        .get_or_init(|| compile_regex(r"/(?:home|Users)/[^/\s]+"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(elapsed_re) = ELAPSED_RE
+        .get_or_init(|| compile_regex(r"\d+m?\d*s"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
+    let Some(tokens_re) = TOKENS_RE
+        .get_or_init(|| compile_regex(r"\d+[kK]? tokens?"))
+        .as_ref()
+    else {
+        return s.to_string();
+    };
 
     let mut result = s.to_string();
 

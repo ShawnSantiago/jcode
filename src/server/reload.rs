@@ -211,9 +211,13 @@ async fn graceful_shutdown_sessions_with_timeout(
     {
         let signals = shutdown_signals.read().await;
         for session_id in &signalable_sessions {
-            let signal = signals
-                .get(session_id)
-                .expect("signalable sessions were filtered against shutdown_signals");
+            let Some(signal) = signals.get(session_id) else {
+                crate::logging::warn(&format!(
+                    "Server: shutdown signal disappeared before graceful reload handoff for session {}",
+                    session_id
+                ));
+                continue;
+            };
             signal.fire();
             crate::logging::info(&format!(
                 "Server: sent graceful shutdown signal to session {}",

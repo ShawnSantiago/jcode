@@ -576,10 +576,9 @@ pub(super) fn draw_file_diff_view(
             Ok(c) => c,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let cached = cache
-            .entries
-            .get(&cache_key)
-            .expect("file diff cache entry should exist after build");
+        let Some(cached) = cache.entries.get(&cache_key) else {
+            return;
+        };
         (
             cached.additions,
             cached.deletions,
@@ -659,10 +658,9 @@ pub(super) fn draw_file_diff_view(
             Ok(c) => c,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let cached = cache
-            .entries
-            .get_mut(&cache_key)
-            .expect("file diff cache entry should exist after build");
+        let Some(cached) = cache.entries.get_mut(&cache_key) else {
+            return;
+        };
         materialize_visible_file_diff_lines(cached, effective_scroll, inner.height as usize)
     };
     record_side_pane_snapshot(

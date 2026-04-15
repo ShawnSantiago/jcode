@@ -237,7 +237,8 @@ pub(super) fn write_output_png_cached_fonts(
     let opt = usvg::Options {
         font_family: primary_font_family(&theme.font_family),
         default_size: usvg::Size::from_wh(render_cfg.width, render_cfg.height)
-            .unwrap_or(usvg::Size::from_wh(800.0, 600.0).unwrap()),
+            .or_else(|| usvg::Size::from_wh(800.0, 600.0))
+            .ok_or_else(|| anyhow::anyhow!("invalid mermaid render size"))?,
         fontdb: SVG_FONT_DB.clone(),
         ..Default::default()
     };

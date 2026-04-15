@@ -37,8 +37,9 @@ pub(super) async fn resolve_debug_session(
     }
 
     if sessions_guard.len() == 1 {
-        let (id, agent) = sessions_guard.iter().next().expect("len==1 checked above");
-        return Ok((id.clone(), Arc::clone(agent)));
+        if let Some((id, agent)) = sessions_guard.iter().next() {
+            return Ok((id.clone(), Arc::clone(agent)));
+        }
     }
 
     Err(anyhow::anyhow!(

@@ -717,8 +717,10 @@ impl RemoteConnection {
     }
 
     /// Create a dummy RemoteConnection for replay mode (no real server)
+    #[cfg(test)]
     pub fn dummy() -> Self {
-        let (a, b) = crate::transport::Stream::pair().expect("socketpair");
+        let (a, b) = crate::transport::Stream::pair()
+            .unwrap_or_else(|err| panic!("failed to create dummy socketpair for tests: {}", err));
         let (reader, writer) = a.into_split();
         Self {
             reader: BufReader::new(reader),

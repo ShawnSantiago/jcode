@@ -5,6 +5,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+fn compile_static_regex(pattern: &str) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(err) => {
+            eprintln!("jcode: failed to compile static regex: {err}");
+            None
+        }
+    }
+}
+
+fn compile_static_regexes(patterns: &[&str]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| compile_static_regex(pattern))
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputShellResult {
     pub command: String,
@@ -135,19 +152,19 @@ pub struct ParsedBackgroundTaskNotification {
 pub fn parse_background_task_notification_markdown(
     content: &str,
 ) -> Option<ParsedBackgroundTaskNotification> {
-    static HEADER_RE: OnceLock<Regex> = OnceLock::new();
-    static FULL_OUTPUT_RE: OnceLock<Regex> = OnceLock::new();
+    static HEADER_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static FULL_OUTPUT_RE: OnceLock<Option<Regex>> = OnceLock::new();
 
-    let header_re = HEADER_RE.get_or_init(|| {
-        Regex::new(
-            r"^\*\*Background task\*\* `(?P<task_id>[^`]+)` · `(?P<tool_name>[^`]+)` · (?P<status>.+?) · (?P<duration>[0-9]+(?:\.[0-9]+)?s) · (?P<exit_label>.+)$",
-        )
-        .expect("valid background task header regex")
-    });
-    let full_output_re = FULL_OUTPUT_RE.get_or_init(|| {
-        Regex::new(r#"^_Full output:_ `(?P<command>[^`]+)`$"#)
-            .expect("valid background task full output regex")
-    });
+    let header_re = HEADER_RE
+        .get_or_init(|| {
+            compile_static_regex(
+                r"^\*\*Background task\*\* `(?P<task_id>[^`]+)` · `(?P<tool_name>[^`]+)` · (?P<status>.+?) · (?P<duration>[0-9]+(?:\.[0-9]+)?s) · (?P<exit_label>.+)$",
+            )
+        })
+        .as_ref()?;
+    let full_output_re = FULL_OUTPUT_RE
+        .get_or_init(|| compile_static_regex(r#"^_Full output:_ `(?P<command>[^`]+)`$"#))
+        .as_ref()?;
 
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let mut sections = normalized.split("\n\n");
@@ -563,84 +580,51 @@ pub fn redact_secrets(text: &str) -> String {
     static ASSIGNMENT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 
     let direct_patterns = DIRECT_PATTERNS.get_or_init(|| {
-        vec![
-            Regex::new(r"sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}")
-                .expect("valid Anthropic OAuth token regex"),
-            Regex::new(r"sk-or-v1-[A-Za-z0-9_-]{20,}").expect("valid OpenRouter key regex"),
-            Regex::new(r"ghp_[A-Za-z0-9]{20,}").expect("valid GitHub PAT regex"),
-            Regex::new(r"github_pat_[A-Za-z0-9_]{20,}")
-                .expect("valid GitHub fine-grained PAT regex"),
-            Regex::new(r"ya29\.[A-Za-z0-9._-]{20,}").expect("valid Google OAuth token regex"),
-            Regex::new(r"AIza[0-9A-Za-z_-]{20,}").expect("valid Google API key regex"),
-            Regex::new(r"xox[baprs]-[A-Za-z0-9-]{10,}").expect("valid Slack token regex"),
-        ]
+        compile_static_regexes(&[
+            r"sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}",
+            r"sk-or-v1-[A-Za-z0-9_-]{20,}",
+            r"ghp_[A-Za-z0-9]{20,}",
+            r"github_pat_[A-Za-z0-9_]{20,}",
+            r"ya29\.[A-Za-z0-9._-]{20,}",
+            r"AIza[0-9A-Za-z_-]{20,}",
+            r"xox[baprs]-[A-Za-z0-9-]{10,}",
+        ])
     });
 
     let assignment_patterns = ASSIGNMENT_PATTERNS.get_or_init(|| {
-        vec![
-            Regex::new(r"(?m)^\s*(OPENROUTER_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid OPENROUTER_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(OPENCODE_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid OPENCODE_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(OPENCODE_GO_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid OPENCODE_GO_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(ZHIPU_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid ZHIPU_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(ZAI_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid ZAI_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(302AI_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid 302AI_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(BASETEN_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid BASETEN_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(CORTECS_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid CORTECS_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(DEEPSEEK_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid DEEPSEEK_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(FIRMWARE_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid FIRMWARE_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(HF_TOKEN\s*=\s*)[^\r\n]+")
-                .expect("valid HF_TOKEN assignment regex"),
-            Regex::new(r"(?m)^\s*(MOONSHOT_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid MOONSHOT_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(NEBIUS_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid NEBIUS_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(SCALEWAY_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid SCALEWAY_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(STACKIT_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid STACKIT_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(GROQ_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid GROQ_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(MISTRAL_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid MISTRAL_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(PERPLEXITY_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid PERPLEXITY_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(TOGETHER_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid TOGETHER_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(DEEPINFRA_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid DEEPINFRA_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(XAI_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid XAI_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(LMSTUDIO_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid LMSTUDIO_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(OLLAMA_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid OLLAMA_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid CHUTES_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid CEREBRAS_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid OPENAI_COMPAT_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid ANTHROPIC_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(OPENAI_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid OPENAI_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid AZURE_OPENAI_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+")
-                .expect("valid CURSOR_API_KEY assignment regex"),
-            Regex::new(r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+")
-                .expect("valid GITHUB_TOKEN assignment regex"),
-        ]
+        compile_static_regexes(&[
+            r"(?m)^\s*(OPENROUTER_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(OPENCODE_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(OPENCODE_GO_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(ZHIPU_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(ZAI_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(302AI_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(BASETEN_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(CORTECS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(DEEPSEEK_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(FIRMWARE_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(HF_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(MOONSHOT_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(NEBIUS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(SCALEWAY_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(STACKIT_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(GROQ_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(MISTRAL_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(PERPLEXITY_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(TOGETHER_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(DEEPINFRA_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(XAI_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(LMSTUDIO_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(OLLAMA_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(OPENAI_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+",
+        ])
     });
 
     let mut redacted = text.to_string();

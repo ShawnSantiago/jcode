@@ -163,11 +163,25 @@ mod html_regex {
     use regex::Regex;
     use std::sync::OnceLock;
 
+    fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
+        match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "webfetch: failed to compile static regex {label}: {}",
+                    err
+                ));
+                None
+            }
+        }
+    }
+
     macro_rules! static_regex {
         ($name:ident, $pat:expr_2021) => {
-            pub fn $name() -> &'static Regex {
-                static RE: OnceLock<Regex> = OnceLock::new();
-                RE.get_or_init(|| Regex::new($pat).expect("valid regex"))
+            pub fn $name() -> Option<&'static Regex> {
+                static RE: OnceLock<Option<Regex>> = OnceLock::new();
+                RE.get_or_init(|| compile_regex($pat, stringify!($name)))
+                    .as_ref()
             }
         };
     }
@@ -183,27 +197,50 @@ mod html_regex {
     static_regex!(pre_code, r"(?is)<pre[^>]*><code[^>]*>(.+?)</code></pre>");
     static_regex!(li, r"(?i)<li[^>]*>");
 
-    static H_OPEN: OnceLock<[Regex; 6]> = OnceLock::new();
-    static H_CLOSE: OnceLock<[Regex; 6]> = OnceLock::new();
+    static H_OPEN: OnceLock<Option<[Regex; 6]>> = OnceLock::new();
+    static H_CLOSE: OnceLock<Option<[Regex; 6]>> = OnceLock::new();
 
-    pub fn h_open() -> &'static [Regex; 6] {
-        H_OPEN.get_or_init(|| {
-            std::array::from_fn(|i| Regex::new(&format!(r"(?i)<h{}[^>]*>", i + 1)).unwrap())
-        })
+    pub fn h_open() -> Option<&'static [Regex; 6]> {
+        H_OPEN
+            .get_or_init(|| {
+                let mut compiled = Vec::with_capacity(6);
+                for i in 0..6 {
+                    let pattern = format!(r"(?i)<h{}[^>]*>", i + 1);
+                    compiled.push(compile_regex(&pattern, "heading open")?);
+                }
+                compiled.try_into().ok()
+            })
+            .as_ref()
     }
 
-    pub fn h_close() -> &'static [Regex; 6] {
-        H_CLOSE.get_or_init(|| {
-            std::array::from_fn(|i| Regex::new(&format!(r"(?i)</h{}>", i + 1)).unwrap())
-        })
+    pub fn h_close() -> Option<&'static [Regex; 6]> {
+        H_CLOSE
+            .get_or_init(|| {
+                let mut compiled = Vec::with_capacity(6);
+                for i in 0..6 {
+                    let pattern = format!(r"(?i)</h{}>", i + 1);
+                    compiled.push(compile_regex(&pattern, "heading close")?);
+                }
+                compiled.try_into().ok()
+            })
+            .as_ref()
     }
 }
 
 fn html_to_text(html: &str) -> String {
     let mut text = html.to_string();
 
-    text = html_regex::script().replace_all(&text, "").to_string();
-    text = html_regex::style().replace_all(&text, "").to_string();
+    let (Some(script), Some(style), Some(tag), Some(whitespace)) = (
+        html_regex::script(),
+        html_regex::style(),
+        html_regex::tag(),
+        html_regex::whitespace(),
+    ) else {
+        return html.trim().to_string();
+    };
+
+    text = script.replace_all(&text, "").to_string();
+    text = style.replace_all(&text, "").to_string();
 
     text = text.replace("<br>", "\n");
     text = text.replace("<br/>", "\n");
@@ -213,7 +250,7 @@ fn html_to_text(html: &str) -> String {
     text = text.replace("</li>", "\n");
     text = text.replace("</tr>", "\n");
 
-    text = html_regex::tag().replace_all(&text, "").to_string();
+    text = tag.replace_all(&text, "").to_string();
 
     text = text.replace("&nbsp;", " ");
     text = text.replace("&lt;", "<");
@@ -222,9 +259,7 @@ fn html_to_text(html: &str) -> String {
     text = text.replace("&quot;", "\"");
     text = text.replace("&#39;", "'");
 
-    text = html_regex::whitespace()
-        .replace_all(&text, "\n\n")
-        .to_string();
+    text = whitespace.replace_all(&text, "\n\n").to_string();
 
     text.trim().to_string()
 }
@@ -232,34 +267,59 @@ fn html_to_text(html: &str) -> String {
 fn html_to_markdown(html: &str) -> String {
     let mut md = html.to_string();
 
-    md = html_regex::script().replace_all(&md, "").to_string();
-    md = html_regex::style().replace_all(&md, "").to_string();
+    let (
+        Some(script),
+        Some(style),
+        Some(link),
+        Some(strong),
+        Some(em),
+        Some(code),
+        Some(pre_code),
+        Some(li),
+        Some(tag),
+        Some(whitespace),
+    ) = (
+        html_regex::script(),
+        html_regex::style(),
+        html_regex::link(),
+        html_regex::strong(),
+        html_regex::em(),
+        html_regex::code(),
+        html_regex::pre_code(),
+        html_regex::li(),
+        html_regex::tag(),
+        html_regex::whitespace(),
+    )
+    else {
+        return html.trim().to_string();
+    };
 
-    let h_open = html_regex::h_open();
-    let h_close = html_regex::h_close();
-    for i in 0..6 {
-        let prefix = "#".repeat(i + 1);
-        md = h_open[i]
-            .replace_all(&md, &format!("\n{} ", prefix))
-            .to_string();
-        md = h_close[i].replace_all(&md, "\n").to_string();
+    md = script.replace_all(&md, "").to_string();
+    md = style.replace_all(&md, "").to_string();
+
+    if let (Some(h_open), Some(h_close)) = (html_regex::h_open(), html_regex::h_close()) {
+        for i in 0..6 {
+            let prefix = "#".repeat(i + 1);
+            md = h_open[i]
+                .replace_all(&md, &format!("\n{} ", prefix))
+                .to_string();
+            md = h_close[i].replace_all(&md, "\n").to_string();
+        }
     }
 
-    md = html_regex::link().replace_all(&md, "[$2]($1)").to_string();
-    md = html_regex::strong().replace_all(&md, "**$1**").to_string();
-    md = html_regex::em().replace_all(&md, "*$1*").to_string();
-    md = html_regex::code().replace_all(&md, "`$1`").to_string();
-    md = html_regex::pre_code()
-        .replace_all(&md, "\n```\n$1\n```\n")
-        .to_string();
-    md = html_regex::li().replace_all(&md, "\n- ").to_string();
+    md = link.replace_all(&md, "[$2]($1)").to_string();
+    md = strong.replace_all(&md, "**$1**").to_string();
+    md = em.replace_all(&md, "*$1*").to_string();
+    md = code.replace_all(&md, "`$1`").to_string();
+    md = pre_code.replace_all(&md, "\n```\n$1\n```\n").to_string();
+    md = li.replace_all(&md, "\n- ").to_string();
 
     md = md.replace("<br>", "\n");
     md = md.replace("<br/>", "\n");
     md = md.replace("<br />", "\n");
     md = md.replace("</p>", "\n\n");
 
-    md = html_regex::tag().replace_all(&md, "").to_string();
+    md = tag.replace_all(&md, "").to_string();
 
     md = md.replace("&nbsp;", " ");
     md = md.replace("&lt;", "<");
@@ -268,9 +328,7 @@ fn html_to_markdown(html: &str) -> String {
     md = md.replace("&quot;", "\"");
     md = md.replace("&#39;", "'");
 
-    md = html_regex::whitespace()
-        .replace_all(&md, "\n\n")
-        .to_string();
+    md = whitespace.replace_all(&md, "\n\n").to_string();
 
     md.trim().to_string()
 }

@@ -2925,7 +2925,6 @@ impl App {
 
         let mut modifiers = KeyModifiers::empty();
         let mut key_part = "";
-
         for part in &parts {
             match *part {
                 "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
@@ -2934,7 +2933,6 @@ impl App {
                 _ => key_part = part,
             }
         }
-
         let key_code = match key_part {
             "enter" | "return" => KeyCode::Enter,
             "esc" | "escape" => KeyCode::Esc,
@@ -2950,7 +2948,10 @@ impl App {
             "pageup" | "pgup" => KeyCode::PageUp,
             "pagedown" | "pgdn" => KeyCode::PageDown,
             "space" => KeyCode::Char(' '),
-            s if s.len() == 1 => KeyCode::Char(s.chars().next().expect("non-empty key string")),
+            s if s.len() == 1 => KeyCode::Char(
+                s.parse::<char>()
+                    .map_err(|_| "Key spec unexpectedly had no character".to_string())?,
+            ),
             s if s.starts_with('f') && s.len() <= 3 => {
                 if let Ok(n) = s[1..].parse::<u8>() {
                     KeyCode::F(n)
@@ -2960,7 +2961,6 @@ impl App {
             }
             _ => return Err(format!("Unknown key: {}", key_part)),
         };
-
         Ok((key_code, modifiers))
     }
 

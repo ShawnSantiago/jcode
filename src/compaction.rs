@@ -501,13 +501,13 @@ impl CompactionManager {
         let alpha = cfg.ewma_alpha as f64;
         let mut ewma_delta: f64 = (snapshots[1] as f64) - (snapshots[0] as f64);
         ewma_delta = ewma_delta.max(0.0);
-
         for i in 2..snapshots.len() {
             let delta = ((snapshots[i] as f64) - (snapshots[i - 1] as f64)).max(0.0);
             ewma_delta = alpha * delta + (1.0 - alpha) * ewma_delta;
         }
-
-        let current = *snapshots.last().expect("non-empty snapshots") as f64;
+        let Some(current) = snapshots.last().copied().map(|value| value as f64) else {
+            return false;
+        };
         let projected = current + ewma_delta * cfg.lookahead_turns as f64;
 
         crate::logging::info(&format!(

@@ -116,11 +116,25 @@ mod search_regex {
     use regex::Regex;
     use std::sync::OnceLock;
 
+    fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
+        match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "websearch: failed to compile static regex {label}: {}",
+                    err
+                ));
+                None
+            }
+        }
+    }
+
     macro_rules! static_regex {
         ($name:ident, $pat:expr_2021) => {
-            pub fn $name() -> &'static Regex {
-                static RE: OnceLock<Regex> = OnceLock::new();
-                RE.get_or_init(|| Regex::new($pat).expect("valid regex"))
+            pub fn $name() -> Option<&'static Regex> {
+                static RE: OnceLock<Option<Regex>> = OnceLock::new();
+                RE.get_or_init(|| compile_regex($pat, stringify!($name)))
+                    .as_ref()
             }
         };
     }
@@ -139,8 +153,16 @@ mod search_regex {
 fn parse_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
-    let links: Vec<_> = search_regex::result_link().captures_iter(html).collect();
-    let snippets: Vec<_> = search_regex::result_snippet().captures_iter(html).collect();
+    let (Some(result_link), Some(result_snippet), Some(tag)) = (
+        search_regex::result_link(),
+        search_regex::result_snippet(),
+        search_regex::tag(),
+    ) else {
+        return results;
+    };
+
+    let links: Vec<_> = result_link.captures_iter(html).collect();
+    let snippets: Vec<_> = result_snippet.captures_iter(html).collect();
 
     for (i, link_cap) in links.iter().enumerate() {
         if results.len() >= max_results {
@@ -156,7 +178,7 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
 
         let snippet = if i < snippets.len() {
             let raw = &snippets[i][1];
-            html_decode(&search_regex::tag().replace_all(raw, ""))
+            html_decode(&tag.replace_all(raw, ""))
         } else {
             String::new()
         };

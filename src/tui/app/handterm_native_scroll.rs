@@ -198,12 +198,17 @@ fn spawn_bridge_thread(
     updates_rx: Receiver<AppToHost>,
     commands_tx: UnboundedSender<HostToApp>,
 ) {
-    thread::Builder::new()
+    if let Err(err) = thread::Builder::new()
         .name("jcode-handterm-scroll".to_string())
         .spawn(move || {
             let _ = bridge_thread(socket_path, updates_rx, commands_tx);
         })
-        .expect("handterm native scroll bridge should spawn");
+    {
+        crate::logging::warn(&format!(
+            "Failed to spawn handterm native scroll bridge thread: {}",
+            err
+        ));
+    }
 }
 
 #[cfg(unix)]

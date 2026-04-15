@@ -276,7 +276,18 @@ fn search_sessions_blocking(
             }));
         }
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(results) => results,
+                Err(_) => {
+                    crate::logging::warn(
+                        "session_search worker thread panicked; skipping that worker's results",
+                    );
+                    Vec::new()
+                }
+            })
+            .collect()
     });
 
     // Merge results from all threads

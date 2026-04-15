@@ -255,7 +255,11 @@ fn parse_keybinding(raw: &str) -> Option<KeyBinding> {
             Some(number) => KeyCode::F(number),
             None => {
                 if key.len() == 1 {
-                    KeyCode::Char(key.chars().next().expect("non-empty key string"))
+                    let mut chars = key.chars();
+                    let Some(ch) = chars.next() else {
+                        return None;
+                    };
+                    KeyCode::Char(ch)
                 } else {
                     return None;
                 }
