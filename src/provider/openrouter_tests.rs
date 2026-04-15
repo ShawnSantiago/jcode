@@ -1,4 +1,4 @@
-
+use super::openrouter_sse_stream::OpenRouterStream;
 use super::*;
 use std::ffi::OsString;
 use std::sync::Mutex;
