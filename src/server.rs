@@ -187,20 +187,6 @@ async fn dispatch_background_task_completion(
     }
 }
 
-fn json_u64_field(value: Option<&serde_json::Value>, field: &str) -> u64 {
-    value
-        .and_then(|value| value.get(field))
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0)
-}
-
-fn json_bool_field(value: Option<&serde_json::Value>, field: &str) -> bool {
-    value
-        .and_then(|value| value.get(field))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
-
 async fn capture_runtime_memory_sample(
     identity: &ServerIdentity,
     sessions: &SessionAgents,
@@ -232,34 +218,27 @@ async fn capture_runtime_memory_sample(
     let mut top_sessions: Vec<ServerRuntimeMemoryTopSession> = Vec::new();
 
     for (session_id, agent_arc) in sessions_guard.iter() {
-        let Ok(agent) = agent_arc.try_lock() else {
+        let Ok(mut agent) = agent_arc.try_lock() else {
             contended_count += 1;
             continue;
         };
 
         sampled_count += 1;
-        let profile = agent.debug_memory_profile();
-        let session_profile = profile.get("session");
-        let totals = session_profile.and_then(|value| value.get("totals"));
-        let messages = session_profile.and_then(|value| value.get("messages"));
-        let provider_cache = session_profile.and_then(|value| value.get("provider_messages_cache"));
-        let agent_profile = profile.get("agent");
-        let memory_enabled = json_bool_field(agent_profile, "memory_enabled");
+        let profile = agent.session_memory_profile_snapshot();
+        let memory_enabled = agent.memory_enabled();
         if memory_enabled {
             memory_enabled_session_count += 1;
         }
 
-        let message_count = json_u64_field(messages, "count");
-        let provider_cache_message_count = json_u64_field(provider_cache, "count");
-        let json_bytes = json_u64_field(totals, "json_bytes");
-        let payload_text_bytes = json_u64_field(totals, "payload_text_bytes");
-        let provider_cache_json_bytes = json_u64_field(totals, "provider_cache_json_bytes");
-        let tool_result_bytes = json_u64_field(totals, "canonical_tool_result_bytes");
-        let provider_cache_tool_result_bytes =
-            json_u64_field(totals, "provider_cache_tool_result_bytes");
-        let large_blob_bytes = json_u64_field(totals, "canonical_large_blob_bytes");
-        let provider_cache_large_blob_bytes =
-            json_u64_field(totals, "provider_cache_large_blob_bytes");
+        let message_count = profile.message_count as u64;
+        let provider_cache_message_count = profile.provider_cache_message_count as u64;
+        let json_bytes = profile.total_json_bytes as u64;
+        let payload_text_bytes = profile.payload_text_bytes as u64;
+        let provider_cache_json_bytes = profile.provider_cache_json_bytes as u64;
+        let tool_result_bytes = profile.canonical_tool_result_bytes as u64;
+        let provider_cache_tool_result_bytes = profile.provider_cache_tool_result_bytes as u64;
+        let large_blob_bytes = profile.canonical_large_blob_bytes as u64;
+        let provider_cache_large_blob_bytes = profile.provider_cache_large_blob_bytes as u64;
 
         total_message_count += message_count;
         total_provider_cache_message_count += provider_cache_message_count;

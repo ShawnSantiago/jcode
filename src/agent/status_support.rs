@@ -1,6 +1,10 @@
 use super::*;
 
 impl Agent {
+    pub fn session_memory_profile_snapshot(&mut self) -> crate::session::SessionMemoryProfileSnapshot {
+        self.session.memory_profile_snapshot()
+    }
+
     pub fn message_count(&self) -> usize {
         self.session.messages.len()
     }

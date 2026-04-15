@@ -224,7 +224,7 @@ impl StoredMessage {
 
 const LARGE_MEMORY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct ContentBlockMemoryStats {
     block_count: usize,
     text_blocks: usize,
@@ -248,6 +248,28 @@ struct ContentBlockMemoryStats {
 }
 
 impl ContentBlockMemoryStats {
+    fn merge_from(&mut self, other: &Self) {
+        self.block_count += other.block_count;
+        self.text_blocks += other.text_blocks;
+        self.text_bytes += other.text_bytes;
+        self.reasoning_blocks += other.reasoning_blocks;
+        self.reasoning_bytes += other.reasoning_bytes;
+        self.tool_use_blocks += other.tool_use_blocks;
+        self.tool_use_input_json_bytes += other.tool_use_input_json_bytes;
+        self.tool_result_blocks += other.tool_result_blocks;
+        self.tool_result_bytes += other.tool_result_bytes;
+        self.image_blocks += other.image_blocks;
+        self.image_data_bytes += other.image_data_bytes;
+        self.openai_compaction_blocks += other.openai_compaction_blocks;
+        self.openai_compaction_bytes += other.openai_compaction_bytes;
+        self.large_block_count += other.large_block_count;
+        self.large_block_bytes += other.large_block_bytes;
+        self.large_tool_result_count += other.large_tool_result_count;
+        self.large_tool_result_bytes += other.large_tool_result_bytes;
+        self.max_block_bytes = self.max_block_bytes.max(other.max_block_bytes);
+        self.max_tool_result_bytes = self.max_tool_result_bytes.max(other.max_tool_result_bytes);
+    }
+
     fn record_bytes(&mut self, bytes: usize) {
         self.max_block_bytes = self.max_block_bytes.max(bytes);
         if bytes >= LARGE_MEMORY_BLOB_THRESHOLD_BYTES {
@@ -345,6 +367,46 @@ where
     stats
 }
 
+fn summarize_blocks(blocks: &[ContentBlock]) -> ContentBlockMemoryStats {
+    let mut stats = ContentBlockMemoryStats::default();
+    for block in blocks {
+        stats.record_block(block);
+    }
+    stats
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionMemoryProfileCache {
+    messages_count: usize,
+    messages_json_bytes: usize,
+    message_stats: ContentBlockMemoryStats,
+    env_snapshots_count: usize,
+    env_snapshots_json_bytes: usize,
+    memory_injections_count: usize,
+    memory_injections_json_bytes: usize,
+    replay_events_count: usize,
+    replay_events_json_bytes: usize,
+    provider_cache_count: usize,
+    provider_cache_json_bytes: usize,
+    provider_cache_stats: ContentBlockMemoryStats,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMemoryProfileSnapshot {
+    pub message_count: usize,
+    pub provider_cache_message_count: usize,
+    pub env_snapshot_count: usize,
+    pub memory_injection_count: usize,
+    pub replay_event_count: usize,
+    pub payload_text_bytes: usize,
+    pub total_json_bytes: usize,
+    pub provider_cache_json_bytes: usize,
+    pub canonical_tool_result_bytes: usize,
+    pub provider_cache_tool_result_bytes: usize,
+    pub canonical_large_blob_bytes: usize,
+    pub provider_cache_large_blob_bytes: usize,
+}
+
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
 }
@@ -432,6 +494,10 @@ pub struct Session {
     provider_messages_cache_len: usize,
     #[serde(skip)]
     provider_messages_cache_mode: PersistVectorMode,
+    #[serde(skip)]
+    memory_profile_cache: SessionMemoryProfileCache,
+    #[serde(skip)]
+    memory_profile_dirty: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -652,6 +718,7 @@ impl Session {
         session.env_snapshots.clear();
         session.memory_injections.clear();
         session.replay_events.clear();
+        session.rebuild_memory_profile_cache();
         session.reset_persist_state(true);
         session
     }
@@ -682,6 +749,7 @@ impl Session {
         session.replay_events.clear();
         session.env_snapshots.clear();
         session.memory_injections.clear();
+        session.rebuild_memory_profile_cache();
         session.reset_persist_state(true);
         session.reset_provider_messages_cache();
         session
@@ -821,6 +889,9 @@ impl Session {
         self.provider_message_prefix_hashes_cache.clear();
         self.provider_messages_cache_len = 0;
         self.provider_messages_cache_mode = PersistVectorMode::Full;
+        self.memory_profile_cache.provider_cache_count = 0;
+        self.memory_profile_cache.provider_cache_json_bytes = 0;
+        self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
     }
 
     fn push_provider_message_cache_entry(&mut self, message: Message) {
@@ -831,8 +902,77 @@ impl Session {
             .copied()
             .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
             .unwrap_or(message_hash);
+        self.memory_profile_cache.provider_cache_count += 1;
+        self.memory_profile_cache.provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache
+            .provider_cache_stats
+            .merge_from(&summarize_blocks(&message.content));
         self.provider_messages_cache.push(message);
         self.provider_message_prefix_hashes_cache.push(prefix_hash);
+    }
+
+    fn mark_memory_profile_dirty(&mut self) {
+        self.memory_profile_dirty = true;
+    }
+
+    fn rebuild_memory_profile_cache(&mut self) {
+        let message_stats = summarize_message_content(self.messages.iter().map(|message| &message.content));
+        let provider_cache_stats = summarize_message_content(
+            self.provider_messages_cache
+                .iter()
+                .map(|message| &message.content),
+        );
+
+        self.memory_profile_cache = SessionMemoryProfileCache {
+            messages_count: self.messages.len(),
+            messages_json_bytes: self.messages.iter().map(estimate_json_bytes).sum(),
+            message_stats,
+            env_snapshots_count: self.env_snapshots.len(),
+            env_snapshots_json_bytes: self.env_snapshots.iter().map(estimate_json_bytes).sum(),
+            memory_injections_count: self.memory_injections.len(),
+            memory_injections_json_bytes: self.memory_injections.iter().map(estimate_json_bytes).sum(),
+            replay_events_count: self.replay_events.len(),
+            replay_events_json_bytes: self.replay_events.iter().map(estimate_json_bytes).sum(),
+            provider_cache_count: self.provider_messages_cache.len(),
+            provider_cache_json_bytes: self.provider_messages_cache.iter().map(estimate_json_bytes).sum(),
+            provider_cache_stats,
+        };
+        self.memory_profile_dirty = false;
+    }
+
+    fn ensure_memory_profile_cache(&mut self) {
+        if self.memory_profile_dirty {
+            self.rebuild_memory_profile_cache();
+        }
+    }
+
+    pub fn memory_profile_snapshot(&mut self) -> SessionMemoryProfileSnapshot {
+        self.ensure_memory_profile_cache();
+        let compaction_json_bytes = self
+            .compaction
+            .as_ref()
+            .map(estimate_json_bytes)
+            .unwrap_or(0);
+
+        SessionMemoryProfileSnapshot {
+            message_count: self.memory_profile_cache.messages_count,
+            provider_cache_message_count: self.memory_profile_cache.provider_cache_count,
+            env_snapshot_count: self.memory_profile_cache.env_snapshots_count,
+            memory_injection_count: self.memory_profile_cache.memory_injections_count,
+            replay_event_count: self.memory_profile_cache.replay_events_count,
+            payload_text_bytes: self.memory_profile_cache.message_stats.payload_text_bytes(),
+            total_json_bytes: self.memory_profile_cache.messages_json_bytes
+                + self.memory_profile_cache.provider_cache_json_bytes
+                + self.memory_profile_cache.env_snapshots_json_bytes
+                + self.memory_profile_cache.memory_injections_json_bytes
+                + self.memory_profile_cache.replay_events_json_bytes
+                + compaction_json_bytes,
+            provider_cache_json_bytes: self.memory_profile_cache.provider_cache_json_bytes,
+            canonical_tool_result_bytes: self.memory_profile_cache.message_stats.tool_result_bytes,
+            provider_cache_tool_result_bytes: self.memory_profile_cache.provider_cache_stats.tool_result_bytes,
+            canonical_large_blob_bytes: self.memory_profile_cache.message_stats.large_block_bytes,
+            provider_cache_large_blob_bytes: self.memory_profile_cache.provider_cache_stats.large_block_bytes,
+        }
     }
 
     fn mark_messages_append_dirty(&mut self) {
@@ -911,6 +1051,7 @@ impl Session {
         self.is_debug = meta.is_debug;
         self.saved = meta.saved;
         self.save_label = meta.save_label;
+        self.mark_memory_profile_dirty();
     }
 
     fn apply_journal_entry(&mut self, entry: SessionJournalEntry) {
@@ -920,6 +1061,7 @@ impl Session {
         self.memory_injections
             .extend(entry.append_memory_injections);
         self.replay_events.extend(entry.append_replay_events);
+        self.mark_memory_profile_dirty();
     }
 
     fn checkpoint_snapshot(&mut self, snapshot_path: &Path, journal_path: &Path) -> Result<()> {
@@ -969,6 +1111,7 @@ impl Session {
         let finalize_start = Instant::now();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
+        session.rebuild_memory_profile_cache();
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] session_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, journal_entries={}, messages={}, env_snapshots={}, replay_events={}, total={}ms",
@@ -1029,6 +1172,8 @@ impl Session {
             provider_message_prefix_hashes_cache: Vec::new(),
             provider_messages_cache_len: 0,
             provider_messages_cache_mode: PersistVectorMode::Full,
+            memory_profile_cache: SessionMemoryProfileCache::default(),
+            memory_profile_dirty: false,
         };
         session.reset_persist_state(false);
         session
@@ -1073,6 +1218,8 @@ impl Session {
             provider_message_prefix_hashes_cache: Vec::new(),
             provider_messages_cache_len: 0,
             provider_messages_cache_mode: PersistVectorMode::Full,
+            memory_profile_cache: SessionMemoryProfileCache::default(),
+            memory_profile_dirty: false,
         };
         session.reset_persist_state(false);
         session
@@ -1099,10 +1246,13 @@ impl Session {
 
     /// Record an environment snapshot for post-mortem debugging
     pub fn record_env_snapshot(&mut self, snapshot: EnvSnapshot) {
+        self.memory_profile_cache.env_snapshots_count += 1;
+        self.memory_profile_cache.env_snapshots_json_bytes += estimate_json_bytes(&snapshot);
         self.env_snapshots.push(snapshot);
         if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
             let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
             self.env_snapshots.drain(0..excess);
+            self.mark_memory_profile_dirty();
             self.mark_env_snapshots_full_dirty();
         } else {
             self.mark_env_snapshots_append_dirty();
@@ -1456,23 +1606,31 @@ impl Session {
     }
 
     pub fn append_stored_message(&mut self, message: StoredMessage) {
+        self.memory_profile_cache.messages_count += 1;
+        self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache
+            .message_stats
+            .merge_from(&summarize_blocks(&message.content));
         self.messages.push(message);
         self.mark_messages_append_dirty();
     }
 
     pub fn insert_message(&mut self, index: usize, message: StoredMessage) {
         self.messages.insert(index, message);
+        self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
     }
 
     pub fn replace_messages(&mut self, messages: Vec<StoredMessage>) {
         self.messages = messages;
+        self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
     }
 
     pub fn truncate_messages(&mut self, len: usize) {
         if len < self.messages.len() {
             self.messages.truncate(len);
+            self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
         }
     }
@@ -1486,7 +1644,7 @@ impl Session {
         age_ms: u64,
         memory_ids: Vec<String>,
     ) {
-        self.memory_injections.push(StoredMemoryInjection {
+        let injection = StoredMemoryInjection {
             summary,
             content,
             count,
@@ -1494,7 +1652,10 @@ impl Session {
             age_ms: Some(age_ms),
             before_message: Some(self.messages.len()),
             timestamp: Utc::now(),
-        });
+        };
+        self.memory_profile_cache.memory_injections_count += 1;
+        self.memory_profile_cache.memory_injections_json_bytes += estimate_json_bytes(&injection);
+        self.memory_injections.push(injection);
         self.mark_memory_injections_append_dirty();
     }
 
@@ -1512,14 +1673,17 @@ impl Session {
         title: Option<String>,
         content: impl Into<String>,
     ) {
-        self.replay_events.push(StoredReplayEvent {
+        let event = StoredReplayEvent {
             timestamp: Utc::now(),
             kind: StoredReplayEventKind::DisplayMessage {
                 role: role.into(),
                 title,
                 content: content.into(),
             },
-        });
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
         self.mark_replay_events_append_dirty();
     }
 
@@ -1532,10 +1696,13 @@ impl Session {
         {
             return;
         }
-        self.replay_events.push(StoredReplayEvent {
+        let event = StoredReplayEvent {
             timestamp: Utc::now(),
             kind,
-        });
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
         self.mark_replay_events_append_dirty();
     }
 
@@ -1561,10 +1728,13 @@ impl Session {
         {
             return;
         }
-        self.replay_events.push(StoredReplayEvent {
+        let event = StoredReplayEvent {
             timestamp: Utc::now(),
             kind,
-        });
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
         self.mark_replay_events_append_dirty();
     }
 
@@ -1628,6 +1798,7 @@ impl Session {
         self.env_snapshots.clear();
         self.memory_injections.clear();
         self.replay_events.clear();
+        self.rebuild_memory_profile_cache();
         self.reset_provider_messages_cache();
         self.reset_persist_state(true);
     }
@@ -1639,6 +1810,7 @@ impl Session {
             if msg.id == *message_id {
                 msg.content
                     .retain(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+                self.mark_memory_profile_dirty();
                 self.mark_messages_full_dirty();
                 break;
             }
