@@ -147,17 +147,17 @@ fn estimate_display_message_bytes(message: &DisplayMessage) -> usize {
 }
 
 fn estimate_string_vec_bytes(values: &[String]) -> usize {
-    values.iter().map(|value| value.len()).sum()
+    values.iter().map(|value| value.capacity()).sum()
 }
 
 fn estimate_pair_vec_bytes(values: &[(String, usize)]) -> usize {
-    values.iter().map(|(name, _)| name.len()).sum()
+    values.iter().map(|(name, _)| name.capacity()).sum()
 }
 
 fn estimate_pending_images_bytes(values: &[(String, String)]) -> usize {
     values
         .iter()
-        .map(|(media_type, data)| media_type.len() + data.len())
+        .map(|(media_type, data)| media_type.capacity() + data.capacity())
         .sum()
 }
 

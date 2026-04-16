@@ -151,6 +151,26 @@ impl UsageOverlay {
         )
     }
 
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let items_estimate_bytes: usize = self.items.iter().map(estimate_item_bytes).sum();
+        let filtered_estimate_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
+        let filter_bytes = self.filter.capacity();
+        let title_bytes = self.title.capacity();
+        let total_estimate_bytes =
+            items_estimate_bytes + filtered_estimate_bytes + filter_bytes + title_bytes;
+
+        serde_json::json!({
+            "items_count": self.items.len(),
+            "filtered_count": self.filtered.len(),
+            "selected": self.selected,
+            "title_bytes": title_bytes,
+            "filter_bytes": filter_bytes,
+            "items_estimate_bytes": items_estimate_bytes,
+            "filtered_estimate_bytes": filtered_estimate_bytes,
+            "total_estimate_bytes": total_estimate_bytes,
+        })
+    }
+
     pub fn new(
         title: impl Into<String>,
         items: Vec<UsageOverlayItem>,
@@ -506,6 +526,17 @@ impl UsageOverlay {
 
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
+}
+
+fn estimate_item_bytes(item: &UsageOverlayItem) -> usize {
+    item.id.capacity()
+        + item.title.capacity()
+        + item.subtitle.capacity()
+        + item
+            .detail_lines
+            .iter()
+            .map(|value| value.capacity())
+            .sum::<usize>()
 }
 
 fn hotkey(text: &'static str) -> Span<'static> {

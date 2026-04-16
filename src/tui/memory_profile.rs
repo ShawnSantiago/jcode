@@ -132,14 +132,18 @@ pub fn build_transcript_memory_profile(
 }
 
 pub fn estimate_display_message_bytes(message: &DisplayMessage) -> usize {
-    message.role.len()
-        + message.content.len()
+    message.role.capacity()
+        + message.content.capacity()
         + message
             .tool_calls
             .iter()
-            .map(|call| call.len())
+            .map(|call| call.capacity())
             .sum::<usize>()
-        + message.title.as_ref().map(|title| title.len()).unwrap_or(0)
+        + message
+            .title
+            .as_ref()
+            .map(|title| title.capacity())
+            .unwrap_or(0)
         + message
             .tool_data
             .as_ref()
@@ -299,18 +303,19 @@ fn estimate_side_panel_memory(snapshot: &SidePanelSnapshot) -> SidePanelMemorySt
     stats.metadata_bytes += snapshot
         .focused_page_id
         .as_ref()
-        .map(|id| id.len())
+        .map(|id| id.capacity())
         .unwrap_or(0);
 
     for page in &snapshot.pages {
-        let page_metadata_bytes = page.id.len() + page.title.len() + page.file_path.len();
+        let page_metadata_bytes =
+            page.id.capacity() + page.title.capacity() + page.file_path.capacity();
         stats.metadata_bytes += page_metadata_bytes;
-        stats.content_bytes += page.content.len();
-        stats.estimate_bytes += page_metadata_bytes + page.content.len();
+        stats.content_bytes += page.content.capacity();
+        stats.estimate_bytes += page_metadata_bytes + page.content.capacity();
         if focused_page_id == Some(page.id.as_str()) {
-            stats.focused_content_bytes += page.content.len();
+            stats.focused_content_bytes += page.content.capacity();
         } else {
-            stats.unfocused_content_bytes += page.content.len();
+            stats.unfocused_content_bytes += page.content.capacity();
         }
     }
 

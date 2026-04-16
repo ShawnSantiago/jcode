@@ -142,6 +142,26 @@ impl LoginPicker {
         picker
     }
 
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let items_estimate_bytes: usize = self.items.iter().map(estimate_item_bytes).sum();
+        let filtered_estimate_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
+        let filter_bytes = self.filter.capacity();
+        let title_bytes = self.title.capacity();
+        let total_estimate_bytes =
+            items_estimate_bytes + filtered_estimate_bytes + filter_bytes + title_bytes;
+
+        serde_json::json!({
+            "items_count": self.items.len(),
+            "filtered_count": self.filtered.len(),
+            "selected": self.selected,
+            "title_bytes": title_bytes,
+            "filter_bytes": filter_bytes,
+            "items_estimate_bytes": items_estimate_bytes,
+            "filtered_estimate_bytes": filtered_estimate_bytes,
+            "total_estimate_bytes": total_estimate_bytes,
+        })
+    }
+
     fn selected_item(&self) -> Option<&LoginPickerItem> {
         self.filtered
             .get(self.selected)
@@ -526,6 +546,19 @@ impl LoginPicker {
 
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
+}
+
+fn estimate_item_bytes(item: &LoginPickerItem) -> usize {
+    item.method_detail.capacity()
+        + item.provider.id.len()
+        + item.provider.display_name.len()
+        + item
+            .provider
+            .aliases
+            .iter()
+            .map(|value| value.len())
+            .sum::<usize>()
+        + item.provider.menu_detail.len()
 }
 
 fn hotkey(text: &'static str) -> Span<'static> {

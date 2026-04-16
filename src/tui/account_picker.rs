@@ -140,6 +140,35 @@ impl AccountPicker {
         Self::with_summary(title, items, AccountPickerSummary::default())
     }
 
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let items_estimate_bytes: usize = self.items.iter().map(estimate_item_bytes).sum();
+        let filtered_estimate_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
+        let filter_bytes = self.filter.capacity();
+        let title_bytes = self.title.capacity();
+        let summary_estimate_bytes = self
+            .summary
+            .as_ref()
+            .map(estimate_summary_bytes)
+            .unwrap_or(0);
+        let total_estimate_bytes = items_estimate_bytes
+            + filtered_estimate_bytes
+            + filter_bytes
+            + title_bytes
+            + summary_estimate_bytes;
+
+        serde_json::json!({
+            "items_count": self.items.len(),
+            "filtered_count": self.filtered.len(),
+            "selected": self.selected,
+            "title_bytes": title_bytes,
+            "filter_bytes": filter_bytes,
+            "summary_estimate_bytes": summary_estimate_bytes,
+            "items_estimate_bytes": items_estimate_bytes,
+            "filtered_estimate_bytes": filtered_estimate_bytes,
+            "total_estimate_bytes": total_estimate_bytes,
+        })
+    }
+
     pub fn with_summary(
         title: impl Into<String>,
         items: Vec<AccountPickerItem>,
@@ -796,6 +825,48 @@ impl AccountPicker {
             Span::styled(model.to_string(), Style::default().fg(Color::White)),
         ])
     }
+}
+
+fn estimate_optional_string_bytes(value: &Option<String>) -> usize {
+    value.as_ref().map(|value| value.capacity()).unwrap_or(0)
+}
+
+fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
+    match command {
+        AccountPickerCommand::SubmitInput(value) => value.capacity(),
+        AccountPickerCommand::OpenAccountCenter { provider_filter }
+        | AccountPickerCommand::OpenAddReplaceFlow { provider_filter } => {
+            estimate_optional_string_bytes(provider_filter)
+        }
+        AccountPickerCommand::PromptValue {
+            prompt,
+            command_prefix,
+            empty_value,
+            status_notice,
+        } => {
+            prompt.capacity()
+                + command_prefix.capacity()
+                + estimate_optional_string_bytes(empty_value)
+                + status_notice.capacity()
+        }
+        AccountPickerCommand::Switch { label, .. }
+        | AccountPickerCommand::Login { label, .. }
+        | AccountPickerCommand::Remove { label, .. } => label.capacity(),
+        AccountPickerCommand::PromptNew { .. } => 0,
+    }
+}
+
+fn estimate_item_bytes(item: &AccountPickerItem) -> usize {
+    item.provider_id.capacity()
+        + item.provider_label.capacity()
+        + item.title.capacity()
+        + item.subtitle.capacity()
+        + estimate_command_bytes(&item.command)
+}
+
+fn estimate_summary_bytes(summary: &AccountPickerSummary) -> usize {
+    estimate_optional_string_bytes(&summary.default_provider)
+        + estimate_optional_string_bytes(&summary.default_model)
 }
 
 #[cfg(test)]
