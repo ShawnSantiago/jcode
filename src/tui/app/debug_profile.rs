@@ -15,6 +15,8 @@ impl App {
         let markdown = crate::tui::markdown::debug_memory_profile();
         let mermaid = crate::tui::mermaid::debug_memory_profile();
         let visual_debug = crate::tui::visual_debug::debug_memory_profile();
+        let ui_render = crate::tui::ui::debug_memory_profile();
+        let side_panel_render = crate::tui::ui::debug_side_panel_memory_profile();
         let mcp = self
             .mcp_manager
             .try_read()
@@ -78,6 +80,8 @@ impl App {
             "markdown": markdown,
             "mermaid": mermaid,
             "visual_debug": visual_debug,
+            "ui_render": ui_render,
+            "side_panel_render": side_panel_render,
             "ui": {
                 "provider_messages": {
                     "count": self.messages.len(),
@@ -621,6 +625,14 @@ fn build_debug_summary(payload: &serde_json::Value) -> serde_json::Value {
         (
             "app_owned_extra_bytes".to_string(),
             nested_usize(payload, &["app_owned", "total_estimate_bytes"]),
+        ),
+        (
+            "ui_render_cache_bytes".to_string(),
+            nested_usize(payload, &["ui_render", "total_estimate_bytes"]),
+        ),
+        (
+            "side_panel_render_cache_bytes".to_string(),
+            nested_usize(payload, &["side_panel_render", "total_estimate_bytes"]),
         ),
         (
             "streaming_markdown_renderer_bytes".to_string(),

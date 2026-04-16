@@ -290,6 +290,174 @@ struct PinnedRenderedCache {
     has_scrollable_images: bool,
 }
 
+fn estimate_lines_bytes(lines: &[Line<'static>]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            std::mem::size_of::<Line<'static>>()
+                + line.spans.capacity() * std::mem::size_of::<Span<'static>>()
+                + line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+fn estimate_arc_string_vec_bytes(values: &std::sync::Arc<Vec<String>>) -> usize {
+    std::mem::size_of::<Vec<String>>()
+        + values.capacity() * std::mem::size_of::<String>()
+        + values.iter().map(|value| value.capacity()).sum::<usize>()
+}
+
+fn estimate_arc_usize_vec_bytes(values: &std::sync::Arc<Vec<usize>>) -> usize {
+    std::mem::size_of::<Vec<usize>>() + values.capacity() * std::mem::size_of::<usize>()
+}
+
+fn estimate_arc_wrapped_line_map_bytes(values: &std::sync::Arc<Vec<WrappedLineMap>>) -> usize {
+    std::mem::size_of::<Vec<WrappedLineMap>>()
+        + values.capacity() * std::mem::size_of::<WrappedLineMap>()
+}
+
+fn estimate_pinned_rendered_cache_bytes(cache: &PinnedRenderedCache) -> usize {
+    estimate_lines_bytes(&cache.lines)
+        + estimate_arc_string_vec_bytes(&cache.wrapped_plain_lines)
+        + estimate_arc_usize_vec_bytes(&cache.wrapped_copy_offsets)
+        + estimate_arc_string_vec_bytes(&cache.raw_plain_lines)
+        + estimate_arc_wrapped_line_map_bytes(&cache.wrapped_line_map)
+        + cache.left_margins.capacity() * std::mem::size_of::<u16>()
+        + cache.image_placements.capacity() * std::mem::size_of::<PinnedImagePlacement>()
+}
+
+fn estimate_rendered_side_panel_markdown_bytes(value: &RenderedSidePanelMarkdown) -> usize {
+    estimate_lines_bytes(&value.rendered_markdown)
+        + value.placeholder_hashes.capacity() * std::mem::size_of::<Option<u64>>()
+        + value.has_following_content_after.capacity() * std::mem::size_of::<bool>()
+}
+
+fn estimate_pinned_content_entry_bytes(entry: &PinnedContentEntry) -> usize {
+    match entry {
+        PinnedContentEntry::Diff {
+            file_path, lines, ..
+        } => {
+            file_path.capacity()
+                + lines.capacity() * std::mem::size_of::<crate::tui::ui_diff::ParsedDiffLine>()
+                + lines
+                    .iter()
+                    .map(|line| line.prefix.capacity() + line.content.capacity())
+                    .sum::<usize>()
+        }
+        PinnedContentEntry::Image {
+            label,
+            media_type,
+            source,
+            ..
+        } => {
+            let source_bytes = match source {
+                crate::session::RenderedImageSource::UserInput => 0,
+                crate::session::RenderedImageSource::ToolResult { tool_name } => {
+                    tool_name.capacity()
+                }
+                crate::session::RenderedImageSource::Other { role } => role.capacity(),
+            };
+            label.capacity() + media_type.capacity() + source_bytes
+        }
+    }
+}
+
+fn estimate_side_panel_markdown_key_bytes(key: &SidePanelMarkdownKey) -> usize {
+    key.page_id.capacity()
+}
+
+fn estimate_side_panel_render_key_bytes(key: &SidePanelRenderKey) -> usize {
+    key.page_id.capacity()
+}
+
+pub(crate) fn debug_memory_profile() -> serde_json::Value {
+    let (pinned_entries_count, pinned_entries_bytes, pinned_rendered_lines_bytes) = {
+        let cache = pinned_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries_bytes = cache
+            .entries
+            .iter()
+            .map(estimate_pinned_content_entry_bytes)
+            .sum::<usize>()
+            + cache.entries.capacity() * std::mem::size_of::<PinnedContentEntry>();
+        let rendered_lines_bytes = cache
+            .rendered_lines
+            .as_ref()
+            .map(estimate_pinned_rendered_cache_bytes)
+            .unwrap_or(0);
+        (cache.entries.len(), entries_bytes, rendered_lines_bytes)
+    };
+
+    let (markdown_cache_entries_count, markdown_cache_bytes, markdown_cache_key_bytes) =
+        with_side_panel_markdown_cache(|cache| {
+            let entry_bytes = cache
+                .entries
+                .values()
+                .map(estimate_rendered_side_panel_markdown_bytes)
+                .sum::<usize>();
+            let key_bytes = cache
+                .entries
+                .keys()
+                .map(estimate_side_panel_markdown_key_bytes)
+                .sum::<usize>()
+                + cache
+                    .order
+                    .iter()
+                    .map(estimate_side_panel_markdown_key_bytes)
+                    .sum::<usize>();
+            (cache.entries.len(), entry_bytes, key_bytes)
+        });
+
+    let (render_cache_entries_count, render_cache_bytes, render_cache_key_bytes) =
+        with_side_panel_render_cache(|cache| {
+            let entry_bytes = cache
+                .entries
+                .values()
+                .map(estimate_pinned_rendered_cache_bytes)
+                .sum::<usize>();
+            let key_bytes = cache
+                .entries
+                .keys()
+                .map(estimate_side_panel_render_key_bytes)
+                .sum::<usize>()
+                + cache
+                    .order
+                    .iter()
+                    .map(estimate_side_panel_render_key_bytes)
+                    .sum::<usize>();
+            (cache.entries.len(), entry_bytes, key_bytes)
+        });
+
+    serde_json::json!({
+        "pinned_cache": {
+            "entries_count": pinned_entries_count,
+            "entries_bytes": pinned_entries_bytes,
+            "rendered_lines_bytes": pinned_rendered_lines_bytes,
+        },
+        "side_panel_markdown_cache": {
+            "entries_count": markdown_cache_entries_count,
+            "entries_bytes": markdown_cache_bytes,
+            "key_bytes": markdown_cache_key_bytes,
+        },
+        "side_panel_render_cache": {
+            "entries_count": render_cache_entries_count,
+            "entries_bytes": render_cache_bytes,
+            "key_bytes": render_cache_key_bytes,
+        },
+        "total_estimate_bytes": pinned_entries_bytes
+            + pinned_rendered_lines_bytes
+            + markdown_cache_bytes
+            + markdown_cache_key_bytes
+            + render_cache_bytes
+            + render_cache_key_bytes,
+    })
+}
+
 #[derive(Clone)]
 struct PinnedImagePlacement {
     after_text_line: usize,
