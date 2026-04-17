@@ -490,6 +490,35 @@ impl App {
             || !self.hidden_queued_system_messages.is_empty()
     }
 
+    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        if !self.auto_poke_incomplete_todos
+            || self.pending_queued_dispatch
+            || self.pending_turn
+            || self.has_queued_followups()
+        {
+            return false;
+        }
+
+        let incomplete = super::commands::incomplete_poke_todos(self);
+        if incomplete.is_empty() {
+            self.auto_poke_incomplete_todos = false;
+            self.push_display_message(DisplayMessage::system(
+                "✅ Todos complete. Auto-poke finished.".to_string(),
+            ));
+            return false;
+        }
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "👉 Todos remain. Auto-poking again with {} incomplete todo{}...",
+            incomplete.len(),
+            if incomplete.len() == 1 { "" } else { "s" },
+        )));
+        self.queued_messages
+            .push(super::commands::build_poke_message(&incomplete));
+        self.pending_queued_dispatch = true;
+        true
+    }
+
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
         if self.has_queued_followups() {
             self.pending_queued_dispatch = true;

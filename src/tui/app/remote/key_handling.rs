@@ -1462,46 +1462,18 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/poke" {
-                    let session_id = app
-                        .remote_session_id
-                        .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
-                    let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
-                    let incomplete: Vec<_> = todos
-                        .iter()
-                        .filter(|t| t.status != "completed" && t.status != "cancelled")
-                        .collect();
+                    let incomplete = app_mod::commands::incomplete_poke_todos(app);
 
                     if incomplete.is_empty() {
+                        app.auto_poke_incomplete_todos = false;
                         app.push_display_message(DisplayMessage::system(
                             "No incomplete todos found. Nothing to poke about.".to_string(),
                         ));
                         return Ok(());
                     }
 
-                    let mut todo_list = String::new();
-                    for t in &incomplete {
-                        let status_icon = match t.status.as_str() {
-                            "in_progress" => "🔄",
-                            _ => "⬜",
-                        };
-                        todo_list.push_str(&format!(
-                            "  {} [{}] {}\n",
-                            status_icon, t.priority, t.content
-                        ));
-                    }
-
-                    let poke_msg = format!(
-                        "Your todo list has {} incomplete item{}:\n\n{}\n\
-                        Please continue your work. Either:\n\
-                        1. Keep working and complete the remaining tasks\n\
-                        2. Update the todo list with `todo` if items are already done or no longer needed\n\
-                        3. If you genuinely need user input to proceed, say so clearly and specifically — \
-                        but only if truly blocked (this should be rare; prefer making reasonable assumptions)",
-                        incomplete.len(),
-                        if incomplete.len() == 1 { "" } else { "s" },
-                        todo_list,
-                    );
+                    app.auto_poke_incomplete_todos = true;
+                    let poke_msg = app_mod::commands::build_poke_message(&incomplete);
 
                     if app.is_processing {
                         remote.cancel().await?;

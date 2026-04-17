@@ -4730,6 +4730,88 @@ fn test_autojudge_command_toggles_session_preference() {
 }
 
 #[test]
+fn test_poke_arms_auto_poke_until_todos_are_done() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish the remaining task".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        assert!(super::commands::handle_session_command(&mut app, "/poke"));
+
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(app.pending_turn);
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Poking model with 1 incomplete todo"))
+        );
+    });
+}
+
+#[test]
+fn test_finish_turn_auto_pokes_again_when_todos_remain() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Keep going".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        super::local::finish_turn(&mut app);
+
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages().len(), 1);
+        assert!(app.queued_messages()[0].contains("Please continue your work"));
+    });
+}
+
+#[test]
+fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Keep going".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.queued_messages.push("existing poke".to_string());
+        super::local::finish_turn(&mut app);
+
+        assert_eq!(app.queued_messages(), &["existing poke"]);
+    });
+}
+
+#[test]
 fn test_review_prefers_openai_oauth_gpt_5_4_when_available() {
     with_temp_jcode_home(|| {
         let auth_path = crate::storage::jcode_dir()
@@ -8242,6 +8324,43 @@ fn test_remote_done_recovers_stranded_soft_interrupt_as_queued_followup() {
         .map(|msg| msg.content.as_str())
         .collect();
     assert_eq!(user_messages, vec!["late interleave", "queued later"]);
+}
+
+#[test]
+fn test_remote_done_auto_pokes_again_when_todos_remain() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Continue working".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+
+        let needs_redraw =
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+        assert!(needs_redraw);
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages().len(), 1);
+        assert!(app.queued_messages()[0].contains("Please continue your work"));
+    });
 }
 
 #[test]

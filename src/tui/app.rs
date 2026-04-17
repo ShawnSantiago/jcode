@@ -438,6 +438,8 @@ pub struct App {
     last_turn_input_tokens: Option<u64>,
     // Pending turn to process (allows UI to redraw before processing starts)
     pending_turn: bool,
+    // When armed by /poke, automatically continue prompting until todos are complete.
+    auto_poke_incomplete_todos: bool,
     // Pending cross-provider resend after a failover warning/countdown.
     pending_provider_failover: Option<PendingProviderFailover>,
     // Local session file write to flush once the first "sending" frame is visible.

@@ -310,4 +310,5 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
+    app.schedule_auto_poke_followup_if_needed();
 }

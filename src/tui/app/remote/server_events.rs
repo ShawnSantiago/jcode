@@ -269,6 +269,7 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Done { id } => {
+            let mut auto_poked = false;
             crate::logging::info(&format!(
                 "Client received Done id={}, current_message_id={:?}",
                 id, app.current_message_id
@@ -308,6 +309,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
                 app.note_runtime_memory_event_force("turn_completed", "remote_turn_finished");
+                auto_poked = app.schedule_auto_poke_followup_if_needed();
             } else if app.is_processing {
                 let is_stale = app.current_message_id.is_some_and(|mid| id < mid);
                 if is_stale {
@@ -322,7 +324,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     ));
                 }
             }
-            false
+            auto_poked
         }
         ServerEvent::Error {
             message,
