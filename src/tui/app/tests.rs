@@ -4147,7 +4147,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         "gpt-5.4-pro".to_string(),
         "gpt-5.3-codex-spark".to_string(),
         "gpt-5.3-codex".to_string(),
-        "claude-opus-4-6".to_string(),
+        "claude-opus-4-7".to_string(),
     ];
     app.remote_model_options = app
         .remote_available_entries
@@ -5556,8 +5556,8 @@ fn test_model_picker_preserves_recommendation_priority_order() {
     let claude_opus = picker
         .entries
         .iter()
-        .position(|model| model.name == "claude-opus-4-6")
-        .expect("claude-opus-4-6 should be present");
+        .position(|model| model.name == "claude-opus-4-7")
+        .expect("claude-opus-4-7 should be present");
     let spark = picker
         .entries
         .iter()
@@ -5576,12 +5576,12 @@ fn test_model_picker_preserves_recommendation_priority_order() {
     );
     assert!(
         gpt54_pro < claude_opus,
-        "gpt-5.4-pro should rank ahead of claude-opus-4-6, got {:?}",
+        "gpt-5.4-pro should rank ahead of claude-opus-4-7, got {:?}",
         model_names
     );
     assert!(
         claude_opus < spark,
-        "claude-opus-4-6 should rank ahead of non-recommended gpt-5.3-codex-spark, got {:?}",
+        "claude-opus-4-7 should rank ahead of non-recommended gpt-5.3-codex-spark, got {:?}",
         model_names
     );
     assert!(

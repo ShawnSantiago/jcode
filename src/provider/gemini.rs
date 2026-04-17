@@ -3,6 +3,7 @@ use crate::auth::gemini as gemini_auth;
 use crate::message::{ConnectionPhase, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 pub use jcode_provider_gemini::{
     AVAILABLE_MODELS, CODE_ASSIST_API_VERSION, CODE_ASSIST_ENDPOINT, ClientMetadata,
     CodeAssistGenerateRequest, CodeAssistGenerateResponse, DEFAULT_MODEL, GeminiCandidate,
@@ -25,6 +26,12 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct PersistedCatalog {
+    models: Vec<String>,
+    fetched_at_rfc3339: String,
+}
+
 pub struct GeminiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
@@ -33,14 +40,55 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
+    fn persisted_catalog_path() -> Result<std::path::PathBuf> {
+        Ok(crate::storage::app_config_dir()?.join("gemini_models_cache.json"))
+    }
+
+    fn load_persisted_catalog() -> Option<PersistedCatalog> {
+        let path = Self::persisted_catalog_path().ok()?;
+        crate::storage::read_json(&path)
+            .ok()
+            .filter(|catalog: &PersistedCatalog| !catalog.models.is_empty())
+    }
+
+    fn persist_catalog(models: &[String]) {
+        if models.is_empty() {
+            return;
+        }
+        let Ok(path) = Self::persisted_catalog_path() else {
+            return;
+        };
+        let payload = PersistedCatalog {
+            models: models.to_vec(),
+            fetched_at_rfc3339: Utc::now().to_rfc3339(),
+        };
+        if let Err(error) = crate::storage::write_json(&path, &payload) {
+            crate::logging::warn(&format!(
+                "Failed to persist Gemini model catalog {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+
+    fn seed_cached_catalog(&self) {
+        if let Some(catalog) = Self::load_persisted_catalog()
+            && let Ok(mut models) = self.fetched_models.write()
+        {
+            *models = catalog.models;
+        }
+    }
+
     pub fn new() -> Self {
         let model = std::env::var("JCODE_GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        Self {
+        let provider = Self {
             client: gemini_http_client(),
             model: Arc::new(RwLock::new(model)),
             state: Arc::new(Mutex::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
-        }
+        };
+        provider.seed_cached_catalog();
+        provider
     }
 
     fn base_url() -> String {
@@ -173,6 +221,7 @@ impl GeminiProvider {
             if let Ok(mut guard) = self.fetched_models.write() {
                 *guard = models.clone();
             }
+            Self::persist_catalog(&models);
         }
         Ok(models)
     }
@@ -960,6 +1009,37 @@ mod tests {
             provider.available_models_display(),
             vec!["gemini-4-pro-preview".to_string()]
         );
+    }
+
+    #[test]
+    fn available_models_display_seeds_from_persisted_catalog() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let path = GeminiProvider::persisted_catalog_path().expect("catalog path");
+        crate::storage::write_json(
+            &path,
+            &PersistedCatalog {
+                models: vec!["gemini-3-pro-preview".to_string()],
+                fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .expect("write persisted catalog");
+
+        let provider = GeminiProvider::new();
+        assert!(
+            provider
+                .available_models_display()
+                .contains(&"gemini-3-pro-preview".to_string())
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[test]

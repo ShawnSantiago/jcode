@@ -4,8 +4,10 @@ use crate::auth::cursor as cursor_auth;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 use flate2::read::GzDecoder;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use std::fmt;
 use std::io::Read;
@@ -44,6 +46,12 @@ pub(crate) fn is_known_model(model: &str) -> bool {
 struct CursorModelsResponse {
     #[serde(default)]
     models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PersistedCatalog {
+    models: Vec<String>,
+    fetched_at_rfc3339: String,
 }
 
 fn merge_cursor_models(dynamic: &[String], current: &str) -> Vec<String> {
@@ -117,16 +125,57 @@ pub struct CursorCliProvider {
 }
 
 impl CursorCliProvider {
+    fn persisted_catalog_path() -> Result<std::path::PathBuf> {
+        Ok(crate::storage::app_config_dir()?.join("cursor_models_cache.json"))
+    }
+
+    fn load_persisted_catalog() -> Option<PersistedCatalog> {
+        let path = Self::persisted_catalog_path().ok()?;
+        crate::storage::read_json(&path)
+            .ok()
+            .filter(|catalog: &PersistedCatalog| !catalog.models.is_empty())
+    }
+
+    fn persist_catalog(models: &[String]) {
+        if models.is_empty() {
+            return;
+        }
+        let Ok(path) = Self::persisted_catalog_path() else {
+            return;
+        };
+        let payload = PersistedCatalog {
+            models: models.to_vec(),
+            fetched_at_rfc3339: Utc::now().to_rfc3339(),
+        };
+        if let Err(error) = crate::storage::write_json(&path, &payload) {
+            crate::logging::warn(&format!(
+                "Failed to persist Cursor model catalog {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+
+    fn seed_cached_catalog(&self) {
+        if let Some(catalog) = Self::load_persisted_catalog()
+            && let Ok(mut models) = self.fetched_models.write()
+        {
+            *models = catalog.models;
+        }
+    }
+
     pub fn new() -> Self {
         let cli_path =
             std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
         let model = std::env::var("JCODE_CURSOR_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        Self {
+        let provider = Self {
             cli_path,
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
-        }
+        };
+        provider.seed_cached_catalog();
+        provider
     }
 }
 
@@ -225,6 +274,7 @@ impl Provider for CursorCliProvider {
                         "Discovered Cursor models: {}",
                         models.join(", ")
                     ));
+                    Self::persist_catalog(&models);
                     *self
                         .fetched_models
                         .write()
@@ -922,6 +972,37 @@ mod tests {
             1
         );
         assert!(models.iter().any(|model| model == "composer-2"));
+    }
+
+    #[test]
+    fn available_models_display_seeds_from_persisted_catalog() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let path = CursorCliProvider::persisted_catalog_path().expect("catalog path");
+        crate::storage::write_json(
+            &path,
+            &PersistedCatalog {
+                models: vec!["cursor-disk-model".to_string()],
+                fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .expect("write persisted catalog");
+
+        let provider = CursorCliProvider::new();
+        assert!(
+            provider
+                .available_models_display()
+                .contains(&"cursor-disk-model".to_string())
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[test]

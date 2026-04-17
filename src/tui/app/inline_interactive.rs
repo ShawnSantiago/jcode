@@ -820,23 +820,14 @@ impl App {
             "gpt-5.4",
             "gpt-5.4[1m]",
             "gpt-5.4-pro",
-            "claude-opus-4-6",
-            "claude-opus-4-6[1m]",
-            "claude-opus-4.6",
-            "claude-sonnet-4-6",
-            "claude-sonnet-4-6[1m]",
+            "claude-opus-4-7",
             "moonshotai/kimi-k2.5",
         ];
 
-        const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &[
-            "claude-opus-4-6",
-            "claude-opus-4-6[1m]",
-            "claude-sonnet-4-6",
-            "claude-sonnet-4-6[1m]",
-        ];
+        const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &["claude-opus-4-7"];
 
         const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4[1m]", "gpt-5.4-pro"];
-        const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.6", "gpt-5.4"];
+        const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.7", "gpt-5.4"];
 
         fn recommendation_rank(name: &str, recommended_models: &[&str]) -> usize {
             recommended_models
