@@ -34,6 +34,11 @@ pub fn current_binary_path() -> Result<PathBuf> {
     Ok(builds_dir()?.join("current").join(binary_name()))
 }
 
+/// Get path to the shared server symlink (approved daemon channel).
+pub fn shared_server_binary_path() -> Result<PathBuf> {
+    Ok(builds_dir()?.join("shared-server").join(binary_name()))
+}
+
 /// Get path to canary binary
 pub fn canary_binary_path() -> Result<PathBuf> {
     Ok(builds_dir()?.join("canary").join(binary_name()))
@@ -54,6 +59,11 @@ pub fn stable_version_file() -> Result<PathBuf> {
 /// Get path to current version file (active local build marker).
 pub fn current_version_file() -> Result<PathBuf> {
     Ok(builds_dir()?.join("current-version"))
+}
+
+/// Get path to the shared server version file (approved daemon marker).
+pub fn shared_server_version_file() -> Result<PathBuf> {
+    Ok(builds_dir()?.join("shared-server-version"))
 }
 
 /// Save migration context before switching to canary
@@ -100,6 +110,22 @@ pub fn read_stable_version() -> Result<Option<String>> {
 /// Read the current active version.
 pub fn read_current_version() -> Result<Option<String>> {
     let path = current_version_file()?;
+    if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        let hash = content.trim();
+        if hash.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(hash.to_string()))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Read the current shared-server version.
+pub fn read_shared_server_version() -> Result<Option<String>> {
+    let path = shared_server_version_file()?;
     if path.exists() {
         let content = std::fs::read_to_string(path)?;
         let hash = content.trim();

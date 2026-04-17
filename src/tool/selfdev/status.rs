@@ -40,6 +40,12 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
         status.push_str("**Current:** none\n");
     }
 
+    if let Ok(Some(shared_server)) = build::read_shared_server_version() {
+        status.push_str(&format!("**Shared server:** {}\n", shared_server));
+    } else {
+        status.push_str("**Shared server:** none\n");
+    }
+
     if let Some(ref stable) = manifest.stable {
         status.push_str(&format!("**Stable:** {}\n", stable));
     } else {
@@ -65,6 +71,12 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
         ));
         if let Some(previous) = pending.previous_current_version.as_deref() {
             status.push_str(&format!("**Rollback target:** {}\n", previous));
+        }
+        if let Some(previous) = pending.previous_shared_server_version.as_deref() {
+            status.push_str(&format!(
+                "**Shared server rollback target:** {}\n",
+                previous
+            ));
         }
         if let Some(fingerprint) = pending.source_fingerprint.as_deref() {
             status.push_str(&format!(

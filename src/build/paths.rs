@@ -1,4 +1,7 @@
-use super::{SelfDevBuildCommand, canary_binary_path, current_binary_path, stable_binary_path};
+use super::{
+    SelfDevBuildCommand, canary_binary_path, current_binary_path, shared_server_binary_path,
+    stable_binary_path,
+};
 use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -281,6 +284,30 @@ pub fn client_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'s
         && launcher.exists()
     {
         return Some((launcher, "launcher"));
+    }
+
+    if let Ok(stable) = stable_binary_path()
+        && stable.exists()
+    {
+        return Some((stable, "stable"));
+    }
+
+    std::env::current_exe().ok().map(|exe| (exe, "current"))
+}
+
+/// Resolve the binary that the shared daemon should spawn or reload into.
+///
+/// This intentionally does not follow the fast-moving `current` channel. The
+/// shared server should only run binaries that were explicitly promoted onto the
+/// shared-server channel (or stable as fallback), so local dirty self-dev builds
+/// stop taking out every client by accident.
+pub fn shared_server_update_candidate(
+    _is_selfdev_session: bool,
+) -> Option<(PathBuf, &'static str)> {
+    if let Ok(shared_server) = shared_server_binary_path()
+        && shared_server.exists()
+    {
+        return Some((shared_server, "shared-server"));
     }
 
     if let Ok(stable) = stable_binary_path()

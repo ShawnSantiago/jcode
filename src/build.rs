@@ -7,7 +7,8 @@ pub use paths::{
     current_binary_build_time_string, current_binary_built_at, find_dev_binary,
     find_repo_in_ancestors, get_repo_dir, is_jcode_repo, launcher_binary_path, launcher_dir,
     preferred_reload_candidate, release_binary_path, run_selfdev_build, selfdev_binary_path,
-    selfdev_build_command, update_launcher_symlink_to_current, update_launcher_symlink_to_stable,
+    selfdev_build_command, shared_server_update_candidate, update_launcher_symlink_to_current,
+    update_launcher_symlink_to_stable,
 };
 pub use source_state::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
@@ -18,7 +19,8 @@ pub use storage_helpers::{
     build_log_path, build_progress_path, builds_dir, canary_binary_path, clear_build_progress,
     clear_migration_context, current_binary_path, current_version_file, load_migration_context,
     manifest_path, migration_context_path, read_build_progress, read_current_version,
-    read_stable_version, save_migration_context, stable_binary_path, stable_version_file,
+    read_shared_server_version, read_stable_version, save_migration_context,
+    shared_server_binary_path, shared_server_version_file, stable_binary_path, stable_version_file,
     version_binary_path, write_build_progress,
 };
 
@@ -26,8 +28,10 @@ use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SelfDevBuildCommand {
@@ -63,6 +67,8 @@ pub struct PendingActivation {
     pub session_id: String,
     pub new_version: String,
     pub previous_current_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_shared_server_version: Option<String>,
     pub source_fingerprint: Option<String>,
     pub requested_at: DateTime<Utc>,
 }
@@ -281,6 +287,9 @@ pub fn rollback_pending_activation_for_session(session_id: &str) -> Result<Optio
         update_current_symlink(previous)?;
         update_launcher_symlink_to_current()?;
     }
+    if let Some(previous) = pending.previous_shared_server_version.as_deref() {
+        update_shared_server_symlink(previous)?;
+    }
     manifest.canary_status = Some(CanaryStatus::Failed);
     manifest.pending_activation = None;
     manifest.save()?;
@@ -355,6 +364,149 @@ pub fn smoke_test_binary(binary: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn smoke_test_server_request(
+    stream: &mut BufReader<std::os::unix::net::UnixStream>,
+    request: &serde_json::Value,
+    expected_ack_id: u64,
+) -> Result<()> {
+    let payload = serde_json::to_string(request)? + "\n";
+    stream.get_mut().write_all(payload.as_bytes())?;
+    stream.get_mut().flush()?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut line = String::new();
+        let bytes = stream.read_line(&mut line)?;
+        if bytes == 0 {
+            anyhow::bail!("server closed the smoke-test socket before replying");
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim()).map_err(|err| {
+            anyhow::anyhow!("server smoke test returned invalid JSON line: {}", err)
+        })?;
+        if value.get("type").and_then(|t| t.as_str()) == Some("ack")
+            && value.get("id").and_then(|id| id.as_u64()) == Some(expected_ack_id)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for ack {} during server smoke test",
+                expected_ack_id
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
+    use std::fs::File;
+    use std::os::unix::net::UnixStream;
+    use std::process::Stdio;
+    use std::thread;
+
+    smoke_test_binary(binary)?;
+
+    let temp = tempfile::tempdir()?;
+    let runtime_dir = temp.path().join("runtime");
+    storage::ensure_dir(&runtime_dir)?;
+    let socket_path = temp.path().join("jcode-smoke.sock");
+    let stderr_path = temp.path().join("jcode-smoke.stderr.log");
+    let stderr = File::create(&stderr_path)?;
+
+    let mut child = Command::new(binary)
+        .arg("serve")
+        .arg("--socket")
+        .arg(&socket_path)
+        .env("JCODE_NON_INTERACTIVE", "1")
+        .env("JCODE_RUNTIME_DIR", &runtime_dir)
+        .env("JCODE_GATEWAY_ENABLED", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()?;
+
+    let result = (|| -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                anyhow::bail!(
+                    "server smoke test process exited early with status {:?}: {}",
+                    status.code(),
+                    stderr.trim()
+                );
+            }
+
+            match UnixStream::connect(&socket_path) {
+                Ok(stream) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                    let mut stream = BufReader::new(stream);
+                    smoke_test_server_request(
+                        &mut stream,
+                        &serde_json::json!({
+                            "type": "ping",
+                            "id": 1
+                        }),
+                        1,
+                    )?;
+                    smoke_test_server_request(
+                        &mut stream,
+                        &serde_json::json!({
+                            "type": "subscribe",
+                            "id": 2,
+                            "working_dir": env!("CARGO_MANIFEST_DIR")
+                        }),
+                        2,
+                    )?;
+                    return Ok(());
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    if Instant::now() >= deadline {
+                        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                        anyhow::bail!(
+                            "timed out waiting for server smoke test socket {}: {}",
+                            socket_path.display(),
+                            stderr.trim()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+    })();
+
+    let _ = child.kill();
+    let shutdown_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= shutdown_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    result
+}
+
+#[cfg(not(unix))]
+pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
+    smoke_test_binary(binary)
+}
+
 fn update_channel_symlink(channel: &str, version: &str) -> Result<PathBuf> {
     let channel_dir = builds_dir()?.join(channel);
     storage::ensure_dir(&channel_dir)?;
@@ -388,6 +540,14 @@ pub fn update_current_symlink(version: &str) -> Result<PathBuf> {
     let current_link = update_channel_symlink("current", version)?;
     std::fs::write(current_version_file()?, version)?;
     Ok(current_link)
+}
+
+/// Update the shared server symlink to point to a version and publish the
+/// shared-server-version marker.
+pub fn update_shared_server_symlink(version: &str) -> Result<PathBuf> {
+    let shared_link = update_channel_symlink("shared-server", version)?;
+    std::fs::write(shared_server_version_file()?, version)?;
+    Ok(shared_link)
 }
 
 pub fn publish_local_current_build_for_source(
@@ -424,6 +584,13 @@ pub fn publish_local_current_build(repo_dir: &std::path::Path) -> Result<PathBuf
     Ok(publish_local_current_build_for_source(repo_dir, &source)?.versioned_path)
 }
 
+/// Promote an already installed immutable version onto the shared server channel.
+pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>> {
+    let previous = read_shared_server_version()?;
+    update_shared_server_symlink(version)?;
+    Ok(previous)
+}
+
 /// Install release binary into immutable versions, promote it to stable, and also make it the
 /// active current/launcher build.
 pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
@@ -437,6 +604,7 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
     let versioned = install_binary_at_version(&source, &version)?;
     update_stable_symlink(&version)?;
     update_current_symlink(&version)?;
+    update_shared_server_symlink(&version)?;
     update_launcher_symlink_to_current()?;
 
     Ok(versioned)
@@ -644,9 +812,13 @@ mod tests {
     fn pending_activation_can_complete_and_roll_back() {
         with_temp_jcode_home(|| {
             let current_version = "stable-prev";
+            let shared_version = "shared-prev";
             install_binary_at_version(std::env::current_exe().as_ref().unwrap(), current_version)
                 .expect("install previous version");
+            install_binary_at_version(std::env::current_exe().as_ref().unwrap(), shared_version)
+                .expect("install previous shared version");
             update_current_symlink(current_version).expect("publish previous current");
+            update_shared_server_symlink(shared_version).expect("publish previous shared");
 
             let mut manifest = BuildManifest::default();
             manifest
@@ -654,6 +826,7 @@ mod tests {
                     session_id: "session-a".to_string(),
                     new_version: "canary-next".to_string(),
                     previous_current_version: Some(current_version.to_string()),
+                    previous_shared_server_version: Some(shared_version.to_string()),
                     source_fingerprint: Some("fingerprint-a".to_string()),
                     requested_at: Utc::now(),
                 })
@@ -674,6 +847,7 @@ mod tests {
                     session_id: "session-b".to_string(),
                     new_version: "canary-bad".to_string(),
                     previous_current_version: Some(current_version.to_string()),
+                    previous_shared_server_version: Some(shared_version.to_string()),
                     source_fingerprint: Some("fingerprint-b".to_string()),
                     requested_at: Utc::now(),
                 })
@@ -687,6 +861,32 @@ mod tests {
                 .expect("read current version")
                 .expect("restored current version");
             assert_eq!(restored, current_version);
+            let restored_shared = read_shared_server_version()
+                .expect("read shared server version")
+                .expect("restored shared server version");
+            assert_eq!(restored_shared, shared_version);
+        });
+    }
+
+    #[test]
+    fn shared_server_candidate_prefers_approved_channel_over_current() {
+        with_temp_jcode_home(|| {
+            let approved_version = "shared-ok";
+            let current_version = "current-dev";
+            install_binary_at_version(std::env::current_exe().as_ref().unwrap(), approved_version)
+                .expect("install approved version");
+            install_binary_at_version(std::env::current_exe().as_ref().unwrap(), current_version)
+                .expect("install current version");
+            update_shared_server_symlink(approved_version).expect("update shared server");
+            update_current_symlink(current_version).expect("update current");
+
+            let candidate =
+                shared_server_update_candidate(true).expect("expected shared-server candidate");
+            assert_eq!(candidate.1, "shared-server");
+            let selected = std::fs::canonicalize(candidate.0).expect("canonical selected");
+            let approved = std::fs::canonicalize(version_binary_path(approved_version).unwrap())
+                .expect("canonical approved");
+            assert_eq!(selected, approved);
         });
     }
 }

@@ -130,6 +130,14 @@ impl SelfDevTool {
                 &repo_dir, &source,
             )?)
         };
+        let previous_shared_server_version = if SelfDevTool::is_test_session() {
+            None
+        } else {
+            build::smoke_test_server_binary(
+                &published.as_ref().expect("published build").versioned_path,
+            )?;
+            build::read_shared_server_version()?
+        };
 
         // Update manifest - track what we're testing
         let mut manifest = build::BuildManifest::load()?;
@@ -141,10 +149,18 @@ impl SelfDevTool {
             previous_current_version: published
                 .as_ref()
                 .and_then(|published| published.previous_current_version.clone()),
+            previous_shared_server_version,
             source_fingerprint: Some(source.fingerprint.clone()),
             requested_at: chrono::Utc::now(),
         })?;
         manifest.save()?;
+
+        if !SelfDevTool::is_test_session()
+            && let Err(error) = build::update_shared_server_symlink(&hash)
+        {
+            let _ = build::rollback_pending_activation_for_session(session_id);
+            return Err(error);
+        }
 
         // Save reload context for continuation after restart
         let reload_ctx = ReloadContext {
@@ -160,6 +176,7 @@ impl SelfDevTool {
         ));
         if let Err(e) = reload_ctx.save() {
             crate::logging::error(&format!("Failed to save reload context: {}", e));
+            let _ = build::rollback_pending_activation_for_session(session_id);
             return Err(e);
         }
         crate::logging::info("Reload context saved successfully");
@@ -167,7 +184,10 @@ impl SelfDevTool {
         // Write reload info for post-restart display
         let info_path = crate::storage::jcode_dir()?.join("reload-info");
         let info = format!("reload:{}", hash);
-        std::fs::write(&info_path, &info)?;
+        if let Err(error) = std::fs::write(&info_path, &info) {
+            let _ = build::rollback_pending_activation_for_session(session_id);
+            return Err(error.into());
+        }
 
         // Signal the server via in-process channel (replaces filesystem-based rebuild-signal)
         let request_id =
