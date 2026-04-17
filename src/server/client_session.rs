@@ -795,6 +795,7 @@ pub(super) async fn handle_resume_session(
             writer,
             server_name,
             server_icon,
+            None,
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -938,7 +939,7 @@ pub(super) async fn handle_resume_session(
         (result, is_canary)
     };
 
-    let _was_interrupted = match &result {
+    let was_interrupted = match &result {
         Ok(status) => {
             let agent_guard = agent.lock().await;
             restored_session_was_interrupted(&session_id, status, &agent_guard)
@@ -1060,6 +1061,7 @@ pub(super) async fn handle_resume_session(
                 writer,
                 server_name,
                 server_icon,
+                Some(was_interrupted),
             )
             .await?;
             let _ = client_event_tx.send(ServerEvent::Done { id });

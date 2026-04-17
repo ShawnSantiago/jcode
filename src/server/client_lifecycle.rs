@@ -829,6 +829,7 @@ pub(super) async fn handle_client(
                     &writer,
                     &server_name,
                     &server_icon,
+                    None,
                 )
                 .await
                 .is_err()

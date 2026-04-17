@@ -79,6 +79,7 @@ pub(super) async fn handle_get_history(
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
+    was_interrupted: Option<bool>,
 ) -> Result<()> {
     let history_start = Instant::now();
     let activity =
@@ -99,6 +100,7 @@ pub(super) async fn handle_get_history(
             writer,
             server_name,
             server_icon,
+            was_interrupted,
             activity,
         )
         .await?;
@@ -119,7 +121,7 @@ pub(super) async fn handle_get_history(
         writer,
         server_name,
         server_icon,
-        None,
+        was_interrupted,
         activity,
         HistoryPayloadMode::Full,
         true,
@@ -170,6 +172,7 @@ async fn send_history_from_persisted_session(
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
+    was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
 ) -> Result<()> {
     let session = crate::session::Session::load_for_remote_startup(session_id)
@@ -208,7 +211,7 @@ async fn send_history_from_persisted_session(
         server_name: Some(server_name.to_string()),
         server_icon: Some(server_icon.to_string()),
         server_has_update: Some(server_has_newer_binary()),
-        was_interrupted: None,
+        was_interrupted,
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
@@ -707,6 +710,7 @@ mod tests {
             &writer,
             "server-name",
             "🔥",
+            None,
         )
         .await
         .expect("history should be written from persisted fallback");
