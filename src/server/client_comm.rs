@@ -2,7 +2,9 @@ pub(super) use super::client_comm_channels::{
     handle_comm_channel_members, handle_comm_list_channels, handle_comm_subscribe_channel,
     handle_comm_unsubscribe_channel,
 };
-pub(super) use super::client_comm_context::{handle_comm_list, handle_comm_read, handle_comm_share};
+pub(super) use super::client_comm_context::{
+    handle_comm_list, handle_comm_read, handle_comm_share,
+};
 pub(super) use super::client_comm_message::handle_comm_message;
 
 #[cfg(test)]
@@ -18,7 +20,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, atomic::AtomicU64};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
     struct TestProvider;
@@ -286,26 +288,30 @@ mod tests {
 
         let _busy_guard = target.lock().await;
 
-        handle_comm_message(
-            1,
-            sender_id.clone(),
-            "hello now".to_string(),
-            Some(target_id.clone()),
-            None,
-            Some(CommDeliveryMode::Wake),
-            None,
-            &client_event_tx,
-            &sessions,
-            &soft_interrupt_queues,
-            &swarm_members,
-            &swarms_by_id,
-            &channel_subscriptions,
-            &event_history,
-            &event_counter,
-            &swarm_event_tx,
-            &client_connections,
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            handle_comm_message(
+                1,
+                sender_id.clone(),
+                "hello now".to_string(),
+                Some(target_id.clone()),
+                None,
+                Some(CommDeliveryMode::Wake),
+                None,
+                &client_event_tx,
+                &sessions,
+                &soft_interrupt_queues,
+                &swarm_members,
+                &swarms_by_id,
+                &channel_subscriptions,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx,
+                &client_connections,
+            ),
         )
-        .await;
+        .await
+        .expect("comm message should not deadlock");
 
         match target_event_rx.recv().await.expect("target notification") {
             ServerEvent::Notification {

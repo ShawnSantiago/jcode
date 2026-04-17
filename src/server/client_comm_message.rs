@@ -37,7 +37,10 @@ async fn resolve_dm_target_session(
     swarm_session_ids: &[String],
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> anyhow::Result<String> {
-    if swarm_session_ids.iter().any(|session_id| session_id == target) {
+    if swarm_session_ids
+        .iter()
+        .any(|session_id| session_id == target)
+    {
         return Ok(target.to_string());
     }
 
@@ -210,7 +213,10 @@ pub(super) async fn handle_comm_message(
             "broadcast"
         };
 
-        let members = swarm_members.read().await;
+        let known_member_ids: std::collections::HashSet<String> = {
+            let members = swarm_members.read().await;
+            members.keys().cloned().collect()
+        };
 
         let target_sessions: Vec<String> = if let Some(target) = resolved_to_session {
             vec![target]
@@ -245,7 +251,7 @@ pub(super) async fn handle_comm_message(
             if !swarm_session_ids.contains(session_id) {
                 continue;
             }
-            if members.get(session_id).is_some() {
+            if known_member_ids.contains(session_id) {
                 let from_label = friendly_name
                     .clone()
                     .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
