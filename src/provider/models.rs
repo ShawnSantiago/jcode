@@ -98,6 +98,10 @@ static ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT: std::sync::LazyLock<
 static ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT: std::sync::LazyLock<
     RwLock<HashMap<String, SystemTime>>,
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static ANTHROPIC_MODEL_REFRESH_LAST_ATTEMPT: std::sync::LazyLock<RwLock<HashMap<String, Instant>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static ANTHROPIC_MODEL_REFRESH_IN_FLIGHT: std::sync::LazyLock<RwLock<HashSet<String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
 const ACCOUNT_MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(10 * 60);
 const PROVIDER_RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -385,6 +389,60 @@ fn anthropic_static_model_ids() -> Vec<String> {
     ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()).collect()
 }
 
+fn model_ids_with_context_aliases(models: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+
+    for model in models {
+        let normalized = normalize_model_id(&model);
+        if normalized.is_empty() {
+            continue;
+        }
+        if seen.insert(model.clone()) {
+            deduped.push(model.clone());
+        }
+        if get_cached_context_limit(&normalized).unwrap_or_default() >= 1_000_000 {
+            let alias = format!("{}[1m]", normalized);
+            if seen.insert(alias.clone()) {
+                deduped.push(alias);
+            }
+        }
+    }
+
+    deduped
+}
+
+fn live_catalog_model_ids(
+    cache: &RwLock<HashMap<String, HashSet<String>>>,
+    scope: &str,
+) -> Option<Vec<String>> {
+    let models = cache
+        .read()
+        .ok()?
+        .get(scope)?
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return None;
+    }
+
+    let mut models = models;
+    models.sort();
+    Some(model_ids_with_context_aliases(models))
+}
+
+pub fn cached_anthropic_model_ids() -> Option<Vec<String>> {
+    live_catalog_model_ids(
+        &ANTHROPIC_AVAILABLE_MODELS,
+        &current_anthropic_catalog_scope(),
+    )
+}
+
+pub fn cached_openai_model_ids() -> Option<Vec<String>> {
+    live_catalog_model_ids(&ACCOUNT_AVAILABLE_MODELS, &current_openai_account_scope())
+}
+
 /// Look up a cached context limit for a model.
 fn get_cached_context_limit(model: &str) -> Option<usize> {
     let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
@@ -549,36 +607,22 @@ pub(crate) fn merge_anthropic_model_ids(dynamic_models: Vec<String>) -> Vec<Stri
 }
 
 pub fn known_anthropic_model_ids() -> Vec<String> {
-    let scope = current_anthropic_catalog_scope();
-    let dynamic_models = ANTHROPIC_AVAILABLE_MODELS
-        .read()
-        .ok()
-        .and_then(|cache| {
-            cache
-                .get(&scope)
-                .map(|models| models.iter().cloned().collect())
-        })
-        .unwrap_or_default();
-    merge_anthropic_model_ids(dynamic_models)
+    cached_anthropic_model_ids().unwrap_or_else(anthropic_static_model_ids)
 }
 
 pub fn known_openai_model_ids() -> Vec<String> {
-    let scope = current_openai_account_scope();
-    let dynamic_models = ACCOUNT_AVAILABLE_MODELS
-        .read()
-        .ok()
-        .and_then(|cache| {
-            cache
-                .get(&scope)
-                .map(|models| models.iter().cloned().collect())
-        })
-        .unwrap_or_default();
-    merge_openai_model_ids(dynamic_models)
+    cached_openai_model_ids().unwrap_or_else(openai_static_model_ids)
 }
 
 pub fn note_openai_model_catalog_refresh_attempt() {
     if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
         last_attempt.insert(current_openai_account_scope(), Instant::now());
+    }
+}
+
+fn note_anthropic_model_catalog_refresh_attempt_for_scope(scope: &str) {
+    if let Ok(mut last_attempt) = ANTHROPIC_MODEL_REFRESH_LAST_ATTEMPT.write() {
+        last_attempt.insert(scope.to_string(), Instant::now());
     }
 }
 
@@ -600,6 +644,17 @@ fn openai_model_catalog_refresh_throttled() -> bool {
         .unwrap_or(false)
 }
 
+fn anthropic_model_catalog_refresh_throttled(scope: &str) -> bool {
+    let Ok(last_attempt) = ANTHROPIC_MODEL_REFRESH_LAST_ATTEMPT.read() else {
+        return false;
+    };
+
+    last_attempt
+        .get(scope)
+        .map(|at| at.elapsed() < ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL)
+        .unwrap_or(false)
+}
+
 pub fn should_refresh_openai_model_catalog() -> bool {
     if account_model_cache_is_fresh() {
         return false;
@@ -610,6 +665,20 @@ pub fn should_refresh_openai_model_catalog() -> bool {
     ACCOUNT_MODEL_REFRESH_IN_FLIGHT
         .read()
         .map(|in_flight| !in_flight.contains(&current_openai_account_scope()))
+        .unwrap_or(true)
+}
+
+pub fn should_refresh_anthropic_model_catalog() -> bool {
+    let scope = current_anthropic_catalog_scope();
+    if anthropic_model_cache_is_fresh(&scope) {
+        return false;
+    }
+    if anthropic_model_catalog_refresh_throttled(&scope) {
+        return false;
+    }
+    ANTHROPIC_MODEL_REFRESH_IN_FLIGHT
+        .read()
+        .map(|in_flight| !in_flight.contains(&scope))
         .unwrap_or(true)
 }
 
@@ -631,6 +700,22 @@ pub fn begin_openai_model_catalog_refresh() -> bool {
     true
 }
 
+pub fn begin_anthropic_model_catalog_refresh() -> Option<String> {
+    if !should_refresh_anthropic_model_catalog() {
+        return None;
+    }
+    let scope = current_anthropic_catalog_scope();
+    let Ok(mut in_flight) = ANTHROPIC_MODEL_REFRESH_IN_FLIGHT.write() else {
+        return None;
+    };
+    if !in_flight.insert(scope.clone()) {
+        return None;
+    }
+
+    note_anthropic_model_catalog_refresh_attempt_for_scope(&scope);
+    Some(scope)
+}
+
 pub fn finish_openai_model_catalog_refresh() {
     if let Ok(mut in_flight) = ACCOUNT_MODEL_REFRESH_IN_FLIGHT.write() {
         in_flight.remove(&current_openai_account_scope());
@@ -643,6 +728,12 @@ fn finish_openai_model_catalog_refresh_for_scope(scope: &str) {
     }
 }
 
+pub fn finish_anthropic_model_catalog_refresh_for_scope(scope: &str) {
+    if let Ok(mut in_flight) = ANTHROPIC_MODEL_REFRESH_IN_FLIGHT.write() {
+        in_flight.remove(scope);
+    }
+}
+
 fn account_model_cache_is_fresh() -> bool {
     let scope = current_openai_account_scope();
     let Ok(guard) = ACCOUNT_AVAILABLE_MODELS_FETCHED_AT.read() else {
@@ -650,6 +741,16 @@ fn account_model_cache_is_fresh() -> bool {
     };
     guard
         .get(&scope)
+        .map(|fetched_at| fetched_at.elapsed() <= ACCOUNT_MODEL_CACHE_TTL)
+        .unwrap_or(false)
+}
+
+fn anthropic_model_cache_is_fresh(scope: &str) -> bool {
+    let Ok(guard) = ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT.read() else {
+        return false;
+    };
+    guard
+        .get(scope)
         .map(|fetched_at| fetched_at.elapsed() <= ACCOUNT_MODEL_CACHE_TTL)
         .unwrap_or(false)
 }

@@ -196,6 +196,7 @@ impl MultiProvider {
             }
         }
 
+        result.spawn_anthropic_catalog_refresh_if_needed();
         result.spawn_openai_catalog_refresh_if_needed();
         result.auto_select_active_multi_account();
         crate::logging::info(&format!(
@@ -255,6 +256,30 @@ impl MultiProvider {
             .map(|c| c.access_token.clone())
             .unwrap_or_default();
         refresh_openai_model_catalog_in_background(token, "multi-provider");
+    }
+
+    pub(super) fn spawn_anthropic_catalog_refresh_if_needed(&self) {
+        let provider: Arc<dyn Provider> = if let Some(anthropic) = self.anthropic_provider() {
+            anthropic
+        } else if let Some(claude) = self.claude_provider() {
+            claude
+        } else {
+            return;
+        };
+
+        let Some(scope) = begin_anthropic_model_catalog_refresh() else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            if let Err(err) = provider.prefetch_models().await {
+                crate::logging::info(&format!(
+                    "Failed to refresh Anthropic model catalog from provider bootstrap: {}",
+                    err
+                ));
+            }
+            finish_anthropic_model_catalog_refresh_for_scope(&scope);
+        });
     }
 
     /// Create a new MultiProvider, detecting available credentials

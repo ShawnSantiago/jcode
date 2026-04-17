@@ -943,6 +943,44 @@ fn test_openai_model_catalog_is_scoped_per_account() {
 }
 
 #[test]
+fn test_openai_live_catalog_replaces_static_fallback_list() {
+    let _guard = crate::storage::lock_test_env();
+    crate::auth::codex::set_active_account_override(Some("work".to_string()));
+
+    populate_account_models(vec!["gpt-5.4-live-only".to_string()]);
+    let models = known_openai_model_ids();
+
+    assert_eq!(models, vec!["gpt-5.4-live-only".to_string()]);
+
+    crate::auth::codex::set_active_account_override(None);
+}
+
+#[test]
+fn test_anthropic_live_catalog_replaces_static_fallback_list() {
+    let _guard = crate::storage::lock_test_env();
+    crate::env::remove_var("ANTHROPIC_API_KEY");
+    crate::auth::claude::set_active_account_override(Some("work".to_string()));
+
+    populate_context_limits(
+        [("claude-opus-4-7".to_string(), 1_048_576)]
+            .into_iter()
+            .collect(),
+    );
+    populate_anthropic_models(vec!["claude-opus-4-7".to_string()]);
+    let models = known_anthropic_model_ids();
+
+    assert_eq!(
+        models,
+        vec![
+            "claude-opus-4-7".to_string(),
+            "claude-opus-4-7[1m]".to_string()
+        ]
+    );
+
+    crate::auth::claude::set_active_account_override(None);
+}
+
+#[test]
 fn test_same_provider_account_candidates_include_other_openai_accounts() {
     with_clean_provider_test_env(|| {
         let now_ms = chrono::Utc::now().timestamp_millis() + 60_000;

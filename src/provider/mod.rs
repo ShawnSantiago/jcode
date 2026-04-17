@@ -386,19 +386,21 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
     DEFAULT_CONTEXT_LIMIT, ModelCapabilities, OpenAIModelCatalog,
-    begin_openai_model_catalog_refresh, clear_all_model_unavailability_for_account,
-    clear_all_provider_unavailability_for_account, clear_model_unavailable_for_account,
-    clear_provider_unavailable_for_account, context_limit_for_model,
-    context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
+    begin_anthropic_model_catalog_refresh, begin_openai_model_catalog_refresh,
+    cached_anthropic_model_ids, cached_openai_model_ids,
+    clear_all_model_unavailability_for_account, clear_all_provider_unavailability_for_account,
+    clear_model_unavailable_for_account, clear_provider_unavailable_for_account,
+    context_limit_for_model, context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
     fetch_anthropic_model_catalog_oauth, fetch_openai_context_limits, fetch_openai_model_catalog,
-    finish_openai_model_catalog_refresh, format_account_model_availability_detail,
-    get_best_available_openai_model, is_model_available_for_account, known_anthropic_model_ids,
-    known_openai_model_ids, model_availability_for_account,
-    model_unavailability_detail_for_account, note_openai_model_catalog_refresh_attempt,
-    populate_account_models, populate_anthropic_models, populate_context_limits,
-    provider_for_model, provider_for_model_with_hint, provider_unavailability_detail_for_account,
-    record_model_unavailable_for_account, record_provider_unavailable_for_account,
-    refresh_openai_model_catalog_in_background, resolve_model_capabilities,
+    finish_anthropic_model_catalog_refresh_for_scope, finish_openai_model_catalog_refresh,
+    format_account_model_availability_detail, get_best_available_openai_model,
+    is_model_available_for_account, known_anthropic_model_ids, known_openai_model_ids,
+    model_availability_for_account, model_unavailability_detail_for_account,
+    note_openai_model_catalog_refresh_attempt, populate_account_models, populate_anthropic_models,
+    populate_context_limits, provider_for_model, provider_for_model_with_hint,
+    provider_unavailability_detail_for_account, record_model_unavailable_for_account,
+    record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
+    resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_openai_model_catalog,
 };
 use self::models::{
@@ -663,6 +665,7 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
         let active = self.active_provider();
@@ -909,6 +912,7 @@ impl Provider for MultiProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
+        self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
         ensure_model_allowed_for_subscription(model)?;
@@ -1247,8 +1251,14 @@ impl Provider for MultiProvider {
 
     fn available_models_display(&self) -> Vec<String> {
         let mut models = Vec::new();
-        models.extend(known_anthropic_model_ids());
-        models.extend(known_openai_model_ids());
+        if let Some(anthropic) = self.anthropic_provider() {
+            models.extend(anthropic.available_models_display());
+        } else if let Some(claude) = self.claude_provider() {
+            models.extend(claude.available_models_display());
+        }
+        if let Some(openai) = self.openai_provider() {
+            models.extend(openai.available_models_display());
+        }
         {
             let copilot_guard = self
                 .copilot_api
@@ -1333,14 +1343,27 @@ impl Provider for MultiProvider {
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
+        self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
         let mut routes = Vec::new();
         let has_oauth = self.has_claude_runtime();
         let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+        let anthropic_models = if let Some(anthropic) = self.anthropic_provider() {
+            anthropic.available_models_for_switching()
+        } else if let Some(claude) = self.claude_provider() {
+            claude.available_models_for_switching()
+        } else {
+            known_anthropic_model_ids()
+        };
+        let openai_models = if let Some(openai) = self.openai_provider() {
+            openai.available_models_for_switching()
+        } else {
+            known_openai_model_ids()
+        };
 
         // Anthropic models (oauth and/or api-key)
-        for model in known_anthropic_model_ids() {
+        for model in anthropic_models {
             let (available, detail) = if has_oauth && !has_api_key {
                 anthropic_oauth_route_availability(&model)
             } else {
@@ -1381,7 +1404,7 @@ impl Provider for MultiProvider {
         }
 
         // OpenAI models
-        for model in known_openai_model_ids() {
+        for model in openai_models {
             let availability = model_availability_for_account(&model);
             let (available, detail) = if self.openai_provider().is_none() {
                 (false, "no credentials".to_string())
@@ -2234,6 +2257,7 @@ impl Provider for MultiProvider {
             forced_provider: self.forced_provider,
         };
 
+        provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
         if matches!(active, ActiveProvider::Copilot) {
             let _ = provider.set_model(&format!("copilot:{}", current_model));

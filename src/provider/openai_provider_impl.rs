@@ -360,11 +360,11 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        crate::provider::known_openai_model_ids()
+        crate::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()])
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        crate::provider::known_openai_model_ids()
+        self.available_models_for_switching()
     }
 
     async fn prefetch_models(&self) -> Result<()> {
