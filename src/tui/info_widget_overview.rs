@@ -92,7 +92,7 @@ pub(crate) fn compute_page_layout(
 
     let max_page_height = pages
         .iter()
-        .map(|page| page.height + if show_dots { 1 } else { 0 })
+        .map(|page| page.height + u16::from(show_dots))
         .max()
         .unwrap_or(0);
 
@@ -163,8 +163,8 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
             UsageProvider::CostBased | UsageProvider::Copilot => return 2,
             _ => {
                 let label = info.provider.label();
-                let label_line = if label.is_empty() { 0 } else { 1 };
-                let spark_line = if info.spark.is_some() { 1 } else { 0 };
+                let label_line = u16::from(!label.is_empty());
+                let spark_line = u16::from(info.spark.is_some());
                 return 2 + label_line + spark_line;
             }
         }
@@ -198,7 +198,7 @@ fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
 
     let available_lines = MAX_TODO_LINES.saturating_sub(2);
     let todo_lines = data.todos.len().min(available_lines);
-    let mut height = 2 + todo_lines as u16;
+    let mut height = 2 + u16::try_from(todo_lines).unwrap_or(u16::MAX);
     if data.todos.len() > available_lines {
         height += 1;
     }
