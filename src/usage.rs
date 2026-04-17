@@ -592,15 +592,20 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     }
 
     let client = crate::provider::shared_http_client();
-    let response = client
-        .get(USAGE_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "claude-cli/1.0.0")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
-        .send()
-        .await;
+    let response = crate::provider::anthropic::apply_oauth_attribution_headers(
+        client
+            .get(USAGE_URL)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header(
+                "User-Agent",
+                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+            )
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219"),
+    )
+    .send()
+    .await;
 
     let response = match response {
         Ok(response) => response,

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 static CACHE_TTL_1H: AtomicBool = AtomicBool::new(false);
 
@@ -39,6 +40,14 @@ const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 /// User-Agent for OAuth requests (must match Claude CLI format)
 pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
+/// Claude Code billing attribution header observed in the official CLI.
+///
+/// This is the strongest first-party marker we have observed via Claude Code's
+/// own API debug logs. Keep it centralized so all Anthropic OAuth requests use
+/// a consistent attribution shape.
+pub(crate) const OAUTH_BILLING_HEADER: &str =
+    "cc_version=2.1.112.b02; cc_entrypoint=sdk-cli; cch=00000;";
+
 /// Beta headers required for OAuth (base)
 pub(crate) const OAUTH_BETA_HEADERS: &str =
     "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
@@ -54,6 +63,17 @@ fn oauth_beta_headers(model: &str) -> &'static str {
     } else {
         OAUTH_BETA_HEADERS
     }
+}
+
+pub(crate) fn new_oauth_request_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+pub(crate) fn apply_oauth_attribution_headers(
+    req: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    req.header("x-anthropic-billing-header", OAUTH_BILLING_HEADER)
+        .header("x-client-request-id", new_oauth_request_id())
 }
 
 /// Check if a model name explicitly requests 1M context via suffix (e.g. "claude-opus-4-6[1m]")
@@ -939,10 +959,11 @@ async fn stream_response(
         // 2. User-Agent matching Claude CLI
         // 3. Multiple beta headers
         // 4. ?beta=true query param (in URL above)
-        req = req
-            .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", CLAUDE_CLI_USER_AGENT)
-            .header("anthropic-beta", oauth_beta_headers(model_name));
+        req = apply_oauth_attribution_headers(
+            req.header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header("anthropic-beta", oauth_beta_headers(model_name)),
+        );
     } else {
         // Direct API keys use x-api-key
         // Include prompt-caching beta header

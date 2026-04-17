@@ -140,19 +140,21 @@ pub async fn fetch_anthropic_model_catalog_oauth(
     access_token: &str,
 ) -> Result<AnthropicModelCatalog> {
     fetch_anthropic_model_catalog_with_request(|client, after_id| {
-        let mut req = client
-            .get("https://api.anthropic.com/v1/models")
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header(
-                "User-Agent",
-                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
-            )
-            .header("anthropic-version", "2023-06-01")
-            .header(
-                "anthropic-beta",
-                crate::provider::anthropic::OAUTH_BETA_HEADERS,
-            )
-            .query(&[("limit", "1000")]);
+        let mut req = crate::provider::anthropic::apply_oauth_attribution_headers(
+            client
+                .get("https://api.anthropic.com/v1/models")
+                .header("Authorization", format!("Bearer {}", access_token))
+                .header(
+                    "User-Agent",
+                    crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                )
+                .header("anthropic-version", "2023-06-01")
+                .header(
+                    "anthropic-beta",
+                    crate::provider::anthropic::OAUTH_BETA_HEADERS,
+                )
+                .query(&[("limit", "1000")]),
+        );
 
         if let Some(after) = after_id {
             req = req.query(&[("after_id", after)]);

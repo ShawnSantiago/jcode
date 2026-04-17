@@ -277,18 +277,19 @@ impl Sidecar {
             }],
         };
 
-        let response = self
-            .client
-            .post(CLAUDE_API_URL)
-            .header("Authorization", format!("Bearer {}", creds.access_token))
-            .header("User-Agent", CLAUDE_CLI_USER_AGENT)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", OAUTH_BETA_HEADERS)
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to Claude API")?;
+        let response = crate::provider::anthropic::apply_oauth_attribution_headers(
+            self.client
+                .post(CLAUDE_API_URL)
+                .header("Authorization", format!("Bearer {}", creds.access_token))
+                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-beta", OAUTH_BETA_HEADERS)
+                .header("content-type", "application/json")
+                .json(&request),
+        )
+        .send()
+        .await
+        .context("Failed to send request to Claude API")?;
 
         if !response.status().is_success() {
             let status = response.status();
