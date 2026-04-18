@@ -666,4 +666,26 @@ mod tests {
     }
 
 
+    #[tokio::test]
+    async fn wait_for_reload_ack_handles_repeated_unique_requests() {
+        let (tx, _) = reload_ack();
+
+        for _ in 0..5 {
+            let request_id = crate::id::new_id("reload-repeat");
+            let ack = ReloadAck {
+                hash: format!("hash-{}", request_id),
+                request_id: request_id.clone(),
+            };
+            let _ = tx.send(Some(ack.clone()));
+
+            let received = wait_for_reload_ack(&request_id, Duration::from_millis(50))
+                .await
+                .expect("ack should be received for repeated request");
+
+            assert_eq!(received.request_id, ack.request_id);
+            assert_eq!(received.hash, ack.hash);
+        }
+    }
+
+
 }
