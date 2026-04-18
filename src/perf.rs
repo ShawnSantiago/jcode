@@ -467,30 +467,29 @@ fn detect_memory() -> (Option<u64>, Option<u64>) {
     use std::mem;
 
     #[repr(C)]
-    #[allow(non_snake_case)]
-    struct MEMORYSTATUSEX {
-        dwLength: u32,
-        dwMemoryLoad: u32,
-        ullTotalPhys: u64,
-        ullAvailPhys: u64,
-        ullTotalPageFile: u64,
-        ullAvailPageFile: u64,
-        ullTotalVirtual: u64,
-        ullAvailVirtual: u64,
-        ullAvailExtendedVirtual: u64,
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
     }
 
     unsafe extern "system" {
-        fn GlobalMemoryStatusEx(lpBuffer: *mut MEMORYSTATUSEX) -> i32;
+        fn GlobalMemoryStatusEx(lpBuffer: *mut MemoryStatusEx) -> i32;
     }
 
-    let mut status: MEMORYSTATUSEX = unsafe { mem::zeroed() };
-    status.dwLength = mem::size_of::<MEMORYSTATUSEX>() as u32;
+    let mut status: MemoryStatusEx = unsafe { mem::zeroed() };
+    status.dw_length = mem::size_of::<MemoryStatusEx>() as u32;
 
     let ret = unsafe { GlobalMemoryStatusEx(&mut status) };
     if ret != 0 {
-        let total_mb = status.ullTotalPhys / (1024 * 1024);
-        let avail_mb = status.ullAvailPhys / (1024 * 1024);
+        let total_mb = status.ull_total_phys / (1024 * 1024);
+        let avail_mb = status.ull_avail_phys / (1024 * 1024);
         (Some(avail_mb), Some(total_mb))
     } else {
         (None, None)
