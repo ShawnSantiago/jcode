@@ -73,6 +73,14 @@ even if they cannot reach the same fast path.
 
 ### Phase 2 — Measurement and repeatability
 
+Standard self-dev checkpoints now live behind `scripts/bench_selfdev_checkpoints.sh`, which runs:
+- cold `cargo check`
+- warm touched-file `cargo check`
+- cold self-dev `jcode` build
+- warm touched-file self-dev `jcode` build
+
+Use it when capturing comparable before/after numbers for refactors.
+
 - Add documented commands for cold/warm `check` and `build` timing.
 - Prefer touched-file timings (for example `scripts/bench_compile.sh check --touch src/server.rs`) over no-op hot-cache reruns when judging ROI.
 - Track timing deltas after each structural phase.
@@ -334,6 +342,7 @@ scripts/bench_compile.sh check --runs 3 --touch src/tool/read.rs
 scripts/bench_compile.sh release-jcode --runs 3
 scripts/bench_compile.sh selfdev-jcode --runs 3
 scripts/bench_compile.sh build -- --package jcode --bin test_api
+scripts/bench_selfdev_checkpoints.sh --touch src/server.rs --runs 3
 ```
 
 `bench_compile.sh` now supports:
@@ -342,6 +351,9 @@ scripts/bench_compile.sh build -- --package jcode --bin test_api
 - `--touch <path>` to simulate a local edit before each timed run
 - `--json` for scriptable output
 - `-- <extra cargo args>` to narrow the measured target/package/bin/features
+
+`bench_selfdev_checkpoints.sh` builds on that foundation to produce a single standard
+self-dev checkpoint bundle for cold/warm check + build comparisons.
 
 ## Stop Conditions
 
