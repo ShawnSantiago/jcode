@@ -1468,7 +1468,6 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
 /// Legacy render function - kept for backwards compatibility
 /// Renders the first available widget at the given rect
 #[deprecated(note = "Use render_all instead")]
-#[allow(deprecated)]
 pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     // Just render as the first available widget type
     let available = data.available_widgets();

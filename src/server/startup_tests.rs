@@ -86,8 +86,7 @@ async fn wait_for_existing_server_tolerates_delayed_listener() {
 
     let bind_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        #[allow(unused_mut)]
-        let mut listener = Listener::bind(&bind_path).expect("bind delayed listener");
+        let listener = Listener::bind(&bind_path).expect("bind delayed listener");
         tokio::time::sleep(Duration::from_millis(200)).await;
         drop(listener);
     });

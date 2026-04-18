@@ -1552,8 +1552,10 @@ fn command_candidates(command: &str) -> Vec<std::ffi::OsString> {
         return vec![file_name];
     }
 
-    #[allow(unused_mut)]
+    #[cfg(windows)]
     let mut candidates = vec![file_name.clone()];
+    #[cfg(not(windows))]
+    let candidates = vec![file_name.clone()];
 
     #[cfg(windows)]
     {

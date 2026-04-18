@@ -1458,10 +1458,8 @@ impl Server {
         crate::transport::remove_socket(&self.socket_path);
         crate::transport::remove_socket(&self.debug_socket_path);
 
-        #[allow(unused_mut)]
-        let mut main_listener = Listener::bind(&self.socket_path)?;
-        #[allow(unused_mut)]
-        let mut debug_listener = Listener::bind(&self.debug_socket_path)?;
+        let main_listener = Listener::bind(&self.socket_path)?;
+        let debug_listener = Listener::bind(&self.debug_socket_path)?;
 
         #[cfg(unix)]
         {

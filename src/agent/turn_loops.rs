@@ -132,8 +132,6 @@ impl Agent {
             }));
 
             let mut text_content = String::new();
-            #[allow(unused_variables)]
-            let text_wrapped_detected = false;
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
