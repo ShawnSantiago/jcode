@@ -27,6 +27,60 @@ This report inventories the repo-wide code-quality issues detectable with static
 - Production files between 801 and 1200 LOC: **62**
 - Approximate production functions over 100 LOC: **304** across **165** files
 
+## `unwrap` / `expect` split by production vs test-only files
+
+Using improved path-based classification for Rust files:
+- production files exclude `tests/`, `*_test.rs`, `*_tests.rs`, and directories ending in `_test` / `_tests`
+- test-only files include `tests/` and Rust files or directories explicitly marked as tests
+- note: this is still path-based, so test-only code embedded inside production files is counted as production
+
+### Counts
+
+| Scope | `unwrap` / `expect` occurrences |
+|---|---:|
+| Production files | **1258** |
+| Test-only files | **1334** |
+
+### Highest-count production files
+
+| Count | File |
+|---:|---|
+| 136 | `src/tool/communicate.rs` |
+| 62 | `src/build.rs` |
+| 52 | `src/auth/cursor.rs` |
+| 46 | `src/auth/codex.rs` |
+| 42 | `src/provider/openai.rs` |
+| 37 | `src/auth/claude.rs` |
+| 30 | `src/cli/dispatch.rs` |
+| 28 | `src/tool/bash.rs` |
+| 26 | `src/storage.rs` |
+| 25 | `src/auth/gemini.rs` |
+| 25 | `src/tool/read.rs` |
+| 25 | `src/tui/session_picker/loading.rs` |
+| 24 | `src/side_panel.rs` |
+| 24 | `src/cli/args.rs` |
+| 24 | `src/server/comm_control.rs` |
+
+### Highest-count test-only files
+
+| Count | File |
+|---:|---|
+| 788 | `src/tui/app/tests.rs` |
+| 98 | `src/tool/selfdev/tests.rs` |
+| 59 | `src/memory_tests.rs` |
+| 44 | `src/import_tests.rs` |
+| 26 | `src/provider/tests.rs` |
+| 26 | `src/tool/agentgrep_tests.rs` |
+| 24 | `src/tui/mermaid_tests.rs` |
+| 24 | `src/server/socket_tests.rs` |
+| 21 | `src/tui/markdown_tests/cases.rs` |
+| 20 | `src/provider/openrouter_tests.rs` |
+| 18 | `src/tui/ui_pinned_tests.rs` |
+| 17 | `src/cli/provider_init_tests.rs` |
+| 15 | `src/agent_tests.rs` |
+| 12 | `tests/e2e/provider_behavior.rs` |
+| 12 | `src/server/startup_tests.rs` |
+
 ## Structural debt
 
 ### Production files over 1200 LOC
