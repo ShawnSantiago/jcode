@@ -100,6 +100,17 @@ Use it when capturing comparable before/after numbers for refactors.
   `scripts/dev_cargo.sh build --release -p jcode --bin jcode --quiet` to about **16.0s** for
   `scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode --quiet`, while keeping the
   normal release/distribution profile unchanged.
+- 2026-04-18: added `scripts/bench_selfdev_checkpoints.sh` to standardize cold/warm self-dev
+  checkpoints. First local checkpoint attempt on this machine surfaced two environment blockers:
+  - cold checkpoints failed because `cargo clean` could not remove part of `target/release`
+    (`Permission denied` on a fingerprint timestamp file)
+  - warm `selfdev-jcode` touched-file measurement on `src/tool/read.rs` failed because the
+    `sccache`-wrapped rustc process terminated with signal 15 during the `jcode` crate build
+  - warm touched-file `cargo check` on `src/tool/read.rs` completed in **93.115s** then **9.430s**,
+    which is useful as a rough upper/lower bound but not yet stable enough to treat as an
+    authoritative checkpoint
+  - follow-up required: fix the `target/release` permission issue, rerun cold checkpoints, and
+    rerun warm self-dev measurements until they are stable enough to compare against future waves
 
 ### Phase 3 — Workspace boundary design
 
