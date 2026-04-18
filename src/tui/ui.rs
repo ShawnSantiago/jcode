@@ -893,6 +893,7 @@ impl BodyCacheState {
         }
     }
 
+    #[cfg(test)]
     fn best_incremental_base(
         &self,
         key: &BodyCacheKey,
@@ -936,6 +937,61 @@ impl BodyCacheState {
             (Some(entry), None) | (None, Some(entry)) => Some(entry),
             (None, None) => None,
         }
+    }
+
+    fn take_best_incremental_base(
+        &mut self,
+        key: &BodyCacheKey,
+        msg_count: usize,
+    ) -> Option<(Arc<PreparedMessages>, usize)> {
+        let regular = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.msg_count > 0
+                    && msg_count > entry.msg_count
+                    && entry.key.width == key.width
+                    && entry.key.diff_mode == key.diff_mode
+                    && entry.key.diagram_mode == key.diagram_mode
+                    && entry.key.centered == key.centered
+            })
+            .max_by_key(|(_, entry)| entry.msg_count)
+            .map(|(idx, entry)| (false, idx, entry.msg_count));
+        let oversized = self
+            .oversized_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.msg_count > 0
+                    && msg_count > entry.msg_count
+                    && entry.key.width == key.width
+                    && entry.key.diff_mode == key.diff_mode
+                    && entry.key.diagram_mode == key.diagram_mode
+                    && entry.key.centered == key.centered
+            })
+            .max_by_key(|(_, entry)| entry.msg_count)
+            .map(|(idx, entry)| (true, idx, entry.msg_count));
+
+        let chosen = match (regular, oversized) {
+            (Some(left), Some(right)) => {
+                if left.2 >= right.2 {
+                    left
+                } else {
+                    right
+                }
+            }
+            (Some(entry), None) | (None, Some(entry)) => entry,
+            (None, None) => return None,
+        };
+
+        let (is_oversized, idx, msg_count) = chosen;
+        let entry = if is_oversized {
+            self.oversized_entries.remove(idx)?
+        } else {
+            self.entries.remove(idx)?
+        };
+        Some((entry.prepared, msg_count))
     }
 
     fn insert(&mut self, key: BodyCacheKey, prepared: Arc<PreparedMessages>, msg_count: usize) {

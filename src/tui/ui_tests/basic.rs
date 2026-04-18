@@ -431,6 +431,39 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
 }
 
 #[test]
+fn test_prepare_body_incremental_reuses_unique_prepared_arc() {
+    let width = 80;
+    let base_state = TestState {
+        display_messages: vec![
+            DisplayMessage::user("first prompt"),
+            DisplayMessage::assistant("initial answer"),
+        ],
+        messages_version: 1,
+        ..Default::default()
+    };
+    let grown_state = TestState {
+        display_messages: vec![
+            DisplayMessage::user("first prompt"),
+            DisplayMessage::assistant("initial answer"),
+            DisplayMessage::user("second prompt"),
+            DisplayMessage::assistant("follow-up answer"),
+        ],
+        messages_version: 2,
+        ..Default::default()
+    };
+
+    let prepared = Arc::new(super::prepare::prepare_body(&base_state, width, false));
+    let base_ptr = Arc::as_ptr(&prepared) as usize;
+    let incremented = super::prepare::prepare_body_incremental(&grown_state, width, prepared, 2);
+
+    assert_eq!(Arc::as_ptr(&incremented) as usize, base_ptr);
+    assert!(
+        incremented.wrapped_lines.len() >= 4,
+        "expected incremental prep to append new wrapped content"
+    );
+}
+
+#[test]
 fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     let key_a = FullPrepCacheKey {
         width: 40,
