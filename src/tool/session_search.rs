@@ -59,6 +59,14 @@ struct SearchResult {
     score: f64,
 }
 
+#[derive(Default)]
+struct SearchWorkerOutcome {
+    results: Vec<SearchResult>,
+    read_errors: usize,
+    utf8_errors: usize,
+    parse_errors: usize,
+}
+
 #[derive(Debug, Clone)]
 struct QueryProfile {
     normalized: String,
@@ -114,7 +122,7 @@ impl Tool for SessionSearchTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SearchInput = serde_json::from_value(input)?;
         let limit = params.limit.unwrap_or(10);
         let query = QueryProfile::new(&params.query);
@@ -129,8 +137,9 @@ impl Tool for SessionSearchTool {
             return Ok(ToolOutput::new("No past sessions found."));
         }
 
-        let results = tokio::task::spawn_blocking(move || {
-            search_sessions_blocking(&sessions_dir, &query, wd_filter.as_deref(), limit)
+        let results = tokio::task::spawn_blocking({
+            let session_id = ctx.session_id.clone();
+            move || search_sessions_blocking(&sessions_dir, &query, wd_filter.as_deref(), limit, &session_id)
         })
         .await??;
 
@@ -175,6 +184,7 @@ fn search_sessions_blocking(
     query: &QueryProfile,
     wd_filter: Option<&str>,
     limit: usize,
+    session_id: &str,
 ) -> Result<Vec<SearchResult>> {
     // Phase 1: Collect file paths with mtime, sort newest-first
     let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
@@ -195,7 +205,7 @@ fn search_sessions_blocking(
     let thread_count = SCAN_THREADS.min(files.len().max(1));
     let chunk_size = (files.len() + thread_count - 1) / thread_count.max(1);
 
-    let all_results: Vec<Vec<SearchResult>> = std::thread::scope(|s| {
+    let all_results: Vec<SearchWorkerOutcome> = std::thread::scope(|s| {
         let mut handles = Vec::new();
 
         for chunk in files.chunks(chunk_size) {
@@ -203,6 +213,7 @@ fn search_sessions_blocking(
             handles.push(s.spawn(move || {
                 let mut results: Vec<SearchResult> = Vec::new();
                 let mut deserialized = 0usize;
+                let mut outcome = SearchWorkerOutcome::default();
 
                 for (path, _mtime) in chunk {
                     if results.len() >= MAX_CANDIDATES / thread_count {
@@ -211,7 +222,10 @@ fn search_sessions_blocking(
 
                     let raw = match std::fs::read(path) {
                         Ok(data) => data,
-                        Err(_) => continue,
+                        Err(_) => {
+                            outcome.read_errors += 1;
+                            continue;
+                        }
                     };
 
                     if !raw_matches_query(&raw, query) {
@@ -231,12 +245,18 @@ fn search_sessions_blocking(
 
                     let raw_str = match std::str::from_utf8(&raw) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        Err(_) => {
+                            outcome.utf8_errors += 1;
+                            continue;
+                        }
                     };
 
                     let session: Session = match serde_json::from_str(raw_str) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        Err(_) => {
+                            outcome.parse_errors += 1;
+                            continue;
+                        }
                     };
 
                     if let Some(wd_filter) = wd_filter {
@@ -272,26 +292,41 @@ fn search_sessions_blocking(
                     }
                 }
 
-                results
+                outcome.results = results;
+                outcome
             }));
         }
 
         handles
             .into_iter()
             .map(|handle| match handle.join() {
-                Ok(results) => results,
+                Ok(outcome) => outcome,
                 Err(_) => {
                     crate::logging::warn(
                         "session_search worker thread panicked; skipping that worker's results",
                     );
-                    Vec::new()
+                    SearchWorkerOutcome::default()
                 }
             })
             .collect()
     });
 
+    let read_errors: usize = all_results.iter().map(|outcome| outcome.read_errors).sum();
+    let utf8_errors: usize = all_results.iter().map(|outcome| outcome.utf8_errors).sum();
+    let parse_errors: usize = all_results.iter().map(|outcome| outcome.parse_errors).sum();
+
+    if read_errors > 0 || utf8_errors > 0 || parse_errors > 0 {
+        crate::logging::warn(&format!(
+            "[tool:session_search] skipped unreadable or invalid session files in session {} (read_errors={} utf8_errors={} parse_errors={})",
+            session_id, read_errors, utf8_errors, parse_errors
+        ));
+    }
+
     // Merge results from all threads
-    let mut results: Vec<SearchResult> = all_results.into_iter().flatten().collect();
+    let mut results: Vec<SearchResult> = all_results
+        .into_iter()
+        .flat_map(|outcome| outcome.results)
+        .collect();
 
     // Sort by score descending, take top `limit`
     results.sort_unstable_by(|a, b| {
@@ -601,7 +636,13 @@ mod tests {
             )]);
 
             let query = QueryProfile::new("airpods reconnect bluetooth");
-            let results = search_sessions_blocking(&home.join("sessions"), &query, None, 10)
+            let results = search_sessions_blocking(
+                &home.join("sessions"),
+                &query,
+                None,
+                10,
+                "test-session",
+            )
                 .expect("search succeeds");
 
             assert!(!results.is_empty(), "expected token-overlap match");
@@ -624,7 +665,13 @@ mod tests {
             )]);
 
             let query = QueryProfile::new("hackernews visibility upvotes");
-            let results = search_sessions_blocking(&home.join("sessions"), &query, None, 10)
+            let results = search_sessions_blocking(
+                &home.join("sessions"),
+                &query,
+                None,
+                10,
+                "test-session",
+            )
                 .expect("search succeeds");
 
             assert!(!results.is_empty(), "expected tool input match");
