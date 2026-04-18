@@ -133,9 +133,12 @@ impl SelfDevTool {
         let previous_shared_server_version = if SelfDevTool::is_test_session() {
             None
         } else {
-            build::smoke_test_server_binary(
-                &published.as_ref().expect("published build").versioned_path,
-            )?;
+            let published_build = published.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "published build metadata was missing after publish_local_current_build_for_source"
+                )
+            })?;
+            build::smoke_test_server_binary(&published_build.versioned_path)?;
             build::read_shared_server_version()?
         };
 
