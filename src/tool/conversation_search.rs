@@ -83,6 +83,12 @@ impl Tool for ConversationSearchTool {
         let params: SearchInput = serde_json::from_value(input)?;
         let manager = self.compaction.read().await;
         let session_messages = load_session_messages(&ctx.session_id);
+        if session_messages.is_none() {
+            crate::logging::warn(&format!(
+                "[tool:conversation_search] failed to load session history for session {}",
+                ctx.session_id
+            ));
+        }
 
         let mut output = String::new();
 
@@ -137,6 +143,12 @@ impl Tool for ConversationSearchTool {
                 }
 
                 if results.len() > 10 {
+                    crate::logging::warn(&format!(
+                        "[tool:conversation_search] truncating displayed search results for session {} query={} total_results={}",
+                        ctx.session_id,
+                        query,
+                        results.len()
+                    ));
                     output.push_str(&format!("... and {} more results\n", results.len() - 10));
                 }
             }
