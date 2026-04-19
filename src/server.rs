@@ -110,15 +110,17 @@ fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
     is_headless && !matches!(status, "completed" | "done" | "failed" | "stopped")
 }
 
-fn headless_reload_continuation_message(
-    session_id: &str,
-    reload_ctx: Option<ReloadContext>,
-) -> String {
-    let reminder = ReloadContext::recovery_continuation_message(reload_ctx.as_ref(), "", None);
-    if reload_ctx.is_some() {
-        return reminder;
-    }
-    format!("{} Session id: {}.", reminder, session_id)
+fn headless_reload_continuation_message(reload_ctx: Option<ReloadContext>) -> Option<String> {
+    ReloadContext::recovery_directive(reload_ctx.as_ref(), true, "", None)
+        .map(|directive| directive.continuation_message)
+}
+
+#[derive(Default)]
+struct HeadlessRecoveryStats {
+    candidates: usize,
+    resumed: usize,
+    skipped: usize,
+    failed_to_load: usize,
 }
 
 async fn run_background_task_message_in_live_session_if_idle(
@@ -688,11 +690,16 @@ impl Server {
         ));
 
         let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
+        let recovery_started = Instant::now();
+        let mut stats = HeadlessRecoveryStats::default();
+        let mut swarms_to_persist = HashSet::new();
 
         for session_id in sessions_to_restore {
+            stats.candidates += 1;
             let session = match crate::session::Session::load(&session_id) {
                 Ok(session) => session,
                 Err(error) => {
+                    stats.failed_to_load += 1;
                     crate::logging::warn(&format!(
                         "Failed to load headless session {} during startup recovery: {}",
                         session_id, error
@@ -775,6 +782,7 @@ impl Server {
                     "skipped",
                     "restored session was not interrupted by reload",
                 );
+                stats.skipped += 1;
                 update_member_status(
                     &session_id,
                     "ready",
@@ -792,12 +800,21 @@ impl Server {
                         .get(&session_id)
                         .and_then(|member| member.swarm_id.clone())
                 } {
-                    persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
+                    swarms_to_persist.insert(swarm_id);
                 }
                 continue;
             }
 
-            let reminder = headless_reload_continuation_message(&session_id, reload_ctx);
+            let Some(reminder) = headless_reload_continuation_message(reload_ctx) else {
+                ReloadContext::log_recovery_outcome(
+                    "server_startup_headless",
+                    &session_id,
+                    "failed",
+                    "recovery directive missing for interrupted headless session",
+                );
+                continue;
+            };
+            stats.resumed += 1;
             ReloadContext::log_recovery_outcome(
                 "server_startup_headless",
                 &session_id,
@@ -886,6 +903,19 @@ impl Server {
                 }
             });
         }
+
+        for swarm_id in swarms_to_persist {
+            persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
+        }
+
+        crate::logging::info(&format!(
+            "[TIMING] headless reload startup recovery: candidates={}, resumed={}, skipped={}, failed_to_load={}, total={}ms",
+            stats.candidates,
+            stats.resumed,
+            stats.skipped,
+            stats.failed_to_load,
+            recovery_started.elapsed().as_millis()
+        ));
     }
 
     fn spawn_background_tasks(&self, server_start_time: Instant) {
@@ -1511,9 +1541,10 @@ impl Server {
                         }
                     };
 
-                    // Only notify on modifications; plain reads are tracked for later context
-                    // but should not proactively alert the swarm.
-                    let is_modification = matches!(touch.op, FileOp::Write | FileOp::Edit);
+                    // Only notify on modifications, and only about prior peer modifications.
+                    // Plain reads are still tracked for later context/listing but should not
+                    // proactively alert the swarm.
+                    let is_modification = touch.op.is_modification();
                     if is_modification {
                         crate::logging::info(&format!(
                             "[file-activity] modification by {} on {}, swarm_peers: {:?}",

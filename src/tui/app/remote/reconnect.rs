@@ -737,7 +737,17 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
             result.ok().flatten()
         });
 
-        if let Some(ctx) = reload_ctx {
+        let background_task_note = session_to_resume
+            .map(super::super::reload_persisted_background_tasks_note)
+            .unwrap_or_default();
+        let directive = ReloadContext::recovery_directive(
+            reload_ctx.as_ref(),
+            false,
+            &background_task_note,
+            None,
+        );
+
+        if let Some(directive) = directive {
             let session_id = session_to_resume.unwrap_or("unknown");
             if app.current_message_id.is_none()
                 && (app.remote_resume_activity.is_some() || app.is_processing)
@@ -754,18 +764,9 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 app.replay_elapsed_override = None;
             }
 
-            let background_task_note = session_to_resume
-                .map(super::super::reload_persisted_background_tasks_note)
-                .unwrap_or_default();
-            let continuation_msg = ReloadContext::recovery_continuation_message(
-                Some(&ctx),
-                &background_task_note,
-                None,
-            );
-
             crate::logging::info(&format!(
                 "Queuing reload continuation message ({} chars)",
-                continuation_msg.len()
+                directive.continuation_message.len()
             ));
             ReloadContext::log_recovery_outcome(
                 "tui_reconnect",
@@ -774,7 +775,8 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 "queued initiator continuation after reconnect",
             );
             app.push_display_message(DisplayMessage::system("Reload complete — continuing."));
-            app.hidden_queued_system_messages.push(continuation_msg);
+            app.hidden_queued_system_messages
+                .push(directive.continuation_message);
         } else {
             ReloadContext::log_recovery_outcome(
                 "tui_reconnect",

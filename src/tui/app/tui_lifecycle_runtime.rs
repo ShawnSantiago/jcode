@@ -310,51 +310,30 @@ impl App {
 
             // Queue an automatic message to notify the AI that reload completed
             let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
-            if let Some(ctx) = reload_ctx {
-                // This session initiated the reload - send the reload-specific continuation
-                let background_task_note =
-                    super::reload_persisted_background_tasks_note(session_id);
-                let continuation_msg = ReloadContext::recovery_continuation_message(
-                    Some(&ctx),
-                    &background_task_note,
-                    Some(total_turns),
-                );
+            let background_task_note = super::reload_persisted_background_tasks_note(session_id);
+            let directive = ReloadContext::recovery_directive(
+                reload_ctx.as_ref(),
+                self.was_interrupted_by_reload(),
+                &background_task_note,
+                Some(total_turns),
+            );
+            if let Some(directive) = directive {
+                let detail = if reload_ctx.is_some() {
+                    "restored initiating session after reload"
+                } else {
+                    "restored interrupted non-initiator session after reload"
+                };
 
                 crate::logging::info(&format!(
                     "Queuing reload continuation message ({} chars)",
-                    continuation_msg.len()
+                    directive.continuation_message.len()
                 ));
-                ReloadContext::log_recovery_outcome(
-                    "local_restore",
-                    session_id,
-                    "resumed",
-                    "restored initiating session after reload",
-                );
-                self.hidden_queued_system_messages.push(continuation_msg);
+                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
+                self.hidden_queued_system_messages
+                    .push(directive.continuation_message);
                 // Trigger processing so the queued message gets sent to the LLM.
                 // Without this, the local event loop waits for user input since
                 // process_queued_messages only runs inside process_turn_with_input.
-                self.is_processing = true;
-                self.status = ProcessingStatus::Sending;
-                self.processing_started = Some(Instant::now());
-                self.pending_turn = true;
-            } else if self.was_interrupted_by_reload() {
-                // This session was interrupted by another session's reload.
-                // The conversation has incomplete tool results - auto-continue.
-                crate::logging::info(
-                    "Session was interrupted by reload (not initiator), queuing continuation",
-                );
-                ReloadContext::log_recovery_outcome(
-                    "local_restore",
-                    session_id,
-                    "resumed",
-                    "restored interrupted non-initiator session after reload",
-                );
-                self.push_display_message(DisplayMessage::system(
-                    "Reload complete — continuing.".to_string(),
-                ));
-                self.hidden_queued_system_messages
-                    .push(ReloadContext::recovery_continuation_message(None, "", None));
                 self.is_processing = true;
                 self.status = ProcessingStatus::Sending;
                 self.processing_started = Some(Instant::now());

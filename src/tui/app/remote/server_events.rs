@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool::selfdev::ReloadContext;
 use crate::tui::app as app_mod;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 
@@ -652,13 +653,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 crate::logging::info(
                     "Session was interrupted mid-generation, queuing continuation",
                 );
-                app.push_display_message(DisplayMessage::system(
-                    "Reload complete — continuing.".to_string(),
-                ));
-                app.hidden_queued_system_messages.push(
-                    "Your session was interrupted by a server reload while you were working. The session has been restored. Any tool that was running was aborted and its results may be incomplete. Continue exactly where you left off and do not ask the user what to do next."
-                        .to_string(),
-                );
+                if let Some(directive) = ReloadContext::recovery_directive(None, true, "", None) {
+                    app.push_display_message(DisplayMessage::system(
+                        "Reload complete — continuing.".to_string(),
+                    ));
+                    app.hidden_queued_system_messages
+                        .push(directive.continuation_message);
+                }
             }
 
             false
@@ -683,6 +684,7 @@ pub(in crate::tui::app) fn handle_server_event(
             participants,
             reason,
             summary,
+            ..
         } => {
             let snapshot = RemoteSwarmPlanSnapshot {
                 swarm_id: swarm_id.clone(),

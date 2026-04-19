@@ -166,6 +166,59 @@ fn test_reload_context_save_and_load_for_session_uses_session_scoped_file() {
 }
 
 #[test]
+fn test_recovery_directive_prefers_reload_context_when_present() {
+    let ctx = ReloadContext {
+        task_context: Some("Resume a self-dev reload".to_string()),
+        version_before: "old-build".to_string(),
+        version_after: "new-build".to_string(),
+        session_id: "session-123".to_string(),
+        timestamp: "2026-04-19T00:00:00Z".to_string(),
+    };
+
+    let directive = ReloadContext::recovery_directive(
+        Some(&ctx),
+        true,
+        "\nPersisted background task(s) detected.",
+        Some(12),
+    )
+    .expect("directive should exist");
+
+    assert_eq!(
+        directive.reconnect_notice.as_deref(),
+        Some("Reloaded with build new-build")
+    );
+    assert!(directive.continuation_message.contains("Reload succeeded"));
+    assert!(
+        directive
+            .continuation_message
+            .contains("Persisted background task(s)")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("Session restored with 12 turns")
+    );
+}
+
+#[test]
+fn test_recovery_directive_uses_interrupted_message_without_reload_context() {
+    let directive = ReloadContext::recovery_directive(None, true, "", None)
+        .expect("interrupted sessions should get a directive");
+
+    assert!(directive.reconnect_notice.is_none());
+    assert!(
+        directive
+            .continuation_message
+            .contains("interrupted by a server reload while a tool was running")
+    );
+}
+
+#[test]
+fn test_recovery_directive_returns_none_when_no_reload_recovery_needed() {
+    assert!(ReloadContext::recovery_directive(None, false, "", None).is_none());
+}
+
+#[test]
 fn reload_timeout_secs_defaults_to_15() {
     let _storage_guard = crate::storage::lock_test_env();
     let _lock = lock_env();

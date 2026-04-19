@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadRecoveryDirective {
+    pub reconnect_notice: Option<String>,
+    pub continuation_message: String,
+}
+
 impl ReloadContext {
     fn sanitize_session_id(session_id: &str) -> String {
         session_id
@@ -121,6 +127,30 @@ impl ReloadContext {
         reload_ctx
             .map(|ctx| ctx.continuation_message(background_task_note, restored_turns))
             .unwrap_or_else(Self::interrupted_session_continuation_message)
+    }
+
+    pub fn recovery_directive(
+        reload_ctx: Option<&Self>,
+        was_interrupted: bool,
+        background_task_note: &str,
+        restored_turns: Option<usize>,
+    ) -> Option<ReloadRecoveryDirective> {
+        if let Some(ctx) = reload_ctx {
+            return Some(ReloadRecoveryDirective {
+                reconnect_notice: Some(ctx.reconnect_notice_line()),
+                continuation_message: ctx
+                    .continuation_message(background_task_note, restored_turns),
+            });
+        }
+
+        if was_interrupted {
+            return Some(ReloadRecoveryDirective {
+                reconnect_notice: None,
+                continuation_message: Self::interrupted_session_continuation_message(),
+            });
+        }
+
+        None
     }
 
     pub fn log_recovery_outcome(flow: &str, session_id: &str, outcome: &str, detail: &str) {
