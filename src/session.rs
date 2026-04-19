@@ -2462,6 +2462,7 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
     }
 
     let entries = std::fs::read_dir(&dir).ok()?;
+    let cutoff = Utc::now() - Duration::hours(24);
     let mut crashed: Vec<(String, String, DateTime<Utc>)> = Vec::new();
 
     for entry in entries.flatten() {
@@ -2493,10 +2494,13 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
                     pid
                 )));
                 let _ = session.save();
+                let ts = session.last_active_at.unwrap_or(session.updated_at);
+                if ts <= cutoff {
+                    continue;
+                }
                 let name = extract_session_name(&session_id)
                     .unwrap_or(&session_id)
                     .to_string();
-                let ts = session.last_active_at.unwrap_or(session.updated_at);
                 crashed.push((session_id, name, ts));
             }
             Err(_) => {

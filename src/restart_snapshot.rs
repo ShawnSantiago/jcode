@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+const AUTO_RESTORE_CRASH_MAX_AGE_HOURS: i64 = 24;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestartSnapshot {
     pub version: u32,
@@ -71,6 +73,64 @@ pub fn set_auto_restore_on_next_start(enabled: bool) -> Result<bool> {
     snapshot.auto_restore_on_next_start = enabled;
     write_snapshot(&snapshot)?;
     Ok(true)
+}
+
+pub fn arm_auto_restore_from_recent_crashes() -> Result<Option<RestartSnapshot>> {
+    let cutoff = Utc::now() - chrono::Duration::hours(AUTO_RESTORE_CRASH_MAX_AGE_HOURS);
+    let mut unique_ids = HashSet::new();
+    let mut captured: Vec<(DateTime<Utc>, RestartSnapshotSession)> = Vec::new();
+
+    for (session_id, _) in crate::session::find_recent_crashed_sessions() {
+        if !unique_ids.insert(session_id.clone()) {
+            continue;
+        }
+
+        let Ok(session) = crate::session::Session::load(&session_id) else {
+            continue;
+        };
+
+        if !matches!(
+            session.status,
+            crate::session::SessionStatus::Crashed { .. }
+        ) {
+            continue;
+        }
+
+        let sort_key = session.last_active_at.unwrap_or(session.updated_at);
+        if sort_key < cutoff {
+            continue;
+        }
+
+        captured.push((
+            sort_key,
+            RestartSnapshotSession {
+                session_id: session.id.clone(),
+                display_name: session.display_name().to_string(),
+                working_dir: session.working_dir.clone(),
+                is_selfdev: session.is_canary,
+            },
+        ));
+    }
+
+    if captured.is_empty() {
+        return Ok(None);
+    }
+
+    captured.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.display_name.cmp(&b.1.display_name))
+            .then_with(|| a.1.session_id.cmp(&b.1.session_id))
+    });
+
+    let snapshot = RestartSnapshot {
+        version: 1,
+        created_at: Utc::now(),
+        auto_restore_on_next_start: true,
+        sessions: captured.into_iter().map(|(_, session)| session).collect(),
+    };
+
+    write_snapshot(&snapshot)?;
+    Ok(Some(snapshot))
 }
 
 pub fn capture_current_snapshot() -> Result<RestartSnapshot> {
@@ -165,8 +225,12 @@ pub fn restore_command_display(exe: &Path, session: &RestartSnapshotSession) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_current_snapshot, clear_snapshot, load_snapshot, save_current_snapshot};
+    use super::{
+        AUTO_RESTORE_CRASH_MAX_AGE_HOURS, arm_auto_restore_from_recent_crashes,
+        capture_current_snapshot, clear_snapshot, load_snapshot, save_current_snapshot,
+    };
     use crate::session::Session;
+    use chrono::Utc;
     use std::ffi::OsString;
 
     struct TestEnvGuard {
@@ -260,6 +324,84 @@ mod tests {
         save_current_snapshot().expect("save snapshot");
 
         assert!(clear_snapshot().expect("clear snapshot"));
+        assert!(load_snapshot().is_err());
+    }
+
+    #[test]
+    fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
+        let _guard = TestEnvGuard::new().expect("setup test env");
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn child");
+        let dead_pid = child.id();
+        let _ = child.wait().expect("wait for child");
+
+        let mut crashed = Session::create_with_id(
+            "session_auto_restore_crash".to_string(),
+            None,
+            Some("Crash Me".to_string()),
+        );
+        crashed.working_dir = Some("/tmp".to_string());
+        crashed.mark_active_with_pid(dead_pid);
+        crashed.save().expect("save crashed session");
+
+        let snapshot = arm_auto_restore_from_recent_crashes()
+            .expect("arm crash snapshot")
+            .expect("expected crash snapshot");
+        assert!(snapshot.auto_restore_on_next_start);
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].session_id, crashed.id);
+        assert_eq!(snapshot.sessions[0].working_dir.as_deref(), Some("/tmp"));
+
+        let persisted = load_snapshot().expect("load persisted snapshot");
+        assert!(persisted.auto_restore_on_next_start);
+        assert_eq!(persisted.sessions.len(), 1);
+
+        let refreshed = Session::load(&crashed.id).expect("reload crashed session");
+        assert!(matches!(
+            refreshed.status,
+            crate::session::SessionStatus::Crashed { .. }
+        ));
+    }
+
+    #[test]
+    fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
+        let _guard = TestEnvGuard::new().expect("setup test env");
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn child");
+        let dead_pid = child.id();
+        let _ = child.wait().expect("wait for child");
+
+        let mut crashed = Session::create_with_id(
+            "session_old_auto_restore_crash".to_string(),
+            None,
+            Some("Old Crash".to_string()),
+        );
+        let old_ts = Utc::now() - chrono::Duration::hours(AUTO_RESTORE_CRASH_MAX_AGE_HOURS + 2);
+        crashed.updated_at = old_ts;
+        crashed.last_active_at = Some(old_ts);
+        crashed.status = crate::session::SessionStatus::Active;
+        crashed.last_pid = Some(dead_pid);
+        crashed.save().expect("save stale active session");
+        let active_dir = crate::storage::jcode_dir()
+            .expect("jcode dir")
+            .join("active_pids");
+        std::fs::create_dir_all(&active_dir).expect("create active pid dir");
+        std::fs::write(active_dir.join(&crashed.id), dead_pid.to_string())
+            .expect("write active pid file");
+
+        assert!(
+            arm_auto_restore_from_recent_crashes()
+                .expect("arm stale crash snapshot")
+                .is_none()
+        );
         assert!(load_snapshot().is_err());
     }
 }
