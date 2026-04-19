@@ -58,15 +58,15 @@ pub(super) fn estimate_side_panel_image_layout_with_font(
     let (cell_w, cell_h) = font_size.unwrap_or((8, 16));
     let cell_w = cell_w.max(1) as u32;
     let cell_h = cell_h.max(1) as u32;
-    let image_w_cells = super::diagram_pane::div_ceil_u32(width.max(1), cell_w).max(1);
     let image_h_cells = super::diagram_pane::div_ceil_u32(height.max(1), cell_h).max(1);
     let available_width = available_width.max(1) as u32;
 
-    let fit_zoom = if image_w_cells > available_width {
-        ((available_width.saturating_mul(100)) / image_w_cells).clamp(1, 100) as u8
-    } else {
-        100
-    };
+    let fit_zoom = fit_zoom_percent_for_area(
+        Rect::new(0, 0, available_width as u16, inner_height.max(1)),
+        width,
+        height,
+        Some((cell_w as u16, cell_h as u16)),
+    );
 
     if fit_zoom < SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT {
         let zoom_percent = SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT;
@@ -298,60 +298,6 @@ pub(super) fn fit_image_area_with_font(
     let area_w_px = area.width as f64 * font_w;
     let area_h_px = area.height as f64 * font_h;
     let scale = (area_w_px / img_w_px as f64).min(area_h_px / img_h_px as f64);
-    if !scale.is_finite() || scale <= 0.0 {
-        return area;
-    }
-
-    let fitted_w_cells = ((img_w_px as f64 * scale) / font_w)
-        .ceil()
-        .max(1.0)
-        .min(area.width as f64) as u16;
-    let fitted_h_cells = ((img_h_px as f64 * scale) / font_h)
-        .ceil()
-        .max(1.0)
-        .min(area.height as f64) as u16;
-
-    let x_offset = if centered {
-        area.width.saturating_sub(fitted_w_cells) / 2
-    } else {
-        0
-    };
-    let y_offset = if vcenter {
-        area.height.saturating_sub(fitted_h_cells) / 2
-    } else {
-        0
-    };
-
-    Rect {
-        x: area.x + x_offset,
-        y: area.y + y_offset,
-        width: fitted_w_cells,
-        height: fitted_h_cells,
-    }
-}
-
-pub(super) fn fit_image_area_without_upscale_with_font(
-    area: Rect,
-    img_w_px: u32,
-    img_h_px: u32,
-    font_size: Option<(u16, u16)>,
-    centered: bool,
-    vcenter: bool,
-) -> Rect {
-    if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
-        return area;
-    }
-
-    let (font_w, font_h) = match font_size {
-        Some(fs) => (fs.0.max(1) as f64, fs.1.max(1) as f64),
-        None => return area,
-    };
-
-    let area_w_px = area.width as f64 * font_w;
-    let area_h_px = area.height as f64 * font_h;
-    let scale = (area_w_px / img_w_px as f64)
-        .min(area_h_px / img_h_px as f64)
-        .min(1.0);
     if !scale.is_finite() || scale <= 0.0 {
         return area;
     }

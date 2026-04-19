@@ -10,7 +10,7 @@ use layout_support::{
 };
 use layout_support::{
     estimate_side_panel_image_layout, estimate_side_panel_image_layout_with_font,
-    fit_image_area_with_font, fit_image_area_without_upscale_with_font, plan_fit_image_render,
+    fit_image_area_with_font, plan_fit_image_render,
     side_panel_viewport_scroll_x,
 };
 use serde::Serialize;
@@ -343,7 +343,7 @@ pub fn debug_probe_side_panel_mermaid(
         centered,
         false,
     );
-    let widget_fit = fit_image_area_without_upscale_with_font(
+    let widget_fit = fit_image_area_with_font(
         reserved,
         width,
         height,
@@ -1490,11 +1490,10 @@ pub(super) fn draw_side_panel_markdown(
                         ) {
                             match plan {
                                 FitImageRenderPlan::Full { area } => {
-                                    mermaid::render_image_widget_fit(
+                                    mermaid::render_image_widget_scale(
                                         placement.hash,
                                         area,
                                         frame.buffer_mut(),
-                                        false,
                                         false,
                                     );
                                 }
@@ -1516,11 +1515,10 @@ pub(super) fn draw_side_panel_markdown(
                             }
                         }
                     } else {
-                        mermaid::render_image_widget_fit(
+                        mermaid::render_image_widget_scale(
                             placement.hash,
                             img_area,
                             frame.buffer_mut(),
-                            false,
                             false,
                         );
                     }

@@ -109,6 +109,25 @@ fn side_panel_mermaid_keeps_fit_mode_when_zoom_stays_readable() {
 }
 
 #[test]
+fn side_panel_mermaid_scales_up_to_fill_nearly_matching_pane() {
+    let layout =
+        estimate_side_panel_image_layout_with_font(219, 360, 36, 30, 0, false, Some((8, 16)));
+    let fitted = fit_image_area_with_font(
+        Rect::new(0, 0, 36, layout.rows),
+        219,
+        360,
+        Some((8, 16)),
+        true,
+        false,
+    );
+
+    assert_eq!(layout.render_mode, SidePanelImageRenderMode::Fit);
+    assert_eq!(layout.rows, 30);
+    assert_eq!(fitted.width, 36);
+    assert_eq!(fitted.height, 30);
+}
+
+#[test]
 fn fit_side_panel_image_area_scales_up_small_image_to_use_available_width() {
     let area = Rect::new(0, 0, 36, 30);
     let fitted = fit_image_area_with_font(area, 160, 240, Some((8, 16)), true, false);
@@ -116,6 +135,24 @@ fn fit_side_panel_image_area_scales_up_small_image_to_use_available_width() {
     assert_eq!(fitted.x, area.x);
     assert_eq!(fitted.width, area.width);
     assert_eq!(fitted.height, 27);
+}
+
+#[test]
+fn side_panel_mermaid_probe_reports_full_utilization_for_nearly_matching_diagram() {
+    let probe = debug_probe_side_panel_mermaid(
+        "flowchart TD\n    A[Start] --> B[Process]\n    B --> C{Decision}\n    C -->|Yes| D[Ship]\n    C -->|No| E[Retry]\n    E --> B\n",
+        36,
+        30,
+        Some((8, 16)),
+        true,
+    )
+    .expect("probe");
+
+    assert_eq!(probe.estimated_rows, 30);
+    assert_eq!(probe.layout_fit.width_cells, 36);
+    assert_eq!(probe.layout_fit.height_cells, 30);
+    assert_eq!(probe.widget_fit.width_cells, 36);
+    assert_eq!(probe.widget_fit.height_cells, 30);
 }
 
 #[test]
