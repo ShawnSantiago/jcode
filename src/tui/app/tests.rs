@@ -5005,6 +5005,92 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
 }
 
 #[test]
+fn test_poke_status_reports_current_state() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish the remaining task".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        assert!(super::commands::handle_session_command(
+            &mut app,
+            "/poke status"
+        ));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Auto-poke: **OFF**. 1 incomplete todo.")
+        }));
+
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.queued_messages
+            .push(super::commands::build_poke_message(
+                &super::commands::incomplete_poke_todos(&app),
+            ));
+
+        assert!(super::commands::handle_session_command(
+            &mut app,
+            "/poke status"
+        ));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Auto-poke: **ON**. 1 incomplete todo.")
+                && msg.content.contains("A follow-up poke is queued.")
+                && msg.content.contains("A turn is currently running.")
+        }));
+    });
+}
+
+#[test]
+fn test_poke_off_disarms_and_clears_queued_followup() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Keep going".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.auto_poke_incomplete_todos = true;
+        app.pending_queued_dispatch = true;
+        app.queued_messages
+            .push(super::commands::build_poke_message(
+                &super::commands::incomplete_poke_todos(&app),
+            ));
+
+        assert!(super::commands::handle_session_command(
+            &mut app,
+            "/poke off"
+        ));
+
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
+        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content.contains("Auto-poke disabled.")
+                && msg.content.contains("Cleared 1 queued poke follow-up")
+        }));
+    });
+}
+
+#[test]
 fn test_poke_queues_when_turn_is_in_progress() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -8666,6 +8752,65 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("Please continue your work"));
+    });
+}
+
+#[test]
+fn test_remote_poke_status_and_off_update_state() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Continue working".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+        app.pending_queued_dispatch = true;
+        app.queued_messages
+            .push(super::commands::build_poke_message(
+                &super::commands::incomplete_poke_todos(&app),
+            ));
+
+        app.input = "/poke status".to_string();
+        app.cursor_pos = app.input.len();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("/poke status should succeed remotely");
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Auto-poke: **ON**. 1 incomplete todo.")
+                && msg.content.contains("A follow-up poke is queued.")
+                && msg.content.contains("A turn is currently running.")
+        }));
+
+        app.input = "/poke off".to_string();
+        app.cursor_pos = app.input.len();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("/poke off should succeed remotely");
+
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
+        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content.contains("Auto-poke disabled.")
+                && msg.content.contains("Cleared 1 queued poke follow-up")
+        }));
     });
 }
 

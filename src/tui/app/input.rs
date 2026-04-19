@@ -1677,7 +1677,10 @@ impl App {
                 "`/dictate`\nRun the configured external speech-to-text command and inject the transcript into jcode.\n\nConfigure `[dictation]` in `~/.jcode/config.toml`:\n- `command`: shell command that prints transcript to stdout, for example `~/.local/bin/my-whisper-script --grammar-target code`\n- `mode`: `insert|append|replace|send`\n- `key`: optional hotkey (for example `alt+;`)\n- `timeout_secs`: max wait time"
             }
             "poke" => {
-                "`/poke`\nPoke the model to resume when it has stopped with incomplete todos.\n\
+                "`/poke [on|off|status]`\nPoke the model to resume when it has stopped with incomplete todos.\n\
+                `/poke` or `/poke on` arms auto-poke and immediately pokes if work remains.\n\
+                `/poke off` disarms auto-poke and clears any queued poke follow-ups.\n\
+                `/poke status` shows whether auto-poke is currently armed.\n\
                 If a turn is currently running, the poke is queued and sent right after that turn finishes.\n\
                 Injects a reminder listing all pending/in-progress tasks and prompts the model to either\n\
                 finish the work, update the todo list to reflect what is done, or ask for user input if genuinely blocked."

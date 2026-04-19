@@ -181,7 +181,10 @@ impl App {
             ),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
-            ("/poke".into(), "Poke model to resume with incomplete todos"),
+            (
+                "/poke".into(),
+                "Poke model to resume with incomplete todos (on/off/status)",
+            ),
             (
                 "/improve".into(),
                 "Autonomously find and implement highest-leverage improvements",
@@ -1062,6 +1065,7 @@ impl App {
                 | "/account openai remove"
                 | "/usage"
                 | "/subscription"
+                | "/poke"
                 | "/memory"
                 | "/goals"
                 | "/goals show"

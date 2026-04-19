@@ -30,6 +30,68 @@ use std::time::Instant;
 const BTW_PAGE_ID: &str = "btw";
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.4";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PokeCommand {
+    Trigger,
+    On,
+    Off,
+    Status,
+}
+
+pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, String>> {
+    match trimmed {
+        "/poke" => Some(Ok(PokeCommand::Trigger)),
+        "/poke on" => Some(Ok(PokeCommand::On)),
+        "/poke off" => Some(Ok(PokeCommand::Off)),
+        "/poke status" => Some(Ok(PokeCommand::Status)),
+        _ if trimmed.starts_with("/poke ") => {
+            Some(Err("Usage: `/poke [on|off|status]`".to_string()))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn is_poke_message(message: &str) -> bool {
+    message.starts_with("Your todo list has ")
+        && message.contains("Please continue your work. Either:")
+}
+
+pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
+    let before = app.queued_messages.len();
+    app.queued_messages
+        .retain(|message| !is_poke_message(message));
+    let removed = before.saturating_sub(app.queued_messages.len());
+    if removed > 0 && !app.has_queued_followups() {
+        app.pending_queued_dispatch = false;
+    }
+    removed
+}
+
+pub(super) fn poke_status_message(app: &App) -> String {
+    let incomplete = incomplete_poke_todos(app);
+    let queued_followup = app
+        .queued_messages
+        .iter()
+        .any(|message| is_poke_message(message));
+    let mut message = format!(
+        "Auto-poke: **{}**. {} incomplete todo{}.",
+        if app.auto_poke_incomplete_todos {
+            "ON"
+        } else {
+            "OFF"
+        },
+        incomplete.len(),
+        if incomplete.len() == 1 { "" } else { "s" }
+    );
+    if queued_followup {
+        message.push_str(" A follow-up poke is queued.");
+    }
+    if app.is_processing {
+        message.push_str(" A turn is currently running.");
+    }
+    message
+}
+
 pub(super) fn current_subagent_model_summary(app: &App) -> String {
     match app.session.subagent_model.as_deref() {
         Some(model) => format!("fixed `{}`", model),
@@ -843,66 +905,92 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/poke" {
-        let incomplete = incomplete_poke_todos(app);
+    if let Some(command) = parse_poke_command(trimmed) {
+        match command {
+            Err(error) => app.push_display_message(DisplayMessage::error(error)),
+            Ok(PokeCommand::Status) => {
+                app.push_display_message(DisplayMessage::system(poke_status_message(app)));
+            }
+            Ok(PokeCommand::Off) => {
+                let cleared = clear_queued_poke_messages(app);
+                app.auto_poke_incomplete_todos = false;
+                app.set_status_notice("Poke: OFF");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Auto-poke disabled.{}",
+                    if cleared == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            " Cleared {} queued poke follow-up{}.",
+                            cleared,
+                            if cleared == 1 { "" } else { "s" }
+                        )
+                    }
+                )));
+            }
+            Ok(PokeCommand::Trigger | PokeCommand::On) => {
+                let incomplete = incomplete_poke_todos(app);
 
-        if incomplete.is_empty() {
-            app.auto_poke_incomplete_todos = false;
-            app.push_display_message(DisplayMessage::system(
-                "No incomplete todos found. Nothing to poke about.".to_string(),
-            ));
-            return true;
-        }
+                if incomplete.is_empty() {
+                    app.auto_poke_incomplete_todos = false;
+                    app.push_display_message(DisplayMessage::system(
+                        "No incomplete todos found. Nothing to poke about.".to_string(),
+                    ));
+                    return true;
+                }
 
-        app.auto_poke_incomplete_todos = true;
+                app.auto_poke_incomplete_todos = true;
+                app.set_status_notice("Poke: ON");
 
-        if app.is_processing {
-            app.set_status_notice("Poke queued after current turn");
-            app.push_display_message(DisplayMessage::system(
-                "👉 Queued /poke for after the current turn. Incomplete todos will be re-checked then."
-                    .to_string(),
-            ));
-        } else {
-            let poke_msg = build_poke_message(&incomplete);
-            app.push_display_message(DisplayMessage::system(format!(
-                "👉 Poking model with {} incomplete todo{}...",
-                incomplete.len(),
-                if incomplete.len() == 1 { "" } else { "s" },
-            )));
+                if app.is_processing {
+                    app.set_status_notice("Poke queued after current turn");
+                    app.push_display_message(DisplayMessage::system(
+                        "👉 Queued /poke for after the current turn. Incomplete todos will be re-checked then."
+                            .to_string(),
+                    ));
+                } else {
+                    let poke_msg = build_poke_message(&incomplete);
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "👉 Poking model with {} incomplete todo{}...",
+                        incomplete.len(),
+                        if incomplete.len() == 1 { "" } else { "s" },
+                    )));
 
-            app.add_provider_message(Message::user(&poke_msg));
-            app.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: poke_msg,
-                    cache_control: None,
-                }],
-            );
-            let _ = app.session.save();
+                    app.add_provider_message(Message::user(&poke_msg));
+                    app.session.add_message(
+                        Role::User,
+                        vec![ContentBlock::Text {
+                            text: poke_msg,
+                            cache_control: None,
+                        }],
+                    );
+                    let _ = app.session.save();
 
-            app.is_processing = true;
-            app.status = ProcessingStatus::Sending;
-            app.clear_streaming_render_state();
-            app.stream_buffer.clear();
-            app.thought_line_inserted = false;
-            app.thinking_prefix_emitted = false;
-            app.thinking_buffer.clear();
-            app.streaming_tool_calls.clear();
-            app.batch_progress = None;
-            app.streaming_input_tokens = 0;
-            app.streaming_output_tokens = 0;
-            app.streaming_cache_read_tokens = None;
-            app.streaming_cache_creation_tokens = None;
-            app.upstream_provider = None;
-            app.status_detail = None;
-            app.streaming_tps_start = None;
-            app.streaming_tps_elapsed = std::time::Duration::ZERO;
-            app.streaming_tps_collect_output = false;
-            app.streaming_total_output_tokens = 0;
-            app.streaming_tps_observed_output_tokens = 0;
-            app.streaming_tps_observed_elapsed = std::time::Duration::ZERO;
-            app.processing_started = Some(Instant::now());
-            app.pending_turn = true;
+                    app.is_processing = true;
+                    app.status = ProcessingStatus::Sending;
+                    app.clear_streaming_render_state();
+                    app.stream_buffer.clear();
+                    app.thought_line_inserted = false;
+                    app.thinking_prefix_emitted = false;
+                    app.thinking_buffer.clear();
+                    app.streaming_tool_calls.clear();
+                    app.batch_progress = None;
+                    app.streaming_input_tokens = 0;
+                    app.streaming_output_tokens = 0;
+                    app.streaming_cache_read_tokens = None;
+                    app.streaming_cache_creation_tokens = None;
+                    app.upstream_provider = None;
+                    app.status_detail = None;
+                    app.streaming_tps_start = None;
+                    app.streaming_tps_elapsed = std::time::Duration::ZERO;
+                    app.streaming_tps_collect_output = false;
+                    app.streaming_total_output_tokens = 0;
+                    app.streaming_tps_observed_output_tokens = 0;
+                    app.streaming_tps_observed_elapsed = std::time::Duration::ZERO;
+                    app.processing_started = Some(Instant::now());
+                    app.pending_turn = true;
+                }
+            }
         }
 
         return true;

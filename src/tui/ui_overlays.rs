@@ -188,7 +188,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/poke",
-        "Remind model to finish incomplete todos",
+        "Poke model to resume with incomplete todos (on/off/status)",
     ));
     lines.push(help_entry(
         "/improve",
