@@ -415,3 +415,101 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
 
     Ok(())
 }
+
+#[tokio::test]
+async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>
+{
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("continued after reload".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+
+    let mut headless = crate::session::Session::create(None, Some("headless".to_string()));
+    headless.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool_bash".to_string(),
+            content: "[Tool 'bash' interrupted by server reload after 0.2s]".to_string(),
+            is_error: Some(true),
+        }],
+    );
+    headless.save()?;
+
+    ReloadContext {
+        task_context: Some("resume headless worker".to_string()),
+        version_before: "old-headless".to_string(),
+        version_after: "new-headless".to_string(),
+        session_id: headless.id.clone(),
+        timestamp: "2026-04-19T00:00:00Z".to_string(),
+    }
+    .save()?;
+
+    let headed_session_id = crate::id::new_id("headed-reconnect");
+    ReloadContext {
+        task_context: Some("resume headed reconnecting session".to_string()),
+        version_before: "old-headed".to_string(),
+        version_after: "new-headed".to_string(),
+        session_id: headed_session_id.clone(),
+        timestamp: "2026-04-19T00:00:01Z".to_string(),
+    }
+    .save()?;
+
+    let swarm_id = "swarm-reload-headed-mixed";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(
+            &headless.id,
+            swarm_id,
+            "running",
+            "bash tool",
+        )],
+    );
+
+    let server = Server::new(provider.clone());
+    server.recover_headless_sessions_on_startup().await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let sessions = server.sessions.read().await;
+            let Some(headless_agent) = sessions.get(&headless.id).cloned() else {
+                drop(sessions);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                continue;
+            };
+            drop(sessions);
+
+            let headless_done = {
+                let guard = headless_agent.lock().await;
+                guard.messages().iter().any(|message| {
+                    message.role == Role::Assistant
+                        && message.content_preview().contains("continued after reload")
+                })
+            };
+            if headless_done {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("headless reload recovery should complete");
+
+    assert!(
+        ReloadContext::peek_for_session(&headless.id)?.is_none(),
+        "headless session reload context should be consumed by startup recovery"
+    );
+    assert!(
+        ReloadContext::peek_for_session(&headed_session_id)?.is_some(),
+        "headed reconnecting session reload context should remain available for later reconnect"
+    );
+
+    Ok(())
+}

@@ -40,9 +40,9 @@ pub(in crate::tui::app) enum PostConnectOutcome {
     Quit,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::tui::app) struct ReloadReconnectHints {
-    pub has_reload_ctx_for_session: bool,
+    pub reload_ctx_for_session: Option<ReloadContext>,
     pub has_client_reload_marker: bool,
 }
 
@@ -562,7 +562,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         session_to_resume, app.remote_session_id, state.reconnect_attempts
     ));
     let hints = load_reload_reconnect_hints(app, session_to_resume);
-    let has_reload_ctx_for_session = hints.has_reload_ctx_for_session;
+    let has_reload_ctx_for_session = hints.reload_ctx_for_session.is_some();
     if state.reconnect_attempts > 0 {
         if let Some(disconnect_start) = state.disconnect_start {
             crate::logging::info(&format!(
@@ -572,24 +572,9 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
             ));
         }
         if app.reload_info.is_empty()
-            && let Ok(jcode_dir) = crate::storage::jcode_dir()
+            && let Some(ctx) = hints.reload_ctx_for_session.as_ref()
         {
-            let info_path = jcode_dir.join("reload-info");
-            if info_path.exists()
-                && let Ok(info) = std::fs::read_to_string(&info_path)
-            {
-                let _ = std::fs::remove_file(&info_path);
-                let trimmed = info.trim();
-                if let Some(hash) = trimmed.strip_prefix("reload:") {
-                    app.reload_info
-                        .push(format!("Reloaded with build {}", hash.trim()));
-                } else if let Some(hash) = trimmed.strip_prefix("rebuild:") {
-                    app.reload_info
-                        .push(format!("Rebuilt and reloaded ({})", hash.trim()));
-                } else if !trimmed.is_empty() {
-                    app.reload_info.push(trimmed.to_string());
-                }
-            }
+            app.reload_info.push(ctx.reconnect_notice_line());
         }
 
         let must_reload_client = state.server_reload_in_progress || app.has_newer_binary();
@@ -685,17 +670,15 @@ pub(super) fn load_reload_reconnect_hints(
     app: &mut App,
     session_to_resume: Option<&str>,
 ) -> ReloadReconnectHints {
-    let has_reload_ctx_for_session = session_to_resume
-        .and_then(|sid| {
-            let result = ReloadContext::peek_for_session(sid);
-            crate::logging::info(&format!(
-                "Reload peek_for_session({}) = {:?}",
-                sid,
-                result.as_ref().map(|r| r.is_some())
-            ));
-            result.ok().flatten()
-        })
-        .is_some();
+    let reload_ctx_for_session = session_to_resume.and_then(|sid| {
+        let result = ReloadContext::peek_for_session(sid);
+        crate::logging::info(&format!(
+            "Reload peek_for_session({}) = {:?}",
+            sid,
+            result.as_ref().map(|r| r.is_some())
+        ));
+        result.ok().flatten()
+    });
 
     let has_client_reload_marker = session_to_resume
         .and_then(|sid| {
@@ -724,7 +707,7 @@ pub(super) fn load_reload_reconnect_hints(
         .is_some();
 
     ReloadReconnectHints {
-        has_reload_ctx_for_session,
+        reload_ctx_for_session,
         has_client_reload_marker,
     }
 }
@@ -735,12 +718,12 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
     hints: ReloadReconnectHints,
     reconnected_after_disconnect: bool,
 ) {
-    let should_queue_reload_continuation = hints.has_reload_ctx_for_session;
+    let should_queue_reload_continuation = hints.reload_ctx_for_session.is_some();
     crate::logging::info(&format!(
         "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
         should_queue_reload_continuation,
         app.reload_info.is_empty(),
-        hints.has_reload_ctx_for_session,
+        hints.reload_ctx_for_session.is_some(),
         hints.has_client_reload_marker
     ));
     if should_queue_reload_continuation {
@@ -755,6 +738,7 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
         });
 
         if let Some(ctx) = reload_ctx {
+            let session_id = session_to_resume.unwrap_or("unknown");
             if app.current_message_id.is_none()
                 && (app.remote_resume_activity.is_some() || app.is_processing)
             {
@@ -770,32 +754,46 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 app.replay_elapsed_override = None;
             }
 
-            let task_info = ctx
-                .task_context
-                .map(|t| format!("\nTask context: {}", t))
-                .unwrap_or_default();
             let background_task_note = session_to_resume
                 .map(super::super::reload_persisted_background_tasks_note)
                 .unwrap_or_default();
-
-            let continuation_msg = format!(
-                "Reload succeeded ({} → {}).{}{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
-                ctx.version_before, ctx.version_after, task_info, background_task_note
+            let continuation_msg = ReloadContext::recovery_continuation_message(
+                Some(&ctx),
+                &background_task_note,
+                None,
             );
 
             crate::logging::info(&format!(
                 "Queuing reload continuation message ({} chars)",
                 continuation_msg.len()
             ));
+            ReloadContext::log_recovery_outcome(
+                "tui_reconnect",
+                session_id,
+                "resumed",
+                "queued initiator continuation after reconnect",
+            );
             app.push_display_message(DisplayMessage::system("Reload complete — continuing."));
             app.hidden_queued_system_messages.push(continuation_msg);
         } else {
+            ReloadContext::log_recovery_outcome(
+                "tui_reconnect",
+                session_to_resume.unwrap_or("unknown"),
+                "failed",
+                "reload context missing for reconnecting initiator session",
+            );
             crate::logging::warn(
                 "Reload context missing for initiating session after reconnect; skipping selfdev continuation",
             );
         }
         app.reload_info.clear();
     } else if hints.has_client_reload_marker {
+        ReloadContext::log_recovery_outcome(
+            "tui_reconnect",
+            session_to_resume.unwrap_or("unknown"),
+            "skipped",
+            "client reload marker present without session reload context",
+        );
         if !reconnected_after_disconnect && !app.reload_info.is_empty() {
             app.push_display_message(DisplayMessage::system(app.reload_info.join("\n")));
         }

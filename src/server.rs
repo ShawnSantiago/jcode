@@ -114,21 +114,11 @@ fn headless_reload_continuation_message(
     session_id: &str,
     reload_ctx: Option<ReloadContext>,
 ) -> String {
-    if let Some(ctx) = reload_ctx {
-        let task_info = ctx
-            .task_context
-            .map(|task| format!("\nTask context: {}", task))
-            .unwrap_or_default();
-        return format!(
-            "Reload succeeded ({} → {}).{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
-            ctx.version_before, ctx.version_after, task_info
-        );
+    let reminder = ReloadContext::recovery_continuation_message(reload_ctx.as_ref(), "", None);
+    if reload_ctx.is_some() {
+        return reminder;
     }
-
-    format!(
-        "Your session {} was interrupted by a server reload while you were working. The session has been restored. Any tool that was running was aborted and its results may be incomplete. Continue exactly where you left off and do not ask the user what to do next.",
-        session_id
-    )
+    format!("{} Session id: {}.", reminder, session_id)
 }
 
 async fn run_background_task_message_in_live_session_if_idle(
@@ -779,6 +769,12 @@ impl Server {
 
             let reload_ctx = ReloadContext::load_for_session(&session_id).ok().flatten();
             if !should_resume {
+                ReloadContext::log_recovery_outcome(
+                    "server_startup_headless",
+                    &session_id,
+                    "skipped",
+                    "restored session was not interrupted by reload",
+                );
                 update_member_status(
                     &session_id,
                     "ready",
@@ -802,6 +798,12 @@ impl Server {
             }
 
             let reminder = headless_reload_continuation_message(&session_id, reload_ctx);
+            ReloadContext::log_recovery_outcome(
+                "server_startup_headless",
+                &session_id,
+                "resuming",
+                "restored interrupted headless session after reload",
+            );
             let recover_swarm_members = Arc::clone(&self.swarm_state.members);
             let recover_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
             let recover_event_history = Arc::clone(&self.event_history);
@@ -844,8 +846,24 @@ impl Server {
                 .await;
 
                 let (status, detail) = match result {
-                    Ok(()) => ("ready", None),
-                    Err(error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
+                    Ok(()) => {
+                        ReloadContext::log_recovery_outcome(
+                            "server_startup_headless",
+                            &session_id,
+                            "resumed",
+                            "continuation dispatched successfully",
+                        );
+                        ("ready", None)
+                    }
+                    Err(error) => {
+                        ReloadContext::log_recovery_outcome(
+                            "server_startup_headless",
+                            &session_id,
+                            "failed",
+                            &error.to_string(),
+                        );
+                        ("failed", Some(truncate_detail(&error.to_string(), 120)))
+                    }
                 };
                 update_member_status(
                     &session_id,

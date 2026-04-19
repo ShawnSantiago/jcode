@@ -9774,7 +9774,7 @@ fn test_finalize_reload_reconnect_marker_only_does_not_queue_selfdev_continuatio
         &mut app,
         Some("ses_test_marker_only"),
         remote::ReloadReconnectHints {
-            has_reload_ctx_for_session: false,
+            reload_ctx_for_session: None,
             has_client_reload_marker: true,
         },
         false,
@@ -9848,7 +9848,7 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
         &mut app,
         Some(session_id.as_str()),
         remote::ReloadReconnectHints {
-            has_reload_ctx_for_session: true,
+            reload_ctx_for_session: Some(reload_ctx.clone()),
             has_client_reload_marker: false,
         },
         false,
@@ -9863,6 +9863,114 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
 
     cleanup_background_task_files(&info.task_id);
     cleanup_reload_context_file(&session_id);
+}
+
+#[test]
+fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
+    let _guard = crate::storage::lock_test_env();
+    let mut app_a = create_test_app();
+    let mut app_b = create_test_app();
+    let session_a = crate::id::new_id("ses_reload_a");
+    let session_b = crate::id::new_id("ses_reload_b");
+
+    let ctx_a = crate::tool::selfdev::ReloadContext {
+        task_context: Some("resume session A".to_string()),
+        version_before: "old-a".to_string(),
+        version_after: "new-a".to_string(),
+        session_id: session_a.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let ctx_b = crate::tool::selfdev::ReloadContext {
+        task_context: Some("resume session B".to_string()),
+        version_before: "old-b".to_string(),
+        version_after: "new-b".to_string(),
+        session_id: session_b.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    ctx_a.save().expect("save reload context a");
+    ctx_b.save().expect("save reload context b");
+
+    remote::finalize_reload_reconnect(
+        &mut app_b,
+        Some(session_b.as_str()),
+        remote::ReloadReconnectHints {
+            reload_ctx_for_session: Some(ctx_b.clone()),
+            has_client_reload_marker: false,
+        },
+        false,
+    );
+
+    assert_eq!(app_b.hidden_queued_system_messages.len(), 1);
+    assert!(app_b.hidden_queued_system_messages[0].contains("new-b"));
+    assert!(
+        crate::tool::selfdev::ReloadContext::peek_for_session(&session_a)
+            .expect("peek session a")
+            .is_some(),
+        "session A context should remain available after session B reconnects first"
+    );
+    assert!(
+        crate::tool::selfdev::ReloadContext::peek_for_session(&session_b)
+            .expect("peek session b")
+            .is_none(),
+        "session B context should be consumed by its own reconnect"
+    );
+
+    remote::finalize_reload_reconnect(
+        &mut app_a,
+        Some(session_a.as_str()),
+        remote::ReloadReconnectHints {
+            reload_ctx_for_session: Some(ctx_a.clone()),
+            has_client_reload_marker: false,
+        },
+        false,
+    );
+
+    assert_eq!(app_a.hidden_queued_system_messages.len(), 1);
+    assert!(app_a.hidden_queued_system_messages[0].contains("new-a"));
+    assert!(
+        crate::tool::selfdev::ReloadContext::peek_for_session(&session_a)
+            .expect("peek session a after consume")
+            .is_none(),
+        "session A context should be consumed only by session A reconnect"
+    );
+}
+
+#[test]
+fn test_finalize_reload_reconnect_supports_repeated_reload_cycles_for_same_session() {
+    let _guard = crate::storage::lock_test_env();
+    let session_id = crate::id::new_id("ses_reload_loop");
+
+    for cycle in 0..3 {
+        let mut app = create_test_app();
+        let version_after = format!("loop-build-{}", cycle);
+        let reload_ctx = crate::tool::selfdev::ReloadContext {
+            task_context: Some(format!("reload loop cycle {}", cycle)),
+            version_before: format!("loop-prev-{}", cycle),
+            version_after: version_after.clone(),
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        reload_ctx.save().expect("save loop reload context");
+
+        remote::finalize_reload_reconnect(
+            &mut app,
+            Some(session_id.as_str()),
+            remote::ReloadReconnectHints {
+                reload_ctx_for_session: Some(reload_ctx.clone()),
+                has_client_reload_marker: false,
+            },
+            false,
+        );
+
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert!(app.hidden_queued_system_messages[0].contains(&version_after));
+        assert!(
+            crate::tool::selfdev::ReloadContext::peek_for_session(&session_id)
+                .expect("peek loop reload context")
+                .is_none(),
+            "reload context should be consumed each cycle"
+        );
+    }
 }
 
 #[test]
