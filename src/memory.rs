@@ -694,6 +694,50 @@ fn normalize_search_text(text: &str) -> String {
     normalized.trim_end().to_string()
 }
 
+fn is_skill_memory(entry: &MemoryEntry) -> bool {
+    entry.id.starts_with("skill:")
+        || entry.source.as_deref() == Some("skill_registry")
+        || matches!(
+            &entry.category,
+            MemoryCategory::Custom(name) if name.eq_ignore_ascii_case("Skills")
+        )
+}
+
+fn collect_skill_query_terms(query_text: &str) -> HashSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "about", "after", "before", "could", "from", "have", "just", "make", "ready", "should",
+        "start", "that", "their", "there", "they", "this", "what", "when", "where", "which",
+        "while", "will", "with", "work", "would", "your",
+    ];
+
+    let normalized = normalize_search_text(query_text);
+    normalized
+        .split_whitespace()
+        .filter(|term| term.len() >= 4)
+        .filter(|term| !STOPWORDS.contains(term))
+        .map(str::to_string)
+        .collect()
+}
+
+fn skill_retrieval_bonus(entry: &MemoryEntry, query_terms: &HashSet<String>) -> f32 {
+    if !is_skill_memory(entry) || query_terms.is_empty() {
+        return 0.0;
+    }
+
+    let searchable = entry.searchable_text();
+    let overlap = query_terms
+        .iter()
+        .filter(|term| searchable.contains(term.as_str()))
+        .count();
+
+    match overlap {
+        0 | 1 => 0.0,
+        2 => 0.08,
+        3 => 0.14,
+        _ => 0.20,
+    }
+}
+
 fn normalize_memory_search_text(content: &str, tags: &[String]) -> String {
     let normalized_content = normalize_search_text(content);
     let normalized_tags: Vec<String> = tags
@@ -1127,7 +1171,7 @@ impl MemoryManager {
         limit: usize,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
         let entries_with_emb = self.collect_all_memories_with_embeddings()?;
-        Self::score_and_filter(entries_with_emb, query_embedding, threshold, limit)
+        Self::score_and_filter(entries_with_emb, query_embedding, "", threshold, limit)
     }
 
     pub fn find_similar_with_embedding_scoped(
@@ -1138,7 +1182,7 @@ impl MemoryManager {
         scope: MemoryScope,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
         let entries_with_emb = self.collect_memories_with_embeddings_scoped(scope)?;
-        Self::score_and_filter(entries_with_emb, query_embedding, threshold, limit)
+        Self::score_and_filter(entries_with_emb, query_embedding, "", threshold, limit)
     }
 
     fn collect_all_memories_with_embeddings(&self) -> Result<Vec<MemoryEntry>> {
@@ -1242,12 +1286,13 @@ impl MemoryManager {
         };
 
         let entries = self.collect_retrieval_candidates_with_embeddings_scoped(scope)?;
-        Self::score_and_filter(entries, &query_embedding, threshold, limit)
+        Self::score_and_filter(entries, &query_embedding, text, threshold, limit)
     }
 
     fn score_and_filter(
         entries: Vec<MemoryEntry>,
         query_embedding: &[f32],
+        query_text: &str,
         threshold: f32,
         limit: usize,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
@@ -1278,11 +1323,16 @@ impl MemoryManager {
             .filter_map(|entry| entry.embedding.as_deref())
             .collect();
         let scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
+        let skill_query_terms = collect_skill_query_terms(query_text);
 
         let scored = top_k_by_score(
             filtered_entries
                 .into_iter()
                 .zip(scores)
+                .map(|(entry, sim)| {
+                    let adjusted = sim + skill_retrieval_bonus(&entry, &skill_query_terms);
+                    (entry, adjusted)
+                })
                 .filter(|(_, sim)| *sim >= threshold),
             limit,
         );

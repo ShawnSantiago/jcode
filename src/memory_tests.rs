@@ -539,3 +539,49 @@ fn retrieval_candidates_include_local_skills() {
         }));
     });
 }
+
+#[test]
+fn collect_skill_query_terms_keeps_relevant_words_and_drops_generic_words() {
+    let terms = collect_skill_query_terms(
+        "Before we start, make the todo list for this long debugging and validation task.",
+    );
+
+    assert!(terms.contains("todo"));
+    assert!(terms.contains("debugging"));
+    assert!(terms.contains("validation"));
+    assert!(terms.contains("task"));
+    assert!(!terms.contains("before"));
+    assert!(!terms.contains("start"));
+    assert!(!terms.contains("make"));
+    assert!(!terms.contains("this"));
+}
+
+#[test]
+fn score_and_filter_prioritizes_matching_skill_memories() {
+    let generic = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "General planning note that is not about structured todo skills.",
+    )
+    .with_embedding(vec![1.0, 0.0]);
+
+    let mut skill = MemoryEntry::new(
+        MemoryCategory::Custom("Skills".to_string()),
+        "Use skill `/todo-planning-skill` for todo list planning, debugging, reflection, and validation on long tasks.",
+    )
+    .with_embedding(vec![1.0, 0.0])
+    .with_source("skill_registry");
+    skill.id = "skill:todo-planning-skill".to_string();
+
+    let ranked = MemoryManager::score_and_filter(
+        vec![generic, skill],
+        &[1.0, 0.0],
+        "Please make the todo list for this long debugging and validation task.",
+        0.0,
+        2,
+    )
+    .expect("score and filter");
+
+    assert_eq!(ranked.len(), 2);
+    assert_eq!(ranked[0].0.id, "skill:todo-planning-skill");
+    assert!(ranked[0].1 > ranked[1].1);
+}
