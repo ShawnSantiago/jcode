@@ -10,6 +10,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+fn default_watch_notify() -> bool {
+    true
+}
+
+fn default_watch_wake() -> bool {
+    true
+}
+
 pub struct BgTool;
 
 impl BgTool {
@@ -20,14 +28,20 @@ impl BgTool {
 
 #[derive(Deserialize)]
 struct BgInput {
-    /// Action to perform: "list", "status", "output", "cancel", "cleanup"
+    /// Action to perform: "list", "status", "output", "cancel", "cleanup", "watch"
     action: String,
-    /// Task ID (required for status, output, cancel)
+    /// Task ID (required for status, output, cancel, watch)
     #[serde(default)]
     task_id: Option<String>,
     /// Max age in hours for cleanup (default: 24)
     #[serde(default)]
     max_age_hours: Option<u64>,
+    /// Whether to notify on completion when using watch (default: true)
+    #[serde(default = "default_watch_notify")]
+    notify: bool,
+    /// Whether to wake on completion when using watch (default: true)
+    #[serde(default = "default_watch_wake")]
+    wake: bool,
 }
 
 #[async_trait]
@@ -47,7 +61,7 @@ impl Tool for BgTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "status", "output", "cancel", "cleanup"],
+                    "enum": ["list", "status", "output", "cancel", "cleanup", "watch"],
                     "description": "Action."
                 },
                 "task_id": {
@@ -57,6 +71,14 @@ impl Tool for BgTool {
                 "max_age_hours": {
                     "type": "integer",
                     "description": "Cleanup age in hours."
+                },
+                "notify": {
+                    "type": "boolean",
+                    "description": "When using action='watch', whether to notify on completion. Defaults to true."
+                },
+                "wake": {
+                    "type": "boolean",
+                    "description": "When using action='watch', whether to wake on completion. Defaults to true."
                 }
             }
         })
@@ -224,8 +246,40 @@ impl Tool for BgTool {
                 .with_title("bg cleanup"))
             }
 
+            "watch" => {
+                let task_id = params
+                    .task_id
+                    .ok_or_else(|| anyhow::anyhow!("task_id is required for watch action"))?;
+
+                match manager
+                    .update_delivery(&task_id, params.notify, params.wake)
+                    .await?
+                {
+                    Some(task) => {
+                        let status_str = match task.status {
+                            BackgroundTaskStatus::Running => "running",
+                            BackgroundTaskStatus::Completed => "completed",
+                            BackgroundTaskStatus::Superseded => "superseded",
+                            BackgroundTaskStatus::Failed => "failed",
+                        };
+                        Ok(ToolOutput::new(format!(
+                            "Updated background task delivery for {}.\nStatus: {}\nNotify: {}\nWake: {}",
+                            task_id, status_str, task.notify, task.wake
+                        ))
+                        .with_title(format!("bg watch {}", task_id))
+                        .with_metadata(json!({
+                            "task_id": task.task_id,
+                            "status": status_str,
+                            "notify": task.notify,
+                            "wake": task.wake,
+                        })))
+                    }
+                    None => Err(anyhow::anyhow!("Task not found: {}", task_id)),
+                }
+            }
+
             _ => Err(anyhow::anyhow!(
-                "Unknown action: {}. Valid actions: list, status, output, cancel, cleanup",
+                "Unknown action: {}. Valid actions: list, status, output, cancel, cleanup, watch",
                 params.action
             )),
         }

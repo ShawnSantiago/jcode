@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 
 /// Directory for background task output files
@@ -68,6 +68,7 @@ struct RunningTask {
     session_id: String,
     status_path: PathBuf,
     started_at: Instant,
+    delivery_flags: watch::Sender<(bool, bool)>,
     handle: JoinHandle<Result<TaskResult>>,
 }
 
@@ -111,16 +112,18 @@ pub struct BackgroundTaskManager {
 }
 
 impl BackgroundTaskManager {
-    /// Create a new background task manager
-    pub fn new() -> Self {
-        let output_dir = task_dir();
-        // Ensure directory exists (sync is fine for init)
+    fn with_output_dir(output_dir: PathBuf) -> Self {
         std::fs::create_dir_all(&output_dir).ok();
-
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             output_dir,
         }
+    }
+
+    /// Create a new background task manager
+    pub fn new() -> Self {
+        let output_dir = task_dir();
+        Self::with_output_dir(output_dir)
     }
 
     /// Generate a short, unique task ID
@@ -355,8 +358,7 @@ impl BackgroundTaskManager {
         let tool_name_owned = tool_name.to_string();
         let session_id_owned = session_id.to_string();
         let started_at = Instant::now();
-        let notify_flag = notify;
-        let wake_flag = wake;
+        let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
 
         // Spawn the background task
         let handle = tokio::spawn(async move {
@@ -376,6 +378,8 @@ impl BackgroundTaskManager {
                 }
                 Err(e) => (BackgroundTaskStatus::Failed, None, Some(e.to_string())),
             };
+
+            let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
 
             // Update status file
             let final_status = TaskStatusFile {
@@ -433,6 +437,7 @@ impl BackgroundTaskManager {
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
+            delivery_flags: delivery_flags_tx,
             handle,
         };
 
@@ -487,6 +492,7 @@ impl BackgroundTaskManager {
         let tool_name_owned = tool_name.to_string();
         let session_id_owned = session_id.to_string();
         let started_at = Instant::now();
+        let (delivery_flags_tx, delivery_flags_rx) = watch::channel((true, false));
 
         let wrapper_handle = tokio::spawn(async move {
             let tool_result = handle.await;
@@ -517,6 +523,8 @@ impl BackgroundTaskManager {
                 let _ = file.write_all(output_text.as_bytes()).await;
             }
 
+            let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
+
             let final_status = TaskStatusFile {
                 task_id: task_id_clone.clone(),
                 tool_name: tool_name_owned.clone(),
@@ -529,8 +537,8 @@ impl BackgroundTaskManager {
                 duration_secs: Some(duration_secs),
                 pid: None,
                 detached: false,
-                notify: true,
-                wake: false,
+                notify: notify_flag,
+                wake: wake_flag,
             };
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = tokio::fs::write(&status_path_clone, json).await;
@@ -551,8 +559,8 @@ impl BackgroundTaskManager {
                 output_preview,
                 output_file: output_path_clone,
                 duration_secs,
-                notify: true,
-                wake: false,
+                notify: notify_flag,
+                wake: wake_flag,
             }));
 
             Ok(TaskResult {
@@ -568,6 +576,7 @@ impl BackgroundTaskManager {
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
+            delivery_flags: delivery_flags_tx,
             handle: wrapper_handle,
         };
 
@@ -629,6 +638,31 @@ impl BackgroundTaskManager {
         fs::read_to_string(&output_path).await.ok()
     }
 
+    /// Update delivery behavior for an existing background task.
+    ///
+    /// This supports retroactively enabling notify/wake after the task was already started.
+    pub async fn update_delivery(
+        &self,
+        task_id: &str,
+        notify: bool,
+        wake: bool,
+    ) -> Result<Option<TaskStatusFile>> {
+        let (notify, wake) = normalize_delivery(notify, wake);
+        let status_path = self.status_path_for(task_id);
+        let Some(mut status) = self.read_status_file(&status_path).await else {
+            return Ok(None);
+        };
+        status.notify = notify;
+        status.wake = wake;
+        self.write_status_file(&status_path, &status).await;
+
+        if let Some(task) = self.tasks.read().await.get(task_id) {
+            let _ = task.delivery_flags.send((notify, wake));
+        }
+
+        Ok(Some(status))
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         let mut tasks = self.tasks.write().await;
@@ -636,6 +670,7 @@ impl BackgroundTaskManager {
             task.handle.abort();
 
             // Update status file
+            let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
             let final_status = TaskStatusFile {
                 task_id: task.task_id,
                 tool_name: task.tool_name,
@@ -648,8 +683,8 @@ impl BackgroundTaskManager {
                 duration_secs: Some(task.started_at.elapsed().as_secs_f64()),
                 pid: None,
                 detached: false,
-                notify: true,
-                wake: false,
+                notify: notify_flag,
+                wake: wake_flag,
             };
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
@@ -794,4 +829,57 @@ static BACKGROUND_MANAGER: std::sync::OnceLock<BackgroundTaskManager> = std::syn
 /// Get the global background task manager
 pub fn global() -> &'static BackgroundTaskManager {
     BACKGROUND_MANAGER.get_or_init(BackgroundTaskManager::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::time::{Duration, sleep};
+
+    #[tokio::test]
+    async fn update_delivery_applies_to_running_task_completion() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+        let info = manager
+            .spawn_with_notify(
+                "bash",
+                "session-test",
+                false,
+                false,
+                |output_path| async move {
+                    sleep(Duration::from_millis(25)).await;
+                    tokio::fs::write(&output_path, "hello")
+                        .await
+                        .expect("write output");
+                    Ok(TaskResult::completed(Some(0)))
+                },
+            )
+            .await;
+
+        let updated = manager
+            .update_delivery(&info.task_id, true, true)
+            .await
+            .expect("update delivery should succeed")
+            .expect("task should exist");
+        assert!(updated.notify);
+        assert!(updated.wake);
+
+        for _ in 0..40 {
+            let status = manager
+                .status(&info.task_id)
+                .await
+                .expect("status should exist");
+            if status.status != BackgroundTaskStatus::Running {
+                assert!(status.notify);
+                assert!(status.wake);
+                assert_eq!(status.status, BackgroundTaskStatus::Completed);
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("background task did not complete in time");
+    }
 }
