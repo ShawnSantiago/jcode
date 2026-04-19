@@ -446,8 +446,24 @@ impl Agent {
             .collect()
     }
 
-    pub fn get_rendered_images(&self) -> Vec<crate::session::RenderedImage> {
-        crate::session::render_images(&self.session)
+    pub fn get_history_and_rendered_images(
+        &self,
+    ) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {
+        let (messages, images) = crate::session::render_messages_and_images(&self.session);
+        let history = messages
+            .into_iter()
+            .map(|msg| HistoryMessage {
+                role: msg.role,
+                content: msg.content,
+                tool_calls: if msg.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(msg.tool_calls)
+                },
+                tool_data: msg.tool_data,
+            })
+            .collect();
+        (history, images)
     }
 
     pub fn get_tool_call_summaries(&self, limit: usize) -> Vec<crate::protocol::ToolCallSummary> {

@@ -1960,68 +1960,7 @@ fn parse_attached_image_label(text: &str) -> Option<String> {
 }
 
 pub fn render_images(session: &Session) -> Vec<RenderedImage> {
-    let mut images = Vec::new();
-    let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
-
-    for msg in &session.messages {
-        let message_role = msg.role.clone();
-        let mut current_tool: Option<ToolCall> = None;
-        let mut last_image_idx: Option<usize> = None;
-
-        for block in &msg.content {
-            match block {
-                ContentBlock::ToolUse { id, name, input } => {
-                    tool_map.insert(
-                        id.clone(),
-                        ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            intent: None,
-                        },
-                    );
-                }
-                ContentBlock::ToolResult { tool_use_id, .. } => {
-                    current_tool = tool_map.get(tool_use_id).cloned().or_else(|| {
-                        Some(ToolCall {
-                            id: tool_use_id.clone(),
-                            name: "tool".to_string(),
-                            input: serde_json::Value::Null,
-                            intent: None,
-                        })
-                    });
-                }
-                ContentBlock::Image { media_type, data } => {
-                    images.push(RenderedImage {
-                        media_type: media_type.clone(),
-                        data: data.clone(),
-                        label: current_tool
-                            .as_ref()
-                            .and_then(fallback_image_label_for_tool),
-                        source: image_source_for_message(
-                            message_role.clone(),
-                            current_tool.as_ref(),
-                        ),
-                    });
-                    last_image_idx = Some(images.len().saturating_sub(1));
-                }
-                ContentBlock::Text { text, .. } => {
-                    let Some(label) = parse_attached_image_label(text) else {
-                        continue;
-                    };
-                    if let Some(last_idx) = last_image_idx
-                        && let Some(image) = images.get_mut(last_idx)
-                    {
-                        image.label = Some(label);
-                    }
-                }
-                ContentBlock::Reasoning { .. } => {}
-                ContentBlock::OpenAICompaction { .. } => {}
-            }
-        }
-    }
-
-    images
+    render_messages_and_images(session).1
 }
 
 pub fn has_rendered_images(session: &Session) -> bool {
@@ -2081,7 +2020,12 @@ pub fn summarize_tool_calls(
 
 /// Convert stored session messages into renderable messages (including tool output).
 pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
+    render_messages_and_images(session).0
+}
+
+pub fn render_messages_and_images(session: &Session) -> (Vec<RenderedMessage>, Vec<RenderedImage>) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
+    let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
 
     for msg in &session.messages {
@@ -2093,24 +2037,31 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                 Role::Assistant => "assistant",
             },
         };
+        let message_role = msg.role.clone();
         let mut text = String::new();
         let mut tool_calls: Vec<String> = Vec::new();
+        let mut current_tool: Option<ToolCall> = None;
+        let mut last_image_idx: Option<usize> = None;
 
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text: t, .. } => {
                     text.push_str(t);
+                    if let Some(label) = parse_attached_image_label(t)
+                        && let Some(last_idx) = last_image_idx
+                        && let Some(image) = images.get_mut(last_idx)
+                    {
+                        image.label = Some(label);
+                    }
                 }
                 ContentBlock::ToolUse { id, name, input } => {
-                    tool_map.insert(
-                        id.clone(),
-                        ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            intent: None,
-                        },
-                    );
+                    let tool_call = ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        intent: None,
+                    };
+                    tool_map.insert(id.clone(), tool_call);
                     tool_calls.push(name.clone());
                 }
                 ContentBlock::ToolResult {
@@ -2135,6 +2086,7 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                             intent: None,
                         })
                     });
+                    current_tool = tool_data.clone();
 
                     rendered.push(RenderedMessage {
                         role: "tool".to_string(),
@@ -2144,7 +2096,20 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                     });
                 }
                 ContentBlock::Reasoning { .. } => {}
-                ContentBlock::Image { .. } => {}
+                ContentBlock::Image { media_type, data } => {
+                    images.push(RenderedImage {
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                        label: current_tool
+                            .as_ref()
+                            .and_then(fallback_image_label_for_tool),
+                        source: image_source_for_message(
+                            message_role.clone(),
+                            current_tool.as_ref(),
+                        ),
+                    });
+                    last_image_idx = Some(images.len().saturating_sub(1));
+                }
                 ContentBlock::OpenAICompaction { .. } => {}
             }
         }
@@ -2159,7 +2124,7 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
         }
     }
 
-    rendered
+    (rendered, images)
 }
 
 fn session_path_in_dir(base: &std::path::Path, session_id: &str) -> PathBuf {

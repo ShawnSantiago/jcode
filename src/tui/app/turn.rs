@@ -92,11 +92,10 @@ impl App {
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let request_messages = provider_messages;
-            let messages_clone = if crate::config::config().features.message_timestamps {
-                Message::with_timestamps(&request_messages)
+            let request_messages = if crate::config::config().features.message_timestamps {
+                Message::with_timestamps(&provider_messages)
             } else {
-                request_messages.clone()
+                provider_messages
             };
             let session_id_clone = self.provider_session_id.clone();
             let static_part = split_prompt.static_part.clone();
@@ -104,7 +103,7 @@ impl App {
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
             let mut api_future = std::pin::pin!(provider.complete_split(
-                &messages_clone,
+                &request_messages,
                 &tools,
                 &static_part,
                 &dynamic_part,

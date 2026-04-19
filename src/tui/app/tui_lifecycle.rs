@@ -766,7 +766,9 @@ impl App {
         };
 
         let render_start = Instant::now();
-        let display_messages = crate::session::render_messages(&session)
+        let (rendered_messages, rendered_images) =
+            crate::session::render_messages_and_images(&session);
+        let display_messages = rendered_messages
             .into_iter()
             .map(|item| DisplayMessage {
                 role: item.role,
@@ -780,9 +782,8 @@ impl App {
         self.replace_display_messages(display_messages);
         let render_ms = render_start.elapsed().as_millis();
 
-        let image_start = Instant::now();
-        self.remote_side_pane_images = crate::session::render_images(&session);
-        let image_ms = image_start.elapsed().as_millis();
+        self.remote_side_pane_images = rendered_images;
+        let image_ms = 0;
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );

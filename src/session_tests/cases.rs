@@ -669,3 +669,59 @@ fn test_render_messages_honors_background_task_display_role_override() {
     assert_eq!(rendered[0].role, "background_task");
     assert!(rendered[0].content.contains("**Background task**"));
 }
+
+#[test]
+fn test_render_messages_and_images_share_tool_resolution_and_labels() {
+    let mut session = Session::create_with_id(
+        "session_render_bundle_test".to_string(),
+        None,
+        Some("render bundle test".to_string()),
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::ToolUse {
+                id: "tool_img_1".to_string(),
+                name: "view_image".to_string(),
+                input: serde_json::json!({"file_path": "/tmp/screenshot.png"}),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "tool_img_1".to_string(),
+                content: "rendered image".to_string(),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abcd".to_string(),
+            },
+            ContentBlock::Text {
+                text: "[Attached image associated with the preceding tool result: screenshot.png]"
+                    .to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+
+    let (rendered, images) = render_messages_and_images(&session);
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "tool");
+    assert_eq!(rendered[0].content, "rendered image");
+    assert_eq!(
+        rendered[0]
+            .tool_data
+            .as_ref()
+            .map(|tool| tool.name.as_str()),
+        Some("view_image")
+    );
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].label.as_deref(), Some("screenshot.png"));
+    assert_eq!(images[0].media_type, "image/png");
+    assert_eq!(
+        images[0].source,
+        RenderedImageSource::ToolResult {
+            tool_name: "view_image".to_string(),
+        }
+    );
+}

@@ -30,26 +30,28 @@ impl Agent {
         }
 
         let context_limit = self.provider.context_window() as u64;
-        let all_messages = self.session.messages_for_provider();
         let compaction = self.registry.compaction();
 
         let (dropped, usage_pct) = match compaction.try_write() {
             Ok(mut manager) => {
-                manager.update_observed_input_tokens(context_limit);
-                let usage_pct = manager.context_usage_with(&all_messages) * 100.0;
-                match manager.hard_compact_with(&all_messages) {
-                    Ok(dropped) => {
-                        self.sync_session_compaction_state_from_manager(&manager);
-                        (dropped, usage_pct)
-                    }
-                    Err(reason) => {
-                        logging::warn(&format!(
-                            "Context-limit auto-recovery failed: hard compact failed ({})",
-                            reason
-                        ));
-                        return false;
-                    }
-                }
+                let (dropped, usage_pct) = {
+                    let all_messages = self.session.provider_messages();
+                    manager.update_observed_input_tokens(context_limit);
+                    let usage_pct = manager.context_usage_with(all_messages) * 100.0;
+                    let dropped = match manager.hard_compact_with(all_messages) {
+                        Ok(dropped) => dropped,
+                        Err(reason) => {
+                            logging::warn(&format!(
+                                "Context-limit auto-recovery failed: hard compact failed ({})",
+                                reason
+                            ));
+                            return false;
+                        }
+                    };
+                    (dropped, usage_pct)
+                };
+                self.sync_session_compaction_state_from_manager(&manager);
+                (dropped, usage_pct)
             }
             Err(_) => {
                 logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");

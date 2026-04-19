@@ -358,31 +358,35 @@ impl Agent {
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
-        let all_messages = self.session.messages_for_provider();
         if self.provider.uses_jcode_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
-                    if self.provider.uses_jcode_compaction() {
-                        let action =
-                            manager.ensure_context_fits(&all_messages, self.provider.clone());
-                        match action {
-                            crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
-                                logging::info(&format!(
-                                    "Background compaction started ({})",
-                                    trigger
-                                ));
+                    let messages = {
+                        let all_messages = self.session.provider_messages();
+                        if self.provider.uses_jcode_compaction() {
+                            let action =
+                                manager.ensure_context_fits(all_messages, self.provider.clone());
+                            match action {
+                                crate::compaction::CompactionAction::BackgroundStarted {
+                                    trigger,
+                                } => {
+                                    logging::info(&format!(
+                                        "Background compaction started ({})",
+                                        trigger
+                                    ));
+                                }
+                                crate::compaction::CompactionAction::HardCompacted(dropped) => {
+                                    logging::warn(&format!(
+                                        "Emergency hard compact: dropped {} messages (context was critical)",
+                                        dropped
+                                    ));
+                                }
+                                crate::compaction::CompactionAction::None => {}
                             }
-                            crate::compaction::CompactionAction::HardCompacted(dropped) => {
-                                logging::warn(&format!(
-                                    "Emergency hard compact: dropped {} messages (context was critical)",
-                                    dropped
-                                ));
-                            }
-                            crate::compaction::CompactionAction::None => {}
                         }
-                    }
-                    let messages = manager.messages_for_api_with(&all_messages);
+                        manager.messages_for_api_with(all_messages)
+                    };
                     let event = if self.provider.uses_jcode_compaction() {
                         manager.take_compaction_event()
                     } else {
@@ -409,18 +413,21 @@ impl Agent {
                 }
             };
         }
-        let user_count = all_messages
+
+        let all_messages = self.session.provider_messages();
+        let messages = all_messages.to_vec();
+        let user_count = messages
             .iter()
             .filter(|message| matches!(message.role, Role::User))
             .count();
-        let assistant_count = all_messages.len().saturating_sub(user_count);
+        let assistant_count = messages.len().saturating_sub(user_count);
         logging::info(&format!(
             "messages_for_provider (session): returning {} messages (user={}, assistant={})",
-            all_messages.len(),
+            messages.len(),
             user_count,
             assistant_count,
         ));
-        (all_messages, None)
+        (messages, None)
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {

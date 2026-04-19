@@ -141,24 +141,6 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
-fn render_history_messages_from_session(
-    session: &crate::session::Session,
-) -> Vec<crate::protocol::HistoryMessage> {
-    crate::session::render_messages(session)
-        .into_iter()
-        .map(|msg| crate::protocol::HistoryMessage {
-            role: msg.role,
-            content: msg.content,
-            tool_calls: if msg.tool_calls.is_empty() {
-                None
-            } else {
-                Some(msg.tool_calls)
-            },
-            tool_data: msg.tool_data,
-        })
-        .collect()
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "persisted history fallback still needs session/client/server metadata for a usable bootstrap payload"
@@ -177,8 +159,20 @@ async fn send_history_from_persisted_session(
 ) -> Result<()> {
     let session = crate::session::Session::load_for_remote_startup(session_id)
         .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
-    let messages = render_history_messages_from_session(&session);
-    let images = crate::session::render_images(&session);
+    let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
+    let messages = rendered_messages
+        .into_iter()
+        .map(|msg| crate::protocol::HistoryMessage {
+            role: msg.role,
+            content: msg.content,
+            tool_calls: if msg.tool_calls.is_empty() {
+                None
+            } else {
+                Some(msg.tool_calls)
+            },
+            tool_data: msg.tool_data,
+        })
+        .collect();
     let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
 
     let (all_sessions, current_client_count) = {
@@ -279,12 +273,9 @@ pub(super) async fn send_history(
         let provider = agent_guard.provider_handle();
 
         let history_snapshot_start = Instant::now();
-        let messages = agent_guard.get_history();
+        let (messages, images) = agent_guard.get_history_and_rendered_images();
         let history_snapshot_ms = history_snapshot_start.elapsed().as_millis();
-
-        let image_render_start = Instant::now();
-        let images = agent_guard.get_rendered_images();
-        let image_render_ms = image_render_start.elapsed().as_millis();
+        let image_render_ms = 0;
 
         let tool_names_start = Instant::now();
         let tool_names = agent_guard.tool_names().await;
