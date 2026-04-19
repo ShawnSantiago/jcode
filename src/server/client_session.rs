@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
-fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
+pub(super) fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
     let messages = agent.messages();
     let Some(last) = messages.last() else {
         return false;
@@ -49,7 +49,7 @@ fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
     })
 }
 
-fn restored_session_was_interrupted(
+pub(super) fn restored_session_was_interrupted(
     session_id: &str,
     previous_status: &crate::session::SessionStatus,
     agent: &Agent,

@@ -136,6 +136,10 @@ async fn handle_remote_key_internal(
         return app.handle_inline_interactive_key(code, modifiers);
     }
 
+    if app.handle_model_preview_key_as_active(code, modifiers)? {
+        return Ok(());
+    }
+
     if app.handle_inline_interactive_preview_key(&code, modifiers)? {
         return Ok(());
     }
