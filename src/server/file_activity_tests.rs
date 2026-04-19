@@ -18,7 +18,7 @@ fn access(session_id: &str, op: FileOp, age_ms: u64) -> FileAccess {
 }
 
 #[test]
-fn latest_peer_touches_includes_previous_readers_for_modification_alerts() {
+fn latest_peer_touches_excludes_previous_readers_from_modification_alerts() {
     let swarm_session_ids = HashSet::from([
         "current".to_string(),
         "reader".to_string(),
@@ -32,12 +32,8 @@ fn latest_peer_touches_includes_previous_readers_for_modification_alerts() {
 
     let latest = latest_peer_touches(&accesses, "current", &swarm_session_ids);
 
-    assert_eq!(latest.len(), 2);
-    assert!(
-        latest
-            .iter()
-            .any(|entry| entry.session_id == "reader" && entry.op == FileOp::Read)
-    );
+    assert_eq!(latest.len(), 1);
+    assert!(!latest.iter().any(|entry| entry.session_id == "reader"));
     assert!(
         latest
             .iter()

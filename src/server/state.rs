@@ -29,7 +29,9 @@ pub(super) fn latest_peer_touches(
     let mut latest_by_session: HashMap<&str, &FileAccess> = HashMap::new();
 
     for access in accesses.iter().filter(|access| {
-        access.session_id != current_session_id && swarm_session_ids.contains(&access.session_id)
+        access.session_id != current_session_id
+            && swarm_session_ids.contains(&access.session_id)
+            && access.op.is_modification()
     }) {
         latest_by_session
             .entry(&access.session_id)

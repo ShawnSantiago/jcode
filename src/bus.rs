@@ -121,6 +121,10 @@ impl FileOp {
             FileOp::Edit => "edited",
         }
     }
+
+    pub fn is_modification(&self) -> bool {
+        matches!(self, FileOp::Write | FileOp::Edit)
+    }
 }
 
 /// File touch event for swarm coordination
