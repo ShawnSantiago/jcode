@@ -625,14 +625,24 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         )));
     }
 
-    finalize_reload_reconnect(app, session_to_resume, hints, state.reconnect_attempts > 0);
-
     let same_session_reload_fast_path = state.reconnect_attempts > 0
         && session_to_resume
             .zip(app.remote_session_id.as_deref())
             .map(|(resume_id, remote_id)| resume_id == remote_id)
             .unwrap_or(false)
         && !app.display_messages.is_empty();
+
+    if same_session_reload_fast_path || hints.has_client_reload_marker {
+        finalize_reload_reconnect(app, session_to_resume, hints, state.reconnect_attempts > 0);
+    } else if hints.reload_ctx_for_session.is_some() {
+        ReloadContext::log_recovery_outcome(
+            "tui_reconnect",
+            session_to_resume.unwrap_or("unknown"),
+            "deferred",
+            "waiting for server history payload to deliver reload recovery directive",
+        );
+        app.reload_info.clear();
+    }
 
     state.reconnect_attempts = 0;
     state.initial_server_start = false;

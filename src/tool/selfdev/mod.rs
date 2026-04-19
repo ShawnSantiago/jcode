@@ -28,6 +28,7 @@ mod status;
 mod tests;
 
 pub use launch::{enter_selfdev_session, schedule_selfdev_prompt_delivery};
+pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
 pub use status::selfdev_status_output;
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +58,7 @@ struct SelfDevInput {
 }
 
 /// Context saved before reload, restored after restart
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReloadContext {
     /// What the agent was working on (user-provided or auto-detected)
     pub task_context: Option<String>,

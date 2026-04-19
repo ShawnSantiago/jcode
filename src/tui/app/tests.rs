@@ -7605,6 +7605,7 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
                 server_icon: None,
                 server_has_update: None,
                 was_interrupted: None,
+                reload_recovery: None,
                 connection_type: Some("websocket".to_string()),
                 status_detail: None,
                 upstream_provider: None,
@@ -7693,6 +7694,7 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                 server_icon: None,
                 server_has_update: None,
                 was_interrupted: Some(true),
+                reload_recovery: None,
                 connection_type: Some("websocket".to_string()),
                 status_detail: None,
                 upstream_provider: None,
@@ -7960,6 +7962,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
@@ -8010,6 +8013,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
@@ -8063,6 +8067,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
@@ -8142,7 +8147,7 @@ fn test_handle_post_connect_marker_without_reload_context_does_not_queue_selfdev
 }
 
 #[test]
-fn test_handle_post_connect_dispatches_hidden_reload_followup_immediately() {
+fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -8184,25 +8189,11 @@ fn test_handle_post_connect_dispatches_hidden_reload_followup_immediately() {
 
     assert!(matches!(outcome, super::remote::PostConnectOutcome::Ready));
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert!(
-        app.is_processing,
-        "hidden reload continuation should dispatch immediately"
-    );
-    assert!(matches!(app.status, ProcessingStatus::Sending));
-    assert!(app.current_message_id.is_some());
-
-    let pending = app
-        .rate_limit_pending_message
-        .as_ref()
-        .expect("expected pending remote message for dispatched continuation");
-    assert!(pending.is_system);
-    assert_eq!(pending.content, "");
-    let reminder = pending
-        .system_reminder
-        .as_ref()
-        .expect("expected hidden system reminder");
-    assert!(reminder.contains("Reload succeeded (old-build → new-build)"));
-    assert!(reminder.contains("Continue immediately from where you left off"));
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Idle));
+    assert!(app.current_message_id.is_none());
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.reload_info.is_empty());
 
     cleanup_reload_context_file(session_id);
     if let Some(prev_home) = prev_home {
@@ -9676,6 +9667,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: Some(true),
+            reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
@@ -9705,6 +9697,66 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             .iter()
             .any(|m| m.role == "system" && m.content == "Reload complete — continuing.")
     );
+}
+
+#[test]
+fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_server_owned_reload".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "assistant".to_string(),
+                content: "Reconnect me from server history".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            images: vec![],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            reload_recovery: Some(crate::protocol::ReloadRecoverySnapshot {
+                reconnect_notice: Some("Reloaded with build srv1234".to_string()),
+                continuation_message: "Server-owned reload continuation".to_string(),
+            }),
+            connection_type: Some("websocket".to_string()),
+            status_detail: None,
+            upstream_provider: None,
+            reasoning_effort: None,
+            service_tier: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.hidden_queued_system_messages.len(), 1);
+    assert_eq!(
+        app.hidden_queued_system_messages[0],
+        "Server-owned reload continuation"
+    );
+    assert!(app.reload_info.iter().any(|line| line.contains("srv1234")));
 }
 
 #[test]
@@ -9743,6 +9795,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: Some("https/sse".to_string()),
             status_detail: None,
             upstream_provider: None,
@@ -10017,6 +10070,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
@@ -10071,6 +10125,7 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
@@ -10265,6 +10320,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            reload_recovery: None,
             connection_type: Some("https".to_string()),
             status_detail: None,
             upstream_provider: None,

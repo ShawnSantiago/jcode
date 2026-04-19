@@ -457,6 +457,7 @@ pub(in crate::tui::app) fn handle_server_event(
             server_icon,
             server_has_update,
             was_interrupted,
+            reload_recovery,
             connection_type,
             status_detail,
             upstream_provider,
@@ -649,17 +650,21 @@ pub(in crate::tui::app) fn handle_server_event(
 
             app.maybe_show_catchup_after_history(&session_id);
 
-            if was_interrupted == Some(true) && !app.display_messages.is_empty() {
-                crate::logging::info(
-                    "Session was interrupted mid-generation, queuing continuation",
-                );
-                if let Some(directive) = ReloadContext::recovery_directive(None, true, "", None) {
-                    app.push_display_message(DisplayMessage::system(
-                        "Reload complete — continuing.".to_string(),
-                    ));
-                    app.hidden_queued_system_messages
-                        .push(directive.continuation_message);
+            let reload_recovery = reload_recovery.or_else(|| {
+                ReloadContext::recovery_directive(None, was_interrupted == Some(true), "", None)
+            });
+            if let Some(reload_recovery) = reload_recovery
+                && !app.display_messages.is_empty()
+            {
+                crate::logging::info("History payload requested reload recovery continuation");
+                if let Some(notice) = reload_recovery.reconnect_notice {
+                    app.reload_info.push(notice);
                 }
+                app.push_display_message(DisplayMessage::system(
+                    "Reload complete — continuing.".to_string(),
+                ));
+                app.hidden_queued_system_messages
+                    .push(reload_recovery.continuation_message);
             }
 
             false

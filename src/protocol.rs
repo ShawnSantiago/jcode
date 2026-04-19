@@ -58,6 +58,8 @@ pub struct SessionActivitySnapshot {
     pub current_tool_name: Option<String>,
 }
 
+pub type ReloadRecoverySnapshot = crate::tool::selfdev::ReloadRecoveryDirective;
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -822,6 +824,9 @@ pub enum ServerEvent {
         /// Whether the session was interrupted mid-generation (crashed/disconnected while processing)
         #[serde(skip_serializing_if = "Option::is_none")]
         was_interrupted: Option<bool>,
+        /// Server-owned reload recovery directive for this session, if a reconnect should continue automatically.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reload_recovery: Option<ReloadRecoverySnapshot>,
         /// Last observed actual connection type for this session (e.g. websocket, https/sse)
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_type: Option<String>,
