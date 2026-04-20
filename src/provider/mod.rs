@@ -1523,8 +1523,20 @@ impl Provider for MultiProvider {
         // OpenRouter models (with per-provider endpoints)
         let has_openrouter = self.openrouter_provider().is_some();
         if let Some(openrouter) = self.openrouter_provider() {
+            let current_openrouter_model = openrouter.model();
+            let mut scheduled_endpoint_refreshes = 0usize;
             for model in openrouter.available_models_display() {
                 let cached = openrouter::load_endpoints_disk_cache_public(&model);
+                let cache_age = cached.as_ref().map(|(_, age)| *age);
+                if model == current_openrouter_model || scheduled_endpoint_refreshes < 8 {
+                    if openrouter.maybe_schedule_endpoint_refresh_for_display(
+                        &model,
+                        cache_age,
+                        "model picker route hydration",
+                    ) {
+                        scheduled_endpoint_refreshes += 1;
+                    }
+                }
                 let age_str = cached.as_ref().map(|(_, age)| {
                     if *age < 3600 {
                         format!("{}m ago", age / 60)

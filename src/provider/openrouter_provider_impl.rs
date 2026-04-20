@@ -754,6 +754,7 @@ impl Provider for OpenRouterProvider {
             )),
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
+            endpoint_refresh: Arc::clone(&self.endpoint_refresh),
         })
     }
 }

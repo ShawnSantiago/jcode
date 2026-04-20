@@ -409,6 +409,12 @@ async fn fetch_models_from_api(
 
 type EndpointsCache = HashMap<String, (u64, Vec<EndpointInfo>)>;
 
+#[derive(Debug, Default)]
+struct EndpointRefreshTracker {
+    in_flight: HashSet<String>,
+    last_attempt_unix: HashMap<String, u64>,
+}
+
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
@@ -425,6 +431,8 @@ pub struct OpenRouterProvider {
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     /// In-memory cache of per-model endpoint data
     endpoints_cache: Arc<RwLock<EndpointsCache>>,
+    /// Background refresh state for per-model endpoint data
+    endpoint_refresh: Arc<Mutex<EndpointRefreshTracker>>,
 }
 
 impl OpenRouterProvider {
@@ -497,6 +505,7 @@ impl OpenRouterProvider {
             provider_routing: Arc::new(RwLock::new(provider_routing)),
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })
     }
 
@@ -553,6 +562,108 @@ impl OpenRouterProvider {
         if let Ok(mut state) = refresh_state.lock() {
             state.in_flight = false;
         }
+    }
+
+    fn begin_background_endpoint_refresh(&self, model: &str) -> bool {
+        let Some(now) = current_unix_secs() else {
+            return false;
+        };
+
+        let Ok(mut state) = self.endpoint_refresh.lock() else {
+            return false;
+        };
+
+        if state.in_flight.contains(model) {
+            return false;
+        }
+
+        if let Some(last) = state.last_attempt_unix.get(model)
+            && now.saturating_sub(*last) < MODEL_CATALOG_REFRESH_RETRY_SECS
+        {
+            return false;
+        }
+
+        state.in_flight.insert(model.to_string());
+        state.last_attempt_unix.insert(model.to_string(), now);
+        true
+    }
+
+    fn finish_background_endpoint_refresh(
+        refresh_state: &Arc<Mutex<EndpointRefreshTracker>>,
+        model: &str,
+    ) {
+        if let Ok(mut state) = refresh_state.lock() {
+            state.in_flight.remove(model);
+        }
+    }
+
+    fn maybe_schedule_endpoint_refresh(
+        &self,
+        model: &str,
+        cache_age_secs: Option<u64>,
+        context: &'static str,
+    ) -> bool {
+        if !self.supports_provider_features || !self.supports_model_catalog {
+            return false;
+        }
+
+        if matches!(cache_age_secs, Some(age) if age < ENDPOINTS_CACHE_TTL_SECS) {
+            return false;
+        }
+
+        if !self.begin_background_endpoint_refresh(model) {
+            return false;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            Self::finish_background_endpoint_refresh(&self.endpoint_refresh, model);
+            return false;
+        };
+
+        let client = self.client.clone();
+        let api_base = self.api_base.clone();
+        let auth = self.auth.clone();
+        let model_name = model.to_string();
+        let refresh_state = Arc::clone(&self.endpoint_refresh);
+        let endpoints_cache = Arc::clone(&self.endpoints_cache);
+
+        handle.spawn(async move {
+            let provider = OpenRouterProvider {
+                client,
+                model: Arc::new(RwLock::new(model_name.clone())),
+                api_base,
+                auth,
+                supports_provider_features: true,
+                supports_model_catalog: true,
+                send_openrouter_headers: true,
+                models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+                model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+                provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+                provider_pin: Arc::new(Mutex::new(None)),
+                endpoints_cache,
+                endpoint_refresh: Arc::clone(&refresh_state),
+            };
+
+            match provider.fetch_endpoints(&model_name).await {
+                Ok(endpoints) => {
+                    crate::logging::info(&format!(
+                        "Refreshed OpenRouter endpoint providers in background ({}): {} via {} providers",
+                        context,
+                        model_name,
+                        endpoints.len()
+                    ));
+                    crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                }
+                Err(error) => crate::logging::info(&format!(
+                    "Failed to refresh OpenRouter endpoint providers in background ({}): {} ({})",
+                    context, model_name, error
+                )),
+            }
+
+            OpenRouterProvider::finish_background_endpoint_refresh(&refresh_state, &model_name);
+        });
+
+        true
     }
 
     fn maybe_schedule_model_catalog_refresh(&self, cache_age_secs: u64, context: &'static str) {
@@ -791,7 +902,10 @@ impl OpenRouterProvider {
         }
 
         if providers.is_empty() {
+            self.maybe_schedule_endpoint_refresh(model, None, "provider autocomplete cache miss");
             providers = known_providers();
+        } else if let Some((_, age)) = load_endpoints_disk_cache_public(model) {
+            self.maybe_schedule_endpoint_refresh(model, Some(age), "provider autocomplete stale cache");
         }
 
         providers.sort();
@@ -807,6 +921,9 @@ impl OpenRouterProvider {
 
         // Try endpoints disk cache first (has pricing, uptime, cache info)
         if let Some(endpoints) = load_endpoints_disk_cache(model) {
+            if let Some((_, age)) = load_endpoints_disk_cache_public(model) {
+                self.maybe_schedule_endpoint_refresh(model, Some(age), "provider details stale cache");
+            }
             return endpoints
                 .iter()
                 .map(|e| (e.provider_name.clone(), e.detail_string()))
@@ -823,7 +940,18 @@ impl OpenRouterProvider {
                 .collect();
         }
 
+        self.maybe_schedule_endpoint_refresh(model, None, "provider details cache miss");
+
         Vec::new()
+    }
+
+    pub fn maybe_schedule_endpoint_refresh_for_display(
+        &self,
+        model: &str,
+        cache_age_secs: Option<u64>,
+        context: &'static str,
+    ) -> bool {
+        self.maybe_schedule_endpoint_refresh(model, cache_age_secs, context)
     }
 
     /// Check if OPENROUTER_API_KEY is available (env var or config file)
