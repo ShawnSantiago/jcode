@@ -201,25 +201,42 @@ fn model_entry_base_name(entry: &PickerEntry) -> String {
     }
 }
 
+fn openrouter_route_model_id(model: &str) -> String {
+    if model.contains('/') {
+        return model.to_string();
+    }
+
+    match crate::provider::provider_for_model(model) {
+        Some("claude") => format!("anthropic/{}", model),
+        Some("openai") => format!("openai/{}", model),
+        _ => model.to_string(),
+    }
+}
+
+fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption) -> String {
+    let bare_name = model_entry_base_name(entry);
+    if route.api_method == "copilot" {
+        format!("copilot:{}", bare_name)
+    } else if route.api_method == "cursor" {
+        format!("cursor:{}", bare_name)
+    } else if route.provider == "Antigravity" {
+        format!("antigravity:{}", bare_name)
+    } else if route.api_method == "openrouter" && route.provider != "auto" {
+        format!(
+            "{}@{}",
+            openrouter_route_model_id(&bare_name),
+            route.provider
+        )
+    } else {
+        bare_name
+    }
+}
+
 fn model_entry_saved_spec(entry: &PickerEntry) -> String {
     let bare_name = model_entry_base_name(entry);
     let route = entry.options.get(entry.selected_option);
     if let Some(route) = route {
-        if route.api_method == "copilot" {
-            format!("copilot:{}", bare_name)
-        } else if route.api_method == "cursor" {
-            format!("cursor:{}", bare_name)
-        } else if route.provider == "Antigravity" {
-            format!("antigravity:{}", bare_name)
-        } else if route.api_method == "openrouter" && route.provider != "auto" {
-            if bare_name.contains('/') {
-                format!("{}@{}", bare_name, route.provider)
-            } else {
-                format!("anthropic/{}@{}", bare_name, route.provider)
-            }
-        } else {
-            bare_name
-        }
+        picker_route_model_spec(entry, route)
     } else {
         bare_name
     }
@@ -743,7 +760,7 @@ impl App {
                 None => false,
                 Some(default) => {
                     let bare = default.strip_prefix("copilot:").unwrap_or(default);
-                    let bare = default.strip_prefix("cursor:").unwrap_or(bare);
+                    let bare = bare.strip_prefix("cursor:").unwrap_or(bare);
                     let bare = bare.strip_prefix("antigravity:").unwrap_or(bare);
                     let bare = bare.split('@').next().unwrap_or(bare);
                     name == default || name == bare
@@ -1845,23 +1862,10 @@ impl App {
                         }
 
                         let bare_name = model_entry_base_name(&entry);
-
-                        let spec = if route.provider == "Antigravity" {
-                            format!("antigravity:{}", bare_name)
-                        } else if route.api_method == "openrouter" && route.provider != "auto" {
-                            if entry.name.contains('/') {
-                                format!("{}@{}", entry.name, route.provider)
-                            } else {
-                                format!("anthropic/{}@{}", entry.name, route.provider)
-                            }
-                        } else if route.api_method == "openrouter" {
-                            entry.name.clone()
-                        } else if route.api_method == "cursor" {
-                            format!("cursor:{}", bare_name)
-                        } else if route.provider == "Copilot" {
-                            format!("copilot:{}", bare_name)
+                        let spec = if route.api_method == "openrouter" && route.provider == "auto" {
+                            openrouter_route_model_id(&bare_name)
                         } else {
-                            bare_name.clone()
+                            picker_route_model_spec(&entry, route)
                         };
 
                         let effort = entry.effort.clone();

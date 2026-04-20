@@ -349,7 +349,7 @@ fn test_startup_initializes_antigravity_when_cached_tokens_are_expired() {
 
         assert!(provider.antigravity_provider().is_some());
         assert!(provider.model_routes().iter().any(|route| {
-            route.provider == "Antigravity" && route.api_method == "antigravity" && route.available
+            route.provider == "Antigravity" && route.api_method == "cli" && route.available
         }));
     });
 }
@@ -388,9 +388,94 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
 
         assert!(provider.antigravity_provider().is_some());
         assert!(provider.model_routes().iter().any(|route| {
-            route.provider == "Antigravity" && route.api_method == "antigravity" && route.available
+            route.provider == "Antigravity" && route.api_method == "cli" && route.available
         }));
     });
+}
+
+#[test]
+fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entries() {
+    let provider = MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(Some(Arc::new(antigravity::AntigravityCliProvider::new()))),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::Antigravity),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        forced_provider: Some(ActiveProvider::Antigravity),
+    };
+
+    let routes = provider.model_routes();
+    assert!(routes.iter().any(|route| {
+        route.provider == "Antigravity" && route.api_method == "cli" && route.available
+    }));
+    assert!(
+        !routes
+            .iter()
+            .any(|route| { route.provider == "Antigravity" && route.api_method == "antigravity" }),
+        "legacy duplicate antigravity routes should not be emitted: {:?}",
+        routes
+    );
+}
+
+#[test]
+fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes() {
+    let summary = summarize_model_catalog_refresh(
+        vec!["anthropic/claude-sonnet-4".to_string()],
+        vec!["anthropic/claude-sonnet-4".to_string()],
+        vec![ModelRoute {
+            model: "anthropic/claude-sonnet-4".to_string(),
+            provider: "Fireworks".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: "fast, 5m ago".to_string(),
+            cheapness: None,
+        }],
+        vec![ModelRoute {
+            model: "anthropic/claude-sonnet-4".to_string(),
+            provider: "Fireworks".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: "fast, 6m ago".to_string(),
+            cheapness: None,
+        }],
+    );
+
+    assert_eq!(
+        summary.routes_changed, 0,
+        "age-only detail churn should be ignored"
+    );
+}
+
+#[test]
+fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes() {
+    let summary = summarize_model_catalog_refresh(
+        vec!["anthropic/claude-sonnet-4".to_string()],
+        vec!["anthropic/claude-sonnet-4".to_string()],
+        vec![ModelRoute {
+            model: "anthropic/claude-sonnet-4".to_string(),
+            provider: "Fireworks".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: "fast, 5m ago".to_string(),
+            cheapness: None,
+        }],
+        vec![ModelRoute {
+            model: "anthropic/claude-sonnet-4".to_string(),
+            provider: "Fireworks".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: "cached, 6m ago".to_string(),
+            cheapness: None,
+        }],
+    );
+
+    assert_eq!(summary.routes_changed, 1);
 }
 
 #[test]

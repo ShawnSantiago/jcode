@@ -88,6 +88,30 @@ pub fn summarize_model_catalog_refresh(
     before_routes: Vec<ModelRoute>,
     after_routes: Vec<ModelRoute>,
 ) -> ModelCatalogRefreshSummary {
+    fn is_display_only_age_suffix(detail: &str) -> bool {
+        let detail = detail.trim();
+        ["m ago", "h ago", "d ago"]
+            .iter()
+            .find_map(|suffix| detail.strip_suffix(suffix))
+            .is_some_and(|prefix| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    fn normalize_route_refresh_detail(detail: &str) -> String {
+        let detail = detail.trim();
+        if detail.is_empty() {
+            return String::new();
+        }
+        if is_display_only_age_suffix(detail) {
+            return String::new();
+        }
+        if let Some((prefix, suffix)) = detail.rsplit_once(',')
+            && is_display_only_age_suffix(suffix)
+        {
+            return prefix.trim_end().trim_end_matches(',').trim().to_string();
+        }
+        detail.to_string()
+    }
+
     let before_model_set: BTreeSet<String> = before_models.into_iter().collect();
     let after_model_set: BTreeSet<String> = after_models.into_iter().collect();
 
@@ -98,7 +122,11 @@ pub fn summarize_model_catalog_refresh(
                 let estimated_cost = route.estimated_reference_cost_micros();
                 (
                     (route.model, route.provider, route.api_method),
-                    (route.available, route.detail, estimated_cost),
+                    (
+                        route.available,
+                        normalize_route_refresh_detail(&route.detail),
+                        estimated_cost,
+                    ),
                 )
             })
             .collect();
@@ -109,7 +137,11 @@ pub fn summarize_model_catalog_refresh(
                 let estimated_cost = route.estimated_reference_cost_micros();
                 (
                     (route.model, route.provider, route.api_method),
-                    (route.available, route.detail, estimated_cost),
+                    (
+                        route.available,
+                        normalize_route_refresh_detail(&route.detail),
+                        estimated_cost,
+                    ),
                 )
             })
             .collect();
@@ -1555,22 +1587,6 @@ impl Provider for MultiProvider {
                     detail: "not initialized yet".to_string(),
                     cheapness: cheapness_for_route("claude-sonnet-4-6", "Copilot", "copilot"),
                 });
-            }
-        }
-
-        // Antigravity models
-        {
-            if let Some(antigravity) = self.antigravity_provider() {
-                for model in antigravity.available_models_display() {
-                    routes.push(ModelRoute {
-                        model,
-                        provider: "Antigravity".to_string(),
-                        api_method: "antigravity".to_string(),
-                        available: true,
-                        detail: String::new(),
-                        cheapness: None,
-                    });
-                }
             }
         }
 
