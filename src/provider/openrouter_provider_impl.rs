@@ -1,5 +1,6 @@
 use super::openrouter_sse_stream::run_stream_with_retries;
 use super::*;
+use crate::provider::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 
 #[async_trait]
 impl Provider for OpenRouterProvider {
@@ -709,6 +710,51 @@ impl Provider for OpenRouterProvider {
             }
         }
         Ok(())
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+
+        let refreshed_models = self.refresh_models().await?;
+
+        if self.supports_provider_features {
+            let mut targets = Vec::new();
+            let mut seen = HashSet::new();
+            let push_target = |targets: &mut Vec<String>, seen: &mut HashSet<String>, model: String| {
+                if !model.trim().is_empty() && seen.insert(model.clone()) {
+                    targets.push(model);
+                }
+            };
+
+            push_target(&mut targets, &mut seen, self.model());
+
+            for model in refreshed_models.iter().map(|info| info.id.clone()).take(16) {
+                push_target(&mut targets, &mut seen, model);
+            }
+
+            for model in refreshed_models.iter().map(|info| info.id.clone()) {
+                if load_endpoints_disk_cache_public(&model).is_some() {
+                    push_target(&mut targets, &mut seen, model);
+                }
+                if targets.len() >= 24 {
+                    break;
+                }
+            }
+
+            for model in targets {
+                let _ = self.refresh_endpoints(&model).await;
+            }
+        }
+
+        let after_models = self.available_models_display();
+        let after_routes = self.model_routes();
+        Ok(summarize_model_catalog_refresh(
+            before_models,
+            after_models,
+            before_routes,
+            after_routes,
+        ))
     }
 
     fn supports_compaction(&self) -> bool {

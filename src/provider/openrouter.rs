@@ -1166,6 +1166,56 @@ impl OpenRouterProvider {
         Ok(endpoints)
     }
 
+    /// Force refresh per-provider endpoint data for a model from the API.
+    pub async fn refresh_endpoints(&self, model: &str) -> Result<Vec<EndpointInfo>> {
+        if !self.supports_provider_features || !self.supports_model_catalog {
+            return Ok(Vec::new());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let url = format!("{}/models/{}/endpoints", self.api_base, model);
+        let response = self
+            .auth
+            .apply(self.client.get(&url))
+            .await?
+            .send()
+            .await
+            .context("Failed to refresh endpoint data")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Endpoints API error ({}): {}", status, body);
+        }
+
+        #[derive(Deserialize)]
+        struct EndpointsWrapper {
+            endpoints: Vec<EndpointInfo>,
+        }
+
+        #[derive(Deserialize)]
+        struct EndpointsResponse {
+            data: EndpointsWrapper,
+        }
+
+        let resp: EndpointsResponse = response
+            .json()
+            .await
+            .context("Failed to parse endpoints response")?;
+
+        let endpoints = resp.data.endpoints;
+        save_endpoints_disk_cache(model, &endpoints);
+
+        let mut cache = self.endpoints_cache.write().await;
+        cache.insert(model.to_string(), (now, endpoints.clone()));
+
+        Ok(endpoints)
+    }
+
     /// Get context length for a model
     pub async fn context_length_for_model(&self, model_id: &str) -> Option<u64> {
         if let Ok(models) = self.fetch_models().await {

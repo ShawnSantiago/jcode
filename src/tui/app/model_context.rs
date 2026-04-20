@@ -860,6 +860,42 @@ impl App {
 }
 
 pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
+    if is_refresh_model_list_command(trimmed) {
+        app.set_status_notice("Refreshing model list...");
+        let provider = app.provider.clone();
+        let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(provider.refresh_model_catalog()))
+        } else {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(provider.refresh_model_catalog()),
+                Err(error) => Err(anyhow::anyhow!(error)),
+            }
+        };
+
+        match result {
+            Ok(summary) => {
+                app.push_display_message(DisplayMessage::system(
+                    format_model_refresh_summary(&summary),
+                ));
+                app.set_status_notice(format!(
+                    "Model list refreshed: +{} models, +{} routes, ~{} changed",
+                    summary.models_added, summary.routes_added, summary.routes_changed
+                ));
+            }
+            Err(error) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to refresh model list: {}",
+                    error
+                )));
+                app.set_status_notice("Model list refresh failed");
+            }
+        }
+        return true;
+    }
+
     if trimmed == "/model" || trimmed == "/models" {
         app.open_model_picker();
         return true;
@@ -1135,6 +1171,33 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+pub(super) fn is_refresh_model_list_command(trimmed: &str) -> bool {
+    matches!(
+        trimmed,
+        "/refresh-model-list"
+            | "/refresh-models"
+            | "/refresh models"
+            | "/refresh model list"
+    )
+}
+
+pub(super) fn format_model_refresh_summary(
+    summary: &crate::provider::ModelCatalogRefreshSummary,
+) -> String {
+    format!(
+        "**Model List Refresh Complete**\n\nModels: {} → {}  (+{} / -{})\nRoutes: {} → {}  (+{} / -{} / ~{})",
+        summary.model_count_before,
+        summary.model_count_after,
+        summary.models_added,
+        summary.models_removed,
+        summary.route_count_before,
+        summary.route_count_after,
+        summary.routes_added,
+        summary.routes_removed,
+        summary.routes_changed,
+    )
 }
 
 pub(super) fn no_models_available_message(is_remote: bool) -> String {

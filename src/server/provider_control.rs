@@ -173,9 +173,9 @@ pub(super) async fn handle_refresh_models(
     let agent_clone = agent.clone();
     let client_event_tx_clone = client_event_tx.clone();
     tokio::spawn(async move {
-        let result = provider_clone.prefetch_models().await;
+        let result = provider_clone.refresh_model_catalog().await;
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
                 let (models, model_routes) = {
                     let agent_guard = agent_clone.lock().await;

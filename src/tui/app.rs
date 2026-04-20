@@ -474,6 +474,8 @@ pub struct App {
     remote_compaction_mode: Option<crate::config::CompactionMode>,
     remote_available_entries: Vec<String>,
     remote_model_options: Vec<crate::provider::ModelRoute>,
+    pending_remote_model_refresh_snapshot:
+        Option<(Vec<String>, Vec<crate::provider::ModelRoute>)>,
     // Remote MCP servers and skills (set from server in remote mode)
     remote_mcp_servers: Vec<String>,
     remote_skills: Vec<String>,

@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use failover::FailoverDecision;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
@@ -67,6 +68,95 @@ pub(crate) fn anthropic_api_key_route_availability(model: &str) -> (bool, String
 
 /// Stream of events from a provider
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCatalogRefreshSummary {
+    pub model_count_before: usize,
+    pub model_count_after: usize,
+    pub models_added: usize,
+    pub models_removed: usize,
+    pub route_count_before: usize,
+    pub route_count_after: usize,
+    pub routes_added: usize,
+    pub routes_removed: usize,
+    pub routes_changed: usize,
+}
+
+pub fn summarize_model_catalog_refresh(
+    before_models: Vec<String>,
+    after_models: Vec<String>,
+    before_routes: Vec<ModelRoute>,
+    after_routes: Vec<ModelRoute>,
+) -> ModelCatalogRefreshSummary {
+    let before_model_set: BTreeSet<String> = before_models.into_iter().collect();
+    let after_model_set: BTreeSet<String> = after_models.into_iter().collect();
+
+    let before_route_map: BTreeMap<(String, String, String), (bool, String, Option<u64>)> =
+        before_routes
+            .into_iter()
+            .map(|route| {
+                let estimated_cost = route.estimated_reference_cost_micros();
+                (
+                    (
+                        route.model,
+                        route.provider,
+                        route.api_method,
+                    ),
+                    (
+                        route.available,
+                        route.detail,
+                        estimated_cost,
+                    ),
+                )
+            })
+            .collect();
+    let after_route_map: BTreeMap<(String, String, String), (bool, String, Option<u64>)> =
+        after_routes
+            .into_iter()
+            .map(|route| {
+                let estimated_cost = route.estimated_reference_cost_micros();
+                (
+                    (
+                        route.model,
+                        route.provider,
+                        route.api_method,
+                    ),
+                    (
+                        route.available,
+                        route.detail,
+                        estimated_cost,
+                    ),
+                )
+            })
+            .collect();
+
+    let models_added = after_model_set.difference(&before_model_set).count();
+    let models_removed = before_model_set.difference(&after_model_set).count();
+    let routes_added = after_route_map
+        .keys()
+        .filter(|key| !before_route_map.contains_key(*key))
+        .count();
+    let routes_removed = before_route_map
+        .keys()
+        .filter(|key| !after_route_map.contains_key(*key))
+        .count();
+    let routes_changed = after_route_map
+        .iter()
+        .filter(|(key, value)| before_route_map.get(*key).is_some_and(|before| before != *value))
+        .count();
+
+    ModelCatalogRefreshSummary {
+        model_count_before: before_model_set.len(),
+        model_count_after: after_model_set.len(),
+        models_added,
+        models_removed,
+        route_count_before: before_route_map.len(),
+        route_count_after: after_route_map.len(),
+        routes_added,
+        routes_removed,
+        routes_changed,
+    }
+}
 
 /// Provider trait for LLM backends
 #[async_trait]
@@ -170,6 +260,21 @@ pub trait Provider: Send + Sync {
     /// Prefetch any dynamic model lists (default: no-op).
     async fn prefetch_models(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Force-refresh model catalog data and return a before/after summary.
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.prefetch_models().await?;
+        let after_models = self.available_models_display();
+        let after_routes = self.model_routes();
+        Ok(summarize_model_catalog_refresh(
+            before_models,
+            after_models,
+            before_routes,
+            after_routes,
+        ))
     }
 
     /// Called when auth credentials change (e.g., after login).

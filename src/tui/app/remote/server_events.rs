@@ -774,6 +774,23 @@ pub(in crate::tui::app) fn handle_server_event(
             available_models,
             available_model_routes,
         } => {
+            if let Some((before_models, before_routes)) =
+                app.pending_remote_model_refresh_snapshot.take()
+            {
+                let summary = crate::provider::summarize_model_catalog_refresh(
+                    before_models,
+                    available_models.clone(),
+                    before_routes,
+                    available_model_routes.clone(),
+                );
+                app.push_display_message(DisplayMessage::system(
+                    app_mod::model_context::format_model_refresh_summary(&summary),
+                ));
+                app.set_status_notice(format!(
+                    "Model list refreshed: +{} models, +{} routes, ~{} changed",
+                    summary.models_added, summary.routes_added, summary.routes_changed
+                ));
+            }
             app.remote_available_entries = available_models;
             app.remote_model_options = available_model_routes;
             false
