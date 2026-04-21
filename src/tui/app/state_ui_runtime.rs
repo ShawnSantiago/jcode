@@ -214,11 +214,25 @@ impl App {
         if let Some(d) = self.replay_elapsed_override {
             return Some(d);
         }
-        self.processing_started.map(|t| t.elapsed()).or_else(|| {
-            self.split_launch_in_flight()
-                .then(|| self.pending_split_started_at.map(|t| t.elapsed()))
-                .flatten()
-        })
+        if self.is_processing() {
+            return self
+                .visible_turn_started
+                .or(self.processing_started)
+                .map(|t| t.elapsed());
+        }
+        self.split_launch_in_flight()
+            .then(|| self.pending_split_started_at.map(|t| t.elapsed()))
+            .flatten()
+    }
+
+    pub(super) fn display_turn_duration_secs(&self) -> Option<f32> {
+        self.visible_turn_started
+            .or(self.processing_started)
+            .map(|started| started.elapsed().as_secs_f32())
+    }
+
+    pub(super) fn clear_visible_turn_started(&mut self) {
+        self.visible_turn_started = None;
     }
 
     pub fn provider_name(&self) -> &str {

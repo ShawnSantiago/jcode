@@ -288,6 +288,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             if app.processing_started.is_none() {
                 app.processing_started = Some(std::time::Instant::now());
             }
+            app.visible_turn_started = Some(std::time::Instant::now());
         }
     }
 }
@@ -318,5 +319,7 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    app.schedule_auto_poke_followup_if_needed();
+    if !app.schedule_auto_poke_followup_if_needed() {
+        app.clear_visible_turn_started();
+    }
 }

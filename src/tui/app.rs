@@ -397,6 +397,9 @@ pub struct App {
     // Batch progress (shown during batch tool execution)
     batch_progress: Option<crate::bus::BatchProgress>,
     processing_started: Option<Instant>,
+    // User-visible turn timer. Preserved across synthetic auto-poke follow-ups so elapsed time
+    // reflects the original user turn rather than only the latest poke resend.
+    visible_turn_started: Option<Instant>,
     // When the last API response completed (for cache TTL tracking)
     last_api_completed: Option<Instant>,
     // Input tokens from the last completed turn (for cache TTL display)

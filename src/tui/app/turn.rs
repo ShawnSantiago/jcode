@@ -258,7 +258,7 @@ impl App {
                                                     role: "assistant".to_string(),
                                                     content,
                                                     tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
-                                                    duration_secs: self.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                                                    duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
                                                 });
@@ -731,7 +731,7 @@ impl App {
             }
 
             // Add remaining text to display
-            let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
+            let duration = self.display_turn_duration_secs();
 
             // Flush any remaining buffered text
             if let Some(chunk) = self.stream_buffer.flush() {
@@ -902,7 +902,7 @@ impl App {
                                                     role: "assistant".to_string(),
                                                     content,
                                                     tool_calls: Vec::new(),
-                                                    duration_secs: self.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                                                    duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
                                                 });

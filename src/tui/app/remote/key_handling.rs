@@ -1549,6 +1549,7 @@ async fn handle_remote_key_internal(
                                     0,
                                 )
                                 .await;
+                                app.visible_turn_started = Some(Instant::now());
                             }
                         }
                     }

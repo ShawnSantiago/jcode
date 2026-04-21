@@ -27,6 +27,13 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.status = ProcessingStatus::Sending;
     app.status_detail = None;
     app.processing_started = Some(Instant::now());
+    if !content.is_empty() {
+        if is_system {
+            app.visible_turn_started.get_or_insert_with(Instant::now);
+        } else {
+            app.visible_turn_started = Some(Instant::now());
+        }
+    }
     app.last_stream_activity = Some(Instant::now());
     app.remote_resume_activity = None;
     app.reset_streaming_tps();
@@ -165,6 +172,7 @@ pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
     app.status = ProcessingStatus::Idle;
     app.stream_message_ended = false;
     app.processing_started = None;
+    app.clear_visible_turn_started();
     app.last_stream_activity = None;
     app.reset_streaming_tps();
     app.current_message_id = None;
@@ -283,6 +291,7 @@ async fn submit_remote_input_shell(
     app.status = ProcessingStatus::Sending;
     app.status_detail = None;
     app.processing_started = Some(Instant::now());
+    app.visible_turn_started = Some(Instant::now());
     app.last_stream_activity = Some(Instant::now());
     app.remote_resume_activity = None;
     app.reset_streaming_tps();

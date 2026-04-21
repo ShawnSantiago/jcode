@@ -772,6 +772,7 @@ pub(super) fn handle_disconnect(
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
     app.stream_message_ended = false;
+    app.clear_visible_turn_started();
     state.disconnect_start = Some(Instant::now());
     state.reconnect_attempts = state.reconnect_attempts.max(1);
     state.reload_recovery_attempted = false;
@@ -812,6 +813,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         app.is_processing = false;
         app.status = ProcessingStatus::Idle;
         app.processing_started = None;
+        app.clear_visible_turn_started();
         app.replay_processing_started_ms = None;
         app.replay_elapsed_override = None;
     }
@@ -928,12 +930,22 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
+        let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
         let auto_retry = reminder.is_some() && messages.is_empty();
         for msg in display_system_messages {
             app.push_display_message(DisplayMessage::system(msg));
         }
         for msg in &messages {
-            app.push_display_message(DisplayMessage::user(msg.clone()));
+            if !super::commands::is_poke_message(msg) {
+                app.push_display_message(DisplayMessage::user(msg.clone()));
+            }
+        }
+        if !combined.is_empty() {
+            if preserve_visible_turn {
+                app.visible_turn_started.get_or_insert_with(Instant::now);
+            } else {
+                app.visible_turn_started = Some(Instant::now());
+            }
         }
         let _ =
             begin_remote_send(app, remote, combined, vec![], true, reminder, auto_retry, 0).await;
@@ -994,6 +1006,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
             ));
             let _ = remote.cancel().await;
             app.is_processing = false;
+            app.clear_visible_turn_started();
             app.status = ProcessingStatus::Idle;
             app.current_message_id = None;
             app.processing_started = None;

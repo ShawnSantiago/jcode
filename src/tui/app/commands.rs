@@ -56,6 +56,10 @@ pub(super) fn is_poke_message(message: &str) -> bool {
         && message.contains("Please continue your work. Either:")
 }
 
+pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
+    !messages.is_empty() && messages.iter().all(|message| is_poke_message(message))
+}
+
 pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
     let before = app.queued_messages.len();
     app.queued_messages
@@ -988,6 +992,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                     app.streaming_tps_observed_output_tokens = 0;
                     app.streaming_tps_observed_elapsed = std::time::Duration::ZERO;
                     app.processing_started = Some(Instant::now());
+                    app.visible_turn_started = Some(Instant::now());
                     app.pending_turn = true;
                 }
             }

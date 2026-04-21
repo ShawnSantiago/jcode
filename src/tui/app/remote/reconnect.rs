@@ -769,6 +769,7 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
                 app.processing_started = None;
+                app.clear_visible_turn_started();
                 app.last_stream_activity = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;

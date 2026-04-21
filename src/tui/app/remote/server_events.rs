@@ -241,7 +241,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     role: "assistant".to_string(),
                     content,
                     tool_calls: Vec::new(),
-                    duration_secs: app.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                    duration_secs: app.display_turn_duration_secs(),
                     title: None,
                     tool_data: None,
                 });
@@ -268,7 +268,11 @@ pub(in crate::tui::app) fn handle_server_event(
             app.current_message_id = None;
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
-            app.schedule_auto_poke_followup_if_needed()
+            let auto_poked = app.schedule_auto_poke_followup_if_needed();
+            if !auto_poked {
+                app.clear_visible_turn_started();
+            }
+            auto_poked
         }
         ServerEvent::Done { id } => {
             let mut auto_poked = false;
@@ -283,7 +287,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 app.pause_streaming_tps(false);
                 if !app.streaming_text.is_empty() {
-                    let duration = app.processing_started.map(|s| s.elapsed().as_secs_f32());
+                    let duration = app.display_turn_duration_secs();
                     let content = app.take_streaming_text();
                     app.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
@@ -312,6 +316,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 remote.reset_call_output_tokens_seen();
                 app.note_runtime_memory_event_force("turn_completed", "remote_turn_finished");
                 auto_poked = app.schedule_auto_poke_followup_if_needed();
+                if !auto_poked {
+                    app.clear_visible_turn_started();
+                }
             } else if app.is_processing {
                 let is_stale = app.current_message_id.is_some_and(|mid| id < mid);
                 if is_stale {
@@ -356,6 +363,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.status = ProcessingStatus::Idle;
                     app.stream_message_ended = false;
                     app.processing_started = None;
+                    app.clear_visible_turn_started();
                     app.current_message_id = None;
                     remote.clear_pending();
                     remote.reset_call_output_tokens_seen();
@@ -495,6 +503,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.streaming_cache_read_tokens = None;
                 app.streaming_cache_creation_tokens = None;
                 app.processing_started = None;
+                app.clear_visible_turn_started();
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
                 app.reset_streaming_tps();
@@ -889,7 +898,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.append_streaming_text(&chunk);
             }
             if !app.streaming_text.is_empty() {
-                let duration = app.processing_started.map(|s| s.elapsed().as_secs_f32());
+                let duration = app.display_turn_duration_secs();
                 let flushed = app.take_streaming_text();
                 app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),

@@ -114,6 +114,14 @@ impl Provider for OpenRouterSpecCaptureProvider {
         }]
     }
 
+    fn available_providers_for_model(&self, model: &str) -> Vec<String> {
+        if model == "gpt-5.4" || model == "openai/gpt-5.4" {
+            vec!["auto".to_string(), "OpenAI".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn available_efforts(&self) -> Vec<&'static str> {
         vec!["high"]
     }
@@ -4700,6 +4708,22 @@ fn test_model_command_provider_suggestions_rank_matching_provider_prefix() {
 }
 
 #[test]
+fn test_model_command_provider_suggestions_normalize_bare_openai_model_to_openrouter_catalog_id() {
+    let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+
+    let suggestions = app.get_suggestions_for("/model gpt-5.4@op");
+    assert_eq!(
+        suggestions.first().map(|(cmd, _)| cmd.as_str()),
+        Some("/model openai/gpt-5.4@OpenAI")
+    );
+    assert!(
+        suggestions
+            .iter()
+            .any(|(cmd, _)| cmd == "/model openai/gpt-5.4@auto")
+    );
+}
+
+#[test]
 fn test_login_command_suggestions_follow_provider_catalog() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/login ");
@@ -5365,6 +5389,46 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("Please continue your work"));
     });
+}
+
+#[test]
+fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Keep going".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        let started = Instant::now() - Duration::from_secs(45);
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.visible_turn_started = Some(started);
+
+        super::local::finish_turn(&mut app);
+
+        assert_eq!(app.visible_turn_started, Some(started));
+        assert!(app.pending_queued_dispatch);
+    });
+}
+
+#[test]
+fn test_finish_turn_without_followup_clears_visible_turn_started() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.visible_turn_started = Some(Instant::now() - Duration::from_secs(15));
+
+    super::local::finish_turn(&mut app);
+
+    assert!(app.visible_turn_started.is_none());
 }
 
 #[test]
@@ -9029,6 +9093,54 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("Please continue your work"));
+    });
+}
+
+#[test]
+fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Continue working".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        let started = Instant::now() - Duration::from_secs(90);
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+        app.visible_turn_started = Some(started);
+
+        let needs_redraw =
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+        assert!(needs_redraw);
+        assert!(app.pending_queued_dispatch);
+
+        app.pending_queued_dispatch = false;
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+
+        assert_eq!(app.visible_turn_started, Some(started));
+        assert!(app.is_processing);
+        assert!(app.current_message_id.is_some());
+        assert!(!app.display_messages().iter().any(|msg| {
+            msg.role == "user" && msg.content.contains("Please continue your work")
+        }));
     });
 }
 

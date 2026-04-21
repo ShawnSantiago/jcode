@@ -1921,6 +1921,7 @@ impl App {
         self.streaming_tps_observed_output_tokens = 0;
         self.streaming_tps_observed_elapsed = Duration::ZERO;
         self.processing_started = Some(Instant::now());
+        self.visible_turn_started = Some(Instant::now());
         self.pending_turn = true;
     }
 
@@ -1939,6 +1940,8 @@ impl App {
             let (messages, reminder, display_system_messages) =
                 super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
             let combined = messages.join("\n\n");
+            let has_combined = !combined.is_empty();
+            let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
 
             self.commit_pending_streaming_assistant_message();
 
@@ -1947,12 +1950,14 @@ impl App {
             }
 
             for msg in &messages {
-                self.push_display_message(DisplayMessage::user(msg.clone()));
+                if !super::commands::is_poke_message(msg) {
+                    self.push_display_message(DisplayMessage::user(msg.clone()));
+                }
             }
 
             self.current_turn_system_reminder = reminder;
 
-            if !combined.is_empty() {
+            if has_combined {
                 self.add_provider_message(Message::user(&combined));
                 self.session.add_message(
                     Role::User,
@@ -1982,6 +1987,13 @@ impl App {
             self.streaming_tps_observed_output_tokens = 0;
             self.streaming_tps_observed_elapsed = Duration::ZERO;
             self.processing_started = Some(Instant::now());
+            if has_combined {
+                if preserve_visible_turn {
+                    self.visible_turn_started.get_or_insert_with(Instant::now);
+                } else {
+                    self.visible_turn_started = Some(Instant::now());
+                }
+            }
             self.is_processing = true;
             self.status = ProcessingStatus::Sending;
 
