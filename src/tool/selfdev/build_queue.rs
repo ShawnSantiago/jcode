@@ -273,6 +273,10 @@ impl SelfDevTool {
             if result.error.is_none() {
                 match build::ensure_source_state_matches(&repo_dir, &expected_source) {
                     Ok(source_after_build) => {
+                        build::write_current_dev_binary_source_metadata(
+                            &repo_dir,
+                            &source_after_build,
+                        )?;
                         let published = build::publish_local_current_build_for_source(
                             &repo_dir,
                             &source_after_build,

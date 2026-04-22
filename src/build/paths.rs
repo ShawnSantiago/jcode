@@ -135,6 +135,7 @@ pub fn selfdev_build_command(repo_dir: &Path) -> SelfDevBuildCommand {
 }
 
 pub fn run_selfdev_build(repo_dir: &Path) -> Result<SelfDevBuildCommand> {
+    let source = super::current_source_state(repo_dir)?;
     let build = selfdev_build_command(repo_dir);
     let status = Command::new(&build.program)
         .args(&build.args)
@@ -144,6 +145,9 @@ pub fn run_selfdev_build(repo_dir: &Path) -> Result<SelfDevBuildCommand> {
     if !status.success() {
         anyhow::bail!("Build failed: {}", build.display);
     }
+
+    let source_after_build = super::ensure_source_state_matches(repo_dir, &source)?;
+    super::write_current_dev_binary_source_metadata(repo_dir, &source_after_build)?;
 
     Ok(build)
 }

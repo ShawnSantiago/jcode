@@ -743,6 +743,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
             detached: false,
             notify: true,
             wake: true,
+            progress: None,
         },
     )
     .expect("write stale status file");
@@ -835,6 +836,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
             detached: false,
             notify: true,
             wake: true,
+            progress: None,
         },
     )
     .expect("write superseded status file");
