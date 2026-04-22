@@ -408,6 +408,14 @@ async fn fetch_models_from_api(
     Ok(models_response.data)
 }
 
+fn models_fingerprint(models: &[ModelInfo]) -> String {
+    serde_json::to_string(models).unwrap_or_default()
+}
+
+fn endpoints_fingerprint(endpoints: &[EndpointInfo]) -> String {
+    serde_json::to_string(endpoints).unwrap_or_default()
+}
+
 type EndpointsCache = HashMap<String, (u64, Vec<EndpointInfo>)>;
 
 #[derive(Debug, Default)]
@@ -655,6 +663,7 @@ impl OpenRouterProvider {
         let model_name = model.to_string();
         let refresh_state = Arc::clone(&self.endpoint_refresh);
         let endpoints_cache = Arc::clone(&self.endpoints_cache);
+        let previous_fingerprint = self.cached_endpoints_fingerprint(model);
 
         handle.spawn(async move {
             let provider = OpenRouterProvider {
@@ -675,14 +684,27 @@ impl OpenRouterProvider {
 
             match provider.fetch_endpoints(&model_name).await {
                 Ok(endpoints) => {
-                    if notify_models_updated {
+                    let updated = endpoints_fingerprint(&endpoints) != previous_fingerprint;
+                    if notify_models_updated && updated {
                         crate::logging::info(&format!(
                             "Refreshed OpenRouter endpoint providers in background ({}): {} via {} providers",
                             context,
                             model_name,
                             endpoints.len()
                         ));
-                        crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                        crate::bus::Bus::global().publish_models_updated();
+                    } else if updated {
+                        crate::logging::info(&format!(
+                            "Refreshed OpenRouter endpoint providers in background without broadcast ({}): {} via {} providers",
+                            context,
+                            model_name,
+                            endpoints.len()
+                        ));
+                    } else {
+                        crate::logging::info(&format!(
+                            "OpenRouter endpoint refresh produced no material change ({}): {}",
+                            context, model_name
+                        ));
                     }
                 }
                 Err(error) => crate::logging::info(&format!(
@@ -714,16 +736,26 @@ impl OpenRouterProvider {
         let auth = self.auth.clone();
         let models_cache = Arc::clone(&self.models_cache);
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
+        let previous_fingerprint = self.cached_model_catalog_fingerprint();
 
         handle.spawn(async move {
             match fetch_models_from_api(client, api_base, auth, models_cache).await {
                 Ok(models) => {
-                    crate::logging::info(&format!(
-                        "Refreshed OpenRouter model catalog in background ({}): {} models",
-                        context,
-                        models.len()
-                    ));
-                    crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                    let updated = models_fingerprint(&models) != previous_fingerprint;
+                    if updated {
+                        crate::logging::info(&format!(
+                            "Refreshed OpenRouter model catalog in background ({}): {} models",
+                            context,
+                            models.len()
+                        ));
+                        crate::bus::Bus::global().publish_models_updated();
+                    } else {
+                        crate::logging::info(&format!(
+                            "OpenRouter model catalog refresh produced no material change ({}): {} models",
+                            context,
+                            models.len()
+                        ));
+                    }
                 }
                 Err(e) => crate::logging::info(&format!(
                     "Failed to refresh OpenRouter model catalog in background ({}): {}",
@@ -937,7 +969,7 @@ impl OpenRouterProvider {
                 model,
                 None,
                 "provider autocomplete cache miss",
-                true,
+                false,
             );
             providers = known_providers();
         } else if let Some((_, age)) = load_endpoints_disk_cache_public(model) {
@@ -945,7 +977,7 @@ impl OpenRouterProvider {
                 model,
                 Some(age),
                 "provider autocomplete stale cache",
-                true,
+                false,
             );
         }
 
@@ -967,7 +999,7 @@ impl OpenRouterProvider {
                     model,
                     Some(age),
                     "provider details stale cache",
-                    true,
+                    false,
                 );
             }
             return endpoints
@@ -986,7 +1018,7 @@ impl OpenRouterProvider {
                 .collect();
         }
 
-        self.maybe_schedule_endpoint_refresh(model, None, "provider details cache miss", true);
+        self.maybe_schedule_endpoint_refresh(model, None, "provider details cache miss", false);
 
         Vec::new()
     }
@@ -998,6 +1030,30 @@ impl OpenRouterProvider {
         context: &'static str,
     ) -> bool {
         self.maybe_schedule_endpoint_refresh(model, cache_age_secs, context, false)
+    }
+
+    fn cached_model_catalog_fingerprint(&self) -> String {
+        if let Ok(cache) = self.models_cache.try_read()
+            && cache.fetched
+        {
+            return models_fingerprint(&cache.models);
+        }
+        if let Some(cache_entry) = load_disk_cache_entry() {
+            return models_fingerprint(&cache_entry.models);
+        }
+        String::new()
+    }
+
+    fn cached_endpoints_fingerprint(&self, model: &str) -> String {
+        if let Some(endpoints) = load_endpoints_disk_cache(model) {
+            return endpoints_fingerprint(&endpoints);
+        }
+        if let Ok(cache) = self.endpoints_cache.try_read()
+            && let Some((_, endpoints)) = cache.get(model)
+        {
+            return endpoints_fingerprint(endpoints);
+        }
+        String::new()
     }
 
     /// Check if OPENROUTER_API_KEY is available (env var or config file)

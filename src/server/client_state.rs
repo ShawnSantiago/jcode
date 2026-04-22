@@ -1,7 +1,7 @@
 use super::ClientConnectionInfo;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
-use crate::bus::{Bus, BusEvent};
+use crate::bus::Bus;
 use crate::protocol::{ServerEvent, SessionActivitySnapshot, encode_event};
 use crate::provider::Provider;
 use crate::transport::WriteHalf;
@@ -548,7 +548,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         }
 
         let _ = refreshed;
-        Bus::global().publish(BusEvent::ModelsUpdated);
+        Bus::global().publish_models_updated();
     });
 }
 

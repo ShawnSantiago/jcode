@@ -176,7 +176,7 @@ pub(super) async fn handle_refresh_models(
         let result = provider_clone.refresh_model_catalog().await;
         match result {
             Ok(_) => {
-                crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                crate::bus::Bus::global().publish_models_updated();
                 let (models, model_routes) = {
                     let agent_guard = agent_clone.lock().await;
                     (
@@ -447,7 +447,7 @@ mod tests {
 
         fn on_auth_changed(&self) {
             *self.state.logged_in.write().unwrap() = true;
-            crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+            crate::bus::Bus::global().publish_models_updated();
         }
 
         fn fork(&self) -> Arc<dyn Provider> {

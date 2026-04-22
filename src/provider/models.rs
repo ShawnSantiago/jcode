@@ -668,7 +668,7 @@ fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
                 entry_scope != scope || !normalized.contains(model)
             });
         }
-        crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+        crate::bus::Bus::global().publish_models_updated();
     }
 }
 
@@ -704,7 +704,7 @@ fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
     if let Ok(mut observed_at) = ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT.write() {
         observed_at.insert(scope.to_string(), SystemTime::now());
     }
-    crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+    crate::bus::Bus::global().publish_models_updated();
 }
 
 #[cfg(test)]

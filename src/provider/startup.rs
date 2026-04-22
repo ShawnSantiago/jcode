@@ -13,7 +13,7 @@ impl MultiProvider {
             provider.invalidate_credentials().await;
             match provider.prefetch_models().await {
                 Ok(()) => {
-                    crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                    crate::bus::Bus::global().publish_models_updated();
                 }
                 Err(err) => {
                     crate::logging::info(&format!(

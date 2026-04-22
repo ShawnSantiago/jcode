@@ -663,7 +663,7 @@ impl Provider for AntigravityCliProvider {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if provider.prefetch_models().await.is_ok() {
-                    crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+                    crate::bus::Bus::global().publish_models_updated();
                 }
             });
         }

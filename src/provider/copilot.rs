@@ -382,7 +382,7 @@ impl CopilotApiProvider {
         self.init_done
             .store(true, std::sync::atomic::Ordering::Release);
         self.init_ready.notify_waiters();
-        crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+        crate::bus::Bus::global().publish_models_updated();
     }
 
     pub(crate) fn complete_init_without_tier_detection(&self) {

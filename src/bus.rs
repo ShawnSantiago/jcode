@@ -3,7 +3,8 @@ use crate::side_panel::SidePanelSnapshot;
 use crate::todo::TodoItem;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -348,6 +349,19 @@ pub struct Bus {
     sender: broadcast::Sender<BusEvent>,
 }
 
+const MODELS_UPDATED_DEBOUNCE: Duration = Duration::from_millis(750);
+
+#[derive(Default)]
+struct ModelsUpdatedPublishState {
+    last_published_at: Option<Instant>,
+    publish_pending: bool,
+}
+
+fn models_updated_publish_state() -> &'static Mutex<ModelsUpdatedPublishState> {
+    static STATE: OnceLock<Mutex<ModelsUpdatedPublishState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(ModelsUpdatedPublishState::default()))
+}
+
 impl Bus {
     pub fn global() -> &'static Bus {
         static INSTANCE: OnceLock<Bus> = OnceLock::new();
@@ -363,5 +377,97 @@ impl Bus {
 
     pub fn publish(&self, event: BusEvent) {
         let _ = self.sender.send(event);
+    }
+
+    pub fn publish_models_updated(&self) {
+        let delay = {
+            let now = Instant::now();
+            let mut state = models_updated_publish_state()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match state.last_published_at {
+                None => {
+                    state.last_published_at = Some(now);
+                    None
+                }
+                Some(last) => {
+                    let elapsed = now.saturating_duration_since(last);
+                    if elapsed >= MODELS_UPDATED_DEBOUNCE {
+                        state.last_published_at = Some(now);
+                        None
+                    } else if state.publish_pending {
+                        return;
+                    } else {
+                        state.publish_pending = true;
+                        Some(MODELS_UPDATED_DEBOUNCE - elapsed)
+                    }
+                }
+            }
+        };
+
+        if let Some(delay) = delay {
+            let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                let mut state = models_updated_publish_state()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.publish_pending = false;
+                state.last_published_at = Some(Instant::now());
+                drop(state);
+                self.publish(BusEvent::ModelsUpdated);
+                return;
+            };
+            handle.spawn(async move {
+                tokio::time::sleep(delay).await;
+                let mut state = models_updated_publish_state()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.publish_pending = false;
+                state.last_published_at = Some(Instant::now());
+                drop(state);
+                Bus::global().publish(BusEvent::ModelsUpdated);
+            });
+            return;
+        }
+
+        self.publish(BusEvent::ModelsUpdated);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bus, BusEvent, models_updated_publish_state};
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn models_updated_publishes_are_coalesced() {
+        let mut rx = Bus::global().subscribe();
+        while rx.try_recv().is_ok() {}
+
+        {
+            let mut state = models_updated_publish_state()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state = Default::default();
+        }
+
+        Bus::global().publish_models_updated();
+        Bus::global().publish_models_updated();
+        Bus::global().publish_models_updated();
+
+        match timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(BusEvent::ModelsUpdated)) => {}
+            other => panic!("expected immediate ModelsUpdated event, got {other:?}"),
+        }
+
+        match timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Ok(BusEvent::ModelsUpdated)) => {}
+            other => panic!("expected coalesced delayed ModelsUpdated event, got {other:?}"),
+        }
+
+        assert!(
+            timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .is_err()
+        );
     }
 }
