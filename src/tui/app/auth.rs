@@ -883,7 +883,14 @@ impl App {
                     return;
                 }
                 Err(e) => {
-                    crate::telemetry::record_auth_failed("cursor", "cli");
+                    let reason = crate::auth::login_diagnostics::classify_auth_failure_message(
+                        &e.to_string(),
+                    );
+                    crate::telemetry::record_auth_surface_blocked_reason(
+                        "cursor",
+                        "cli",
+                        reason.label(),
+                    );
                     self.push_display_message(DisplayMessage::error(format!(
                         "Cursor CLI login failed: {}\n\nFalling back to API key mode...",
                         e
@@ -1533,7 +1540,14 @@ impl App {
                         }));
                     }
                     Err(e) => {
-                        crate::telemetry::record_auth_failed(&provider_id, &auth_method);
+                        let reason = crate::auth::login_diagnostics::classify_auth_failure_message(
+                            &e.to_string(),
+                        );
+                        crate::telemetry::record_auth_failed_reason(
+                            &provider_id,
+                            &auth_method,
+                            reason.label(),
+                        );
                         self.push_display_message(DisplayMessage::error(format!(
                             "Failed to save {} key: {}",
                             provider, e
@@ -1608,7 +1622,14 @@ impl App {
                         }));
                     }
                     Err(e) => {
-                        crate::telemetry::record_auth_failed("cursor", "api_key");
+                        let reason = crate::auth::login_diagnostics::classify_auth_failure_message(
+                            &e.to_string(),
+                        );
+                        crate::telemetry::record_auth_failed_reason(
+                            "cursor",
+                            "api_key",
+                            reason.label(),
+                        );
                         self.push_display_message(DisplayMessage::error(format!(
                             "Failed to save Cursor API key: {}",
                             e
@@ -1699,7 +1720,9 @@ impl App {
             if login.success {
                 crate::telemetry::record_auth_success(&provider, &method);
             } else {
-                crate::telemetry::record_auth_failed(&provider, &method);
+                let reason =
+                    crate::auth::login_diagnostics::classify_auth_failure_message(&login.message);
+                crate::telemetry::record_auth_failed_reason(&provider, &method, reason.label());
             }
         }
         if login.success {
@@ -1707,7 +1730,11 @@ impl App {
             self.set_status_notice(format!("Login: {} ready", login.provider));
             self.trigger_provider_auth_changed();
         } else {
-            self.push_display_message(DisplayMessage::error(login.message));
+            let message = crate::auth::login_diagnostics::augment_auth_error_message(
+                &login.provider,
+                &login.message,
+            );
+            self.push_display_message(DisplayMessage::error(message));
             self.set_status_notice(format!("Login: {} failed", login.provider));
         }
         if self.pending_login.is_some() {

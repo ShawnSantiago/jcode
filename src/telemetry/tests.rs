@@ -251,6 +251,32 @@ fn test_sanitize_telemetry_label_strips_ansi_and_controls() {
 }
 
 #[test]
+fn test_onboarding_step_event_serialization_includes_failure_reason() {
+    let event = OnboardingStepEvent {
+        event_id: "event-3".to_string(),
+        id: "test-uuid".to_string(),
+        session_id: None,
+        event: "onboarding_step",
+        version: "0.6.1".to_string(),
+        os: "linux",
+        arch: "x86_64",
+        step: "auth_failed",
+        auth_provider: Some("openai".to_string()),
+        auth_method: Some("oauth".to_string()),
+        auth_failure_reason: Some("callback_timeout".to_string()),
+        milestone_elapsed_ms: Some(1234),
+        schema_version: TELEMETRY_SCHEMA_VERSION,
+        build_channel: "release".to_string(),
+        is_git_checkout: false,
+        is_ci: false,
+        ran_from_cargo: false,
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["step"], "auth_failed");
+    assert_eq!(json["auth_failure_reason"], "callback_timeout");
+}
+
+#[test]
 fn test_onboarding_step_milestone_key_includes_provider_and_method() {
     assert_eq!(
         onboarding_step_milestone_key("auth_success", Some("jcode"), Some("API key")),

@@ -115,6 +115,8 @@ struct OnboardingStepEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    auth_failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     milestone_elapsed_ms: Option<u64>,
     schema_version: u32,
     build_channel: String,
@@ -656,6 +658,7 @@ fn emit_onboarding_step(
     step: &'static str,
     auth_provider: Option<&str>,
     auth_method: Option<&str>,
+    auth_failure_reason: Option<&str>,
 ) {
     if !is_enabled() {
         return;
@@ -663,7 +666,7 @@ fn emit_onboarding_step(
     let Some(id) = get_or_create_id() else {
         return;
     };
-    let _ = send_onboarding_step_for_id(&id, step, auth_provider, auth_method);
+    let _ = send_onboarding_step_for_id(&id, step, auth_provider, auth_method, auth_failure_reason);
 }
 
 fn send_onboarding_step_for_id(
@@ -671,6 +674,7 @@ fn send_onboarding_step_for_id(
     step: &'static str,
     auth_provider: Option<&str>,
     auth_method: Option<&str>,
+    auth_failure_reason: Option<&str>,
 ) -> bool {
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = OnboardingStepEvent {
@@ -684,6 +688,7 @@ fn send_onboarding_step_for_id(
         step,
         auth_provider: auth_provider.map(sanitize_telemetry_label),
         auth_method: auth_method.map(sanitize_telemetry_label),
+        auth_failure_reason: auth_failure_reason.map(sanitize_telemetry_label),
         milestone_elapsed_ms: elapsed_since_install_ms(id),
         schema_version,
         build_channel,
@@ -712,7 +717,7 @@ fn emit_onboarding_step_once(
     if milestone_recorded(&id, &milestone_key) {
         return;
     }
-    if send_onboarding_step_for_id(&id, step, auth_provider, auth_method) {
+    if send_onboarding_step_for_id(&id, step, auth_provider, auth_method, None) {
         mark_milestone_recorded(&id, &milestone_key);
     }
 }
@@ -1535,19 +1540,32 @@ pub fn record_provider_selected(provider: &str) {
 }
 
 pub fn record_auth_started(provider: &str, method: &str) {
-    emit_onboarding_step("auth_started", Some(provider), Some(method));
+    emit_onboarding_step("auth_started", Some(provider), Some(method), None);
 }
 
 pub fn record_auth_failed(provider: &str, method: &str) {
-    emit_onboarding_step("auth_failed", Some(provider), Some(method));
+    record_auth_failed_reason(provider, method, "unknown");
+}
+
+pub fn record_auth_failed_reason(provider: &str, method: &str, reason: &str) {
+    emit_onboarding_step("auth_failed", Some(provider), Some(method), Some(reason));
 }
 
 pub fn record_auth_cancelled(provider: &str, method: &str) {
-    emit_onboarding_step("auth_cancelled", Some(provider), Some(method));
+    emit_onboarding_step("auth_cancelled", Some(provider), Some(method), None);
 }
 
 pub fn record_auth_surface_blocked(provider: &str, method: &str) {
-    emit_onboarding_step("auth_surface_blocked", Some(provider), Some(method));
+    emit_onboarding_step("auth_surface_blocked", Some(provider), Some(method), None);
+}
+
+pub fn record_auth_surface_blocked_reason(provider: &str, method: &str, reason: &str) {
+    emit_onboarding_step(
+        "auth_surface_blocked",
+        Some(provider),
+        Some(method),
+        Some(reason),
+    );
 }
 
 pub fn record_auth_success(provider: &str, method: &str) {
