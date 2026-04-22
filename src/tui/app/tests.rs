@@ -5318,7 +5318,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_turn);
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("Poking model with 1 incomplete todo")
+            msg.content.contains("Poking model: 1 incomplete todo")
                 && msg.content.contains("/poke off")
         }));
     });
@@ -5442,7 +5442,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         assert!(app.queued_messages().is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Queued /poke for after the current turn")
+                .contains("/poke queued. Re-checking incomplete todos after this turn")
         }));
 
         crate::todo::save_todos(
@@ -5472,9 +5472,9 @@ fn test_poke_queues_when_turn_is_in_progress() {
 
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Your todo list has 2 incomplete items"));
+        assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
         assert!(!app.queued_messages()[0].contains("Pick up the newly discovered task"));
-        assert!(app.queued_messages()[0].contains("/poke off"));
+        assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
 
@@ -5501,7 +5501,7 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
 
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Please continue your work"));
+        assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
     });
 }
 
@@ -9415,7 +9415,7 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Please continue your work"));
+        assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
     });
 }
 
@@ -9528,7 +9528,10 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
         assert!(app.is_processing);
         assert!(app.current_message_id.is_some());
         assert!(!app.display_messages().iter().any(|msg| {
-            msg.role == "user" && msg.content.contains("Please continue your work")
+            msg.role == "user"
+                && msg
+                    .content
+                    .contains("Continue working, or update the todo tool.")
         }));
     });
 }
@@ -9635,7 +9638,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(app.queued_messages().is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Queued /poke for after the current turn")
+                .contains("/poke queued. Re-checking incomplete todos after this turn")
         }));
 
         crate::todo::save_todos(
@@ -9667,9 +9670,9 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Your todo list has 2 incomplete items"));
+        assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
         assert!(!app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
-        assert!(app.queued_messages()[0].contains("/poke off"));
+        assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
 
@@ -9758,8 +9761,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Your todo list has 1 incomplete item"));
-        assert!(app.queued_messages()[0].contains("/poke off"));
+        assert!(app.queued_messages()[0].contains("You have 1 incomplete todo"));
+        assert!(!app.queued_messages()[0].contains("/poke off"));
     });
 }
 

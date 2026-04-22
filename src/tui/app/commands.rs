@@ -29,6 +29,7 @@ use std::time::Instant;
 
 const BTW_PAGE_ID: &str = "btw";
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.4";
+const POKE_OFF_UI_HINT: &str = "`/poke off` to stop.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PokeCommand {
@@ -61,9 +62,9 @@ pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, St
 }
 
 pub(super) fn is_poke_message(message: &str) -> bool {
-    message.starts_with("Your todo list has ")
-        && message.contains("Please continue your work")
-        && message.contains("/poke off")
+    message.starts_with("You have ")
+        && message.contains(" incomplete todo")
+        && message.ends_with("update the todo tool.")
 }
 
 pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
@@ -107,15 +108,18 @@ pub(super) fn poke_enabled_without_incomplete_message() -> String {
 }
 
 pub(super) fn poke_queued_display_message() -> String {
-    "👉 Queued /poke for after the current turn. Incomplete todos will be re-checked then. You can turn poke off with `/poke off`."
-        .to_string()
+    format!(
+        "👉 /poke queued. Re-checking incomplete todos after this turn. {}",
+        POKE_OFF_UI_HINT
+    )
 }
 
 pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String {
     format!(
-        "👉 Poking model with {} incomplete todo{}... You can turn poke off with `/poke off`.",
+        "👉 Poking model: {} incomplete todo{}. {}",
         incomplete_count,
-        if incomplete_count == 1 { "" } else { "s" }
+        if incomplete_count == 1 { "" } else { "s" },
+        POKE_OFF_UI_HINT,
     )
 }
 
@@ -1494,7 +1498,7 @@ pub(super) fn incomplete_poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
 
 pub(super) fn build_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
     format!(
-        "Your todo list has {} incomplete item{}. Please continue your work and complete them, or update the todo list with `todo` if items are already done or no longer needed. If you genuinely need user input to proceed, say so clearly and specifically, but only if truly blocked. You can turn poke off with `/poke off` if you want these reminders to stop.",
+        "You have {} incomplete todo{}. Continue working, or update the todo tool.",
         incomplete.len(),
         if incomplete.len() == 1 { "" } else { "s" },
     )

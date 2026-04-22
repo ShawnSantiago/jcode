@@ -509,7 +509,7 @@ impl App {
         }
 
         self.push_display_message(DisplayMessage::system(format!(
-            "👉 Todos remain. Auto-poking again with {} incomplete todo{}... You can turn poke off with `/poke off`.",
+            "👉 Auto-poking: {} incomplete todo{}. `/poke off` to stop.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
         )));
