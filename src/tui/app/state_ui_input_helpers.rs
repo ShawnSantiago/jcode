@@ -242,6 +242,10 @@ impl App {
             ("/unsave".into(), "Remove bookmark from session"),
             ("/split".into(), "Split session into a new window"),
             (
+                "/transfer".into(),
+                "Compact context into a fresh handoff session",
+            ),
+            (
                 "/workspace".into(),
                 "Niri-style session workspace (status/on/off/add)",
             ),

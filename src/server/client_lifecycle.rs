@@ -1,7 +1,7 @@
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_run_subagent, handle_set_feature, handle_set_subagent_model,
-    handle_split, handle_stdin_response, handle_trigger_memory_extraction,
+    handle_split, handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -1678,6 +1678,10 @@ pub(super) async fn handle_client(
 
             Request::Split { id } => {
                 handle_split(id, &client_session_id, &client_event_tx).await;
+            }
+
+            Request::Transfer { id } => {
+                handle_transfer(id, &client_session_id, &agent, &client_event_tx).await;
             }
 
             Request::Compact { id } => {

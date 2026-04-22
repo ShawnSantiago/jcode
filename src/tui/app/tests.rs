@@ -5472,7 +5472,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("Your todo list has 2 incomplete items"));
-        assert!(app.queued_messages()[0].contains("Pick up the newly discovered task"));
+        assert!(!app.queued_messages()[0].contains("Pick up the newly discovered task"));
         assert!(app.queued_messages()[0].contains("/poke off"));
     });
 }
@@ -6912,17 +6912,17 @@ fn test_auto_poke_starts_enabled_by_default() {
 }
 
 #[test]
-fn test_alt_p_toggles_auto_poke_locally() {
+fn test_ctrl_p_toggles_auto_poke_locally() {
     let mut app = create_test_app();
 
     assert!(app.auto_poke_incomplete_todos);
 
-    app.handle_key(KeyCode::Char('p'), KeyModifiers::ALT)
+    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
         .unwrap();
     assert!(!app.auto_poke_incomplete_todos);
     assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
 
-    app.handle_key(KeyCode::Char('p'), KeyModifiers::ALT)
+    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
         .unwrap();
     assert!(app.auto_poke_incomplete_todos);
     assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
@@ -6930,6 +6930,84 @@ fn test_alt_p_toggles_auto_poke_locally() {
         msg.content
             .contains("Auto-poke enabled. No incomplete todos found right now.")
     }));
+}
+
+#[test]
+fn test_transfer_command_queues_pause_while_processing_locally() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+
+    super::commands::handle_transfer_command_local(&mut app);
+
+    assert!(app.pending_transfer_request);
+    let pause_message = super::commands::transfer_pause_message();
+    assert_eq!(
+        app.interleave_message.as_deref(),
+        Some(pause_message.as_str())
+    );
+    assert_eq!(
+        app.status_notice(),
+        Some("Transfer queued after current turn".to_string())
+    );
+}
+
+#[test]
+fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_context_only() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.session.working_dir = Some("/tmp".to_string());
+        app.session.model = Some("test-model".to_string());
+        app.session.provider_key = Some("test-provider".to_string());
+        app.session.messages.push(crate::session::StoredMessage {
+            id: "msg-1".to_string(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "full transcript should not be copied".to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        let transfer_compaction = crate::session::StoredCompactionState {
+            summary_text: "Compacted handoff summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 0,
+        };
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Carry this forward".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        let (child_id, _) = super::commands::create_transfer_session_from_parent(
+            &app.session.id,
+            &app.session,
+            Some(transfer_compaction.clone()),
+        )
+        .expect("create transfer session");
+        let child = crate::session::Session::load(&child_id).expect("load child session");
+        let child_todos = crate::todo::load_todos(&child_id).expect("load child todos");
+
+        assert_eq!(child.parent_id.as_deref(), Some(app.session.id.as_str()));
+        assert!(child.messages.is_empty());
+        assert_eq!(child.compaction, Some(transfer_compaction));
+        assert_eq!(child.model.as_deref(), Some("test-model"));
+        assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
+        assert_eq!(child.working_dir.as_deref(), Some("/tmp"));
+        assert_eq!(child_todos.len(), 1);
+        assert_eq!(child_todos[0].content, "Carry this forward");
+    });
 }
 
 #[test]
@@ -9448,13 +9526,13 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("Your todo list has 2 incomplete items"));
-        assert!(app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
+        assert!(!app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
         assert!(app.queued_messages()[0].contains("/poke off"));
     });
 }
 
 #[test]
-fn test_remote_alt_p_toggles_auto_poke() {
+fn test_remote_ctrl_p_toggles_auto_poke() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -9464,19 +9542,44 @@ fn test_remote_alt_p_toggles_auto_poke() {
         app.is_remote = true;
         assert!(app.auto_poke_incomplete_todos);
 
-        rt.block_on(app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::ALT, &mut remote))
-            .expect("Alt+P should disable poke remotely");
+        rt.block_on(app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::CONTROL, &mut remote))
+            .expect("Ctrl+P should disable poke remotely");
         assert!(!app.auto_poke_incomplete_todos);
         assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
 
-        rt.block_on(app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::ALT, &mut remote))
-            .expect("Alt+P should enable poke remotely");
+        rt.block_on(app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::CONTROL, &mut remote))
+            .expect("Ctrl+P should enable poke remotely");
         assert!(app.auto_poke_incomplete_todos);
         assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
                 .contains("Auto-poke enabled. No incomplete todos found right now.")
         }));
+    });
+}
+
+#[test]
+fn test_remote_transfer_queues_pause_when_processing() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        app.is_processing = true;
+
+        app.input = "/transfer".to_string();
+        app.cursor_pos = app.input.len();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("/transfer should queue while processing");
+
+        assert!(app.pending_transfer_request);
+        assert_eq!(app.pending_split_label.as_deref(), Some("Transfer"));
+        assert_eq!(
+            app.status_notice(),
+            Some("Transfer queued after current turn".to_string())
+        );
     });
 }
 
@@ -9513,7 +9616,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         assert!(needs_redraw);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Resume after interrupt"));
+        assert!(app.queued_messages()[0].contains("Your todo list has 1 incomplete item"));
+        assert!(app.queued_messages()[0].contains("/poke off"));
     });
 }
 

@@ -650,6 +650,10 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             app.toggle_input_stash();
             true
         }
+        KeyCode::Char('p') => {
+            super::commands::toggle_auto_poke_hotkey_local(app);
+            true
+        }
         KeyCode::Char('v') => {
             paste_from_clipboard(app);
             true
@@ -721,10 +725,6 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
                 "Info widget: OFF"
             };
             app.set_status_notice(status);
-            true
-        }
-        KeyCode::Char('p') => {
-            super::commands::toggle_auto_poke_hotkey_local(app);
             true
         }
         KeyCode::Char('v') => {
@@ -1693,13 +1693,16 @@ impl App {
             }
             "poke" => {
                 "`/poke [on|off|status]`\nPoke the model to resume when it has stopped with incomplete todos.\n\
-                Auto-poke now starts enabled by default, and `Alt+P` toggles it on/off.\n\
+                Auto-poke now starts enabled by default, and `Ctrl+P` toggles it on/off.\n\
                 `/poke` or `/poke on` arms auto-poke and immediately pokes if work remains.\n\
                 `/poke off` disarms auto-poke and clears any queued poke follow-ups.\n\
                 `/poke status` shows whether auto-poke is currently armed.\n\
                 If a turn is currently running, the poke is queued and sent right after that turn finishes.\n\
-                Injects a reminder listing all pending/in-progress tasks and prompts the model to either\n\
+                Injects a reminder with the number of incomplete todos and prompts the model to either\n\
                 finish the work, update the todo list to reflect what is done, or ask for user input if genuinely blocked."
+            }
+            "transfer" => {
+                "`/transfer`\nCompact the current session into a summary-only handoff, copy the current todo list to a fresh session, and open that transferred session in a new window.\n\nIf a turn is currently running, jcode first soft-pauses the current session at the next safe point, then performs the transfer."
             }
             "improve" => {
                 "`/improve [focus]`\nStart an autonomous repo-improvement loop. The model inspects the project, writes a ranked todo list, implements the highest-leverage safe improvements, validates them, then keeps going until further work has diminishing returns.\n\n`/improve plan [focus]`\nGenerate a ranked improve todo list only, without editing files.\n\n`/improve resume`\nResume the last saved improve mode for this session using the current improve todos.\n\n`/improve status`\nShow the inferred status of the current improve run and todo batch.\n\n`/improve stop`\nAsk the model to stop after the next safe point, update todos, and summarize remaining work."

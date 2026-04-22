@@ -162,41 +162,6 @@ async fn handle_remote_key_internal(
         app.toggle_side_panel();
         return Ok(());
     }
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('p')) {
-        if app.auto_poke_incomplete_todos {
-            let cleared = app_mod::commands::disable_auto_poke(app);
-            app.set_status_notice("Poke: OFF");
-            app.push_display_message(DisplayMessage::system(
-                app_mod::commands::poke_disabled_message(cleared),
-            ));
-        } else {
-            match app_mod::commands::activate_auto_poke(app) {
-                app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_enabled_without_incomplete_message(),
-                    ));
-                }
-                app_mod::commands::PokeActivation::Queued => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_queued_display_message(),
-                    ));
-                }
-                app_mod::commands::PokeActivation::SendNow {
-                    incomplete_count,
-                    poke_msg,
-                } => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_triggered_display_message(incomplete_count),
-                    ));
-
-                    let _ =
-                        begin_remote_send(app, remote, poke_msg, vec![], true, None, true, 0).await;
-                    app.visible_turn_started = Some(Instant::now());
-                }
-            }
-        }
-        return Ok(());
-    }
     if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')) {
         app.toggle_diagram_pane_position();
         return Ok(());
@@ -439,6 +404,50 @@ async fn handle_remote_key_internal(
             }
             KeyCode::Char('s') => {
                 app.toggle_input_stash();
+                return Ok(());
+            }
+            KeyCode::Char('p') => {
+                if app.auto_poke_incomplete_todos {
+                    let cleared = app_mod::commands::disable_auto_poke(app);
+                    app.set_status_notice("Poke: OFF");
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_disabled_message(cleared),
+                    ));
+                } else {
+                    match app_mod::commands::activate_auto_poke(app) {
+                        app_mod::commands::PokeActivation::EnabledNoIncomplete => {
+                            app.push_display_message(DisplayMessage::system(
+                                app_mod::commands::poke_enabled_without_incomplete_message(),
+                            ));
+                        }
+                        app_mod::commands::PokeActivation::Queued => {
+                            app.push_display_message(DisplayMessage::system(
+                                app_mod::commands::poke_queued_display_message(),
+                            ));
+                        }
+                        app_mod::commands::PokeActivation::SendNow {
+                            incomplete_count,
+                            poke_msg,
+                        } => {
+                            app.push_display_message(DisplayMessage::system(
+                                app_mod::commands::poke_triggered_display_message(incomplete_count),
+                            ));
+
+                            let _ = begin_remote_send(
+                                app,
+                                remote,
+                                poke_msg,
+                                vec![],
+                                true,
+                                None,
+                                true,
+                                0,
+                            )
+                            .await;
+                            app.visible_turn_started = Some(Instant::now());
+                        }
+                    }
+                }
                 return Ok(());
             }
             KeyCode::Char('v') => {
@@ -1422,6 +1431,56 @@ async fn handle_remote_key_internal(
                         "Splitting session...".to_string(),
                     ));
                     remote.split().await?;
+                    return Ok(());
+                }
+
+                if trimmed == "/transfer" {
+                    if app.pending_transfer_request {
+                        app.push_display_message(DisplayMessage::system(
+                            "A transfer is already pending.".to_string(),
+                        ));
+                        app.set_status_notice("Transfer already pending");
+                        return Ok(());
+                    }
+
+                    app.pending_split_label = Some("Transfer".to_string());
+                    if app.is_processing {
+                        let pause_message = app_mod::commands::transfer_pause_message();
+                        let pause_display = pause_message.clone();
+                        match remote.soft_interrupt(pause_message, false).await {
+                            Ok(request_id) => {
+                                app.track_pending_soft_interrupt(request_id, pause_display);
+                                app.pending_transfer_request = true;
+                                app.push_display_message(DisplayMessage::system(
+                                    "Queued `/transfer`. The current session will be asked to pause, then the compacted handoff will open in a new window."
+                                        .to_string(),
+                                ));
+                                app.set_status_notice("Transfer queued after current turn");
+                            }
+                            Err(error) => {
+                                app.pending_split_label = None;
+                                app.push_display_message(DisplayMessage::error(format!(
+                                    "Failed to queue transfer pause: {}",
+                                    error
+                                )));
+                                app.set_status_notice("Transfer queue failed");
+                            }
+                        }
+                    } else {
+                        app.push_display_message(DisplayMessage::system(
+                            "Preparing transfer...".to_string(),
+                        ));
+                        begin_remote_split_launch(app, "Transfer");
+                        if let Err(error) = remote.transfer().await {
+                            finish_remote_split_launch(app);
+                            app.pending_split_label = None;
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to launch transfer session: {}",
+                                error
+                            )));
+                            app.set_status_notice("Transfer launch failed");
+                        }
+                    }
                     return Ok(());
                 }
 

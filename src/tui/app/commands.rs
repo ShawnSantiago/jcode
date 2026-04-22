@@ -62,7 +62,8 @@ pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, St
 
 pub(super) fn is_poke_message(message: &str) -> bool {
     message.starts_with("Your todo list has ")
-        && message.contains("Please continue your work. Either:")
+        && message.contains("Please continue your work")
+        && message.contains("/poke off")
 }
 
 pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
@@ -203,6 +204,208 @@ pub(super) fn toggle_auto_poke_hotkey_local(app: &mut App) {
         app.push_display_message(DisplayMessage::system(poke_disabled_message(cleared)));
     } else {
         activate_auto_poke_local(app);
+    }
+}
+
+pub(super) fn transfer_pause_message() -> String {
+    "Transfer requested. Please pause after the current step, update the todo list if needed, and stop so work can continue in the transferred session."
+        .to_string()
+}
+
+fn transfer_active_messages(session: &crate::session::Session) -> Vec<Message> {
+    let start = session
+        .compaction
+        .as_ref()
+        .map(|state| state.compacted_count.min(session.messages.len()))
+        .unwrap_or(0);
+    session.messages[start..]
+        .iter()
+        .map(crate::session::StoredMessage::to_message)
+        .collect()
+}
+
+pub(super) fn create_transfer_session_from_parent(
+    parent_session_id: &str,
+    parent: &crate::session::Session,
+    compaction: Option<crate::session::StoredCompactionState>,
+) -> anyhow::Result<(String, String)> {
+    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
+    child.messages.clear();
+    child.compaction = compaction;
+    child.working_dir = parent.working_dir.clone();
+    child.model = parent.model.clone();
+    child.provider_key = parent.provider_key.clone();
+    child.subagent_model = parent.subagent_model.clone();
+    child.improve_mode = parent.improve_mode;
+    child.autoreview_enabled = parent.autoreview_enabled;
+    child.autojudge_enabled = parent.autojudge_enabled;
+    child.is_canary = parent.is_canary;
+    child.testing_build = parent.testing_build.clone();
+    child.status = crate::session::SessionStatus::Closed;
+    child.provider_session_id = None;
+    child.save()?;
+    crate::todo::save_todos(&child.id, &todos)?;
+    Ok((child.id.clone(), child.display_name().to_string()))
+}
+
+async fn prepare_transfer_session_local(
+    parent: crate::session::Session,
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+) -> anyhow::Result<super::PreparedTransferSession> {
+    let compaction = crate::compaction::build_transfer_compaction_state(
+        provider,
+        transfer_active_messages(&parent),
+        parent.compaction.clone(),
+    )
+    .await?;
+    let (session_id, session_name) =
+        create_transfer_session_from_parent(parent.id.as_str(), &parent, compaction)?;
+    Ok(super::PreparedTransferSession {
+        session_id,
+        session_name,
+    })
+}
+
+pub(super) fn start_local_transfer_prepare(app: &mut App) -> anyhow::Result<()> {
+    if app.pending_local_transfer.is_some() {
+        return Ok(());
+    }
+
+    let parent = app.session.clone();
+    let provider = app.provider.fork();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.pending_local_transfer = Some(super::PendingLocalTransfer { receiver: rx });
+
+    tokio::spawn(async move {
+        let result = prepare_transfer_session_local(parent, provider).await;
+        let _ = tx.send(result);
+    });
+
+    Ok(())
+}
+
+pub(super) fn poll_local_transfer_prepare(app: &mut App) -> bool {
+    let recv_result = {
+        let Some(pending) = app.pending_local_transfer.as_ref() else {
+            return false;
+        };
+        pending.receiver.try_recv()
+    };
+
+    match recv_result {
+        Ok(result) => {
+            app.pending_local_transfer = None;
+            app.pending_transfer_request = false;
+            match result {
+                Ok(prepared) => {
+                    let exe = super::launch_client_executable();
+                    let cwd = crate::session::Session::load(&prepared.session_id)
+                        .ok()
+                        .and_then(|session| session.working_dir)
+                        .map(std::path::PathBuf::from)
+                        .filter(|path| path.is_dir())
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let socket = std::env::var("JCODE_SOCKET").ok();
+                    match super::spawn_in_new_terminal(
+                        &exe,
+                        &prepared.session_id,
+                        &cwd,
+                        socket.as_deref(),
+                    ) {
+                        Ok(true) => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "↗ Transfer launched in **{}**.",
+                                prepared.session_name
+                            )));
+                            app.set_status_notice("Transfer launched");
+                        }
+                        Ok(false) => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "↗ Transfer session **{}** created.\n\nNo terminal was opened automatically. Resume manually:\n```\njcode --resume {}\n```",
+                                prepared.session_name, prepared.session_id
+                            )));
+                            app.set_status_notice("Transfer session created");
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Transfer session **{}** was created but failed to open a window: {}\n\nResume manually: `jcode --resume {}`",
+                                prepared.session_name, error, prepared.session_id
+                            )));
+                            app.set_status_notice("Transfer open failed");
+                        }
+                    }
+                }
+                Err(error) => {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to prepare transfer session: {}",
+                        error
+                    )));
+                    app.set_status_notice("Transfer failed");
+                }
+            }
+            true
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            app.pending_local_transfer = None;
+            app.pending_transfer_request = false;
+            app.push_display_message(DisplayMessage::error(
+                "Transfer preparation failed before returning a result.".to_string(),
+            ));
+            app.set_status_notice("Transfer failed");
+            true
+        }
+    }
+}
+
+pub(super) fn maybe_begin_pending_local_transfer(app: &mut App) -> bool {
+    if app.is_remote || app.is_processing || !app.pending_transfer_request {
+        return false;
+    }
+    if app.pending_local_transfer.is_some() {
+        return false;
+    }
+
+    match start_local_transfer_prepare(app) {
+        Ok(()) => {
+            app.push_display_message(DisplayMessage::system(
+                "Preparing transferred session with compacted context...".to_string(),
+            ));
+            app.set_status_notice("Preparing transfer");
+        }
+        Err(error) => {
+            app.pending_transfer_request = false;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to start transfer preparation: {}",
+                error
+            )));
+            app.set_status_notice("Transfer failed");
+        }
+    }
+    true
+}
+
+pub(super) fn handle_transfer_command_local(app: &mut App) {
+    if app.pending_transfer_request || app.pending_local_transfer.is_some() {
+        app.push_display_message(DisplayMessage::system(
+            "A transfer is already pending.".to_string(),
+        ));
+        app.set_status_notice("Transfer already pending");
+        return;
+    }
+
+    app.pending_transfer_request = true;
+    if app.is_processing {
+        app.interleave_message = Some(transfer_pause_message());
+        app.push_display_message(DisplayMessage::system(
+            "Queued `/transfer`. The current session will be asked to pause, then the compacted handoff will open in a new window."
+                .to_string(),
+        ));
+        app.set_status_notice("Transfer queued after current turn");
+    } else {
+        let _ = maybe_begin_pending_local_transfer(app);
     }
 }
 
@@ -1063,6 +1266,22 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/transfer" {
+        if app.is_remote {
+            app.push_display_message(DisplayMessage::error(
+                "`/transfer` requires an active connected session in remote mode.".to_string(),
+            ));
+        } else {
+            handle_transfer_command_local(app);
+        }
+        return true;
+    }
+
+    if trimmed.starts_with("/transfer ") {
+        app.push_display_message(DisplayMessage::error("Usage: `/transfer`".to_string()));
+        return true;
+    }
+
     false
 }
 
@@ -1274,29 +1493,10 @@ pub(super) fn incomplete_poke_todos(app: &App) -> Vec<crate::todo::TodoItem> {
 }
 
 pub(super) fn build_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    let mut todo_list = String::new();
-    for todo in incomplete {
-        let status_icon = match todo.status.as_str() {
-            "in_progress" => "🔄",
-            _ => "⬜",
-        };
-        todo_list.push_str(&format!(
-            "  {} [{}] {}\n",
-            status_icon, todo.priority, todo.content
-        ));
-    }
-
     format!(
-        "Your todo list has {} incomplete item{}:\n\n{}\n\
-        Please continue your work. Either:\n\
-        1. Keep working and complete the remaining tasks\n\
-        2. Update the todo list with `todo` if items are already done or no longer needed\n\
-        3. If you genuinely need user input to proceed, say so clearly and specifically — \
-        but only if truly blocked (this should be rare; prefer making reasonable assumptions)\n\
-        4. You can turn poke off with `/poke off` if you want these reminders to stop",
+        "Your todo list has {} incomplete item{}. Please continue your work and complete them, or update the todo list with `todo` if items are already done or no longer needed. If you genuinely need user input to proceed, say so clearly and specifically, but only if truly blocked. You can turn poke off with `/poke off` if you want these reminders to stop.",
         incomplete.len(),
         if incomplete.len() == 1 { "" } else { "s" },
-        todo_list,
     )
 }
 

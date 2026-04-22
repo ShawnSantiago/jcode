@@ -649,6 +649,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Transfer the current session into a compacted handoff session
+    pub async fn transfer(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::Transfer { id };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Trigger manual context compaction on the server
     pub async fn compact(&mut self) -> Result<u64> {
         let id = self.next_request_id;

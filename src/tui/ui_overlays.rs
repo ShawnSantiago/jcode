@@ -212,6 +212,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry("/split", "Clone session into a new window"));
     lines.push(help_entry(
+        "/transfer",
+        "Open a fresh session with only compacted context + copied todos",
+    ));
+    lines.push(help_entry(
         "/workspace [status|on|off|add]",
         "Enable and manage the Niri-style session workspace",
     ));
@@ -384,7 +388,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Alt+Y", "Toggle chat selection/copy mode"));
     lines.push(key_entry("Alt+S", "Toggle typing scroll lock"));
-    lines.push(key_entry("Alt+P", "Toggle auto-poke for incomplete todos"));
+    lines.push(key_entry("Ctrl+P", "Toggle auto-poke for incomplete todos"));
     lines.push(key_entry("Alt+Left / Right", "Cycle reasoning effort"));
     if let Some(label) = app.dictation_key_label() {
         lines.push(key_entry(&label, "Run configured dictation"));

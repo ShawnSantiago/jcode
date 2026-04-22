@@ -31,6 +31,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::interval;
@@ -94,6 +95,16 @@ struct PendingRemoteMessage {
 struct PendingSplitPrompt {
     content: String,
     images: Vec<(String, String)>,
+}
+
+struct PendingLocalTransfer {
+    receiver: mpsc::Receiver<anyhow::Result<PreparedTransferSession>>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedTransferSession {
+    session_id: String,
+    session_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -674,6 +685,10 @@ pub struct App {
     pending_split_started_at: Option<Instant>,
     // Ask the remote followup loop to issue a split request once idle.
     pending_split_request: bool,
+    // Ask the followup loop to issue a transfer request once idle.
+    pending_transfer_request: bool,
+    // Local transfer preparation currently running in the background.
+    pending_local_transfer: Option<PendingLocalTransfer>,
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,

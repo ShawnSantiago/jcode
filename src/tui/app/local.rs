@@ -56,6 +56,8 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_compaction_completion();
+    needs_redraw |= super::commands::poll_local_transfer_prepare(app);
+    needs_redraw |= super::commands::maybe_begin_pending_local_transfer(app);
     needs_redraw |= app.maybe_progress_provider_failover_countdown();
     app.check_debug_command();
     needs_redraw |= app.check_stable_version();
@@ -322,4 +324,5 @@ pub(super) fn finish_turn(app: &mut App) {
     if !app.schedule_auto_poke_followup_if_needed() {
         app.clear_visible_turn_started();
     }
+    let _ = super::commands::maybe_begin_pending_local_transfer(app);
 }

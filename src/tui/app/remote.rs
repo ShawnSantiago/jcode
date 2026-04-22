@@ -885,6 +885,26 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
+    if app.pending_transfer_request && !app.is_processing {
+        app.pending_transfer_request = false;
+        let flow_label = app
+            .pending_split_label
+            .clone()
+            .unwrap_or_else(|| "Transfer".to_string());
+        begin_remote_split_launch(app, &flow_label);
+        if let Err(error) = remote.transfer().await {
+            finish_remote_split_launch(app);
+            let label = app.pending_split_label.take().unwrap_or(flow_label);
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to launch {} session: {}",
+                label.to_lowercase(),
+                error
+            )));
+            app.set_status_notice(format!("{} launch failed", label));
+        }
+        return;
+    }
+
     if app.is_processing {
         if let Some(interleave_msg) = app.interleave_message.take()
             && !interleave_msg.trim().is_empty()

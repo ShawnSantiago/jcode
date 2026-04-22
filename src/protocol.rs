@@ -258,6 +258,10 @@ pub enum Request {
     #[serde(rename = "split")]
     Split { id: u64 },
 
+    /// Transfer the current session into a compacted handoff session
+    #[serde(rename = "transfer")]
+    Transfer { id: u64 },
+
     /// Trigger manual context compaction
     #[serde(rename = "compact")]
     Compact { id: u64 },
@@ -1309,6 +1313,7 @@ impl Request {
             Request::SetFeature { id, .. } => *id,
             Request::SetCompactionMode { id, .. } => *id,
             Request::Split { id } => *id,
+            Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id } => *id,

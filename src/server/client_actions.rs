@@ -630,6 +630,43 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
     Ok((child.id.clone(), name))
 }
 
+fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
+    let start = session
+        .compaction
+        .as_ref()
+        .map(|state| state.compacted_count.min(session.messages.len()))
+        .unwrap_or(0);
+    session.messages[start..]
+        .iter()
+        .map(crate::session::StoredMessage::to_message)
+        .collect()
+}
+
+fn create_transfer_child_session(
+    parent_session_id: &str,
+    parent: &Session,
+    compaction: Option<crate::session::StoredCompactionState>,
+) -> anyhow::Result<(String, String)> {
+    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
+    let mut child = Session::create(Some(parent_session_id.to_string()), None);
+    child.messages.clear();
+    child.compaction = compaction;
+    child.working_dir = parent.working_dir.clone();
+    child.model = parent.model.clone();
+    child.provider_key = parent.provider_key.clone();
+    child.subagent_model = parent.subagent_model.clone();
+    child.improve_mode = parent.improve_mode;
+    child.autoreview_enabled = parent.autoreview_enabled;
+    child.autojudge_enabled = parent.autojudge_enabled;
+    child.is_canary = parent.is_canary;
+    child.testing_build = parent.testing_build.clone();
+    child.provider_session_id = None;
+    child.status = crate::session::SessionStatus::Closed;
+    child.save()?;
+    crate::todo::save_todos(&child.id, &todos)?;
+    Ok((child.id.clone(), child.display_name().to_string()))
+}
+
 pub(super) async fn handle_split(
     id: u64,
     client_session_id: &str,
@@ -646,6 +683,67 @@ pub(super) async fn handle_split(
             return;
         }
     };
+
+    let _ = client_event_tx.send(ServerEvent::SplitResponse {
+        id,
+        new_session_id,
+        new_session_name,
+    });
+}
+
+pub(super) async fn handle_transfer(
+    id: u64,
+    client_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let parent = match Session::load(client_session_id) {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to load session for transfer: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+
+    let provider = {
+        let agent_guard = agent.lock().await;
+        agent_guard.provider_fork()
+    };
+
+    let transfer_compaction = match crate::compaction::build_transfer_compaction_state(
+        provider,
+        transfer_active_messages(&parent),
+        parent.compaction.clone(),
+    )
+    .await
+    {
+        Ok(compaction) => compaction,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to compact session for transfer: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+
+    let (new_session_id, new_session_name) =
+        match create_transfer_child_session(client_session_id, &parent, transfer_compaction) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Failed to create transfer session: {error}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        };
 
     let _ = client_event_tx.send(ServerEvent::SplitResponse {
         id,
