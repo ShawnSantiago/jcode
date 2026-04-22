@@ -353,6 +353,15 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         rendered.contains("logs:"),
         "expected log hint in notification line, got: {rendered}"
     );
+    assert!(
+        rendered.contains("[L]"),
+        "expected copy badge in notification line, got: {rendered}"
+    );
+
+    let target = recent_flicker_copy_target_for_key('l').expect("expected flicker copy target");
+    assert_eq!(target.key, 'l');
+    assert_eq!(target.copied_notice, "Copied flicker hint");
+    assert!(target.content.contains("client:flicker-frames 32"));
 
     clear_flicker_frame_history_for_tests();
 }

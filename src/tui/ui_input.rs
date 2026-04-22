@@ -1019,6 +1019,25 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
     }
 
     if let Some(flicker_notice) = super::recent_flicker_ui_notice() {
+        let copy_badge_ui = app.copy_badge_ui();
+        let copy_badge_now = std::time::Instant::now();
+        let key = 'l';
+        let alt_style = if copy_badge_ui.alt_active {
+            Style::default().fg(accent_color()).bold()
+        } else {
+            Style::default().fg(dim_color())
+        };
+        let shift_style = if copy_badge_ui.shift_active {
+            Style::default().fg(accent_color()).bold()
+        } else {
+            Style::default().fg(dim_color())
+        };
+        let key_style = if copy_badge_ui.key_is_active(key, copy_badge_now) {
+            Style::default().fg(accent_color()).bold()
+        } else {
+            Style::default().fg(dim_color())
+        };
+
         push_sep(&mut spans);
         spans.push(Span::styled(
             flicker_notice.summary,
@@ -1029,6 +1048,25 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
             flicker_notice.hint,
             Style::default().fg(rgb(140, 180, 255)),
         ));
+        spans.push(Span::raw(" "));
+        if let Some(success) = copy_badge_ui.feedback_for_key(key, copy_badge_now) {
+            let feedback_style = if success {
+                Style::default().fg(ai_color()).bold()
+            } else {
+                Style::default().fg(Color::Red).bold()
+            };
+            let feedback_text = if success {
+                "✓ Copied! "
+            } else {
+                "✗ Copy failed "
+            };
+            spans.push(Span::styled(feedback_text, feedback_style));
+        }
+        spans.push(Span::styled("[Alt]", alt_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("[⇧]", shift_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("[L]", key_style));
     }
 
     if let Some(notice) = app.status_notice() {

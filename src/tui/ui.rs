@@ -1513,6 +1513,8 @@ pub(crate) struct FlickerUiNotice {
     pub(crate) hint: String,
 }
 
+const FLICKER_NOTICE_COPY_KEY: char = 'l';
+
 #[derive(Default)]
 struct SlowFrameHistory {
     samples: VecDeque<SlowFrameSample>,
@@ -1923,6 +1925,20 @@ pub(crate) fn recent_flicker_ui_notice() -> Option<FlickerUiNotice> {
     let summary = format!("⚠ flicker detected ({})", flicker_event_label(&event.kind));
     let hint = format!("logs: {} · debug: client:flicker-frames 32", log_hint);
     Some(FlickerUiNotice { summary, hint })
+}
+
+pub(crate) fn recent_flicker_copy_target_for_key(key: char) -> Option<VisibleCopyTarget> {
+    if !key.eq_ignore_ascii_case(&FLICKER_NOTICE_COPY_KEY) {
+        return None;
+    }
+
+    let notice = recent_flicker_ui_notice()?;
+    Some(VisibleCopyTarget {
+        key: FLICKER_NOTICE_COPY_KEY,
+        kind_label: "flicker hint".to_string(),
+        copied_notice: "Copied flicker hint".to_string(),
+        content: notice.hint,
+    })
 }
 
 fn record_slow_frame_sample(sample: SlowFrameSample) {

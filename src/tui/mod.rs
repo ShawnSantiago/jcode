@@ -328,6 +328,9 @@ pub trait TuiState {
         if self.copy_selection_status().is_some() {
             return true;
         }
+        if crate::tui::ui::recent_flicker_ui_notice().is_some() {
+            return true;
+        }
         if self.status_notice().is_some() {
             return true;
         }

@@ -947,7 +947,9 @@ pub(super) fn handle_visible_copy_shortcut(
         return false;
     }
 
-    if let Some(target) = crate::tui::ui::visible_copy_target_for_key(c) {
+    if let Some(target) = crate::tui::ui::recent_flicker_copy_target_for_key(c)
+        .or_else(|| crate::tui::ui::visible_copy_target_for_key(c))
+    {
         let success = super::copy_to_clipboard(&target.content);
         app.record_copy_badge_key_press(c);
         app.record_copy_badge_feedback(c, success);
