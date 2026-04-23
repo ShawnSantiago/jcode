@@ -5,7 +5,7 @@ use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
-const IDLE_VARIANTS: &[&str] = &["donut", "three_rings", "orbit_rings"];
+const IDLE_VARIANTS: &[&str] = &["donut", "orbit_rings"];
 
 fn rotate_xyz(x: f32, y: f32, z: f32, ax: f32, ay: f32, az: f32) -> (f32, f32, f32) {
     let (sx, cx) = ax.sin_cos();
@@ -893,6 +893,7 @@ mod tests {
         assert!(IDLE_VARIANTS.contains(&"donut"));
         assert!(!IDLE_VARIANTS.contains(&"pulse_donut"));
         assert!(IDLE_VARIANTS.contains(&"orbit_rings"));
+        assert!(!IDLE_VARIANTS.contains(&"three_rings"));
         assert!(!IDLE_VARIANTS.contains(&"cube"));
     }
 

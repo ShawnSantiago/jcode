@@ -437,7 +437,7 @@ pub struct DisplayConfig {
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
     pub prompt_entry_animation: bool,
-    /// Disable specific animation variants by name (e.g. ["donut", "three_rings"])
+    /// Disable specific animation variants by name (e.g. ["donut", "orbit_rings"])
     pub disabled_animations: Vec<String>,
     /// Wrap long lines in the pinned diff pane (default: true)
     pub diff_line_wrap: bool,
@@ -1554,8 +1554,8 @@ idle_animation = true
 prompt_entry_animation = true
 
 # Disable specific animation variants by name.
-# Examples: ["donut"] or ["donut", "three_rings"]
-# Aliases: "three_rings" disables gyroscope.
+# Examples: ["donut"] or ["donut", "orbit_rings"]
+# Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
 # disabled_animations = []
 
 # Performance tier: auto/full/reduced/minimal (default: auto)
