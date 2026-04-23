@@ -338,11 +338,23 @@ pub fn debug_probe_side_panel_mermaid(
         false,
         Some(font_size_px),
     );
-    let reserved = Rect::new(0, 0, pane_width_cells, layout.rows);
-    let layout_fit =
-        fit_image_area_with_font(reserved, width, height, Some(font_size_px), centered, false);
-    let widget_fit =
-        fit_image_area_with_font(reserved, width, height, Some(font_size_px), centered, false);
+    let layout_fit = fit_image_area_with_font(
+        Rect::new(0, 0, pane_width_cells, pane_height_cells.max(1)),
+        width,
+        height,
+        Some(font_size_px),
+        centered,
+        false,
+    );
+    let widget_fit = match layout.render_mode {
+        SidePanelImageRenderMode::Fit => layout_fit,
+        SidePanelImageRenderMode::ScrollableViewport { .. } => Rect::new(
+            0,
+            0,
+            pane_width_cells,
+            pane_height_cells.min(layout.rows.max(1)),
+        ),
+    };
 
     Ok(SidePanelMermaidProbe {
         pane_width_cells,

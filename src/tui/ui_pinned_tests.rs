@@ -109,6 +109,19 @@ fn side_panel_mermaid_keeps_fit_mode_when_zoom_stays_readable() {
 }
 
 #[test]
+fn side_panel_mermaid_prefers_viewport_when_downscaled_fit_wastes_space() {
+    let layout =
+        estimate_side_panel_image_layout_with_font(226, 504, 36, 30, 0, false, Some((8, 16)));
+
+    assert_eq!(
+        layout.render_mode,
+        SidePanelImageRenderMode::ScrollableViewport { zoom_percent: 127 }
+    );
+    assert_eq!(layout.rows, 41);
+    assert!(layout.render_mode.is_scrollable());
+}
+
+#[test]
 fn side_panel_mermaid_scales_up_to_fill_nearly_matching_pane() {
     let layout =
         estimate_side_panel_image_layout_with_font(219, 360, 36, 30, 0, false, Some((8, 16)));
@@ -153,6 +166,25 @@ fn side_panel_mermaid_probe_reports_full_utilization_for_nearly_matching_diagram
     assert_eq!(probe.layout_fit.height_cells, 30);
     assert_eq!(probe.widget_fit.width_cells, 36);
     assert_eq!(probe.widget_fit.height_cells, 30);
+}
+
+#[test]
+fn side_panel_mermaid_probe_reports_viewport_fill_for_underutilized_fit() {
+    let probe = debug_probe_side_panel_mermaid(
+        "flowchart TD\n    A[Start] --> B[Get Idea]\n    B --> C[Research Topic]\n    B --> D[Talk to Team]\n    B --> E[Look at Examples]\n    C --> F[Pick Best Option]\n    D --> F\n    E --> F\n    F --> G[Create Plan]\n    G --> H[Gather Tools]\n    G --> I[Set Timeline]\n    H --> J[Start Work]\n    I --> J\n    J --> K[Build First Draft]\n    J --> L[Test Progress]\n    K --> M[Review Results]\n    L --> M\n    M --> N{Good Enough?}\n    N -->|Yes| O[Finalize]\n    N -->|No| P[Make Changes]\n    P --> Q[Improve Draft]\n    Q --> R[Test Again]\n    R --> M\n    O --> S[Finish]\n",
+        36,
+        30,
+        Some((8, 16)),
+        true,
+    )
+    .expect("probe");
+
+    assert_eq!(probe.render_mode, "scrollable-viewport@127%");
+    assert_eq!(probe.layout_fit.width_cells, 27);
+    assert_eq!(probe.layout_fit.height_cells, 30);
+    assert_eq!(probe.widget_fit.width_cells, 36);
+    assert_eq!(probe.widget_fit.height_cells, 30);
+    assert!(probe.widget_fit.area_utilization_percent > probe.layout_fit.area_utilization_percent);
 }
 
 #[test]
