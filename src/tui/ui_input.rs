@@ -1021,7 +1021,7 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
     if let Some(flicker_notice) = super::recent_flicker_ui_notice() {
         let copy_badge_ui = app.copy_badge_ui();
         let copy_badge_now = std::time::Instant::now();
-        let key = 'l';
+        let key = super::FLICKER_NOTICE_COPY_KEY;
         let alt_style = if copy_badge_ui.alt_active {
             Style::default().fg(accent_color()).bold()
         } else {
@@ -1066,7 +1066,10 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
         spans.push(Span::raw(" "));
         spans.push(Span::styled("[⇧]", shift_style));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled("[L]", key_style));
+        spans.push(Span::styled(
+            format!("[{}]", key.to_ascii_uppercase()),
+            key_style,
+        ));
     }
 
     if let Some(notice) = app.status_notice() {

@@ -862,6 +862,8 @@ pub(crate) struct VisibleCopyTarget {
     pub content: String,
 }
 
+// Copy badges intentionally avoid h/j/k/l so they never shadow vi-style
+// movement keys while the user is scanning visible actions.
 const COPY_BADGE_KEYS: [char; 12] = ['s', 'd', 'f', 'g', 'w', 'e', 'r', 't', 'x', 'c', 'v', 'b'];
 
 #[cfg(not(test))]
@@ -1540,7 +1542,8 @@ pub(crate) struct FlickerUiNotice {
     pub(crate) hint: String,
 }
 
-const FLICKER_NOTICE_COPY_KEY: char = 'l';
+// Keep this outside h/j/k/l for the same reason as COPY_BADGE_KEYS.
+pub(super) const FLICKER_NOTICE_COPY_KEY: char = 'z';
 
 #[derive(Default)]
 struct SlowFrameHistory {
@@ -1809,6 +1812,10 @@ fn same_flicker_context_key(a: &FlickerFrameSample, b: &FlickerFrameSample) -> b
         && a.messages_area_height == b.messages_area_height
 }
 
+fn sample_has_visible_transient_content(sample: &FlickerFrameSample) -> bool {
+    sample.visible_streaming_hash != 0 || sample.visible_batch_progress_hash != 0
+}
+
 fn push_flicker_event(history: &mut FlickerFrameHistory, event: FlickerEvent) {
     history.events.push_back(event.clone());
     while history.events.len() > FLICKER_HISTORY_MAX_EVENTS {
@@ -1871,6 +1878,7 @@ fn maybe_record_flicker_event(history: &mut FlickerFrameHistory, current: &Flick
         if let Some(earlier) = earlier
             && same_flicker_context_key(&earlier, current)
             && same_flicker_context_key(&earlier, &previous)
+            && !current.auto_scroll_paused
             && earlier.visible_hash == current.visible_hash
             && earlier.content_width == current.content_width
             && earlier.chat_scrollbar_visible == current.chat_scrollbar_visible
@@ -1908,7 +1916,10 @@ fn maybe_record_flicker_event(history: &mut FlickerFrameHistory, current: &Flick
                     current: current.clone(),
                 },
             );
-        } else if previous.visible_hash != current.visible_hash {
+        } else if previous.visible_hash != current.visible_hash
+            && !sample_has_visible_transient_content(&previous)
+            && !sample_has_visible_transient_content(current)
+        {
             push_flicker_event(
                 history,
                 FlickerEvent {

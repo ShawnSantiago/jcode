@@ -286,8 +286,37 @@ fn test_updates_header_repeated_renders_stay_stable_near_scrollbar_threshold() {
     );
 }
 
+fn test_flicker_sample(timestamp_ms: u64, visible_hash: u64) -> FlickerFrameSample {
+    FlickerFrameSample {
+        timestamp_ms,
+        session_id: Some("session_test".to_string()),
+        session_name: Some("test".to_string()),
+        display_messages_version: 9,
+        diff_mode: "Off".to_string(),
+        centered: false,
+        is_processing: false,
+        auto_scroll_paused: false,
+        scroll: 100,
+        visible_end: 120,
+        visible_lines: 20,
+        total_wrapped_lines: 1000,
+        prompt_preview_lines: 0,
+        messages_area_width: 90,
+        messages_area_height: 24,
+        content_width: 89,
+        chat_scrollbar_visible: true,
+        visible_hash,
+        visible_streaming_hash: 0,
+        visible_batch_progress_hash: 0,
+        total_ms: 5.0,
+        prepare_ms: 2.0,
+        draw_ms: 1.5,
+    }
+}
+
 #[test]
 fn test_flicker_frame_history_detects_same_state_hash_change() {
+    let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     record_flicker_frame_sample(FlickerFrameSample {
         timestamp_ms: 10,
@@ -352,6 +381,7 @@ fn test_flicker_frame_history_detects_same_state_hash_change() {
 
 #[test]
 fn test_flicker_frame_history_detects_layout_oscillation() {
+    let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     for (timestamp_ms, content_width, visible_hash) in
         [(20, 89, 333_u64), (21, 88, 444), (22, 89, 333)]
@@ -399,6 +429,7 @@ fn test_flicker_frame_history_detects_layout_oscillation() {
 
 #[test]
 fn test_flicker_frame_history_detects_layout_feedback_oscillation() {
+    let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     for sample in [
         FlickerFrameSample {
@@ -496,6 +527,7 @@ fn test_flicker_frame_history_detects_layout_feedback_oscillation() {
 
 #[test]
 fn notification_spans_include_recent_flicker_warning_and_log_hint() {
+    let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     record_flicker_frame_sample(FlickerFrameSample {
         timestamp_ms: 10,
@@ -568,12 +600,12 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         "expected log hint in notification line, got: {rendered}"
     );
     assert!(
-        rendered.contains("[L]"),
+        rendered.contains("[Z]"),
         "expected copy badge in notification line, got: {rendered}"
     );
 
-    let target = recent_flicker_copy_target_for_key('l').expect("expected flicker copy target");
-    assert_eq!(target.key, 'l');
+    let target = recent_flicker_copy_target_for_key('z').expect("expected flicker copy target");
+    assert_eq!(target.key, 'z');
     assert_eq!(target.copied_notice, "Copied flicker hint");
     assert!(target.content.contains("client:flicker-frames 32"));
 
@@ -582,6 +614,7 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
 
 #[test]
 fn test_flicker_frame_history_ignores_visible_batch_progress_updates() {
+    let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     record_flicker_frame_sample(FlickerFrameSample {
         timestamp_ms: 40,
@@ -641,6 +674,7 @@ fn test_flicker_frame_history_ignores_visible_batch_progress_updates() {
 
 #[test]
 fn test_flicker_frame_history_ignores_visible_streaming_updates() {
+    let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     record_flicker_frame_sample(FlickerFrameSample {
         timestamp_ms: 50,
@@ -695,6 +729,42 @@ fn test_flicker_frame_history_ignores_visible_streaming_updates() {
 
     let payload = debug_flicker_frame_history(8);
     assert_eq!(payload["buffered_samples"], 2);
+    assert_eq!(payload["buffered_events"], 0);
+}
+
+#[test]
+fn test_flicker_frame_history_ignores_live_batch_hash_noise() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    let mut first = test_flicker_sample(60, 111);
+    first.is_processing = true;
+    first.visible_batch_progress_hash = 77;
+    let mut second = test_flicker_sample(61, 222);
+    second.is_processing = true;
+    second.visible_batch_progress_hash = 77;
+
+    record_flicker_frame_sample(first);
+    record_flicker_frame_sample(second);
+
+    let payload = debug_flicker_frame_history(8);
+    assert_eq!(payload["buffered_samples"], 2);
+    assert_eq!(payload["buffered_events"], 0);
+}
+
+#[test]
+fn test_flicker_frame_history_ignores_manual_scroll_feedback() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    for (timestamp_ms, scroll, visible_hash) in [(70, 100, 111), (71, 101, 222), (72, 100, 111)] {
+        let mut sample = test_flicker_sample(timestamp_ms, visible_hash);
+        sample.auto_scroll_paused = true;
+        sample.scroll = scroll;
+        sample.visible_end = scroll + sample.visible_lines;
+        record_flicker_frame_sample(sample);
+    }
+
+    let payload = debug_flicker_frame_history(8);
+    assert_eq!(payload["buffered_samples"], 3);
     assert_eq!(payload["buffered_events"], 0);
 }
 
