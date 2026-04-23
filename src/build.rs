@@ -582,10 +582,18 @@ fn validate_dev_binary_matches_source(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SmokeTestReplyKind {
+    Ack,
+    Pong,
+}
+
+#[cfg(unix)]
 fn smoke_test_server_request(
     stream: &mut BufReader<std::os::unix::net::UnixStream>,
     request: &serde_json::Value,
-    expected_ack_id: u64,
+    expected_reply_kind: SmokeTestReplyKind,
+    expected_reply_id: u64,
 ) -> Result<()> {
     let payload = serde_json::to_string(request)? + "\n";
     stream.get_mut().write_all(payload.as_bytes())?;
@@ -596,20 +604,29 @@ fn smoke_test_server_request(
         let mut line = String::new();
         let bytes = stream.read_line(&mut line)?;
         if bytes == 0 {
-            anyhow::bail!("server closed the smoke-test socket before replying");
+            anyhow::bail!(
+                "server closed the smoke-test socket before sending {:?} {}",
+                expected_reply_kind,
+                expected_reply_id
+            );
         }
         let value: serde_json::Value = serde_json::from_str(line.trim()).map_err(|err| {
             anyhow::anyhow!("server smoke test returned invalid JSON line: {}", err)
         })?;
-        if value.get("type").and_then(|t| t.as_str()) == Some("ack")
-            && value.get("id").and_then(|id| id.as_u64()) == Some(expected_ack_id)
-        {
+        let reply_type = value.get("type").and_then(|t| t.as_str());
+        let reply_id = value.get("id").and_then(|id| id.as_u64());
+        let kind_matches = match expected_reply_kind {
+            SmokeTestReplyKind::Ack => reply_type == Some("ack"),
+            SmokeTestReplyKind::Pong => reply_type == Some("pong"),
+        };
+        if kind_matches && reply_id == Some(expected_reply_id) {
             return Ok(());
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "timed out waiting for ack {} during server smoke test",
-                expected_ack_id
+                "timed out waiting for {:?} {} during server smoke test",
+                expected_reply_kind,
+                expected_reply_id
             );
         }
     }
@@ -638,6 +655,7 @@ fn smoke_test_server_protocol(path: &Path, working_dir: &str) -> Result<()> {
                 "type": "ping",
                 "id": 1
             }),
+            SmokeTestReplyKind::Pong,
             1,
         )?;
     }
@@ -650,6 +668,7 @@ fn smoke_test_server_protocol(path: &Path, working_dir: &str) -> Result<()> {
             "id": 2,
             "working_dir": working_dir
         }),
+        SmokeTestReplyKind::Ack,
         2,
     )?;
     Ok(())
