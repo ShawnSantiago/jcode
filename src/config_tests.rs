@@ -12,6 +12,11 @@ fn test_display_auto_server_reload_defaults_to_true() {
 }
 
 #[test]
+fn test_display_alignment_defaults_to_left() {
+    assert!(!DisplayConfig::default().centered);
+}
+
+#[test]
 fn test_provider_failover_defaults_match_new_behavior() {
     let provider = Config::default().provider;
     assert_eq!(

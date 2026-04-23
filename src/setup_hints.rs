@@ -230,7 +230,7 @@ fn startup_hints_for_launch(state: &SetupHintsState) -> Option<StartupHints> {
     let spawn_notice: Option<String> = None;
 
     if state.launch_count == 1 {
-        let mut message = "Tip: use `/alignment left` to switch to Claude-style left alignment, or press `Alt+C` to toggle left/centered for the current session.".to_string();
+        let mut message = "Tip: jcode is left-aligned by default. Use `/alignment centered` or press `Alt+C` to toggle left/centered for the current session.".to_string();
 
         if let Some(spawn_notice) = spawn_notice {
             message.push_str("\n\n");
@@ -238,7 +238,7 @@ fn startup_hints_for_launch(state: &SetupHintsState) -> Option<StartupHints> {
         }
 
         return Some(StartupHints::with_status_and_display(
-            "Tip: `/alignment left` or Alt+C toggles alignment.".to_string(),
+            "Tip: `/alignment centered` or Alt+C toggles alignment.".to_string(),
             "Alignment",
             message,
         ));
@@ -250,7 +250,7 @@ fn startup_hints_for_launch(state: &SetupHintsState) -> Option<StartupHints> {
             .unwrap_or_else(|| "~/.jcode/config.toml".to_string());
 
         let mut message = format!(
-            "You can hotswap text alignment with `Alt+C` (left-aligned ↔ centered).\n\nTo save it permanently, use `/alignment centered` or `/alignment left`. You can also change it in `{}` with `display.centered = true` or `display.centered = false`.",
+            "You can hotswap text alignment with `Alt+C` (left-aligned ↔ centered).\n\nTo save it permanently, use `/alignment centered` or `/alignment left`. You can also change it in `{}` with `display.centered = true` or `display.centered = false`.\n\nLeft-aligned mode is the default for new configs.",
             config_path
         );
 
@@ -577,14 +577,14 @@ mod tests {
         let hints = startup_hints_for_launch(&state).expect("expected startup hint");
         assert_eq!(
             hints.status_notice.as_deref(),
-            Some("Tip: `/alignment left` or Alt+C toggles alignment.")
+            Some("Tip: `/alignment centered` or Alt+C toggles alignment.")
         );
 
         let (title, message) = hints.display_message.expect("expected display message");
         assert_eq!(title, "Alignment");
         assert!(message.contains("Alt+C"));
-        assert!(message.contains("/alignment left"));
-        assert!(message.contains("Claude-style left alignment"));
+        assert!(message.contains("/alignment centered"));
+        assert!(message.contains("left-aligned by default"));
         assert!(!message.contains("display.centered = true"));
     }
 
@@ -607,7 +607,7 @@ mod tests {
         assert!(message.contains("/alignment centered"));
         assert!(message.contains("/alignment left"));
         assert!(message.contains("display.centered = true"));
-        assert!(message.contains("display.centered = false"));
+        assert!(message.contains("Left-aligned mode is the default"));
     }
 
     #[test]

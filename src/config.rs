@@ -423,7 +423,7 @@ pub struct DisplayConfig {
     pub mouse_capture: bool,
     /// Enable debug socket for external control (default: false)
     pub debug_socket: bool,
-    /// Center all content (default: true)
+    /// Center all content (default: false)
     pub centered: bool,
     /// Show thinking/reasoning content by default (default: false)
     pub show_thinking: bool,
@@ -463,7 +463,7 @@ impl Default for DisplayConfig {
             auto_server_reload: true,
             mouse_capture: true,
             debug_socket: false,
-            centered: true,
+            centered: false,
             show_thinking: false,
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
@@ -1519,8 +1519,8 @@ timeout_secs = 90
 # Diff display mode: "off", "inline" (default), "full-inline", "pinned" (dedicated pane), or "file"
 diff_mode = "inline"
 
-# Center all content by default (default: true)
-centered = true
+# Center all content by default (default: false)
+centered = false
 
 # Pin read images to a side pane (default: true)
 pin_images = true
