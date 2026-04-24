@@ -87,6 +87,19 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a display-only usage card. This is shown in the transcript UI but
+    /// is not part of provider/model context.
+    pub fn usage(content: impl Into<String>) -> Self {
+        Self {
+            role: "usage".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("Usage".to_string()),
+            tool_data: None,
+        }
+    }
+
     /// Create a memory injection message (bordered box display)
     pub fn memory(title: impl Into<String>, content: impl Into<String>) -> Self {
         Self {

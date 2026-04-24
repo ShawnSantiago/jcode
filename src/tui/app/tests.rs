@@ -1856,18 +1856,11 @@ fn test_usage_report_shows_no_connected_providers_when_results_empty() {
     let mut app = create_test_app();
     app.handle_usage_report(Vec::new());
 
-    assert!(app.display_messages().is_empty());
-    let overlay = app.usage_overlay.as_ref().expect("missing usage overlay");
-    assert_eq!(
-        overlay.borrow().selected_item_title(),
-        Some("No connected providers")
-    );
-    assert!(
-        overlay
-            .borrow()
-            .selected_item_detail_text()
-            .contains("/login claude")
-    );
+    let msg = app.display_messages().last().expect("missing usage card");
+    assert_eq!(msg.role, "usage");
+    assert!(msg.content.contains("No connected providers"));
+    assert!(msg.content.contains("/login claude"));
+    assert!(msg.content.contains("/login openai"));
 }
 
 #[test]
@@ -1877,8 +1870,12 @@ fn test_usage_command_requests_usage_report_with_inline_view() {
     assert!(super::commands::handle_usage_command(&mut app, "/usage"));
 
     assert!(app.inline_interactive_state.is_none());
-    assert!(app.usage_overlay.is_some());
+    assert!(app.usage_overlay.is_none());
     assert!(app.inline_view_state.is_none());
+    assert_eq!(
+        app.display_messages().last().map(|m| m.role.as_str()),
+        Some("usage")
+    );
     assert!(app.usage_report_refreshing);
 }
 
@@ -1890,9 +1887,12 @@ fn test_usage_submit_input_requests_usage_report_with_inline_view() {
     app.submit_input();
 
     assert!(app.inline_interactive_state.is_none());
-    assert!(app.usage_overlay.is_some());
+    assert!(app.usage_overlay.is_none());
     assert!(app.inline_view_state.is_none());
-    assert!(app.display_messages().is_empty());
+    assert_eq!(
+        app.display_messages().last().map(|m| m.role.as_str()),
+        Some("usage")
+    );
     assert!(app.usage_report_refreshing);
 }
 
@@ -1923,14 +1923,18 @@ fn test_usage_enter_requests_report_with_inline_view() {
         .expect("submit /usage");
 
     assert!(app.inline_interactive_state.is_none());
-    assert!(app.usage_overlay.is_some());
+    assert!(app.usage_overlay.is_none());
     assert!(app.inline_view_state.is_none());
     assert_eq!(app.input(), "");
+    assert_eq!(
+        app.display_messages().last().map(|m| m.role.as_str()),
+        Some("usage")
+    );
     assert!(app.usage_report_refreshing);
 }
 
 #[test]
-fn test_usage_overlay_renders_when_loading() {
+fn test_usage_card_renders_when_loading() {
     let mut app = create_test_app();
     app.open_usage_inline_loading();
 
@@ -1938,35 +1942,38 @@ fn test_usage_overlay_renders_when_loading() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     terminal
         .draw(|frame| crate::tui::ui::draw(frame, &app))
-        .expect("usage overlay draw should succeed");
+        .expect("usage card draw should succeed");
 
     let text = buffer_to_text(&terminal);
     assert!(
-        text.contains("Refreshing usage"),
-        "usage overlay should be visible while loading, got:\n{text}"
+        text.contains("╭"),
+        "usage card should render as rounded box, got:\n{text}"
     );
     assert!(
-        text.contains("Fetching limits from connected providers")
-            || text.contains("Fetching usage limits from all connected providers"),
-        "usage overlay should include loading details, got:\n{text}"
+        text.contains("Refreshing usage"),
+        "usage card should be visible while loading, got:\n{text}"
+    );
+    assert!(
+        text.contains("Checking connected provider limits"),
+        "usage card should include loading details, got:\n{text}"
     );
 }
 
 #[test]
-fn test_usage_overlay_closes_when_user_starts_typing() {
+fn test_usage_card_does_not_capture_typing() {
     let mut app = create_test_app();
     app.open_usage_inline_loading();
-    assert!(app.usage_overlay.is_some());
+    assert!(app.usage_overlay.is_none());
 
     app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
-        .expect("type after usage overlay");
+        .expect("type after usage card");
 
     assert!(app.usage_overlay.is_none());
     assert_eq!(app.input(), "h");
 }
 
 #[test]
-fn test_usage_report_updates_custom_overlay_without_system_message() {
+fn test_usage_report_updates_display_only_card_without_system_message() {
     let mut app = create_test_app();
     app.usage_report_refreshing = true;
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
@@ -1983,18 +1990,18 @@ fn test_usage_report_updates_custom_overlay_without_system_message() {
 
     assert!(!app.usage_report_refreshing);
     assert!(app.inline_view_state.is_none());
-    assert!(app.display_messages().is_empty());
-    let overlay = app.usage_overlay.as_ref().expect("missing usage overlay");
-    let overlay = overlay.borrow();
-    assert_eq!(overlay.selected_item_title(), Some("OpenAI (ChatGPT)"));
-    let detail = overlay.selected_item_detail_text();
-    assert!(detail.contains("5h"));
-    assert!(detail.contains("82%"));
-    assert!(detail.contains("plan: pro"));
+    assert!(app.usage_overlay.is_none());
+    let msg = app.display_messages().last().expect("missing usage card");
+    assert_eq!(msg.role, "usage");
+    assert!(msg.content.contains("OpenAI (ChatGPT)"));
+    assert!(msg.content.contains("5h"));
+    assert!(msg.content.contains("82%"));
+    assert!(msg.content.contains("plan: pro"));
+    assert!(app.materialized_provider_messages().is_empty());
 }
 
 #[test]
-fn test_usage_progress_updates_overlay_incrementally() {
+fn test_usage_progress_updates_card_incrementally() {
     let mut app = create_test_app();
     app.open_usage_inline_loading();
 
@@ -2017,9 +2024,19 @@ fn test_usage_progress_updates_overlay_incrementally() {
     });
 
     assert!(app.usage_report_refreshing);
-    let overlay = app.usage_overlay.as_ref().expect("missing usage overlay");
-    let detail = overlay.borrow().selected_item_detail_text();
-    assert!(detail.contains("5-hour window") || detail.contains("Completed 1/2"));
+    assert_eq!(
+        app.display_messages()
+            .iter()
+            .filter(|message| message.role == "usage")
+            .count(),
+        1
+    );
+    let detail = &app
+        .display_messages()
+        .last()
+        .expect("missing usage card")
+        .content;
+    assert!(detail.contains("5-hour window") || detail.contains("Refreshing usage (1/2)"));
 }
 
 #[test]
@@ -9114,7 +9131,6 @@ fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
     let backend = ratatui::backend::TestBackend::new(80, 24);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
 
     let mut state = super::remote::RemoteRunState {
         reconnect_attempts: 1,

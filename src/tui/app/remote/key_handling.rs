@@ -125,13 +125,6 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if app.usage_overlay.is_some() && input::is_plain_text_key(code, modifiers) {
-        app.close_usage_overlay_for_text_input();
-    } else if app.usage_overlay.is_some() {
-        app.handle_usage_overlay_key(code, modifiers)?;
-        return Ok(());
-    }
-
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {

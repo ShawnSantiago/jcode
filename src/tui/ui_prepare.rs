@@ -228,10 +228,7 @@ fn prepare_active_batch_progress(
         Span::styled(format!("  {} ", spinner), Style::default().fg(accent)),
         Span::styled("batch", Style::default().fg(tool_color())),
         Span::styled(
-            format!(
-                " {} calls · {}/{} done",
-                progress.total, progress.completed, progress.total
-            ),
+            format!(" · {}/{} done", progress.completed, progress.total),
             Style::default().fg(dim_color()),
         ),
     ];
@@ -250,10 +247,14 @@ fn prepare_active_batch_progress(
         width.saturating_sub(1) as usize,
     ));
 
+    let mut hidden_completed = 0usize;
     for subcall in &progress.subcalls {
         let (icon, icon_color) = match subcall.state {
             crate::bus::BatchSubcallState::Running => (spinner, accent),
-            crate::bus::BatchSubcallState::Succeeded => ("✓", rgb(100, 180, 100)),
+            crate::bus::BatchSubcallState::Succeeded => {
+                hidden_completed += 1;
+                continue;
+            }
             crate::bus::BatchSubcallState::Failed => ("✗", rgb(220, 100, 100)),
         };
 
@@ -265,6 +266,13 @@ fn prepare_active_batch_progress(
             Some(row_width),
             None,
         ));
+    }
+
+    if hidden_completed > 0 && progress.completed < progress.total {
+        lines.push(Line::from(Span::styled(
+            format!("    … {} completed", hidden_completed),
+            Style::default().fg(dim_color()),
+        )));
     }
 
     if centered {
@@ -758,27 +766,18 @@ pub(super) fn prepare_body_incremental(
                 }
             }
             "usage" => {
-                let raw_line = new_raw_plain_lines.len();
-                new_raw_plain_lines.push(msg.content.clone());
-                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-                let prefix_width = if centered {
-                    0
-                } else {
-                    unicode_width::UnicodeWidthStr::width("  ")
-                };
-                new_lines.push(
-                    Line::from(vec![
-                        Span::styled(if centered { "" } else { "  " }, Style::default()),
-                        Span::styled(msg.content.clone(), Style::default().fg(dim_color())),
-                    ])
-                    .alignment(align),
+                let content_width = width.saturating_sub(4);
+                let cached = get_cached_message_lines(
+                    msg,
+                    content_width,
+                    app.diff_mode(),
+                    render_usage_message,
                 );
-                new_line_raw_overrides.push(Some(WrappedLineMap {
-                    raw_line,
-                    start_col: 0,
-                    end_col: raw_width,
-                }));
-                new_line_copy_offsets.push(prefix_width);
+                for line in cached {
+                    new_lines.push(align_if_unset(line, align));
+                    new_line_raw_overrides.push(None);
+                    new_line_copy_offsets.push(0);
+                }
             }
             "error" => {
                 let error_start_line = new_lines.len();
@@ -1237,27 +1236,18 @@ pub(super) fn prepare_body(
                 }
             }
             "usage" => {
-                let raw_line = raw_plain_lines.len();
-                raw_plain_lines.push(msg.content.clone());
-                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-                let prefix_width = if centered {
-                    0
-                } else {
-                    unicode_width::UnicodeWidthStr::width("  ")
-                };
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(if centered { "" } else { "  " }, Style::default()),
-                        Span::styled(msg.content.clone(), Style::default().fg(dim_color())),
-                    ])
-                    .alignment(align),
+                let content_width = width.saturating_sub(4);
+                let cached = get_cached_message_lines(
+                    msg,
+                    content_width,
+                    app.diff_mode(),
+                    render_usage_message,
                 );
-                line_raw_overrides.push(Some(WrappedLineMap {
-                    raw_line,
-                    start_col: 0,
-                    end_col: raw_width,
-                }));
-                line_copy_offsets.push(prefix_width);
+                for line in cached {
+                    lines.push(align_if_unset(line, align));
+                    line_raw_overrides.push(None);
+                    line_copy_offsets.push(0);
+                }
             }
             "error" => {
                 let error_start_line = lines.len();

@@ -26,6 +26,10 @@ pub enum UsageOverlayStatus {
 }
 
 impl UsageOverlayStatus {
+    pub fn label_for_display(self) -> &'static str {
+        self.label()
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Loading => "loading",

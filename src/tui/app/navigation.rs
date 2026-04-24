@@ -709,10 +709,6 @@ impl App {
             }
         }
 
-        if self.usage_overlay.is_some() {
-            return false;
-        }
-
         if let Some(ref picker_cell) = self.session_picker_overlay {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             return false;

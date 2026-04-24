@@ -39,9 +39,7 @@ impl App {
     }
 
     pub(super) fn open_usage_inline_loading(&mut self) {
-        self.usage_overlay = Some(std::cell::RefCell::new(
-            crate::tui::usage_overlay::UsageOverlay::loading(),
-        ));
+        self.push_usage_loading_card();
         self.inline_interactive_state = None;
         self.inline_view_state = None;
         self.input.clear();
@@ -73,36 +71,6 @@ impl App {
                     runtime.block_on(publish());
                 }
             });
-        }
-    }
-
-    pub(super) fn handle_usage_overlay_key(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> Result<()> {
-        use crate::tui::usage_overlay::OverlayAction;
-
-        let Some(overlay_cell) = self.usage_overlay.as_ref() else {
-            return Ok(());
-        };
-
-        let action = {
-            let mut overlay = overlay_cell.borrow_mut();
-            overlay.handle_overlay_key(code, modifiers)?
-        };
-
-        if matches!(action, OverlayAction::Close) {
-            self.usage_overlay = None;
-            self.set_status_notice("Usage closed");
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn close_usage_overlay_for_text_input(&mut self) {
-        if self.usage_overlay.take().is_some() {
-            self.set_status_notice("Usage closed");
         }
     }
 

@@ -1800,26 +1800,17 @@ impl App {
                         self.start_login_provider(provider);
                     }
                     PickerAction::Usage {
-                        id,
                         title,
                         subtitle,
                         status,
                         detail_lines,
+                        ..
                     } => {
                         self.inline_interactive_state = None;
-                        self.usage_overlay = Some(std::cell::RefCell::new(
-                            crate::tui::usage_overlay::UsageOverlay::new(
-                                "Usage",
-                                vec![crate::tui::usage_overlay::UsageOverlayItem::new(
-                                    id,
-                                    title.clone(),
-                                    subtitle,
-                                    status,
-                                    detail_lines,
-                                )],
-                                crate::tui::usage_overlay::UsageOverlaySummary::default(),
-                            ),
-                        ));
+                        let mut content = vec![format!("# {}", title), subtitle];
+                        content.push(format!("status: {}", status.label_for_display()));
+                        content.extend(detail_lines);
+                        self.push_display_message(DisplayMessage::usage(content.join("\n")));
                         self.set_status_notice(format!("Usage → {}", title));
                     }
                     PickerAction::AgentTarget(target) => {

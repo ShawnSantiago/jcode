@@ -199,6 +199,60 @@ pub(crate) fn render_system_message(
     lines
 }
 
+pub(crate) fn render_usage_message(
+    msg: &DisplayMessage,
+    width: u16,
+    _diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    let border_style = Style::default().fg(rgb(120, 140, 190));
+    let title = msg.title.as_deref().unwrap_or("Usage");
+    let inner_width = width.saturating_sub(8).max(24) as usize;
+    let content_width = inner_width.min(96);
+
+    let mut content = Vec::new();
+    for raw_line in msg.content.lines() {
+        if raw_line.is_empty() {
+            content.push(Line::from(""));
+            continue;
+        }
+
+        let (text, style) = if let Some(rest) = raw_line.strip_prefix("! ") {
+            (rest, Style::default().fg(Color::Red))
+        } else if let Some(rest) = raw_line.strip_prefix("~ ") {
+            (rest, Style::default().fg(rgb(255, 200, 100)))
+        } else if let Some(rest) = raw_line.strip_prefix("+ ") {
+            (rest, Style::default().fg(rgb(100, 220, 170)))
+        } else if let Some(rest) = raw_line.strip_prefix("# ") {
+            (rest, Style::default().fg(Color::White).bold())
+        } else {
+            (raw_line, Style::default().fg(dim_color()))
+        };
+
+        let chunks = split_by_display_width(text, content_width);
+        if chunks.is_empty() {
+            content.push(Line::from(""));
+        } else {
+            for chunk in chunks {
+                content.push(Line::from(Span::styled(chunk, style)));
+            }
+        }
+    }
+
+    if content.is_empty() {
+        content.push(Line::from(Span::styled(
+            "No usage data available.",
+            Style::default().fg(dim_color()),
+        )));
+    }
+
+    render_rounded_box(
+        title,
+        content,
+        width.saturating_sub(4) as usize,
+        border_style,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedScheduledSessionMessage {
     task: String,
@@ -1065,9 +1119,23 @@ pub(crate) fn render_tool_message(
         }
     }
 
-    let is_error = tools_ui::tool_output_looks_failed(&msg.content);
+    let batch_counts = if tc.name == "batch" {
+        tools_ui::parse_batch_completion_counts(&msg.content)
+    } else {
+        None
+    };
+    let is_error = if let Some(counts) = batch_counts {
+        counts.failed > 0 && counts.succeeded == 0
+    } else {
+        tools_ui::tool_output_looks_failed(&msg.content)
+    };
+    let is_partial_batch = batch_counts
+        .map(|counts| counts.failed > 0 && counts.succeeded > 0)
+        .unwrap_or(false);
 
-    let (icon, icon_color) = if is_error {
+    let (icon, icon_color) = if is_partial_batch {
+        ("⚠", rgb(214, 184, 92))
+    } else if is_error {
         ("✗", rgb(220, 100, 100))
     } else {
         ("✓", rgb(100, 180, 100))
@@ -1111,7 +1179,13 @@ pub(crate) fn render_tool_message(
         .min(reserved_summary_width.saturating_sub(8));
     let technical_summary_width = reserved_summary_width.saturating_sub(intent_reserved_width);
 
-    let summary = if tc.name == "subagent" {
+    let summary = if let Some(counts) = batch_counts {
+        if counts.failed > 0 {
+            format!("{}/{} succeeded", counts.succeeded, counts.total())
+        } else {
+            format!("{} calls", counts.total())
+        }
+    } else if tc.name == "subagent" {
         msg.title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
@@ -1175,14 +1249,28 @@ pub(crate) fn render_tool_message(
     if tc.name == "batch"
         && let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array())
     {
-        let sub_results = tools_ui::parse_batch_sub_outputs(&msg.content);
+        if batch_counts
+            .map(|counts| counts.failed == 0)
+            .unwrap_or(false)
+        {
+            if centered {
+                left_pad_lines_for_centered_mode(&mut lines, width);
+            }
+            return lines;
+        }
+
+        let sub_results = tools_ui::parse_batch_sub_outputs_by_index(&msg.content);
+        let show_only_failures = batch_counts
+            .map(|counts| counts.failed > 0)
+            .unwrap_or_else(|| sub_results.values().any(|result| result.errored));
+        let mut hidden_successes = 0usize;
 
         for (i, call) in calls.iter().enumerate() {
             let raw_name = call
                 .get("tool")
                 .or_else(|| call.get("name"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("?");
+                .unwrap_or("unknown");
             let params = tools_ui::batch_subcall_params(call);
 
             let sub_tc = ToolCall {
@@ -1195,8 +1283,12 @@ pub(crate) fn render_tool_message(
                     .map(|s| s.to_string()),
             };
 
-            let sub_result = sub_results.get(i);
+            let sub_result = sub_results.get(&(i + 1));
             let sub_errored = sub_result.map(|result| result.errored).unwrap_or(false);
+            if show_only_failures && !sub_errored {
+                hidden_successes += 1;
+                continue;
+            }
             let (sub_icon, sub_icon_color) = if sub_errored {
                 ("✗", rgb(220, 100, 100))
             } else {
@@ -1211,6 +1303,13 @@ pub(crate) fn render_tool_message(
                 Some(row_width),
                 sub_result.map(|result| result.content.as_str()),
             ));
+        }
+
+        if show_only_failures && hidden_successes > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("    … {} successful subcalls hidden", hidden_successes),
+                Style::default().fg(dim_color()),
+            )));
         }
     }
 

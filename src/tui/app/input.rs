@@ -996,16 +996,6 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
-    if app.usage_overlay.is_some() && is_plain_text_key(code, modifiers) {
-        app.close_usage_overlay_for_text_input();
-        return Ok(false);
-    }
-
-    if app.usage_overlay.is_some() {
-        app.handle_usage_overlay_key(code, modifiers)?;
-        return Ok(true);
-    }
-
     if app.copy_selection_mode {
         if modifiers.contains(KeyModifiers::CONTROL)
             && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'))
@@ -1030,12 +1020,6 @@ pub(super) fn handle_modal_key(
     }
 
     Ok(false)
-}
-
-pub(super) fn is_plain_text_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::Char(_))
-        && !modifiers.contains(KeyModifiers::CONTROL)
-        && !modifiers.contains(KeyModifiers::ALT)
 }
 
 pub(super) fn handle_global_control_shortcuts(

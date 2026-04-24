@@ -133,7 +133,7 @@ use memory_ui::{group_into_tiles, render_memory_tiles, split_by_display_width};
 use messages::get_cached_message_lines;
 pub(crate) use messages::{
     render_assistant_message, render_background_task_message, render_swarm_message,
-    render_system_message, render_tool_message,
+    render_system_message, render_tool_message, render_usage_message,
 };
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
@@ -3132,19 +3132,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(picker_cell) = app.account_picker_overlay() {
         let picker = picker_cell.borrow();
         picker.render(frame);
-        finalize_frame_metrics(
-            app,
-            total_start,
-            Duration::ZERO,
-            total_start.elapsed(),
-            None,
-        );
-        return;
-    }
-
-    if let Some(overlay_cell) = app.usage_overlay() {
-        let overlay = overlay_cell.borrow();
-        overlay.render(frame);
         finalize_frame_metrics(
             app,
             total_start,

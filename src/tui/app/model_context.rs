@@ -674,24 +674,14 @@ impl App {
 
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
         self.usage_report_refreshing = false;
-        self.inline_view_state = None;
-        if self
-            .inline_interactive_state
-            .as_ref()
-            .map(|picker| picker.kind == crate::tui::PickerKind::Usage)
-            .unwrap_or(false)
-        {
-            self.inline_interactive_state = None;
-        }
-
-        let overlay = crate::tui::usage_overlay::UsageOverlay::from_provider_reports(
+        self.clear_usage_transient_ui();
+        self.upsert_usage_display_card(Self::format_usage_display_card(
             &results,
             false,
             results.len(),
             results.len(),
             false,
-        );
-        self.replace_usage_overlay(overlay);
+        ));
         if results.is_empty() {
             self.set_status_notice("Usage → no connected providers");
         } else {
@@ -704,18 +694,14 @@ impl App {
         progress: crate::usage::ProviderUsageProgress,
     ) {
         self.usage_report_refreshing = !progress.done;
-        self.inline_view_state = None;
-        if self
-            .inline_interactive_state
-            .as_ref()
-            .map(|picker| picker.kind == crate::tui::PickerKind::Usage)
-            .unwrap_or(false)
-        {
-            self.inline_interactive_state = None;
-        }
-
-        let overlay = crate::tui::usage_overlay::UsageOverlay::from_progress(&progress);
-        self.replace_usage_overlay(overlay);
+        self.clear_usage_transient_ui();
+        self.upsert_usage_display_card(Self::format_usage_display_card(
+            &progress.results,
+            !progress.done,
+            progress.completed,
+            progress.total,
+            progress.from_cache,
+        ));
 
         if progress.done {
             if progress.results.is_empty() {
@@ -736,11 +722,143 @@ impl App {
         }
     }
 
-    fn replace_usage_overlay(&mut self, overlay: crate::tui::usage_overlay::UsageOverlay) {
-        if let Some(existing) = self.usage_overlay.as_ref() {
-            existing.borrow_mut().replace_preserving_view(overlay);
+    pub(super) fn push_usage_loading_card(&mut self) {
+        self.clear_usage_transient_ui();
+        self.push_display_message(DisplayMessage::usage(Self::format_usage_display_card(
+            &[],
+            true,
+            0,
+            0,
+            false,
+        )));
+    }
+
+    fn clear_usage_transient_ui(&mut self) {
+        self.inline_view_state = None;
+        self.usage_overlay = None;
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .map(|picker| picker.kind == crate::tui::PickerKind::Usage)
+            .unwrap_or(false)
+        {
+            self.inline_interactive_state = None;
+        }
+    }
+
+    fn upsert_usage_display_card(&mut self, content: String) {
+        let existing = self.display_messages.iter().rposition(|message| {
+            message.role == "usage" && message.title.as_deref() == Some("Usage")
+        });
+        if let Some(idx) = existing {
+            self.replace_display_message_title_and_content(idx, Some("Usage".to_string()), content);
         } else {
-            self.usage_overlay = Some(std::cell::RefCell::new(overlay));
+            self.push_display_message(DisplayMessage::usage(content));
+        }
+    }
+
+    fn format_usage_display_card(
+        reports: &[crate::usage::ProviderUsage],
+        refreshing: bool,
+        completed: usize,
+        total: usize,
+        from_cache: bool,
+    ) -> String {
+        let mut lines = Vec::new();
+
+        if refreshing {
+            if total > 0 {
+                lines.push(format!(
+                    "# Refreshing usage ({}/{})",
+                    completed.min(total),
+                    total
+                ));
+            } else if from_cache {
+                lines.push("# Showing cached usage while refreshing".to_string());
+            } else {
+                lines.push("# Refreshing usage".to_string());
+            }
+            lines.push("Checking connected provider limits...".to_string());
+            if !reports.is_empty() {
+                lines.push(String::new());
+            }
+        } else if reports.is_empty() {
+            lines.push("# No connected providers".to_string());
+            lines.push(
+                "Use `/login claude` or `/login openai`, then run `/usage` again.".to_string(),
+            );
+            return lines.join("\n");
+        } else {
+            lines.push(format!("# Usage updated · {} source(s)", reports.len()));
+            lines.push(String::new());
+        }
+
+        for (idx, provider) in reports.iter().enumerate() {
+            if idx > 0 {
+                lines.push(String::new());
+            }
+            lines.push(Self::format_usage_provider_summary(provider));
+
+            if let Some(error) = &provider.error {
+                lines.push(format!("  error: {}", error));
+                continue;
+            }
+
+            if provider.hard_limit_reached {
+                lines.push("  hard limit reached".to_string());
+            }
+
+            if provider.limits.is_empty() && provider.extra_info.is_empty() {
+                lines.push("  no usage data available".to_string());
+                continue;
+            }
+
+            for limit in &provider.limits {
+                let reset = limit
+                    .resets_at
+                    .as_deref()
+                    .map(crate::usage::format_reset_time)
+                    .map(|value| format!(" · resets in {}", value))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  {}: {}{}",
+                    limit.name,
+                    crate::usage::format_usage_bar(limit.usage_percent, 14),
+                    reset
+                ));
+            }
+
+            for (key, value) in &provider.extra_info {
+                lines.push(format!("  {}: {}", key, value));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    fn format_usage_provider_summary(provider: &crate::usage::ProviderUsage) -> String {
+        if provider.error.is_some() {
+            return format!("! {} — error", provider.provider_name);
+        }
+        if provider.hard_limit_reached {
+            return format!("! {} — hard limit", provider.provider_name);
+        }
+
+        let max_percent = provider
+            .limits
+            .iter()
+            .map(|limit| limit.usage_percent)
+            .fold(0.0_f32, f32::max);
+        if max_percent >= 90.0 {
+            format!("! {} — {:.0}% used", provider.provider_name, max_percent)
+        } else if max_percent >= 70.0 {
+            format!("~ {} — {:.0}% used", provider.provider_name, max_percent)
+        } else if provider.limits.is_empty() && provider.extra_info.is_empty() {
+            format!("{} — no data", provider.provider_name)
+        } else if max_percent > 0.0 {
+            format!("+ {} — {:.0}% used", provider.provider_name, max_percent)
+        } else {
+            format!("+ {} — available", provider.provider_name)
         }
     }
 
