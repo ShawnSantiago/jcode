@@ -1930,6 +1930,42 @@ fn test_usage_enter_requests_report_with_inline_view() {
 }
 
 #[test]
+fn test_usage_overlay_renders_when_loading() {
+    let mut app = create_test_app();
+    app.open_usage_inline_loading();
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &app))
+        .expect("usage overlay draw should succeed");
+
+    let text = buffer_to_text(&terminal);
+    assert!(
+        text.contains("Refreshing usage"),
+        "usage overlay should be visible while loading, got:\n{text}"
+    );
+    assert!(
+        text.contains("Fetching limits from connected providers")
+            || text.contains("Fetching usage limits from all connected providers"),
+        "usage overlay should include loading details, got:\n{text}"
+    );
+}
+
+#[test]
+fn test_usage_overlay_closes_when_user_starts_typing() {
+    let mut app = create_test_app();
+    app.open_usage_inline_loading();
+    assert!(app.usage_overlay.is_some());
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+        .expect("type after usage overlay");
+
+    assert!(app.usage_overlay.is_none());
+    assert_eq!(app.input(), "h");
+}
+
+#[test]
 fn test_usage_report_updates_custom_overlay_without_system_message() {
     let mut app = create_test_app();
     app.usage_report_refreshing = true;

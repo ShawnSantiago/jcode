@@ -100,6 +100,12 @@ impl App {
         Ok(())
     }
 
+    pub(super) fn close_usage_overlay_for_text_input(&mut self) {
+        if self.usage_overlay.take().is_some() {
+            self.set_status_notice("Usage closed");
+        }
+    }
+
     pub(super) fn update_cost_impl(&mut self) {
         let provider_name = self.provider.name().to_lowercase();
 

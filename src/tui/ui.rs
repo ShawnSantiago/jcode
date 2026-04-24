@@ -3142,6 +3142,19 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(overlay_cell) = app.usage_overlay() {
+        let overlay = overlay_cell.borrow();
+        overlay.render(frame);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     // Initialize visual debug capture if enabled
     let mut debug_capture = if visual_debug::is_enabled() {
         Some(FrameCaptureBuilder::new(area.width, area.height))
