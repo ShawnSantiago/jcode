@@ -659,9 +659,14 @@ fn test_render_tool_message_batch_nested_subcall_params_still_render() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 2, "rendered={rendered:?}");
-    assert!(rendered[0].contains("✓ batch 1 calls"), "rendered={rendered:?}");
     assert!(
-        rendered.iter().any(|line| line.contains("✓ grep 'TODO' in src")),
+        rendered[0].contains("✓ batch 1 calls"),
+        "rendered={rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ grep 'TODO' in src")),
         "missing grep subtool in {rendered:?}"
     );
 }
@@ -690,9 +695,14 @@ fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 2, "rendered={rendered:?}");
-    assert!(rendered[0].contains("✓ batch 1 calls"), "rendered={rendered:?}");
     assert!(
-        rendered.iter().any(|line| line.contains("✓ grep 'TODO' in src")),
+        rendered[0].contains("✓ batch 1 calls"),
+        "rendered={rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ grep 'TODO' in src")),
         "missing grep subtool in {rendered:?}"
     );
 }

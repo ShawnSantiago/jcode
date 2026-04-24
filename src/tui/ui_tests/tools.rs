@@ -116,13 +116,20 @@ fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 3, "rendered={rendered:?}");
-    assert!(rendered[0].contains("✓ batch 2 calls"), "rendered={rendered:?}");
     assert!(
-        rendered.iter().any(|line| line.contains("✓ read src/session.rs:0-420")),
+        rendered[0].contains("✓ batch 2 calls"),
+        "rendered={rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ read src/session.rs:0-420")),
         "missing first read subtool in {rendered:?}"
     );
     assert!(
-        rendered.iter().any(|line| line.contains("✓ read src/main.rs:2320-2540")),
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ read src/main.rs:2320-2540")),
         "missing second read subtool in {rendered:?}"
     );
 }
@@ -154,7 +161,10 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 3, "rendered={rendered:?}");
-    assert!(rendered[0].contains("✓ batch 2 calls"), "rendered={rendered:?}");
+    assert!(
+        rendered[0].contains("✓ batch 2 calls"),
+        "rendered={rendered:?}"
+    );
     assert!(
         rendered[1].contains("read src/session.rs:0-1") && rendered[1].contains("1 tok"),
         "rendered={rendered:?}"
@@ -246,11 +256,15 @@ Completed: 2 succeeded, 1 failed"
         "failed subcall should be attributed to agentgrep: {rendered:?}"
     );
     assert!(
-        rendered.iter().any(|line| line.contains("✓ read src/lib.rs")),
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ read src/lib.rs")),
         "successful read subcall should still be visible: {rendered:?}"
     );
     assert!(
-        rendered.iter().any(|line| line.contains("✓ grep 'TODO' in src")),
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ grep 'TODO' in src")),
         "successful grep subcall should still be visible: {rendered:?}"
     );
 }
@@ -296,9 +310,14 @@ fn test_render_tool_message_batch_includes_start_end_read_details() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 2, "rendered={rendered:?}");
-    assert!(rendered[0].contains("✓ batch 1 calls"), "rendered={rendered:?}");
     assert!(
-        rendered.iter().any(|line| line.contains("✓ read src/tool/read.rs:10-20")),
+        rendered[0].contains("✓ batch 1 calls"),
+        "rendered={rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("✓ read src/tool/read.rs:10-20")),
         "missing read subtool in {rendered:?}"
     );
 }
