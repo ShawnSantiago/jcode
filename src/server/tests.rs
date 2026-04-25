@@ -194,6 +194,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     let task = BackgroundTaskCompleted {
         task_id: "bgwake".to_string(),
         tool_name: "selfdev-build".to_string(),
+        display_name: None,
         session_id: session_id.clone(),
         status: BackgroundTaskStatus::Completed,
         exit_code: Some(0),
@@ -280,6 +281,7 @@ async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
     let task = BackgroundTaskCompleted {
         task_id: "bgnotify".to_string(),
         tool_name: "bash".to_string(),
+        display_name: None,
         session_id: session_id.clone(),
         status: BackgroundTaskStatus::Completed,
         exit_code: Some(0),
@@ -324,6 +326,7 @@ async fn background_task_progress_notifies_attached_clients() {
     let task = BackgroundTaskProgressEvent {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
+        display_name: None,
         session_id: session_id.clone(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,

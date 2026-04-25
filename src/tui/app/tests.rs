@@ -7443,6 +7443,7 @@ fn test_handle_background_task_completed_renders_markdown_preview() {
     let event = BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
         task_id: "bg123".to_string(),
         tool_name: "bash".to_string(),
+        display_name: None,
         session_id: app.session.id.clone(),
         status: BackgroundTaskStatus::Completed,
         exit_code: Some(0),
@@ -7484,6 +7485,7 @@ fn test_handle_background_task_completed_with_wake_starts_pending_turn() {
     let event = BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
         task_id: "bgwake".to_string(),
         tool_name: "selfdev-build".to_string(),
+        display_name: None,
         session_id: app.session.id.clone(),
         status: BackgroundTaskStatus::Completed,
         exit_code: Some(0),
@@ -7510,6 +7512,7 @@ fn test_handle_background_task_progress_updates_status_notice() {
     let event = BusEvent::BackgroundTaskProgress(BackgroundTaskProgressEvent {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
+        display_name: None,
         session_id: app.session.id.clone(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,
@@ -7549,6 +7552,7 @@ fn test_handle_background_task_progress_debounces_identical_notice_updates() {
     let first_event = BusEvent::BackgroundTaskProgress(BackgroundTaskProgressEvent {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
+        display_name: None,
         session_id: app.session.id.clone(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,
@@ -7568,6 +7572,7 @@ fn test_handle_background_task_progress_debounces_identical_notice_updates() {
     let second_event = BusEvent::BackgroundTaskProgress(BackgroundTaskProgressEvent {
         task_id: "bgprogress".to_string(),
         tool_name: "bash".to_string(),
+        display_name: None,
         session_id: app.session.id.clone(),
         progress: BackgroundTaskProgress {
             kind: BackgroundTaskProgressKind::Determinate,
@@ -7602,6 +7607,7 @@ fn test_handle_background_task_progress_updates_existing_card() {
                 BackgroundTaskProgressEvent {
                     task_id: "bgprogress".to_string(),
                     tool_name: "bash".to_string(),
+                    display_name: None,
                     session_id: session_id.clone(),
                     progress: BackgroundTaskProgress {
                         kind: BackgroundTaskProgressKind::Determinate,

@@ -207,6 +207,7 @@ impl BackgroundTaskProgress {
 pub struct BackgroundTaskProgressEvent {
     pub task_id: String,
     pub tool_name: String,
+    pub display_name: Option<String>,
     pub session_id: String,
     pub progress: BackgroundTaskProgress,
 }
@@ -216,6 +217,7 @@ pub struct BackgroundTaskProgressEvent {
 pub struct BackgroundTaskCompleted {
     pub task_id: String,
     pub tool_name: String,
+    pub display_name: Option<String>,
     pub session_id: String,
     pub status: BackgroundTaskStatus,
     pub exit_code: Option<i32>,

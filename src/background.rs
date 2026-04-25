@@ -326,6 +326,7 @@ impl BackgroundTaskManager {
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),
             tool_name: status.tool_name.clone(),
+            display_name: status.display_name.clone(),
             session_id: status.session_id.clone(),
             status: final_status,
             exit_code,
@@ -520,6 +521,7 @@ impl BackgroundTaskManager {
             Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
                 task_id: task_id_clone,
                 tool_name: tool_name_owned,
+                display_name: display_name_owned,
                 session_id: session_id_owned,
                 status,
                 exit_code,
@@ -600,6 +602,7 @@ impl BackgroundTaskManager {
         let session_id_owned = session_id.to_string();
         let started_at = Instant::now();
         let started_at_rfc3339 = initial_status.started_at.clone();
+        let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((true, false));
 
         let wrapper_handle = tokio::spawn(async move {
@@ -641,7 +644,7 @@ impl BackgroundTaskManager {
             let final_status = TaskStatusFile {
                 task_id: task_id_clone.clone(),
                 tool_name: tool_name_owned.clone(),
-                display_name: None,
+                display_name: display_name_owned.clone(),
                 session_id: session_id_owned.clone(),
                 status: status.clone(),
                 exit_code,
@@ -668,6 +671,7 @@ impl BackgroundTaskManager {
             Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
                 task_id: task_id_clone,
                 tool_name: tool_name_owned,
+                display_name: display_name_owned,
                 session_id: session_id_owned,
                 status: status.clone(),
                 exit_code,
@@ -791,6 +795,7 @@ impl BackgroundTaskManager {
             BackgroundTaskProgressEvent {
                 task_id: status.task_id.clone(),
                 tool_name: status.tool_name.clone(),
+                display_name: status.display_name.clone(),
                 session_id: status.session_id.clone(),
                 progress,
             },

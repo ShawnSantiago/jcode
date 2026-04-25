@@ -750,23 +750,27 @@ pub(crate) fn render_background_task_message(
     };
 
     let centered = markdown::center_code_blocks();
+    let task_label = crate::message::background_task_display_label(
+        &parsed.tool_name,
+        parsed.display_name.as_deref(),
+    );
     let (title, border_color, status_color, preview_color) = if parsed.status.starts_with('✓') {
         (
-            format!("✓ bg {} completed · {}", parsed.tool_name, parsed.task_id),
+            format!("✓ bg {} completed · {}", task_label, parsed.task_id),
             rgb(100, 180, 100),
             rgb(120, 210, 140),
             rgb(214, 240, 220),
         )
     } else if parsed.status.starts_with('✗') {
         (
-            format!("✗ bg {} failed · {}", parsed.tool_name, parsed.task_id),
+            format!("✗ bg {} failed · {}", task_label, parsed.task_id),
             rgb(220, 100, 100),
             rgb(255, 150, 150),
             rgb(255, 225, 225),
         )
     } else {
         (
-            format!("◌ bg {} running · {}", parsed.tool_name, parsed.task_id),
+            format!("◌ bg {} running · {}", task_label, parsed.task_id),
             rgb(255, 193, 94),
             rgb(255, 214, 120),
             rgb(255, 241, 214),
@@ -910,7 +914,11 @@ fn render_background_task_progress_message(
     }
     .max(16);
     let inner_width = max_box_width.saturating_sub(4).max(1);
-    let title = format!("◌ bg {} · {}", progress.tool_name, progress.task_id);
+    let task_label = crate::message::background_task_display_label(
+        &progress.tool_name,
+        progress.display_name.as_deref(),
+    );
+    let title = format!("◌ bg {} · {}", task_label, progress.task_id);
 
     let box_content = vec![render_compact_progress_line(
         progress,
@@ -1599,6 +1607,31 @@ mod tests {
         assert!(!plain.contains("Latest update"));
         assert!(!plain.contains("Source: reported"));
         assert!(!plain.contains("**Background task progress**"));
+    }
+
+    #[test]
+    fn render_background_task_messages_prefer_display_name() {
+        let completion = DisplayMessage::background_task(
+            "**Background task** `bg123` · `Run integration tests` (`bash`) · ✓ completed · 7.1s · exit 0\n\n_No output captured._\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
+        );
+        let completion_plain =
+            render_background_task_message(&completion, 100, crate::config::DiffDisplayMode::Off)
+                .iter()
+                .map(extract_line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(completion_plain.contains("✓ bg Run integration tests completed · bg123"));
+
+        let progress = DisplayMessage::background_task(
+            "**Background task progress** `bg123` · `Run integration tests` (`bash`)\n\n[#####-------] 42% · Running tests (reported)",
+        );
+        let progress_plain =
+            render_background_task_message(&progress, 100, crate::config::DiffDisplayMode::Off)
+                .iter()
+                .map(extract_line_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(progress_plain.contains("◌ bg Run integration tests · bg123"));
     }
 
     #[test]

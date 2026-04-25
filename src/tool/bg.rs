@@ -97,10 +97,10 @@ impl Tool for BgTool {
 
                 let mut output = String::from("Background Tasks:\n\n");
                 output.push_str(&format!(
-                    "{:<12} {:<10} {:<12} {:<10} {:<28} {}\n",
-                    "TASK_ID", "TOOL", "STATUS", "DURATION", "PROGRESS", "SESSION"
+                    "{:<12} {:<28} {:<10} {:<12} {:<10} {:<28} {}\n",
+                    "TASK_ID", "NAME", "TOOL", "STATUS", "DURATION", "PROGRESS", "SESSION"
                 ));
-                output.push_str(&"-".repeat(92));
+                output.push_str(&"-".repeat(121));
                 output.push('\n');
 
                 for task in tasks {
@@ -119,9 +119,14 @@ impl Tool for BgTool {
                         .as_ref()
                         .map(|progress| crate::background::format_progress_display(progress, 10))
                         .unwrap_or_else(|| "-".to_string());
+                    let display_name = crate::message::background_task_display_label(
+                        &task.tool_name,
+                        task.display_name.as_deref(),
+                    );
                     output.push_str(&format!(
-                        "{:<12} {:<10} {:<12} {:<10} {:<28} {}\n",
+                        "{:<12} {:<28} {:<10} {:<12} {:<10} {:<28} {}\n",
                         task.task_id,
+                        crate::util::truncate_str(&display_name, 28),
                         task.tool_name,
                         status,
                         duration,
@@ -149,11 +154,16 @@ impl Tool for BgTool {
 
                         let mut output = format!(
                             "Task: {}\n\
+                             Name: {}\n\
                              Tool: {}\n\
                              Status: {}\n\
                              Session: {}\n\
                              Started: {}\n",
                             task.task_id,
+                            crate::message::background_task_display_label(
+                                &task.tool_name,
+                                task.display_name.as_deref(),
+                            ),
                             task.tool_name,
                             status_str,
                             task.session_id,
@@ -198,6 +208,7 @@ impl Tool for BgTool {
                             .with_title(format!("bg status {}", task_id))
                             .with_metadata(json!({
                                 "task_id": task.task_id,
+                                "display_name": task.display_name,
                                 "status": status_str,
                                 "exit_code": task.exit_code,
                                 "progress": task.progress,

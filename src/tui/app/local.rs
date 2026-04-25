@@ -319,7 +319,10 @@ fn handle_background_task_progress(app: &mut App, event: BackgroundTaskProgressE
 
     let notice = format!(
         "Background task · {} · {}",
-        event.tool_name,
+        crate::message::background_task_display_label(
+            &event.tool_name,
+            event.display_name.as_deref()
+        ),
         crate::background::format_progress_summary(&event.progress)
     );
     maybe_set_background_progress_notice(app, notice);

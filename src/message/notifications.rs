@@ -87,6 +87,63 @@ fn normalize_background_task_preview(preview: &str) -> Option<String> {
     }
 }
 
+fn sanitize_background_task_label(text: &str) -> String {
+    text.replace('`', "'")
+}
+
+fn background_task_display_name<'a>(
+    tool_name: &'a str,
+    display_name: Option<&'a str>,
+) -> Option<&'a str> {
+    display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != tool_name)
+}
+
+fn background_task_header_label(tool_name: &str, display_name: Option<&str>) -> String {
+    if let Some(display_name) = background_task_display_name(tool_name, display_name) {
+        format!(
+            "`{}` (`{}`)",
+            sanitize_background_task_label(display_name),
+            sanitize_background_task_label(tool_name)
+        )
+    } else {
+        format!("`{}`", sanitize_background_task_label(tool_name))
+    }
+}
+
+pub fn background_task_display_label(tool_name: &str, display_name: Option<&str>) -> String {
+    background_task_display_name(tool_name, display_name)
+        .unwrap_or(tool_name)
+        .to_string()
+}
+
+fn parse_background_task_header_label(label: &str) -> (String, Option<String>) {
+    static NAMED_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static TOOL_RE: OnceLock<Option<Regex>> = OnceLock::new();
+
+    let named_re = NAMED_RE
+        .get_or_init(|| {
+            compile_static_regex(r"^`(?P<display_name>[^`]+)` \(`(?P<tool_name>[^`]+)`\)$")
+        })
+        .as_ref();
+    if let Some(captures) = named_re.and_then(|re| re.captures(label)) {
+        return (
+            captures["tool_name"].to_string(),
+            Some(captures["display_name"].to_string()),
+        );
+    }
+
+    let tool_re = TOOL_RE
+        .get_or_init(|| compile_static_regex(r"^`(?P<tool_name>[^`]+)`$"))
+        .as_ref();
+    if let Some(captures) = tool_re.and_then(|re| re.captures(label)) {
+        return (captures["tool_name"].to_string(), None);
+    }
+
+    (label.trim().to_string(), None)
+}
+
 pub fn format_background_task_notification_markdown(task: &BackgroundTaskCompleted) -> String {
     let exit_code = task
         .exit_code
@@ -94,9 +151,9 @@ pub fn format_background_task_notification_markdown(task: &BackgroundTaskComplet
         .unwrap_or_else(|| "exit n/a".to_string());
 
     let mut message = format!(
-        "**Background task** `{}` · `{}` · {} · {:.1}s · {}",
+        "**Background task** `{}` · {} · {} · {:.1}s · {}",
         task.task_id,
-        task.tool_name,
+        background_task_header_label(&task.tool_name, task.display_name.as_deref()),
         format_background_task_status(&task.status),
         task.duration_secs,
         exit_code,
@@ -118,9 +175,9 @@ pub fn format_background_task_notification_markdown(task: &BackgroundTaskComplet
 
 pub fn format_background_task_progress_markdown(task: &BackgroundTaskProgressEvent) -> String {
     format!(
-        "**Background task progress** `{}` · `{}`\n\n{}",
+        "**Background task progress** `{}` · {}\n\n{}",
         task.task_id,
-        task.tool_name,
+        background_task_header_label(&task.tool_name, task.display_name.as_deref()),
         crate::background::format_progress_display(&task.progress, 12)
     )
 }
@@ -129,6 +186,7 @@ pub fn format_background_task_progress_markdown(task: &BackgroundTaskProgressEve
 pub struct ParsedBackgroundTaskProgressNotification {
     pub task_id: String,
     pub tool_name: String,
+    pub display_name: Option<String>,
     pub detail: String,
     pub summary: String,
     pub source: Option<String>,
@@ -176,42 +234,47 @@ pub fn parse_background_task_progress_notification_markdown(
     let header_re = HEADER_RE
         .get_or_init(|| {
             compile_static_regex(
-                r"^\*\*Background task progress\*\* `(?P<task_id>[^`]+)` · `(?P<tool_name>[^`]+)`$",
+                r"^\*\*Background task progress\*\* `(?P<task_id>[^`]+)` · (?P<label>.+)$",
             )
         })
         .as_ref()?;
     let inline_re = INLINE_RE
         .get_or_init(|| {
             compile_static_regex(
-                r"^\*\*Background task progress\*\* `(?P<task_id>[^`]+)` · `(?P<tool_name>[^`]+)` · (?P<detail>.+)$",
+                r"^\*\*Background task progress\*\* `(?P<task_id>[^`]+)` · (?P<label>.+?) · (?P<detail>.+)$",
             )
         })
         .as_ref()?;
 
-    let (task_id, tool_name, detail) = if let Some(captures) = inline_re.captures(trimmed) {
-        (
-            captures["task_id"].to_string(),
-            captures["tool_name"].to_string(),
-            captures["detail"].trim().to_string(),
-        )
-    } else {
-        let mut lines = trimmed.lines();
-        let header = lines.next()?.trim();
-        let captures = header_re.captures(header)?;
-        let detail = lines
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if detail.is_empty() {
-            return None;
-        }
-        (
-            captures["task_id"].to_string(),
-            captures["tool_name"].to_string(),
-            detail,
-        )
-    };
+    let (task_id, tool_name, display_name, detail) =
+        if let Some(captures) = inline_re.captures(trimmed) {
+            let (tool_name, display_name) = parse_background_task_header_label(&captures["label"]);
+            (
+                captures["task_id"].to_string(),
+                tool_name,
+                display_name,
+                captures["detail"].trim().to_string(),
+            )
+        } else {
+            let mut lines = trimmed.lines();
+            let header = lines.next()?.trim();
+            let captures = header_re.captures(header)?;
+            let (tool_name, display_name) = parse_background_task_header_label(&captures["label"]);
+            let detail = lines
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if detail.is_empty() {
+                return None;
+            }
+            (
+                captures["task_id"].to_string(),
+                tool_name,
+                display_name,
+                detail,
+            )
+        };
 
     let (summary_with_bar, source) = split_progress_source(&detail);
     let summary = strip_progress_bar_prefix(&summary_with_bar).to_string();
@@ -220,6 +283,7 @@ pub fn parse_background_task_progress_notification_markdown(
     Some(ParsedBackgroundTaskProgressNotification {
         task_id,
         tool_name,
+        display_name,
         detail,
         summary,
         source,
@@ -231,6 +295,7 @@ pub fn parse_background_task_progress_notification_markdown(
 pub struct ParsedBackgroundTaskNotification {
     pub task_id: String,
     pub tool_name: String,
+    pub display_name: Option<String>,
     pub status: String,
     pub duration: String,
     pub exit_label: String,
@@ -247,7 +312,7 @@ pub fn parse_background_task_notification_markdown(
     let header_re = HEADER_RE
         .get_or_init(|| {
             compile_static_regex(
-                r"^\*\*Background task\*\* `(?P<task_id>[^`]+)` · `(?P<tool_name>[^`]+)` · (?P<status>.+?) · (?P<duration>[0-9]+(?:\.[0-9]+)?s) · (?P<exit_label>.+)$",
+                r"^\*\*Background task\*\* `(?P<task_id>[^`]+)` · (?P<label>.+?) · (?P<status>.+?) · (?P<duration>[0-9]+(?:\.[0-9]+)?s) · (?P<exit_label>.+)$",
             )
         })
         .as_ref()?;
@@ -259,6 +324,7 @@ pub fn parse_background_task_notification_markdown(
     let mut sections = normalized.split("\n\n");
     let header = sections.next()?.trim();
     let captures = header_re.captures(header)?;
+    let (tool_name, display_name) = parse_background_task_header_label(&captures["label"]);
 
     let mut preview: Option<String> = None;
     let mut full_output_command: Option<String> = None;
@@ -289,7 +355,8 @@ pub fn parse_background_task_notification_markdown(
 
     Some(ParsedBackgroundTaskNotification {
         task_id: captures["task_id"].to_string(),
-        tool_name: captures["tool_name"].to_string(),
+        tool_name,
+        display_name,
         status: captures["status"].to_string(),
         duration: captures["duration"].to_string(),
         exit_label: captures["exit_label"].to_string(),
@@ -299,20 +366,18 @@ pub fn parse_background_task_notification_markdown(
 }
 
 pub fn background_task_status_notice(task: &BackgroundTaskCompleted) -> String {
+    let label = background_task_display_label(&task.tool_name, task.display_name.as_deref());
     match task.status {
         BackgroundTaskStatus::Completed => {
-            format!("Background task completed · {}", task.tool_name)
+            format!("Background task completed · {}", label)
         }
         BackgroundTaskStatus::Superseded => {
-            format!("Background task superseded · {}", task.tool_name)
+            format!("Background task superseded · {}", label)
         }
         BackgroundTaskStatus::Failed => match task.exit_code {
-            Some(code) => format!(
-                "Background task failed · {} · exit {}",
-                task.tool_name, code
-            ),
-            None => format!("Background task failed · {}", task.tool_name),
+            Some(code) => format!("Background task failed · {} · exit {}", label, code),
+            None => format!("Background task failed · {}", label),
         },
-        BackgroundTaskStatus::Running => format!("Background task running · {}", task.tool_name),
+        BackgroundTaskStatus::Running => format!("Background task running · {}", label),
     }
 }

@@ -197,7 +197,11 @@ pub(super) fn present_swarm_notification(
                 {
                     format!(
                         "Background task · {} · {}",
-                        progress.tool_name, progress.summary
+                        crate::message::background_task_display_label(
+                            &progress.tool_name,
+                            progress.display_name.as_deref()
+                        ),
+                        progress.summary
                     )
                 } else if trimmed.starts_with("**Background task progress**") {
                     "Background task progress".to_string()

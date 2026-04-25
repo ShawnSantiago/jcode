@@ -803,7 +803,7 @@ impl BashTool {
         let info = crate::background::global()
             .spawn_with_notify(
                 "bash",
-                Some(display_name),
+                Some(display_name.clone()),
                 &ctx.session_id,
                 notify,
                 wake,
@@ -938,12 +938,14 @@ impl BashTool {
         let output = format!(
             "Command started in background.\n\n\
              Task ID: {}\n\
+             Name: {}\n\
              Output file: {}\n\
              Status file: {}\n\n\
              {}\n\
              To check progress: use the `bg` tool with action=\"status\" and task_id=\"{}\"\n\
              To see output: use the `read` tool on the output file, or `bg` with action=\"output\"",
             info.task_id,
+            display_name,
             info.output_file.display(),
             info.status_file.display(),
             notify_msg,
@@ -955,6 +957,7 @@ impl BashTool {
             .with_metadata(json!({
                 "background": true,
                 "task_id": info.task_id,
+                "display_name": display_name,
                 "output_file": info.output_file.to_string_lossy(),
                 "status_file": info.status_file.to_string_lossy(),
             })))

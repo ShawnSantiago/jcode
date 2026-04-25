@@ -9,9 +9,10 @@ mod notifications;
 
 pub use notifications::{
     InputShellResult, ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
-    background_task_status_notice, format_background_task_notification_markdown,
-    format_background_task_progress_markdown, format_input_shell_result_markdown,
-    input_shell_status_notice, parse_background_task_notification_markdown,
+    background_task_display_label, background_task_status_notice,
+    format_background_task_notification_markdown, format_background_task_progress_markdown,
+    format_input_shell_result_markdown, input_shell_status_notice,
+    parse_background_task_notification_markdown,
     parse_background_task_progress_notification_markdown,
 };
 
@@ -969,6 +970,7 @@ mod tests {
         let rendered = format_background_task_notification_markdown(&BackgroundTaskCompleted {
             task_id: "abc123".to_string(),
             tool_name: "bash".to_string(),
+            display_name: None,
             session_id: "session".to_string(),
             status: BackgroundTaskStatus::Completed,
             exit_code: Some(0),
@@ -992,6 +994,7 @@ mod tests {
         let rendered = format_background_task_notification_markdown(&BackgroundTaskCompleted {
             task_id: "abc123".to_string(),
             tool_name: "bash".to_string(),
+            display_name: None,
             session_id: "session".to_string(),
             status: BackgroundTaskStatus::Failed,
             exit_code: Some(9),
@@ -1011,6 +1014,7 @@ mod tests {
         let rendered = format_background_task_notification_markdown(&BackgroundTaskCompleted {
             task_id: "abc123".to_string(),
             tool_name: "selfdev-build".to_string(),
+            display_name: None,
             session_id: "session".to_string(),
             status: BackgroundTaskStatus::Superseded,
             exit_code: Some(0),
@@ -1031,6 +1035,7 @@ mod tests {
         let rendered = format_background_task_progress_markdown(&BackgroundTaskProgressEvent {
             task_id: "bgprogress".to_string(),
             tool_name: "bash".to_string(),
+            display_name: None,
             session_id: "session".to_string(),
             progress: crate::bus::BackgroundTaskProgress {
                 kind: crate::bus::BackgroundTaskProgressKind::Determinate,
@@ -1051,6 +1056,67 @@ mod tests {
     }
 
     #[test]
+    fn background_task_notifications_include_display_name_when_available() {
+        let rendered = format_background_task_notification_markdown(&BackgroundTaskCompleted {
+            task_id: "abc123".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: Some("Run integration tests".to_string()),
+            session_id: "session".to_string(),
+            status: BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output_preview: "done".to_string(),
+            output_file: std::path::PathBuf::from("/tmp/output.log"),
+            duration_secs: 7.1,
+            notify: true,
+            wake: false,
+        });
+
+        assert!(rendered.contains(
+            "**Background task** `abc123` · `Run integration tests` (`bash`) · ✓ completed"
+        ));
+        let parsed = parse_background_task_notification_markdown(&rendered)
+            .expect("named background task notification should parse");
+        assert_eq!(parsed.tool_name, "bash");
+        assert_eq!(
+            parsed.display_name.as_deref(),
+            Some("Run integration tests")
+        );
+    }
+
+    #[test]
+    fn background_task_progress_notifications_include_display_name_when_available() {
+        let rendered = format_background_task_progress_markdown(&BackgroundTaskProgressEvent {
+            task_id: "bgprogress".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: Some("Run integration tests".to_string()),
+            session_id: "session".to_string(),
+            progress: crate::bus::BackgroundTaskProgress {
+                kind: crate::bus::BackgroundTaskProgressKind::Determinate,
+                percent: Some(42.0),
+                message: Some("Running tests".to_string()),
+                current: Some(21),
+                total: Some(50),
+                unit: Some("tests".to_string()),
+                eta_seconds: None,
+                updated_at: Utc::now().to_rfc3339(),
+                source: crate::bus::BackgroundTaskProgressSource::Reported,
+            },
+        });
+
+        assert!(rendered.starts_with(
+            "**Background task progress** `bgprogress` · `Run integration tests` (`bash`)\n\n"
+        ));
+        let parsed = parse_background_task_progress_notification_markdown(&rendered)
+            .expect("named progress notification should parse");
+        assert_eq!(parsed.tool_name, "bash");
+        assert_eq!(
+            parsed.display_name.as_deref(),
+            Some("Run integration tests")
+        );
+        assert_eq!(parsed.summary, "42% · Running tests");
+    }
+
+    #[test]
     fn parse_background_task_progress_notification_extracts_card_fields() {
         let parsed = parse_background_task_progress_notification_markdown(
             "**Background task progress** `bgprogress` · `bash`\n\n[#####-------] 42% · Running tests (reported)",
@@ -1059,6 +1125,7 @@ mod tests {
 
         assert_eq!(parsed.task_id, "bgprogress");
         assert_eq!(parsed.tool_name, "bash");
+        assert_eq!(parsed.display_name, None);
         assert_eq!(parsed.summary, "42% · Running tests");
         assert_eq!(parsed.source.as_deref(), Some("reported"));
         assert_eq!(parsed.percent, Some(42.0));
@@ -1072,6 +1139,8 @@ mod tests {
         .expect("legacy progress notification should parse");
 
         assert_eq!(parsed.task_id, "bgprogress");
+        assert_eq!(parsed.tool_name, "bash");
+        assert_eq!(parsed.display_name, None);
         assert_eq!(
             parsed.summary,
             "Release run in_progress: - 7/8 jobs completed"
@@ -1096,6 +1165,7 @@ mod tests {
         let rendered = format_background_task_notification_markdown(&BackgroundTaskCompleted {
             task_id: "abc123".to_string(),
             tool_name: "bash".to_string(),
+            display_name: None,
             session_id: "session".to_string(),
             status: BackgroundTaskStatus::Completed,
             exit_code: Some(0),
@@ -1110,6 +1180,7 @@ mod tests {
             .expect("background task notification should parse");
         assert_eq!(parsed.task_id, "abc123");
         assert_eq!(parsed.tool_name, "bash");
+        assert_eq!(parsed.display_name, None);
         assert_eq!(parsed.status, "✓ completed");
         assert_eq!(parsed.duration, "7.1s");
         assert_eq!(parsed.exit_label, "exit 0");
