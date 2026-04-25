@@ -364,6 +364,14 @@ fn models_updated_publish_state() -> &'static Mutex<ModelsUpdatedPublishState> {
     STATE.get_or_init(|| Mutex::new(ModelsUpdatedPublishState::default()))
 }
 
+#[cfg(test)]
+pub(crate) fn reset_models_updated_publish_state_for_tests() {
+    let mut state = models_updated_publish_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *state = ModelsUpdatedPublishState::default();
+}
+
 impl Bus {
     pub fn global() -> &'static Bus {
         static INSTANCE: OnceLock<Bus> = OnceLock::new();
@@ -437,7 +445,7 @@ impl Bus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bus, BusEvent, models_updated_publish_state};
+    use super::{Bus, BusEvent, reset_models_updated_publish_state_for_tests};
     use tokio::time::{Duration, timeout};
 
     #[tokio::test]
@@ -445,12 +453,7 @@ mod tests {
         let mut rx = Bus::global().subscribe();
         while rx.try_recv().is_ok() {}
 
-        {
-            let mut state = models_updated_publish_state()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *state = Default::default();
-        }
+        reset_models_updated_publish_state_for_tests();
 
         Bus::global().publish_models_updated();
         Bus::global().publish_models_updated();

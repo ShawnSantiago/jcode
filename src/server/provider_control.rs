@@ -459,6 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn notify_auth_changed_emits_available_models_updated_after_provider_update() {
+        crate::bus::reset_models_updated_publish_state_for_tests();
         let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
         let registry = Registry::empty();
         let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
@@ -506,6 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_models_emits_available_models_updated_after_prefetch() {
+        crate::bus::reset_models_updated_publish_state_for_tests();
         let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
         let registry = Registry::empty();
         let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
