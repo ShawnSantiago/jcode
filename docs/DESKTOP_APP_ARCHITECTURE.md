@@ -62,8 +62,8 @@ The differentiated product is a **keyboard-driven, Niri-like agent workspace sup
 - agent sessions
 - activity/task views
 - diffs and changed files
-- browser surfaces later
-- editor/file surfaces later
+- file/diff/tool surfaces
+- optional future surfaces
 - settings/debug/tool surfaces
 
 The app should help users:
@@ -434,7 +434,7 @@ Avoid:
 - Qt
 - Flutter
 - GTK as the app framework
-- browser/WebView UI
+- WebView UI shell
 - React/Vue/Svelte-style UI stack
 - CSS/DOM-based architecture
 

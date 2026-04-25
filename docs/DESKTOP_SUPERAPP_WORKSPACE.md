@@ -9,8 +9,7 @@ The app should eventually host multiple kinds of surfaces:
 
 - agent sessions
 - task/activity views
-- browser surfaces
-- code editor/file surfaces
+- code/file surfaces
 - diffs
 - terminals or command output surfaces
 - settings/auth/tools/debug surfaces
@@ -48,7 +47,7 @@ And less like:
 
 - a single chat window
 - a conventional IDE clone
-- a browser wrapped around web UI
+- a web-app shell
 - a generic desktop window manager
 
 ## Why Niri-like
@@ -91,9 +90,9 @@ Suggested initial terms:
 | Workspace | A project/repo-level desktop environment |
 | Lane | A vertical grouping or Niri-like workspace row |
 | Column | A horizontal focus/navigation unit |
-| Surface | A visible app panel: session, browser, editor, diff, activity, etc. |
+| Surface | A visible app panel: session, file/code view, diff, activity, settings, debug, etc. |
 | Session surface | A surface attached to a server-owned Jcode session |
-| Tool surface | Browser/editor/diff/activity/settings/debug/etc. |
+| Tool surface | File/code/diff/activity/settings/debug/etc. |
 
 ## Surface types
 
@@ -103,13 +102,13 @@ The app should be architected around a generic surface registry from the start.
 enum SurfaceKind {
     AgentSession,
     Activity,
-    Browser,
-    Editor,
+    WorkspaceFiles,
+    CodeView,
     Diff,
     TerminalOutput,
-    WorkspaceFiles,
     Settings,
     Debug,
+    Extension,
 }
 ```
 
@@ -133,7 +132,7 @@ The surface model should be independent from the renderer so it can support:
 - one window with many surfaces
 - multiple windows later
 - pop-out surfaces later
-- session surfaces and browser/editor surfaces using the same navigation model
+- session surfaces and non-session utility surfaces using the same navigation model
 
 ## Agent sessions as first-class surfaces
 
@@ -151,8 +150,8 @@ AgentSessionSurface
 This allows layouts like:
 
 ```text
-[Session A] [Session B] [Browser]
-[Activity ] [Diff     ] [Editor ]
+[Session A] [Session B] [Diff     ]
+[Activity ] [Files    ] [CodeView ]
 ```
 
 Or:
@@ -163,8 +162,8 @@ Lane 1: main task
   Column 2: implementation agent session
   Column 3: diff/editor
 
-Lane 2: research
-  Column 1: browser
+Lane 2: review
+  Column 1: changed files
   Column 2: notes/session
 ```
 
@@ -220,7 +219,6 @@ Workspace/session:
   leader n      new agent session
   leader s      session switcher
   leader a      activity center
-  leader b      browser surface
   leader e      editor/files surface
   leader d      diff surface
   leader /      command palette
@@ -254,7 +252,7 @@ Text-entry mode
   - platform shortcuts still work: copy/paste/select all
 ```
 
-This is critical once the app has an editor and browser. Without explicit input modes, global Vim-like keys will conflict with text entry.
+This is critical once the app has text-entry surfaces. Without explicit input modes, global Vim-like keys will conflict with text entry.
 
 ## Layout behavior
 
@@ -317,61 +315,17 @@ resume-session
 fork-session
 ```
 
-Browser/editor commands become specialized actions on those surfaces later.
+Non-session surfaces can add specialized commands later without changing generic surface lifecycle commands.
 
-## Built-in browser direction
+## Optional future surfaces
 
-A built-in browser is a large decision under the “no frameworks / custom UI” constraint.
+Do not preplan any large embedded app right now. The workspace model should stay generic enough to host future surface kinds, but the implementation plan should focus on agent sessions, activity, files, diffs, and command routing.
 
-There are three realistic levels:
-
-### Level 1: external browser integration
-
-MVP-friendly:
-
-- open URLs externally
-- track browser-related tool activity
-- maybe show page title/screenshot/result summaries
-- no embedded browser surface yet
-
-### Level 2: platform WebView surface
-
-Practical built-in browser:
-
-- macOS: `WKWebView`
-- Windows: WebView2
-- Linux: WebKitGTK or external-provider fallback
-
-This violates a strict “no frameworks at all” interpretation, but it does not mean Electron/Tauri. It is an OS/platform browser engine embedded as one surface type.
-
-Pros:
-
-- actually feasible
-- good web compatibility
-- less memory than bundling Chromium if using system engines
-
-Cons:
-
-- platform-specific APIs
-- rendering is not through the custom `wgpu` UI
-- input/focus/accessibility integration complexity
-- Linux support is messier than macOS
-
-### Level 3: custom browser engine
-
-Not recommended.
-
-Building a browser engine is a multi-year project and should not be part of Jcode Desktop.
-
-### Recommendation
-
-Start with Level 1. Architect `BrowserSurface` as a placeholder surface so the workspace model is ready. Later, implement Level 2 with platform WebViews if embedded browsing is still worth it.
-
-Do not block the core workspace/sessions product on an embedded browser.
+If a major embedded surface is considered later, it should go through its own design decision rather than being assumed by the initial desktop architecture.
 
 ## Built-in code editor direction
 
-A built-in editor is also a large system, but more realistic than a browser if scoped carefully.
+A built-in editor is a large system and should remain optional until the workspace/session workflow is strong.
 
 Suggested levels:
 
@@ -413,7 +367,7 @@ Large but possible later:
 
 Start with Level 1, then Level 2. Do not build a full editor before the agent workspace, transcript, activity, and diff workflow are excellent.
 
-The architecture should still reserve `EditorSurface` from day one so keyboard navigation and surface layout do not need to be redesigned later.
+The architecture should support file/code surfaces generically, but should not commit to a full editor implementation early.
 
 ## Activity as a persistent surface
 
@@ -439,8 +393,7 @@ The command palette should be the universal way to access everything:
 - commands
 - settings
 - tools
-- browser tabs/pages later
-- editor files later
+- files and code views
 - background tasks
 - debug views
 
@@ -481,11 +434,13 @@ Surface-local data should be separated by kind:
 enum SurfaceLocalState {
     AgentSession(AgentSessionSurfaceState),
     Activity(ActivitySurfaceState),
-    Browser(BrowserSurfaceState),
-    Editor(EditorSurfaceState),
+    WorkspaceFiles(WorkspaceFilesSurfaceState),
+    CodeView(CodeViewSurfaceState),
     Diff(DiffSurfaceState),
+    TerminalOutput(TerminalOutputSurfaceState),
     Settings(SettingsSurfaceState),
     Debug(DebugSurfaceState),
+    Extension(ExtensionSurfaceState),
 }
 ```
 
@@ -525,25 +480,24 @@ Success criteria:
 - focus movement with leader + `h/j/k/l`
 - open/close/move/zoom fake surfaces
 - activity surface with fake running tasks
-- command palette can create session/activity/browser/editor placeholder surfaces
+- command palette can create session/activity/file/diff/debug placeholder surfaces
 - transcript surfaces are virtualized independently
 - debug HUD shows per-surface layout/render stats
 - idle CPU remains near zero
 
-Browser/editor surfaces can be placeholders at this stage. The important part is proving that the workspace model can host them.
+Optional non-session surfaces can be placeholders at this stage. The important part is proving that the workspace model can host multiple surface kinds without committing to specific future apps.
 
 ## Product guardrails
 
 Because “superapp” can explode in scope, keep these guardrails:
 
 1. Agent sessions and activity are the core product.
-2. Browser/editor surfaces are supporting tools, not the first milestone.
-3. External editor/browser integration should come before embedded implementations.
+2. Non-session surfaces are supporting tools, not the first milestone.
+3. External integrations should come before embedded implementations.
 4. Keyboard navigation must work before mouse drag layout polish.
 5. Surface architecture must be generic from day one.
-6. Do not implement a browser engine.
-7. Do not build a full IDE editor before diff/review workflows are excellent.
-8. Keep the server as the source of truth for sessions and agents.
+6. Do not build large embedded apps before diff/review workflows are excellent.
+7. Keep the server as the source of truth for sessions and agents.
 
 ## Summary decision
 
@@ -558,4 +512,4 @@ The initial desktop app should prove:
 - activity visibility
 - performance under multiple visible surfaces
 
-Then browser/editor/diff/terminal surfaces can be added without changing the fundamental app model.
+Then additional file/diff/tool surfaces can be added without changing the fundamental app model.
