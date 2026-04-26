@@ -187,7 +187,10 @@ fn render_system_message_uses_scheduled_task_card() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("⏰ scheduled task due"));
+    assert!(plain.contains(width_stable_system_title(
+        "⏰ scheduled task due",
+        "scheduled task due"
+    )));
     assert!(plain.contains("This scheduled task is now active in this session."));
     assert!(plain.contains("Follow up on the scheduler test"));
     assert!(plain.contains("Verify the scheduled task card styling"));
