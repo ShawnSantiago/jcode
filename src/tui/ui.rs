@@ -2982,7 +2982,7 @@ fn link_target_from_snapshot(
     let raw_point = raw_selection_point(snapshot, point)?;
     let raw_text = snapshot.raw_plain_line(raw_point.raw_line)?;
 
-    for mat in url_regex().find_iter(&raw_text) {
+    for mat in url_regex()?.find_iter(&raw_text) {
         let matched = &raw_text[mat.start()..mat.end()];
         let trimmed = trim_url_candidate(matched);
         if trimmed.is_empty() {
