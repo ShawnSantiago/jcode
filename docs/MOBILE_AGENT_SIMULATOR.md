@@ -227,3 +227,7 @@ Current crates already provide the seed of this architecture:
 The next step is to evolve these from a small mock flow into the real mobile application core and complete simulator environment described above.
 
 See also [`MOBILE_SWIFT_AUDIT.md`](MOBILE_SWIFT_AUDIT.md) for the extraction plan from the current Swift prototype into the Rust mobile core.
+
+For the day-to-day agent workflow, including scenario loading, semantic node
+inspection, interaction commands, assertions, and failure debugging, see
+[`MOBILE_SIMULATOR_WORKFLOW.md`](MOBILE_SIMULATOR_WORKFLOW.md).

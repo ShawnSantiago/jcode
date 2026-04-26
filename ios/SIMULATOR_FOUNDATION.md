@@ -5,6 +5,9 @@ This document describes the first simulation slice now checked into the repo.
 For the full target architecture and milestone plan, see
 [`docs/MOBILE_AGENT_SIMULATOR.md`](../docs/MOBILE_AGENT_SIMULATOR.md).
 
+For the current day-to-day agent workflow, see
+[`docs/MOBILE_SIMULATOR_WORKFLOW.md`](../docs/MOBILE_SIMULATOR_WORKFLOW.md).
+
 ## Product direction
 
 The simulator is intended to be a **Linux-native simulator for the jcode mobile
@@ -123,6 +126,19 @@ cargo run -p jcode-mobile-sim -- state
 ```bash
 cargo run -p jcode-mobile-sim -- tree
 ```
+
+### Find and assert semantic UI nodes
+
+```bash
+cargo run -p jcode-mobile-sim -- find-node pair.submit
+cargo run -p jcode-mobile-sim -- assert-screen onboarding
+cargo run -p jcode-mobile-sim -- assert-node pair.submit --enabled true --role button
+cargo run -p jcode-mobile-sim -- assert-text "Ready to pair"
+cargo run -p jcode-mobile-sim -- assert-no-error
+```
+
+Assertions are the preferred agent workflow because they return structured
+success/failure instead of requiring ad-hoc JSON parsing.
 
 ### Dump transition/effect logs
 
@@ -243,8 +259,9 @@ A good current loop is:
 2. inspect `state`
 3. inspect `tree`
 4. drive it with `set-field` and `tap`
-5. inspect `log`
-6. iterate on the shared simulator core
+5. assert expected behavior with `assert-screen`, `assert-node`, `assert-text`, and `assert-no-error`
+6. inspect `log` on failure
+7. iterate on the shared simulator core
 
 Example:
 
@@ -252,9 +269,11 @@ Example:
 cargo run -p jcode-mobile-sim -- start --scenario pairing_ready
 cargo run -p jcode-mobile-sim -- state
 cargo run -p jcode-mobile-sim -- tap pair.submit
-cargo run -p jcode-mobile-sim -- tree
+cargo run -p jcode-mobile-sim -- assert-screen chat
 cargo run -p jcode-mobile-sim -- set-field draft "hello simulator"
 cargo run -p jcode-mobile-sim -- tap chat.send
+cargo run -p jcode-mobile-sim -- assert-text "Simulated response to: hello simulator"
+cargo run -p jcode-mobile-sim -- assert-no-error
 cargo run -p jcode-mobile-sim -- log --limit 10
 cargo run -p jcode-mobile-sim -- shutdown
 ```
