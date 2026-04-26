@@ -102,6 +102,22 @@ Supported baseline scenarios:
 - `offline_queued_message`
 - `long_running_task`
 
+## Fake backend model
+
+The simulator includes a deterministic in-process fake jcode backend for effects
+emitted by the mobile core.
+
+Current fake backend behavior:
+
+- pairing succeeds when the host is reachable and the pairing code is `123456`
+- pairing fails with `Invalid or expired pairing code.` for any other code
+- pairing fails with an unreachable-server error when the host contains
+  `offline` or `unreachable`
+- message sends append `Simulated response to: <message>` and finish the turn
+
+This lets agents validate pairing and chat behavior without a real jcode server,
+MacBook, Xcode, Apple iOS Simulator, or iPhone.
+
 ## CLI usage
 
 ### Start a simulator in the background

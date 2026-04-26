@@ -541,7 +541,7 @@ impl SimulatorStore {
                 };
                 self.effect_log.push(effect_record.clone());
                 effect_records.push(effect_record);
-                let follow_ups = auto_follow_up_actions(effect);
+                let follow_ups = FakeJcodeBackend::default().handle_effect(effect);
                 for next in follow_ups.into_iter().rev() {
                     pending.push(next);
                 }
@@ -704,9 +704,33 @@ fn reduce(mut state: SimulatorState, action: SimulatorAction) -> Reduction {
     }
 }
 
-fn auto_follow_up_actions(effect: SimulatorEffect) -> Vec<SimulatorAction> {
-    match effect {
-        SimulatorEffect::PairAndConnect { .. } => vec![
+#[derive(Debug, Clone, Default)]
+pub struct FakeJcodeBackend;
+
+impl FakeJcodeBackend {
+    pub fn handle_effect(&self, effect: SimulatorEffect) -> Vec<SimulatorAction> {
+        match effect {
+            SimulatorEffect::PairAndConnect {
+                host, pair_code, ..
+            } => self.pair_and_connect(&host, &pair_code),
+            SimulatorEffect::SendMessage { text } => self.send_message(&text),
+        }
+    }
+
+    fn pair_and_connect(&self, host: &str, pair_code: &str) -> Vec<SimulatorAction> {
+        if host.contains("offline") || host.contains("unreachable") {
+            return vec![SimulatorAction::ConnectionFailed {
+                message: "Server unreachable. Confirm host/port and gateway status.".to_string(),
+            }];
+        }
+
+        if pair_code != "123456" {
+            return vec![SimulatorAction::PairingFailed {
+                message: "Invalid or expired pairing code.".to_string(),
+            }];
+        }
+
+        vec![
             SimulatorAction::PairingSucceeded {
                 server_name: "jcode".to_string(),
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -714,13 +738,16 @@ fn auto_follow_up_actions(effect: SimulatorEffect) -> Vec<SimulatorAction> {
             SimulatorAction::Connected {
                 session_id: "session_sim_1".to_string(),
             },
-        ],
-        SimulatorEffect::SendMessage { text } => vec![
+        ]
+    }
+
+    fn send_message(&self, text: &str) -> Vec<SimulatorAction> {
+        vec![
             SimulatorAction::AppendAssistantText {
                 text: format!("Simulated response to: {text}"),
             },
             SimulatorAction::FinishTurn,
-        ],
+        ]
     }
 }
 
@@ -1079,5 +1106,55 @@ mod tests {
         let offline = SimulatorState::for_scenario(ScenarioName::OfflineQueuedMessage);
         assert_eq!(offline.connection_state, ConnectionState::Disconnected);
         assert!(offline.draft_message.contains("Queued"));
+    }
+
+    #[test]
+    fn fake_backend_rejects_invalid_pairing_code() {
+        let mut store =
+            SimulatorStore::new(SimulatorState::for_scenario(ScenarioName::PairingReady));
+        store.dispatch(SimulatorAction::SetPairCode {
+            value: "000000".to_string(),
+        });
+        store.dispatch(SimulatorAction::TapNode {
+            node_id: "pair.submit".to_string(),
+        });
+
+        assert_eq!(
+            store.state().connection_state,
+            ConnectionState::Disconnected
+        );
+        assert!(
+            store
+                .state()
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Invalid")
+        );
+    }
+
+    #[test]
+    fn fake_backend_reports_unreachable_host() {
+        let mut store =
+            SimulatorStore::new(SimulatorState::for_scenario(ScenarioName::PairingReady));
+        store.dispatch(SimulatorAction::SetHost {
+            value: "offline.tailnet.ts.net".to_string(),
+        });
+        store.dispatch(SimulatorAction::TapNode {
+            node_id: "pair.submit".to_string(),
+        });
+
+        assert_eq!(
+            store.state().connection_state,
+            ConnectionState::Disconnected
+        );
+        assert!(
+            store
+                .state()
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("unreachable")
+        );
     }
 }
