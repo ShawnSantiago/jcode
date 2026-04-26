@@ -2426,7 +2426,7 @@ struct CopyViewportSnapshots {
 static LAST_COPY_VIEWPORT: OnceLock<Mutex<CopyViewportSnapshots>> = OnceLock::new();
 #[path = "ui/url.rs"]
 mod url_regex_support;
-use self::url_regex_support::{trim_url_candidate, url_regex};
+use self::url_regex_support::link_target_for_display_column;
 
 #[cfg(not(test))]
 fn copy_viewport_state() -> &'static Mutex<CopyViewportSnapshots> {
@@ -2958,25 +2958,7 @@ fn link_target_from_snapshot(
 ) -> Option<String> {
     let raw_point = raw_selection_point(snapshot, point)?;
     let raw_text = snapshot.raw_plain_line(raw_point.raw_line)?;
-
-    for mat in url_regex()?.find_iter(&raw_text) {
-        let matched = &raw_text[mat.start()..mat.end()];
-        let trimmed = trim_url_candidate(matched);
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let start_col = line_display_width(&raw_text[..mat.start()]);
-        let end_col = start_col + line_display_width(trimmed);
-        if raw_point.column >= start_col
-            && raw_point.column < end_col
-            && url::Url::parse(trimmed).is_ok()
-        {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
+    link_target_for_display_column(&raw_text, raw_point.column)
 }
 
 pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
