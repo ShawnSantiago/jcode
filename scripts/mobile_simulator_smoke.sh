@@ -33,6 +33,8 @@ cargo run -p jcode-mobile-sim -- assert-text --socket "$socket" "Connected to si
 cargo run -p jcode-mobile-sim -- set-field --socket "$socket" draft "$message" >/dev/null
 cargo run -p jcode-mobile-sim -- tap --socket "$socket" chat.send >/dev/null
 cargo run -p jcode-mobile-sim -- assert-text --socket "$socket" "Simulated response to: $message" >/dev/null
+cargo run -p jcode-mobile-sim -- assert-transition --socket "$socket" --type tap_node --contains chat.send >/dev/null
+cargo run -p jcode-mobile-sim -- assert-effect --socket "$socket" --type send_message --contains "$message" >/dev/null
 cargo run -p jcode-mobile-sim -- assert-no-error --socket "$socket" >/dev/null
 cargo run -p jcode-mobile-sim -- log --socket "$socket" --limit 10 >/dev/null
 

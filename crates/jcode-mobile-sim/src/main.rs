@@ -75,6 +75,22 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    AssertTransition {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long = "type")]
+        transition_type: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
+    },
+    AssertEffect {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long = "type")]
+        effect_type: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
+    },
     Log {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -182,6 +198,30 @@ async fn main() -> Result<()> {
         ),
         Command::AssertNoError { socket } => print_result(
             send_simple(&resolve_socket(socket), "assert_no_error", Value::Null).await?,
+        ),
+        Command::AssertTransition {
+            socket,
+            transition_type,
+            contains,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "assert_transition",
+                json!({ "type": transition_type, "contains": contains }),
+            )
+            .await?,
+        ),
+        Command::AssertEffect {
+            socket,
+            effect_type,
+            contains,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "assert_effect",
+                json!({ "type": effect_type, "contains": contains }),
+            )
+            .await?,
         ),
         Command::Log { socket, limit } => print_result(
             send_simple(&resolve_socket(socket), "log", json!({ "limit": limit })).await?,

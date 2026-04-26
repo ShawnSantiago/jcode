@@ -126,6 +126,13 @@ Assert there is no active error banner:
 cargo run -p jcode-mobile-sim -- assert-no-error
 ```
 
+Assert that reducer transitions/effects occurred:
+
+```bash
+cargo run -p jcode-mobile-sim -- assert-transition --type tap_node --contains chat.send
+cargo run -p jcode-mobile-sim -- assert-effect --type send_message --contains "hello simulator"
+```
+
 ## End-to-end current vertical slice
 
 For a reusable smoke test, run:
@@ -146,6 +153,8 @@ cargo run -p jcode-mobile-sim -- assert-text "Connected to simulated jcode serve
 cargo run -p jcode-mobile-sim -- set-field draft "hello simulator"
 cargo run -p jcode-mobile-sim -- tap chat.send
 cargo run -p jcode-mobile-sim -- assert-text "Simulated response to: hello simulator"
+cargo run -p jcode-mobile-sim -- assert-transition --type tap_node --contains chat.send
+cargo run -p jcode-mobile-sim -- assert-effect --type send_message --contains "hello simulator"
 cargo run -p jcode-mobile-sim -- assert-no-error
 cargo run -p jcode-mobile-sim -- log --limit 10
 cargo run -p jcode-mobile-sim -- shutdown

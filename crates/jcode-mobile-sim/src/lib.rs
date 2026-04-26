@@ -260,6 +260,28 @@ async fn handle_request(
                 Ok((json!({"ok": true}), false))
             }
         }
+        "assert_transition" => {
+            let store = store.lock().await;
+            let transitions = serde_json::to_value(store.transition_log()).unwrap_or(Value::Null);
+            match find_matching_record(&transitions, &request.params, "action") {
+                Some(record) => Ok((json!({"transition": record}), false)),
+                None => Err(anyhow!(
+                    "matching transition not found: {}",
+                    describe_record_assertion(&request.params)
+                )),
+            }
+        }
+        "assert_effect" => {
+            let store = store.lock().await;
+            let effects = serde_json::to_value(store.effect_log()).unwrap_or(Value::Null);
+            match find_matching_record(&effects, &request.params, "effect") {
+                Some(record) => Ok((json!({"effect": record}), false)),
+                None => Err(anyhow!(
+                    "matching effect not found: {}",
+                    describe_record_assertion(&request.params)
+                )),
+            }
+        }
         "log" => {
             let limit = request
                 .params
@@ -402,6 +424,53 @@ fn assert_optional_string(node: &Value, params: &Value, field: &str) -> Result<(
         Err(anyhow!(
             "expected node {field}={expected:?}, got {actual:?}"
         ))
+    }
+}
+
+fn find_matching_record<'a>(
+    records: &'a Value,
+    params: &Value,
+    typed_field: &str,
+) -> Option<&'a Value> {
+    let records = records.as_array()?;
+    records
+        .iter()
+        .find(|record| record_matches(record, params, typed_field))
+}
+
+fn record_matches(record: &Value, params: &Value, typed_field: &str) -> bool {
+    if let Some(expected_type) = params.get("type").and_then(Value::as_str) {
+        let actual_type = record
+            .get(typed_field)
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str);
+        if actual_type != Some(expected_type) {
+            return false;
+        }
+    }
+
+    if let Some(contains) = params.get("contains").and_then(Value::as_str) {
+        let json = serde_json::to_string(record).unwrap_or_default();
+        if !json.contains(contains) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn describe_record_assertion(params: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(expected_type) = params.get("type").and_then(Value::as_str) {
+        parts.push(format!("type={expected_type}"));
+    }
+    if let Some(contains) = params.get("contains").and_then(Value::as_str) {
+        parts.push(format!("contains={contains:?}"));
+    }
+    if parts.is_empty() {
+        "no filters provided".to_string()
+    } else {
+        parts.join(", ")
     }
 }
 
@@ -555,6 +624,50 @@ mod tests {
         )
         .await?;
         assert!(assert_no_error.ok);
+
+        let set_draft = send_request(
+            &socket,
+            AutomationRequest {
+                id: "set-draft".to_string(),
+                method: "dispatch".to_string(),
+                params: json!({"action": {"type": "set_draft", "value": "hello simulator"}}),
+            },
+        )
+        .await?;
+        assert!(set_draft.ok);
+
+        let send_message = send_request(
+            &socket,
+            AutomationRequest {
+                id: "send-message".to_string(),
+                method: "dispatch".to_string(),
+                params: json!({"action": {"type": "tap_node", "node_id": "chat.send"}}),
+            },
+        )
+        .await?;
+        assert!(send_message.ok);
+
+        let assert_transition = send_request(
+            &socket,
+            AutomationRequest {
+                id: "assert-transition".to_string(),
+                method: "assert_transition".to_string(),
+                params: json!({"type": "load_scenario", "contains": "connected_chat"}),
+            },
+        )
+        .await?;
+        assert!(assert_transition.ok);
+
+        let assert_effect = send_request(
+            &socket,
+            AutomationRequest {
+                id: "assert-effect".to_string(),
+                method: "assert_effect".to_string(),
+                params: json!({"type": "send_message", "contains": "hello simulator"}),
+            },
+        )
+        .await?;
+        assert!(assert_effect.ok);
 
         let _ = send_request(
             &socket,
