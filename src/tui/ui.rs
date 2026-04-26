@@ -2428,7 +2428,7 @@ static LAST_COPY_VIEWPORT: OnceLock<Mutex<CopyViewportSnapshots>> = OnceLock::ne
 mod display_width;
 #[path = "ui/url.rs"]
 mod url_regex_support;
-use self::display_width::{clamp_display_col, display_col_to_byte_offset, line_display_width};
+use self::display_width::{clamp_display_col, display_col_slice, line_display_width};
 use self::url_regex_support::link_target_for_display_column;
 
 #[cfg(not(test))]
@@ -2851,9 +2851,7 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
             continue;
         }
 
-        let start_byte = display_col_to_byte_offset(&text, start_col);
-        let end_byte = display_col_to_byte_offset(&text, end_col);
-        out.push(text[start_byte..end_byte].to_string());
+        out.push(display_col_slice(&text, start_col, end_col).to_string());
     }
 
     Some(out.join("\n"))
@@ -2902,9 +2900,7 @@ fn copy_selection_text_from_raw_lines(
             continue;
         }
 
-        let start_byte = display_col_to_byte_offset(&text, start_col);
-        let end_byte = display_col_to_byte_offset(&text, end_col);
-        out.push(text[start_byte..end_byte].to_string());
+        out.push(display_col_slice(&text, start_col, end_col).to_string());
     }
 
     Some(out.join("\n"))

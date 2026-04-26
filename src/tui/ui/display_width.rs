@@ -22,9 +22,17 @@ pub(super) fn clamp_display_col(text: &str, display_col: usize) -> usize {
     display_col.min(line_display_width(text))
 }
 
+pub(super) fn display_col_slice(text: &str, start_col: usize, end_col: usize) -> &str {
+    let start_byte = display_col_to_byte_offset(text, start_col);
+    let end_byte = display_col_to_byte_offset(text, end_col);
+    &text[start_byte..end_byte]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clamp_display_col, display_col_to_byte_offset, line_display_width};
+    use super::{
+        clamp_display_col, display_col_slice, display_col_to_byte_offset, line_display_width,
+    };
 
     #[test]
     fn line_display_width_counts_wide_chars() {
@@ -47,5 +55,15 @@ mod tests {
     fn clamp_display_col_caps_at_line_display_width() {
         assert_eq!(clamp_display_col("a🙂b", 99), 4);
         assert_eq!(clamp_display_col("a🙂b", 2), 2);
+    }
+
+    #[test]
+    fn display_col_slice_respects_wide_char_boundaries() {
+        let text = "a🙂bc";
+
+        assert_eq!(display_col_slice(text, 0, 1), "a");
+        assert_eq!(display_col_slice(text, 1, 3), "🙂");
+        assert_eq!(display_col_slice(text, 2, 4), "🙂b");
+        assert_eq!(display_col_slice(text, 3, 99), "bc");
     }
 }
