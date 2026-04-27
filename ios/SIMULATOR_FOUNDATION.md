@@ -142,6 +142,24 @@ cargo run -p jcode-mobile-sim -- start --scenario onboarding
 
 This prints the socket path when the simulator is ready.
 
+### Agent/debug tester wrapper
+
+`scripts/mobile_simulator_tester.sh` provides a stable tester socket and a
+single command surface for agents/debug workflows to spawn, drive, inspect,
+capture, and clean up the Linux-native mobile simulator.
+
+```bash
+scripts/mobile_simulator_tester.sh start pairing_ready
+scripts/mobile_simulator_tester.sh status
+scripts/mobile_simulator_tester.sh render
+scripts/mobile_simulator_tester.sh screenshot /tmp/mobile-screenshot.json
+scripts/mobile_simulator_tester.sh tap pair.submit
+scripts/mobile_simulator_tester.sh cleanup
+```
+
+The wrapper honors `JCODE_MOBILE_TESTER_DIR` so parallel agents can isolate
+simulator state.
+
 ### Serve in the foreground
 
 ```bash
