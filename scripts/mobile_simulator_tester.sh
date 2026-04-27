@@ -17,6 +17,7 @@ Commands:
   status                    Print simulator status JSON
   state                     Print full app state JSON
   tree                      Print semantic UI tree JSON
+  scene [output]            Print or write Rust visual scene JSON
   render [output]           Print or write deterministic text render
   screenshot [output]       Print or write screenshot snapshot JSON
   screenshot-svg [output]   Print or write deterministic SVG screenshot
@@ -71,6 +72,13 @@ case "$cmd" in
     ;;
   tree)
     sim tree --socket "$socket"
+    ;;
+  scene)
+    if [[ $# -gt 0 ]]; then
+      sim scene --socket "$socket" --output "$1"
+    else
+      sim scene --socket "$socket"
+    fi
     ;;
   render)
     if [[ $# -gt 0 ]]; then

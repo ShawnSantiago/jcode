@@ -45,13 +45,16 @@ shared mobile application core plus an agent-native automation surface.
 
 ## Current scope
 
-This first slice intentionally does **not** include a GUI renderer yet.
+This first slice intentionally does **not** include a wgpu/Metal GUI renderer
+yet.
 
-Instead, it gives us a solid automation and state foundation so agents can:
+Instead, it gives us a solid automation, state, and Rust-owned visual scene
+foundation so agents can:
 
 - start the simulator
 - query state snapshots
 - query the semantic UI tree
+- query the visual scene graph that future render backends should consume
 - dispatch typed actions
 - tap semantic node IDs
 - load scenarios
@@ -72,6 +75,37 @@ inspection:
 
 The goal is for an agent to test autonomously in every way a human would, while
 also having richer semantic APIs than a human has.
+
+## Rust-owned visual rendering direction
+
+The simulator's authoritative visual model is **not HTML**. HTML may be useful
+as a debugging shell in the future, but it should not define the mobile app's
+look or layout.
+
+`jcode-mobile-core` now emits a serializable `VisualScene` contract:
+
+- schema version and logical point coordinate space
+- viewport dimensions matching the mobile simulator target
+- ordered layers such as `background`, `chrome`, and `content`
+- drawing primitives such as rounded rectangles and text
+- stable links from visual primitives back to semantic node IDs for hit testing,
+  accessibility, and agent assertions
+
+The current SVG screenshot is just one deterministic backend for this scene. The
+intended rendering stack is:
+
+```text
+Rust app state
+  -> Rust semantic UI tree
+  -> Rust layout and VisualScene
+  -> deterministic SVG/text backend for CI and agent tests
+  -> future wgpu preview backend on Linux
+  -> future iOS drawing backend through Metal/CoreGraphics/wgpu-on-iOS
+```
+
+This keeps the future iOS app thin: it should host a surface, forward input to
+Rust, receive Rust scene updates, and draw the same Rust-owned scene model that
+the Linux simulator can render.
 
 ## Rust-owned gateway protocol helpers
 
@@ -182,6 +216,17 @@ cargo run -p jcode-mobile-sim -- state
 
 ```bash
 cargo run -p jcode-mobile-sim -- tree
+```
+
+### Dump Rust visual scene graph
+
+The `scene` command prints the Rust-owned visual scene that render backends
+consume. This is the contract a future wgpu or iOS renderer should draw from.
+
+```bash
+cargo run -p jcode-mobile-sim -- scene
+cargo run -p jcode-mobile-sim -- scene --output /tmp/mobile-scene.json
+scripts/mobile_simulator_tester.sh scene /tmp/mobile-scene.json
 ```
 
 ### Render a Linux text preview

@@ -188,6 +188,13 @@ async fn handle_request(
                 false,
             ))
         }
+        "scene" => {
+            let store = store.lock().await;
+            Ok((
+                serde_json::to_value(store.visual_scene()).unwrap_or(Value::Null),
+                false,
+            ))
+        }
         "render" => {
             let store = store.lock().await;
             let output = render_text(&store.semantic_tree());

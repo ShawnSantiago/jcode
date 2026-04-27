@@ -41,6 +41,12 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    Scene {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     Render {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -245,6 +251,10 @@ async fn main() -> Result<()> {
         }
         Command::Tree { socket } => {
             print_result(send_simple(&resolve_socket(socket), "tree", Value::Null).await?)
+        }
+        Command::Scene { socket, output } => {
+            let scene = send_simple(&resolve_socket(socket), "scene", Value::Null).await?;
+            write_or_print_json(scene, output)
         }
         Command::Render { socket, output } => {
             let rendered = send_simple(&resolve_socket(socket), "render", Value::Null).await?;
