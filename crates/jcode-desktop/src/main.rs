@@ -16,6 +16,9 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
@@ -66,6 +69,35 @@ const SINGLE_SESSION_CODE_FONT_SIZE: f32 = 14.0;
 const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
 const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
 const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
+
+#[derive(Clone, Copy, Debug)]
+struct SingleSessionTypography {
+    family: &'static str,
+    weight: &'static str,
+    fallbacks: &'static [&'static str],
+    title_size: f32,
+    body_size: f32,
+    meta_size: f32,
+    code_size: f32,
+    body_line_height: f32,
+    code_line_height: f32,
+    meta_line_height: f32,
+}
+
+const fn single_session_typography() -> SingleSessionTypography {
+    SingleSessionTypography {
+        family: SINGLE_SESSION_FONT_FAMILY,
+        weight: SINGLE_SESSION_FONT_WEIGHT,
+        fallbacks: SINGLE_SESSION_FONT_FALLBACKS,
+        title_size: SINGLE_SESSION_TITLE_FONT_SIZE,
+        body_size: SINGLE_SESSION_BODY_FONT_SIZE,
+        meta_size: SINGLE_SESSION_META_FONT_SIZE,
+        code_size: SINGLE_SESSION_CODE_FONT_SIZE,
+        body_line_height: SINGLE_SESSION_BODY_LINE_HEIGHT,
+        code_line_height: SINGLE_SESSION_CODE_LINE_HEIGHT,
+        meta_line_height: SINGLE_SESSION_META_LINE_HEIGHT,
+    }
+}
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -159,6 +191,7 @@ async fn run() -> Result<()> {
     window.set_title(&app.status_title());
     let mut canvas = Canvas::new(window).await?;
     let mut modifiers = ModifiersState::empty();
+    let mut hot_reloader = DesktopHotReloader::new();
 
     if !workspace_mode {
         if let Err(error) = session_launch::launch_new_session() {
@@ -282,6 +315,15 @@ async fn run() -> Result<()> {
                 _ => {}
             },
             Event::AboutToWait => {
+                if let Some(relaunch) = hot_reloader.poll() {
+                    if let Err(error) = relaunch.spawn() {
+                        eprintln!("jcode-desktop: failed to hot reload desktop: {error:#}");
+                    } else {
+                        target.exit();
+                        return;
+                    }
+                }
+
                 if canvas.needs_initial_frame {
                     canvas.needs_initial_frame = false;
                     window.request_redraw();
@@ -328,6 +370,86 @@ fn fresh_single_session_app() -> DesktopApp {
     DesktopApp::SingleSession(SingleSessionApp::new(None))
 }
 
+struct DesktopHotReloader {
+    relaunch: Option<DesktopRelaunch>,
+    initial_modified: Option<std::time::SystemTime>,
+    last_checked: Instant,
+}
+
+impl DesktopHotReloader {
+    const CHECK_INTERVAL: Duration = Duration::from_millis(750);
+
+    fn new() -> Self {
+        let relaunch = DesktopRelaunch::from_current_process();
+        let initial_modified = relaunch
+            .as_ref()
+            .and_then(|relaunch| binary_modified_time(&relaunch.binary));
+        Self {
+            relaunch,
+            initial_modified,
+            last_checked: Instant::now(),
+        }
+    }
+
+    fn poll(&mut self) -> Option<DesktopRelaunch> {
+        if self.last_checked.elapsed() < Self::CHECK_INTERVAL {
+            return None;
+        }
+        self.last_checked = Instant::now();
+
+        let relaunch = self.relaunch.as_ref()?;
+        let initial_modified = self.initial_modified?;
+        let current_modified = binary_modified_time(&relaunch.binary)?;
+        if current_modified > initial_modified {
+            self.initial_modified = Some(current_modified);
+            return Some(relaunch.clone());
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DesktopRelaunch {
+    binary: PathBuf,
+    args: Vec<OsString>,
+}
+
+impl DesktopRelaunch {
+    fn from_current_process() -> Option<Self> {
+        let mut args = std::env::args_os();
+        let argv0 = args.next()?;
+        let binary = resolve_invoked_binary(&argv0).or_else(|| std::env::current_exe().ok())?;
+        Some(Self {
+            binary,
+            args: args.collect(),
+        })
+    }
+
+    fn spawn(&self) -> Result<()> {
+        Command::new(&self.binary)
+            .args(&self.args)
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", self.binary.display()))?;
+        Ok(())
+    }
+}
+
+fn binary_modified_time(path: &Path) -> Option<std::time::SystemTime> {
+    path.metadata().ok()?.modified().ok()
+}
+
+fn resolve_invoked_binary(argv0: &OsString) -> Option<PathBuf> {
+    let path = PathBuf::from(argv0);
+    if path.components().count() > 1 {
+        return Some(path);
+    }
+
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(&path))
+        .find(|candidate| candidate.is_file())
+}
+
 enum DesktopApp {
     SingleSession(SingleSessionApp),
     Workspace(Workspace),
@@ -364,7 +486,6 @@ impl DesktopApp {
 
 #[derive(Clone, Debug)]
 struct SingleSessionApp {
-    mode: InputMode,
     session: Option<workspace::SessionCard>,
     draft: String,
     detail_scroll: usize,
@@ -373,7 +494,6 @@ struct SingleSessionApp {
 impl SingleSessionApp {
     fn new(session: Option<workspace::SessionCard>) -> Self {
         Self {
-            mode: InputMode::Navigation,
             session,
             draft: String::new(),
             detail_scroll: 0,
@@ -386,61 +506,22 @@ impl SingleSessionApp {
     }
 
     fn status_title(&self) -> String {
-        let mode = match self.mode {
-            InputMode::Navigation => "NAV",
-            InputMode::Insert => "INSERT",
-        };
         let title = self
             .session
             .as_ref()
             .map(|session| session.title.as_str())
             .unwrap_or("new session");
         format!(
-            "Jcode Desktop · single session · {mode} · {title} · Ctrl+; spawn · Ctrl+R refresh · i insert · Esc quit · --workspace for Niri layout"
+            "Jcode Desktop · single session · {title} · Ctrl+Enter send · Enter newline · Ctrl+; spawn · Ctrl+R refresh · Esc quit · --workspace for Niri layout"
         )
     }
 
     fn handle_key(&mut self, key: KeyInput) -> KeyOutcome {
-        match self.mode {
-            InputMode::Navigation => self.handle_navigation_key(key),
-            InputMode::Insert => self.handle_insert_key(key),
-        }
-    }
-
-    fn handle_navigation_key(&mut self, key: KeyInput) -> KeyOutcome {
-        match key {
-            KeyInput::Escape => KeyOutcome::Exit,
-            KeyInput::SpawnPanel => KeyOutcome::SpawnSession,
-            KeyInput::RefreshSessions => KeyOutcome::Redraw,
-            KeyInput::Enter => self.open_session(),
-            KeyInput::Character(text) if text == "i" => {
-                self.mode = InputMode::Insert;
-                KeyOutcome::Redraw
-            }
-            KeyInput::Character(text) if text == "o" || text == "O" => self.open_session(),
-            KeyInput::Character(text) if text == "j" => self.scroll_detail(1),
-            KeyInput::Character(text) if text == "k" => self.scroll_detail(-1),
-            KeyInput::Character(text) if text == "g" => {
-                self.detail_scroll = 0;
-                KeyOutcome::Redraw
-            }
-            KeyInput::Character(text) if text == "G" => {
-                self.detail_scroll = self.detail_line_count().saturating_sub(1);
-                KeyOutcome::Redraw
-            }
-            _ => KeyOutcome::None,
-        }
-    }
-
-    fn handle_insert_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
             KeyInput::SpawnPanel => KeyOutcome::SpawnSession,
             KeyInput::RefreshSessions => KeyOutcome::Redraw,
             KeyInput::SubmitDraft => self.submit_draft(),
-            KeyInput::Escape => {
-                self.mode = InputMode::Navigation;
-                KeyOutcome::Redraw
-            }
+            KeyInput::Escape => KeyOutcome::Exit,
             KeyInput::Enter => {
                 self.draft.push('\n');
                 KeyOutcome::Redraw
@@ -457,16 +538,6 @@ impl SingleSessionApp {
         }
     }
 
-    fn open_session(&self) -> KeyOutcome {
-        let Some(session) = &self.session else {
-            return KeyOutcome::SpawnSession;
-        };
-        KeyOutcome::OpenSession {
-            session_id: session.session_id.clone(),
-            title: session.title.clone(),
-        }
-    }
-
     fn submit_draft(&mut self) -> KeyOutcome {
         let message = self.draft.trim().to_string();
         if message.is_empty() {
@@ -478,25 +549,11 @@ impl SingleSessionApp {
         let session_id = session.session_id.clone();
         let title = session.title.clone();
         self.draft.clear();
-        self.mode = InputMode::Navigation;
         KeyOutcome::SendDraft {
             session_id,
             title,
             message,
         }
-    }
-
-    fn detail_line_count(&self) -> usize {
-        single_session_lines(self.session.as_ref()).len()
-    }
-
-    fn scroll_detail(&mut self, delta: isize) -> KeyOutcome {
-        let max_scroll = self.detail_line_count().saturating_sub(1);
-        self.detail_scroll = self
-            .detail_scroll
-            .saturating_add_signed(delta)
-            .min(max_scroll);
-        KeyOutcome::Redraw
     }
 }
 
@@ -948,6 +1005,19 @@ fn build_single_session_vertices(
         width: width.max(1.0),
         height: height.max(1.0),
     };
+    let typography = single_session_typography();
+    let _ = (
+        typography.family,
+        typography.weight,
+        typography.fallbacks,
+        typography.title_size,
+        typography.body_size,
+        typography.meta_size,
+        typography.code_size,
+        typography.body_line_height,
+        typography.code_line_height,
+        typography.meta_line_height,
+    );
     let surface = single_session_surface(app.session.as_ref());
     push_surface(
         &mut vertices,
@@ -957,7 +1027,7 @@ fn build_single_session_vertices(
         focus_pulse,
         size,
     );
-    let draft = if app.mode == InputMode::Insert && !app.draft.trim().is_empty() {
+    let draft = if !app.draft.trim().is_empty() {
         Some(app.draft.trim())
     } else {
         None
@@ -1409,10 +1479,13 @@ mod tests {
 
     #[test]
     fn single_session_without_session_spawns_on_open() {
-        let app = SingleSessionApp::new(None);
+        let mut app = SingleSessionApp::new(None);
 
         assert!(app.status_title().contains("single session"));
-        assert_eq!(app.open_session(), KeyOutcome::SpawnSession);
+        assert_eq!(
+            app.handle_key(KeyInput::SpawnPanel),
+            KeyOutcome::SpawnSession
+        );
         assert!(
             single_session_lines(None)
                 .iter()
@@ -1422,12 +1495,15 @@ mod tests {
 
     #[test]
     fn default_single_session_app_starts_without_attaching_recent_session() {
-        let DesktopApp::SingleSession(app) = fresh_single_session_app() else {
+        let DesktopApp::SingleSession(mut app) = fresh_single_session_app() else {
             panic!("default desktop app should be single-session mode");
         };
 
         assert!(app.session.is_none());
-        assert_eq!(app.open_session(), KeyOutcome::SpawnSession);
+        assert_eq!(
+            app.handle_key(KeyInput::SpawnPanel),
+            KeyOutcome::SpawnSession
+        );
     }
 
     #[test]
@@ -1442,18 +1518,8 @@ mod tests {
         };
         let mut app = SingleSessionApp::new(Some(card));
 
-        assert_eq!(
-            app.handle_key(KeyInput::Enter),
-            KeyOutcome::OpenSession {
-                session_id: "session_alpha".to_string(),
-                title: "alpha".to_string(),
-            }
-        );
-        assert_eq!(
-            app.handle_key(KeyInput::Character("i".to_string())),
-            KeyOutcome::Redraw
-        );
-        assert_eq!(app.mode, InputMode::Insert);
+        assert_eq!(app.handle_key(KeyInput::Enter), KeyOutcome::Redraw);
+        assert_eq!(app.draft, "\n");
         app.handle_key(KeyInput::Character("draft".to_string()));
         assert_eq!(
             app.handle_key(KeyInput::SubmitDraft),
