@@ -13,7 +13,7 @@ const TELEMETRY_ENDPOINT: &str = "https://jcode-telemetry.jeremyhuang55555.worke
 const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOCKING_INSTALL_TIMEOUT: Duration = Duration::from_millis(1200);
 const BLOCKING_LIFECYCLE_TIMEOUT: Duration = Duration::from_millis(800);
-const TELEMETRY_SCHEMA_VERSION: u32 = 3;
+const TELEMETRY_SCHEMA_VERSION: u32 = 4;
 
 static SESSION_STATE: Mutex<Option<SessionTelemetry>> = Mutex::new(None);
 
@@ -181,6 +181,11 @@ struct SessionLifecycleEvent {
     file_write_calls: u32,
     tests_run: u32,
     tests_passed: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    total_tokens: u64,
     feature_memory_used: bool,
     feature_swarm_used: bool,
     feature_web_used: bool,
@@ -299,6 +304,11 @@ struct TurnEndEvent {
     file_write_calls: u32,
     tests_run: u32,
     tests_passed: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    total_tokens: u64,
     feature_memory_used: bool,
     feature_swarm_used: bool,
     feature_web_used: bool,
@@ -362,6 +372,11 @@ struct TurnTelemetry {
     file_write_calls: u32,
     tests_run: u32,
     tests_passed: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    total_tokens: u64,
     feature_memory_used: bool,
     feature_swarm_used: bool,
     feature_web_used: bool,
@@ -413,6 +428,11 @@ struct SessionTelemetry {
     file_write_calls: u32,
     tests_run: u32,
     tests_passed: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    total_tokens: u64,
     feature_memory_used: bool,
     feature_swarm_used: bool,
     feature_web_used: bool,
@@ -492,6 +512,11 @@ impl TurnTelemetry {
             file_write_calls: 0,
             tests_run: 0,
             tests_passed: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            total_tokens: 0,
             feature_memory_used: false,
             feature_swarm_used: false,
             feature_web_used: false,
@@ -1335,6 +1360,11 @@ fn finalize_current_turn(
         file_write_calls: turn.file_write_calls,
         tests_run: turn.tests_run,
         tests_passed: turn.tests_passed,
+        input_tokens: turn.input_tokens,
+        output_tokens: turn.output_tokens,
+        cache_read_input_tokens: turn.cache_read_input_tokens,
+        cache_creation_input_tokens: turn.cache_creation_input_tokens,
+        total_tokens: turn.total_tokens,
         feature_memory_used: turn.feature_memory_used,
         feature_swarm_used: turn.feature_swarm_used,
         feature_web_used: turn.feature_web_used,
@@ -1642,6 +1672,11 @@ fn begin_session_with_mode(provider: &str, model: &str, resumed_session: bool) {
         file_write_calls: 0,
         tests_run: 0,
         tests_passed: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        total_tokens: 0,
         feature_memory_used: false,
         feature_swarm_used: false,
         feature_web_used: false,
@@ -1828,6 +1863,45 @@ pub fn record_connection_type(connection: &str) {
     maybe_emit_session_start();
 }
 
+pub fn record_token_usage(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+) {
+    if let Ok(mut guard) = SESSION_STATE.lock()
+        && let Some(ref mut state) = *guard
+    {
+        observe_session_concurrency(state);
+        let cache_read = cache_read_input_tokens.unwrap_or(0);
+        let cache_creation = cache_creation_input_tokens.unwrap_or(0);
+        let total = input_tokens
+            .saturating_add(output_tokens)
+            .saturating_add(cache_read)
+            .saturating_add(cache_creation);
+
+        state.input_tokens = state.input_tokens.saturating_add(input_tokens);
+        state.output_tokens = state.output_tokens.saturating_add(output_tokens);
+        state.cache_read_input_tokens = state.cache_read_input_tokens.saturating_add(cache_read);
+        state.cache_creation_input_tokens = state
+            .cache_creation_input_tokens
+            .saturating_add(cache_creation);
+        state.total_tokens = state.total_tokens.saturating_add(total);
+
+        if let Some(turn) = state.current_turn.as_mut() {
+            turn.input_tokens = turn.input_tokens.saturating_add(input_tokens);
+            turn.output_tokens = turn.output_tokens.saturating_add(output_tokens);
+            turn.cache_read_input_tokens = turn.cache_read_input_tokens.saturating_add(cache_read);
+            turn.cache_creation_input_tokens = turn
+                .cache_creation_input_tokens
+                .saturating_add(cache_creation);
+            turn.total_tokens = turn.total_tokens.saturating_add(total);
+            update_turn_activity_timestamp(turn, Instant::now());
+        }
+    }
+    maybe_emit_session_start();
+}
+
 pub fn record_error(category: ErrorCategory) {
     if let Ok(mut guard) = SESSION_STATE.lock()
         && let Some(ref mut state) = *guard
@@ -1994,6 +2068,11 @@ fn emit_lifecycle_event(
                 file_write_calls: s.file_write_calls,
                 tests_run: s.tests_run,
                 tests_passed: s.tests_passed,
+                input_tokens: s.input_tokens,
+                output_tokens: s.output_tokens,
+                cache_read_input_tokens: s.cache_read_input_tokens,
+                cache_creation_input_tokens: s.cache_creation_input_tokens,
+                total_tokens: s.total_tokens,
                 feature_memory_used: s.feature_memory_used,
                 feature_swarm_used: s.feature_swarm_used,
                 feature_web_used: s.feature_web_used,
@@ -2123,6 +2202,11 @@ fn emit_lifecycle_event(
         file_write_calls: state.file_write_calls,
         tests_run: state.tests_run,
         tests_passed: state.tests_passed,
+        input_tokens: state.input_tokens,
+        output_tokens: state.output_tokens,
+        cache_read_input_tokens: state.cache_read_input_tokens,
+        cache_creation_input_tokens: state.cache_creation_input_tokens,
+        total_tokens: state.total_tokens,
         feature_memory_used: state.feature_memory_used,
         feature_swarm_used: state.feature_swarm_used,
         feature_web_used: state.feature_web_used,

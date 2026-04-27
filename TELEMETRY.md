@@ -109,6 +109,9 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | `file_write_calls` | `2` | Count of write/edit/patch style tool uses |
 | `tests_run` | `1` | Coarse count of test runs triggered |
 | `tests_passed` | `1` | Coarse count of successful test runs |
+| `input_tokens` / `output_tokens` | `12345` / `678` | Session-level provider-reported token usage totals |
+| `cache_read_input_tokens` / `cache_creation_input_tokens` | `9000` / `1200` | Session-level provider-reported prompt-cache token totals when available |
+| `total_tokens` | `23223` | Sum of input, output, cache-read, and cache-creation tokens |
 | `feature_*_used` | `true/false` | Whether a feature family was used (memory, swarm, web, email, MCP, side panel, goals, selfdev, background, subagents) |
 | `tool_cat_*` | `0..N` | Coarse tool category counts (read/search, write, shell, web, memory, subagent, swarm, email, side-panel, goal, MCP, other) |
 | `command_*_used` | `true/false` | Whether a slash-command family was used in-session |
@@ -156,6 +159,9 @@ This is a privacy-safe per-prompt summary event. It contains no prompt text, no 
 | `executed_tool_calls` / `executed_tool_successes` / `executed_tool_failures` | `4` / `3` / `1` | Registry tool execution outcomes |
 | `tool_latency_total_ms` / `tool_latency_max_ms` | `2600` / `1400` | Tool latency footprint within the turn |
 | `file_write_calls` / `tests_run` / `tests_passed` | `1` / `1` / `1` | Outcome proxies for coding workflows |
+| `input_tokens` / `output_tokens` | `1200` / `180` | Turn-level provider-reported token usage totals |
+| `cache_read_input_tokens` / `cache_creation_input_tokens` | `8000` / `600` | Turn-level provider-reported prompt-cache token totals when available |
+| `total_tokens` | `9980` | Sum of input, output, cache-read, and cache-creation tokens for the turn |
 | `feature_*_used` | `true/false` | Which feature families were touched in the turn |
 | `tool_cat_*` | `0..N` | Tool category mix for the turn |
 | `workflow_*_used` | `true/false` | What kind of workflow this turn looked like |

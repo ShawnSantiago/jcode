@@ -519,6 +519,19 @@ impl Agent {
                 || usage_cache_read.is_some()
                 || usage_cache_creation.is_some()
             {
+                crate::telemetry::record_token_usage(
+                    usage_input.unwrap_or(0),
+                    usage_output.unwrap_or(0),
+                    usage_cache_read,
+                    usage_cache_creation,
+                );
+            }
+
+            if usage_input.is_some()
+                || usage_output.is_some()
+                || usage_cache_read.is_some()
+                || usage_cache_creation.is_some()
+            {
                 let _ = event_tx.send(ServerEvent::TokenUsage {
                     input: usage_input.unwrap_or(0),
                     output: usage_output.unwrap_or(0),

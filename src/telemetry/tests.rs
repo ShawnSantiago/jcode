@@ -114,6 +114,11 @@ fn test_session_end_event_serialization() {
         file_write_calls: 2,
         tests_run: 1,
         tests_passed: 1,
+        input_tokens: 1234,
+        output_tokens: 567,
+        cache_read_input_tokens: 890,
+        cache_creation_input_tokens: 12,
+        total_tokens: 2703,
         feature_memory_used: true,
         feature_swarm_used: false,
         feature_web_used: true,
@@ -210,7 +215,45 @@ fn test_session_end_event_serialization() {
     assert_eq!(json["transport_persistent_ws_reuse"], 5);
     assert_eq!(json["multi_sessioned"], true);
     assert_eq!(json["end_reason"], "normal_exit");
+    assert_eq!(json["input_tokens"], 1234);
+    assert_eq!(json["output_tokens"], 567);
+    assert_eq!(json["cache_read_input_tokens"], 890);
+    assert_eq!(json["cache_creation_input_tokens"], 12);
+    assert_eq!(json["total_tokens"], 2703);
     assert_eq!(json["errors"]["provider_timeout"], 2);
+}
+
+#[test]
+fn test_record_token_usage_aggregates_session_and_turn() {
+    let _guard = lock_telemetry_test_state();
+    reset_counters();
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+    begin_session_with_mode("openai", "gpt-5.4", false);
+    record_turn();
+    record_token_usage(100, 25, Some(200), Some(10));
+    record_token_usage(50, 5, None, Some(2));
+
+    {
+        let guard = SESSION_STATE.lock().unwrap();
+        let state = guard.as_ref().expect("session telemetry state");
+        assert_eq!(state.input_tokens, 150);
+        assert_eq!(state.output_tokens, 30);
+        assert_eq!(state.cache_read_input_tokens, 200);
+        assert_eq!(state.cache_creation_input_tokens, 12);
+        assert_eq!(state.total_tokens, 392);
+        let turn = state.current_turn.as_ref().expect("current turn");
+        assert_eq!(turn.input_tokens, 150);
+        assert_eq!(turn.output_tokens, 30);
+        assert_eq!(turn.cache_read_input_tokens, 200);
+        assert_eq!(turn.cache_creation_input_tokens, 12);
+        assert_eq!(turn.total_tokens, 392);
+    }
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+    reset_counters();
 }
 
 #[test]

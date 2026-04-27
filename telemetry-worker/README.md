@@ -53,6 +53,7 @@ npm run migrate:transport
 npm run migrate:usage
 npm run migrate:phase123
 npm run migrate:workflow
+npm run migrate:tokens
 
 # Run the health dashboard query
 npm run health
