@@ -451,6 +451,10 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    pub(crate) fn supports_provider_routing_features(&self) -> bool {
+        self.supports_provider_features
+    }
+
     /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
     fn is_kimi_model(model: &str) -> bool {
         jcode_provider_openrouter::is_kimi_model(model)
