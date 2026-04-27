@@ -442,6 +442,7 @@ struct WorkspaceRenderLayout {
     visible: VisibleColumnLayout,
     column_width: f32,
     scroll_offset: f32,
+    vertical_scroll_offset: f32,
 }
 
 #[derive(Default)]
@@ -449,10 +450,13 @@ struct AnimatedViewport {
     initialized: bool,
     start_column_width: f32,
     start_scroll_offset: f32,
+    start_vertical_scroll_offset: f32,
     current_column_width: f32,
     current_scroll_offset: f32,
+    current_vertical_scroll_offset: f32,
     target_column_width: f32,
     target_scroll_offset: f32,
+    target_vertical_scroll_offset: f32,
     started_at: Option<Instant>,
 }
 
@@ -462,18 +466,26 @@ impl AnimatedViewport {
             self.initialized = true;
             self.current_column_width = target.column_width;
             self.current_scroll_offset = target.scroll_offset;
+            self.current_vertical_scroll_offset = target.vertical_scroll_offset;
             self.target_column_width = target.column_width;
             self.target_scroll_offset = target.scroll_offset;
+            self.target_vertical_scroll_offset = target.vertical_scroll_offset;
             return target;
         }
 
         if has_layout_target_changed(self.target_column_width, target.column_width)
             || has_layout_target_changed(self.target_scroll_offset, target.scroll_offset)
+            || has_layout_target_changed(
+                self.target_vertical_scroll_offset,
+                target.vertical_scroll_offset,
+            )
         {
             self.start_column_width = self.current_column_width;
             self.start_scroll_offset = self.current_scroll_offset;
+            self.start_vertical_scroll_offset = self.current_vertical_scroll_offset;
             self.target_column_width = target.column_width;
             self.target_scroll_offset = target.scroll_offset;
+            self.target_vertical_scroll_offset = target.vertical_scroll_offset;
             self.started_at = Some(now);
         }
 
@@ -486,10 +498,16 @@ impl AnimatedViewport {
                 lerp(self.start_column_width, self.target_column_width, eased);
             self.current_scroll_offset =
                 lerp(self.start_scroll_offset, self.target_scroll_offset, eased);
+            self.current_vertical_scroll_offset = lerp(
+                self.start_vertical_scroll_offset,
+                self.target_vertical_scroll_offset,
+                eased,
+            );
 
             if progress >= 1.0 {
                 self.current_column_width = self.target_column_width;
                 self.current_scroll_offset = self.target_scroll_offset;
+                self.current_vertical_scroll_offset = self.target_vertical_scroll_offset;
                 self.started_at = None;
             }
         }
@@ -498,6 +516,7 @@ impl AnimatedViewport {
             visible: target.visible,
             column_width: self.current_column_width,
             scroll_offset: self.current_scroll_offset,
+            vertical_scroll_offset: self.current_vertical_scroll_offset,
         }
     }
 
@@ -586,18 +605,21 @@ fn build_vertices(
     }
 
     let workspace_height = (height - STATUS_BAR_HEIGHT - OUTER_PADDING * 3.0).max(1.0);
+    let workspace_top = STATUS_BAR_HEIGHT + OUTER_PADDING * 2.0;
+    let lane_pitch = workspace_height + GAP;
     let column_width = render_layout.column_width;
     let scroll_offset = render_layout.scroll_offset;
+    let vertical_scroll_offset = render_layout.vertical_scroll_offset;
 
-    for surface in workspace
-        .surfaces
-        .iter()
-        .filter(|surface| surface.lane == active_workspace)
-    {
+    for surface in &workspace.surfaces {
         let column = surface.column as f32;
+        let y = workspace_top + surface.lane as f32 * lane_pitch - vertical_scroll_offset;
+        if y + workspace_height < workspace_top || y > workspace_top + workspace_height {
+            continue;
+        }
         let rect = Rect {
             x: OUTER_PADDING + column * (column_width + GAP) - scroll_offset,
-            y: STATUS_BAR_HEIGHT + OUTER_PADDING * 2.0,
+            y,
             width: column_width,
             height: workspace_height,
         };
@@ -619,6 +641,8 @@ fn workspace_render_layout(
     monitor_size: Option<PhysicalSize<u32>>,
 ) -> WorkspaceRenderLayout {
     let workspace_width = (size.width as f32 - OUTER_PADDING * 2.0).max(1.0);
+    let workspace_height = (size.height as f32 - STATUS_BAR_HEIGHT - OUTER_PADDING * 3.0).max(1.0);
+    let lane_pitch = workspace_height + GAP;
     let active_workspace = workspace.current_workspace();
     let visible = visible_column_layout(
         workspace,
@@ -630,11 +654,13 @@ fn workspace_render_layout(
     let total_gap_width = GAP * (visible_columns_f - 1.0).max(0.0);
     let column_width = ((workspace_width - total_gap_width) / visible_columns_f).max(1.0);
     let scroll_offset = visible.first_visible_column as f32 * (column_width + GAP);
+    let vertical_scroll_offset = active_workspace as f32 * lane_pitch;
 
     WorkspaceRenderLayout {
         visible,
         column_width,
         scroll_offset,
+        vertical_scroll_offset,
     }
 }
 
@@ -1339,6 +1365,7 @@ mod tests {
             visible,
             column_width: 200.0,
             scroll_offset: 0.0,
+            vertical_scroll_offset: 0.0,
         };
         let target = WorkspaceRenderLayout {
             visible: VisibleColumnLayout {
@@ -1347,16 +1374,19 @@ mod tests {
             },
             column_width: 300.0,
             scroll_offset: 600.0,
+            vertical_scroll_offset: 800.0,
         };
 
         let first_frame = animation.frame(start, now);
         assert_eq!(first_frame.column_width, 200.0);
         assert_eq!(first_frame.scroll_offset, 0.0);
+        assert_eq!(first_frame.vertical_scroll_offset, 0.0);
         assert!(!animation.is_animating());
 
         let transition_start = animation.frame(target, now);
         assert_eq!(transition_start.column_width, 200.0);
         assert_eq!(transition_start.scroll_offset, 0.0);
+        assert_eq!(transition_start.vertical_scroll_offset, 0.0);
         assert!(animation.is_animating());
 
         let middle = animation.frame(target, now + VIEWPORT_ANIMATION_DURATION / 2);
@@ -1364,10 +1394,13 @@ mod tests {
         assert!(middle.column_width < 300.0);
         assert!(middle.scroll_offset > 0.0);
         assert!(middle.scroll_offset < 600.0);
+        assert!(middle.vertical_scroll_offset > 0.0);
+        assert!(middle.vertical_scroll_offset < 800.0);
 
         let final_frame = animation.frame(target, now + VIEWPORT_ANIMATION_DURATION);
         assert_eq!(final_frame.column_width, 300.0);
         assert_eq!(final_frame.scroll_offset, 600.0);
+        assert_eq!(final_frame.vertical_scroll_offset, 800.0);
         assert!(!animation.is_animating());
     }
 }
