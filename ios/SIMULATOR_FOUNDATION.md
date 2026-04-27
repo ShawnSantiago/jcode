@@ -152,6 +152,17 @@ cargo run -p jcode-mobile-sim -- state
 cargo run -p jcode-mobile-sim -- tree
 ```
 
+### Render a Linux text preview
+
+The `render` command prints a deterministic human-readable shell view generated
+from the same Rust semantic UI tree used by agents. It is useful on Linux hosts
+without a graphical simulator.
+
+```bash
+cargo run -p jcode-mobile-sim -- render
+cargo run -p jcode-mobile-sim -- render --output /tmp/mobile-render.txt
+```
+
 ### Find and assert semantic UI nodes
 
 ```bash
@@ -331,7 +342,7 @@ This is an initial foundation only.
 
 Not included yet:
 
-- visible desktop renderer
+- interactive desktop renderer beyond deterministic text/SVG rendering
 - raster screenshot export in addition to deterministic SVG snapshots
 - richer replay DSL beyond deterministic JSON action bundles
 - live render inspector

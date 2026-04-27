@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use jcode_mobile_core::{
     DispatchReport, ScenarioName, ScreenshotSnapshot, SimulatorAction, SimulatorStore,
-    UiNodeAction, diff_screenshots, hit_test, hit_test_actionable, screenshot_snapshot,
+    UiNodeAction, diff_screenshots, hit_test, hit_test_actionable, render_text,
+    screenshot_snapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -186,6 +187,11 @@ async fn handle_request(
                 serde_json::to_value(store.semantic_tree()).unwrap_or(Value::Null),
                 false,
             ))
+        }
+        "render" => {
+            let store = store.lock().await;
+            let output = render_text(&store.semantic_tree());
+            Ok((json!({"format": "text", "output": output}), false))
         }
         "screenshot" => {
             let store = store.lock().await;
@@ -941,6 +947,23 @@ mod tests {
         .await?;
         let tree_json = serde_json::to_string(&tree.result)?;
         assert!(tree_json.contains("chat.send"));
+
+        let render = send_request(
+            &socket,
+            AutomationRequest {
+                id: "render".to_string(),
+                method: "render".to_string(),
+                params: Value::Null,
+            },
+        )
+        .await?;
+        assert!(render.ok);
+        assert!(
+            render.result["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("chat.send [Button]")
+        );
 
         let screenshot = send_request(
             &socket,

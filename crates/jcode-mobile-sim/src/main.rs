@@ -41,6 +41,12 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    Render {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     Screenshot {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -239,6 +245,10 @@ async fn main() -> Result<()> {
         }
         Command::Tree { socket } => {
             print_result(send_simple(&resolve_socket(socket), "tree", Value::Null).await?)
+        }
+        Command::Render { socket, output } => {
+            let rendered = send_simple(&resolve_socket(socket), "render", Value::Null).await?;
+            write_text_output(rendered, output)
         }
         Command::Screenshot {
             socket,
@@ -563,6 +573,24 @@ fn write_or_print_json(value: Value, output: Option<PathBuf>) -> Result<()> {
             .with_context(|| format!("write replay trace {}", output.display()))?;
     } else {
         println!("{json}");
+    }
+    Ok(())
+}
+
+fn write_text_output(value: Value, output: Option<PathBuf>) -> Result<()> {
+    let text = value
+        .get("output")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("render response missing output field"))?;
+    if let Some(output) = output {
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create render output directory {}", parent.display()))?;
+        }
+        std::fs::write(&output, text)
+            .with_context(|| format!("write render output {}", output.display()))?;
+    } else {
+        print!("{text}");
     }
     Ok(())
 }

@@ -505,6 +505,68 @@ pub fn diff_screenshots(
     }
 }
 
+pub fn render_text(tree: &UiTree) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "jcode mobile simulator\nscreen: {:?}\nviewport: {}x{}\n",
+        tree.screen, DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT
+    ));
+    render_text_node(&mut output, &tree.root, 0);
+    output
+}
+
+fn render_text_node(output: &mut String, node: &UiNode, depth: usize) {
+    if !node.visible {
+        return;
+    }
+    let indent = "  ".repeat(depth);
+    let bounds = node
+        .bounds
+        .map(|bounds| {
+            format!(
+                "@{},{} {}x{}",
+                bounds.x, bounds.y, bounds.width, bounds.height
+            )
+        })
+        .unwrap_or_else(|| "@unlaid".to_string());
+    let value = node
+        .value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" = {}", truncate_for_text(value, 72)))
+        .unwrap_or_default();
+    let actions = if node.supported_actions.is_empty() {
+        "-".to_string()
+    } else {
+        node.supported_actions
+            .iter()
+            .map(|action| format!("{:?}", action).to_lowercase())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    output.push_str(&format!(
+        "{indent}- {} [{:?}] {bounds} enabled={} actions={} label={}{}\n",
+        node.id,
+        node.role,
+        node.enabled,
+        actions,
+        truncate_for_text(&node.label, 48),
+        value
+    ));
+    for child in &node.children {
+        render_text_node(output, child, depth + 1);
+    }
+}
+
+fn truncate_for_text(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut output: String = input.chars().take(max_chars.saturating_sub(1)).collect();
+    output.push('…');
+    output
+}
+
 fn render_svg(tree: &UiTree) -> String {
     let mut svg = String::new();
     svg.push_str(&format!(
@@ -1664,5 +1726,16 @@ mod tests {
         let diff = diff_screenshots(&expected, &actual);
         assert!(!diff.matches);
         assert!(diff.first_difference.is_some());
+    }
+
+    #[test]
+    fn text_render_exposes_human_readable_layout() {
+        let store = SimulatorStore::new(SimulatorState::for_scenario(ScenarioName::ConnectedChat));
+        let text = render_text(&store.semantic_tree());
+
+        assert!(text.contains("jcode mobile simulator"));
+        assert!(text.contains("screen: Chat"));
+        assert!(text.contains("chat.send [Button]"));
+        assert!(text.contains("@280,766 94x44"));
     }
 }
