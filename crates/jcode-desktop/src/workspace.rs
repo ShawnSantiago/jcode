@@ -165,6 +165,7 @@ pub struct Workspace {
     pub surfaces: Vec<Surface>,
     pub focused_id: u64,
     pub zoomed: bool,
+    pub detail_scroll: usize,
     pub draft: String,
     panel_size: PanelSizePreset,
     next_id: u64,
@@ -188,6 +189,7 @@ impl Workspace {
             surfaces,
             focused_id: 1,
             zoomed: false,
+            detail_scroll: 0,
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id: 8,
@@ -215,6 +217,7 @@ impl Workspace {
             focused_id: surfaces.first().map(|surface| surface.id).unwrap_or(1),
             surfaces,
             zoomed: false,
+            detail_scroll: 0,
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id,
@@ -239,6 +242,7 @@ impl Workspace {
             }],
             focused_id: 1,
             zoomed: false,
+            detail_scroll: 0,
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id: 2,
@@ -269,6 +273,9 @@ impl Workspace {
         let panel_size = self.panel_size.label();
 
         match self.mode {
+            InputMode::Navigation if self.zoomed => format!(
+                "Jcode Desktop · {mode}{zoom} · workspace {workspace} · panel {panel_size} · {focused} · j/k scroll · g/G top/bottom · z unzoom · o/Enter open · Esc quit"
+            ),
             InputMode::Navigation => format!(
                 "Jcode Desktop · {mode}{zoom} · workspace {workspace} · panel {panel_size} · {focused} · h/l columns · j/k workspaces · Ctrl+1-4 panel size · Ctrl+R refresh · Ctrl+; new · Ctrl+? help · z zoom · i insert · Esc quit"
             ),
@@ -297,6 +304,7 @@ impl Workspace {
         let mut replacement = Self::from_session_cards(cards);
         replacement.mode = previous_mode;
         replacement.panel_size = previous_panel_size;
+        replacement.detail_scroll = self.detail_scroll;
         if let Some(previous_session_id) = previous_session_id
             && let Some(surface) = replacement
                 .surfaces
@@ -307,6 +315,7 @@ impl Workspace {
         }
 
         *self = replacement;
+        self.clamp_detail_scroll();
     }
 
     pub fn preferences(&self) -> DesktopPreferences {
@@ -330,12 +339,14 @@ impl Workspace {
         {
             self.focused_id = surface.id;
             self.zoomed = false;
+            self.detail_scroll = 0;
             return;
         }
 
         if self.is_lane_navigable(preferences.workspace_lane) {
             self.focused_id = self.ensure_workspace_surface(preferences.workspace_lane, 0);
             self.zoomed = false;
+            self.detail_scroll = 0;
         }
     }
 
@@ -391,9 +402,17 @@ impl Workspace {
 
         match text.as_str() {
             "h" => self.focus_column(Direction::Left),
+            "j" if self.zoomed && self.focused_detail_line_count() > 0 => self.scroll_detail(1),
+            "k" if self.zoomed && self.focused_detail_line_count() > 0 => self.scroll_detail(-1),
             "j" => self.focus_workspace(Direction::Down),
             "k" => self.focus_workspace(Direction::Up),
             "l" => self.focus_column(Direction::Right),
+            "g" if self.zoomed && self.focused_detail_line_count() > 0 => {
+                self.scroll_detail_to_top()
+            }
+            "G" if self.zoomed && self.focused_detail_line_count() > 0 => {
+                self.scroll_detail_to_bottom()
+            }
             "o" | "O" => {
                 if let Some((session_id, title)) = self.focused_session_target() {
                     return KeyOutcome::OpenSession { session_id, title };
@@ -415,6 +434,7 @@ impl Workspace {
             "x" => self.close_focused(),
             "z" => {
                 self.zoomed = !self.zoomed;
+                self.detail_scroll = 0;
                 true
             }
             _ => false,
@@ -457,6 +477,7 @@ impl Workspace {
     fn focus_column(&mut self, direction: Direction) -> bool {
         if let Some(next_id) = self.column_neighbor_id(direction) {
             self.focused_id = next_id;
+            self.detail_scroll = 0;
             true
         } else {
             false
@@ -480,6 +501,7 @@ impl Workspace {
         let target_id = self.ensure_workspace_surface(target_lane, current_column);
         self.focused_id = target_id;
         self.zoomed = false;
+        self.detail_scroll = 0;
         true
     }
 
@@ -539,6 +561,7 @@ impl Workspace {
                 let neighbor_column = self.surfaces[neighbor_index].column;
                 self.surfaces[focused_index].column = neighbor_column;
                 self.surfaces[neighbor_index].column = focused_column;
+                self.detail_scroll = 0;
                 return true;
             }
         }
@@ -556,6 +579,7 @@ impl Workspace {
         };
         self.surfaces[focused_index].lane += lane_delta;
         self.zoomed = false;
+        self.detail_scroll = 0;
         true
     }
 
@@ -608,6 +632,7 @@ impl Workspace {
         ));
         self.focused_id = id;
         self.zoomed = false;
+        self.detail_scroll = 0;
     }
 
     fn open_hotkey_help(&mut self) {
@@ -621,6 +646,7 @@ impl Workspace {
             self.surfaces[index].body_lines = body_lines;
             self.focused_id = self.surfaces[index].id;
             self.zoomed = false;
+            self.detail_scroll = 0;
             return;
         }
 
@@ -639,6 +665,7 @@ impl Workspace {
         self.surfaces.push(help);
         self.focused_id = id;
         self.zoomed = false;
+        self.detail_scroll = 0;
     }
 
     fn hotkey_help_lines(&self) -> Vec<String> {
@@ -658,6 +685,8 @@ impl Workspace {
                 ];
                 if self.focused_session_target().is_some() {
                     lines.push("o or enter open session".to_string());
+                    lines.push("zoomed j k scroll detail".to_string());
+                    lines.push("zoomed g G top bottom".to_string());
                 } else {
                     lines.push("enter insert mode".to_string());
                 }
@@ -699,7 +728,54 @@ impl Workspace {
             self.focused_id = self.surfaces[new_position].id;
         }
         self.zoomed = false;
+        self.detail_scroll = 0;
         true
+    }
+
+    fn focused_detail_line_count(&self) -> usize {
+        self.focused_surface()
+            .map(|surface| surface.detail_lines.len())
+            .unwrap_or_default()
+    }
+
+    fn scroll_detail(&mut self, delta: isize) -> bool {
+        let max_scroll = self.max_detail_scroll();
+        let next = if delta.is_negative() {
+            self.detail_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.detail_scroll.saturating_add(delta as usize)
+        }
+        .min(max_scroll);
+        if next == self.detail_scroll {
+            return false;
+        }
+        self.detail_scroll = next;
+        true
+    }
+
+    fn scroll_detail_to_top(&mut self) -> bool {
+        if self.detail_scroll == 0 {
+            return false;
+        }
+        self.detail_scroll = 0;
+        true
+    }
+
+    fn scroll_detail_to_bottom(&mut self) -> bool {
+        let max_scroll = self.max_detail_scroll();
+        if self.detail_scroll == max_scroll {
+            return false;
+        }
+        self.detail_scroll = max_scroll;
+        true
+    }
+
+    fn clamp_detail_scroll(&mut self) {
+        self.detail_scroll = self.detail_scroll.min(self.max_detail_scroll());
+    }
+
+    fn max_detail_scroll(&self) -> usize {
+        self.focused_detail_line_count().saturating_sub(1)
     }
 }
 
@@ -1016,6 +1092,49 @@ mod tests {
             KeyOutcome::Redraw
         );
         assert_eq!(placeholder_workspace.mode, InputMode::Insert);
+    }
+
+    #[test]
+    fn zoomed_j_and_k_scroll_detail_instead_of_switching_workspace() {
+        let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+        workspace.surfaces[0].detail_lines = vec![
+            "line 0".to_string(),
+            "line 1".to_string(),
+            "line 2".to_string(),
+            "line 3".to_string(),
+        ];
+        workspace.handle_key(KeyInput::Character("z".to_string()));
+
+        assert_eq!(workspace.current_workspace(), 0);
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("j".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.detail_scroll, 1);
+        assert_eq!(workspace.current_workspace(), 0);
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("k".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.detail_scroll, 0);
+    }
+
+    #[test]
+    fn zoomed_g_and_shift_g_jump_detail_scroll() {
+        let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+        workspace.surfaces[0].detail_lines = (0..5).map(|index| format!("line {index}")).collect();
+        workspace.handle_key(KeyInput::Character("z".to_string()));
+
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("G".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.detail_scroll, 4);
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("g".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.detail_scroll, 0);
     }
 
     fn assert_unique_positions(workspace: &Workspace) {

@@ -729,7 +729,14 @@ fn build_vertices(
                 focus_pulse,
                 size,
             );
-            push_panel_contents(&mut vertices, surface, rect, size, true);
+            push_panel_contents(
+                &mut vertices,
+                surface,
+                rect,
+                size,
+                true,
+                workspace.detail_scroll,
+            );
         }
         return vertices;
     }
@@ -763,7 +770,7 @@ fn build_vertices(
             surface_pulse,
             size,
         );
-        push_panel_contents(&mut vertices, surface, rect, size, false);
+        push_panel_contents(&mut vertices, surface, rect, size, false, 0);
     }
 
     vertices
@@ -896,6 +903,7 @@ fn push_panel_contents(
     rect: Rect,
     size: PhysicalSize<u32>,
     expanded: bool,
+    scroll_lines: usize,
 ) {
     push_panel_title(vertices, surface.title.as_str(), rect, size);
 
@@ -908,7 +916,7 @@ fn push_panel_contents(
     let mut y = rect.y + PANEL_BODY_TOP_PADDING;
     let line_height = bitmap_text_height(BITMAP_TEXT_PIXEL) + PANEL_BODY_LINE_GAP;
     let max_y = rect.y + rect.height - PANEL_TITLE_TOP_PADDING;
-    for line in lines {
+    for line in lines.iter().skip(if expanded { scroll_lines } else { 0 }) {
         if y + bitmap_text_height(BITMAP_TEXT_PIXEL) > max_y {
             break;
         }
