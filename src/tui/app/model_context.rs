@@ -1028,6 +1028,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 app.provider_session_id = None;
                 app.session.provider_session_id = None;
                 app.upstream_provider = None;
+                app.invalidate_model_picker_cache();
                 let active_model = app.provider.model();
                 app.update_context_limit_for_model(&active_model);
                 app.session.model = Some(active_model.clone());

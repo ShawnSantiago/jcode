@@ -57,6 +57,84 @@ fn test_open_model_picker_without_routes_shows_actionable_guidance() {
     assert!(last.content.contains("/model"));
 }
 
+#[derive(Clone)]
+struct CountingModelRoutesProvider {
+    calls: StdArc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Provider for CountingModelRoutesProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("CountingModelRoutesProvider")
+    }
+
+    fn name(&self) -> &str {
+        "counting"
+    }
+
+    fn model(&self) -> String {
+        "counting-a".to_string()
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        vec![crate::provider::ModelRoute {
+            model: "counting-a".to_string(),
+            provider: "Counting".to_string(),
+            api_method: "test".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }]
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn test_model_picker_reuses_cached_entries_until_invalidated() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let calls = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+        calls: StdArc::clone(&calls),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    app.open_model_picker();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(app.model_picker_cache.is_some());
+
+    app.open_model_picker();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "second open should reuse cached picker entries"
+    );
+
+    app.invalidate_model_picker_cache();
+    app.open_model_picker();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "invalidating should force rebuilding provider routes"
+    );
+}
+
 #[test]
 fn test_local_model_picker_selection_failure_keeps_picker_open_and_shows_next_steps() {
     let mut app = create_failing_model_switch_test_app();

@@ -112,6 +112,33 @@ struct PendingSessionPickerLoad {
     >,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelPickerCacheSignature {
+    is_remote: bool,
+    provider_name: String,
+    current_model: String,
+    config_default_model: Option<String>,
+    reasoning_effort: Option<String>,
+    available_efforts: Vec<String>,
+    simplified_model_picker: bool,
+    catalog_revision: u64,
+    remote_provider_name: Option<String>,
+    remote_available_len: usize,
+    remote_available_first: Option<String>,
+    remote_available_last: Option<String>,
+    remote_routes_len: usize,
+    remote_routes_first: Option<String>,
+    remote_routes_last: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ModelPickerCache {
+    signature: ModelPickerCacheSignature,
+    entries: Vec<super::PickerEntry>,
+    route_count: usize,
+    model_count: usize,
+}
+
 #[derive(Debug, Clone)]
 struct PreparedTransferSession {
     session_id: String,
@@ -643,6 +670,9 @@ pub struct App {
     inline_view_state: Option<super::InlineViewState>,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
+    // Cached model picker entries. Building these can require hydrating large provider catalogs.
+    model_picker_cache: Option<ModelPickerCache>,
+    model_picker_catalog_revision: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)

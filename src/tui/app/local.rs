@@ -135,6 +135,10 @@ pub(super) fn handle_bus_event(
             app.handle_login_completed(login);
             true
         }
+        Ok(BusEvent::ModelsUpdated) => {
+            app.invalidate_model_picker_cache();
+            true
+        }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
             true

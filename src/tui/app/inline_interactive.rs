@@ -18,6 +18,102 @@ use helpers::{
 use preview_request::InlinePickerPreviewRequest;
 
 impl App {
+    pub(super) fn invalidate_model_picker_cache(&mut self) {
+        self.model_picker_cache = None;
+        self.model_picker_catalog_revision = self.model_picker_catalog_revision.wrapping_add(1);
+    }
+
+    fn model_route_cache_marker(route: &crate::provider::ModelRoute) -> String {
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            route.model, route.provider, route.api_method, route.available, route.detail
+        )
+    }
+
+    fn model_picker_cache_signature(
+        &self,
+        current_model: &str,
+        config_default_model: Option<String>,
+        current_effort: Option<String>,
+        available_efforts: &[&str],
+    ) -> ModelPickerCacheSignature {
+        ModelPickerCacheSignature {
+            is_remote: self.is_remote,
+            provider_name: if self.is_remote {
+                self.remote_provider_name
+                    .clone()
+                    .unwrap_or_else(|| "remote".to_string())
+            } else {
+                self.provider.name().to_string()
+            },
+            current_model: current_model.to_string(),
+            config_default_model,
+            reasoning_effort: current_effort,
+            available_efforts: available_efforts
+                .iter()
+                .map(|effort| (*effort).to_string())
+                .collect(),
+            simplified_model_picker: crate::perf::tui_policy().simplified_model_picker,
+            catalog_revision: self.model_picker_catalog_revision,
+            remote_provider_name: self.remote_provider_name.clone(),
+            remote_available_len: self.remote_available_entries.len(),
+            remote_available_first: self.remote_available_entries.first().cloned(),
+            remote_available_last: self.remote_available_entries.last().cloned(),
+            remote_routes_len: self.remote_model_options.len(),
+            remote_routes_first: self
+                .remote_model_options
+                .first()
+                .map(Self::model_route_cache_marker),
+            remote_routes_last: self
+                .remote_model_options
+                .last()
+                .map(Self::model_route_cache_marker),
+        }
+    }
+
+    fn open_cached_model_picker_if_fresh(
+        &mut self,
+        signature: &ModelPickerCacheSignature,
+        picker_started: std::time::Instant,
+    ) -> bool {
+        let Some(cache) = self.model_picker_cache.as_ref() else {
+            return false;
+        };
+        if cache.signature != *signature {
+            return false;
+        }
+
+        let entries = cache.entries.clone();
+        let entry_count = entries.len();
+        let route_count = cache.route_count;
+        let model_count = cache.model_count;
+        self.inline_view_state = None;
+        self.inline_interactive_state = Some(InlineInteractiveState {
+            kind: PickerKind::Model,
+            filtered: (0..entry_count).collect(),
+            entries,
+            selected: 0,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+        });
+        self.input.clear();
+        self.cursor_pos = 0;
+
+        if std::env::var("JCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
+            crate::logging::info(&format!(
+                "[TIMING] model_picker_open: cache_hit=true, remote={}, simplified={}, routes={}, models={}, entries={}, total={}ms",
+                self.is_remote,
+                crate::perf::tui_policy().simplified_model_picker,
+                route_count,
+                model_count,
+                entry_count,
+                picker_started.elapsed().as_millis(),
+            ));
+        }
+        true
+    }
+
     pub(super) fn model_picker_preview_filter(input: &str) -> Option<String> {
         slash_command_preview_filter(input, &["/model", "/models"])
     }
@@ -485,6 +581,27 @@ impl App {
 
         let config_default_model = crate::config::config().provider.default_model.clone();
 
+        let current_effort = if self.is_remote {
+            self.remote_reasoning_effort.clone()
+        } else {
+            self.provider.reasoning_effort()
+        };
+        let available_efforts = if self.is_remote {
+            Vec::new()
+        } else {
+            self.provider.available_efforts()
+        };
+
+        let cache_signature = self.model_picker_cache_signature(
+            &current_model,
+            config_default_model.clone(),
+            current_effort.clone(),
+            &available_efforts,
+        );
+        if self.open_cached_model_picker_if_fresh(&cache_signature, picker_started) {
+            return;
+        }
+
         let is_config_default = |name: &str| -> bool {
             match &config_default_model {
                 None => false,
@@ -621,8 +738,6 @@ impl App {
             }
         }
 
-        let current_effort = self.provider.reasoning_effort();
-        let available_efforts = self.provider.available_efforts();
         let is_openai = !available_efforts.is_empty();
 
         let entries_started = std::time::Instant::now();
@@ -757,6 +872,12 @@ impl App {
         }
 
         self.inline_view_state = None;
+        self.model_picker_cache = Some(ModelPickerCache {
+            signature: cache_signature,
+            entries: entries.clone(),
+            route_count: routes.len(),
+            model_count: model_order.len(),
+        });
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),
@@ -1578,7 +1699,10 @@ impl App {
 
                     match crate::config::Config::set_default_model(Some(&model_spec), provider_key)
                     {
-                        Ok(()) => self.set_status_notice(notice),
+                        Ok(()) => {
+                            self.invalidate_model_picker_cache();
+                            self.set_status_notice(notice)
+                        }
                         Err(e) => self.set_status_notice(format!("Failed to save default: {}", e)),
                     }
                     self.inline_interactive_state = None;
@@ -1722,6 +1846,7 @@ impl App {
                                     self.inline_interactive_state = None;
                                     self.upstream_provider = None;
                                     self.status_detail = None;
+                                    self.invalidate_model_picker_cache();
                                 }
                                 Err(error) => {
                                     self.push_display_message(DisplayMessage::error(

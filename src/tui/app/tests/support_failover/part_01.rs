@@ -8,7 +8,7 @@ use crate::tui::TuiState;
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 

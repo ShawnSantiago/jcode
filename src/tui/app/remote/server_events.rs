@@ -535,6 +535,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_side_pane_images = images;
             app.remote_available_entries = available_models;
             app.remote_model_options = available_model_routes;
+            app.invalidate_model_picker_cache();
             app.remote_skills = skills;
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
@@ -786,6 +787,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                app.invalidate_model_picker_cache();
                 app.push_display_message(DisplayMessage::system(format!(
                     "✓ Switched to model: {}",
                     model
@@ -817,6 +819,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.remote_available_entries = available_models;
             app.remote_model_options = available_model_routes;
+            app.invalidate_model_picker_cache();
             false
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
