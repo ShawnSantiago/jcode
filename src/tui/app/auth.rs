@@ -4,7 +4,6 @@ mod auth_account_commands;
 mod auth_account_picker;
 #[path = "auth_types.rs"]
 mod auth_types;
-
 pub(crate) use self::auth_account_commands::{
     handle_account_command_remote, handle_auth_command, resolve_account_provider_descriptor,
     save_openai_fast_setting_local,
