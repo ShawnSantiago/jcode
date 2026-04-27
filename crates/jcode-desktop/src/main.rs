@@ -36,6 +36,10 @@ const WORKSPACE_NUMBER_DIGIT_WIDTH: f32 = 8.0;
 const WORKSPACE_NUMBER_DIGIT_HEIGHT: f32 = 14.0;
 const WORKSPACE_NUMBER_DIGIT_GAP: f32 = 4.0;
 const WORKSPACE_NUMBER_STROKE: f32 = 2.0;
+const BITMAP_TEXT_PIXEL: f32 = 2.0;
+const STATUS_TEXT_RIGHT_PADDING: f32 = 14.0;
+const PANEL_TITLE_LEFT_PADDING: f32 = 12.0;
+const PANEL_TITLE_TOP_PADDING: f32 = 12.0;
 const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 const FOCUS_PULSE_DURATION: Duration = Duration::from_millis(180);
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
@@ -59,6 +63,8 @@ const STATUS_PREVIEW_ACTIVE_GROUP_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.16];
 const STATUS_PREVIEW_EMPTY_FOCUSED_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.50];
 const STATUS_PREVIEW_VIEWPORT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.78];
 const WORKSPACE_NUMBER_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.76];
+const STATUS_TEXT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.72];
+const PANEL_TITLE_COLOR: [f32; 4] = [0.205, 0.225, 0.265, 0.56];
 const STATUS_PREVIEW_ACCENTS: [[f32; 3]; 8] = [
     [0.560, 0.690, 0.980],
     [0.780, 0.610, 0.910],
@@ -634,6 +640,7 @@ fn build_vertices(
         status_rect,
         size,
     );
+    push_status_text(&mut vertices, workspace, status_rect, size);
 
     if workspace.zoomed {
         if let Some(surface) = workspace.focused_surface() {
@@ -651,6 +658,7 @@ fn build_vertices(
                 focus_pulse,
                 size,
             );
+            push_panel_title(&mut vertices, surface.title.as_str(), rect, size);
         }
         return vertices;
     }
@@ -684,6 +692,7 @@ fn build_vertices(
             surface_pulse,
             size,
         );
+        push_panel_title(&mut vertices, surface.title.as_str(), rect, size);
     }
 
     vertices
@@ -764,6 +773,251 @@ fn inferred_visible_column_count(
     let preferred_panel_screen_fraction = preferred_panel_screen_fraction.clamp(0.25, 1.0);
     let target_panel_width = monitor_width as f32 * preferred_panel_screen_fraction;
     ((window_width as f32 / target_panel_width + PANEL_FIT_TOLERANCE).floor() as u32).clamp(1, 4)
+}
+
+fn push_status_text(
+    vertices: &mut Vec<Vertex>,
+    workspace: &Workspace,
+    status_rect: Rect,
+    size: PhysicalSize<u32>,
+) {
+    let mode = match workspace.mode {
+        InputMode::Navigation => "NAV",
+        InputMode::Insert => "INS",
+    };
+    let panel_percent = (workspace.preferred_panel_screen_fraction() * 100.0).round() as u32;
+    let text = format!("{mode} P{panel_percent}");
+    let text_width = bitmap_text_width(&text, BITMAP_TEXT_PIXEL);
+    let x = status_rect.x + status_rect.width - STATUS_TEXT_RIGHT_PADDING - text_width;
+    let y = status_rect.y + (status_rect.height - bitmap_text_height(BITMAP_TEXT_PIXEL)) / 2.0;
+    if x > status_rect.x {
+        push_bitmap_text(
+            vertices,
+            &text,
+            x,
+            y,
+            BITMAP_TEXT_PIXEL,
+            STATUS_TEXT_COLOR,
+            size,
+            text_width,
+        );
+    }
+}
+
+fn push_panel_title(vertices: &mut Vec<Vertex>, title: &str, rect: Rect, size: PhysicalSize<u32>) {
+    let text = normalize_bitmap_text(title);
+    let max_width = (rect.width - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
+    push_bitmap_text(
+        vertices,
+        &text,
+        rect.x + PANEL_TITLE_LEFT_PADDING,
+        rect.y + PANEL_TITLE_TOP_PADDING,
+        BITMAP_TEXT_PIXEL,
+        PANEL_TITLE_COLOR,
+        size,
+        max_width,
+    );
+}
+
+fn normalize_bitmap_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut last_was_space = false;
+    for ch in text.chars() {
+        let mapped = match ch {
+            'a'..='z' => ch.to_ascii_uppercase(),
+            'A'..='Z' | '0'..='9' => ch,
+            '-' | '/' => ch,
+            _ => ' ',
+        };
+        if mapped == ' ' {
+            if !last_was_space {
+                normalized.push(mapped);
+            }
+            last_was_space = true;
+        } else {
+            normalized.push(mapped);
+            last_was_space = false;
+        }
+    }
+    normalized.trim().to_string()
+}
+
+fn push_bitmap_text(
+    vertices: &mut Vec<Vertex>,
+    text: &str,
+    x: f32,
+    y: f32,
+    pixel: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+    max_width: f32,
+) {
+    let advance = bitmap_char_advance(pixel);
+    let mut cursor_x = x;
+    for ch in text.chars() {
+        if cursor_x + 5.0 * pixel > x + max_width {
+            break;
+        }
+        if let Some(rows) = bitmap_glyph(ch) {
+            for (row_index, row) in rows.iter().enumerate() {
+                for column in 0..5 {
+                    let mask = 1 << (4 - column);
+                    if row & mask != 0 {
+                        push_rect(
+                            vertices,
+                            Rect {
+                                x: cursor_x + column as f32 * pixel,
+                                y: y + row_index as f32 * pixel,
+                                width: pixel,
+                                height: pixel,
+                            },
+                            color,
+                            size,
+                        );
+                    }
+                }
+            }
+        }
+        cursor_x += advance;
+    }
+}
+
+fn bitmap_text_width(text: &str, pixel: f32) -> f32 {
+    let count = text.chars().count();
+    if count == 0 {
+        0.0
+    } else {
+        count as f32 * 5.0 * pixel + count.saturating_sub(1) as f32 * pixel
+    }
+}
+
+fn bitmap_text_height(pixel: f32) -> f32 {
+    7.0 * pixel
+}
+
+fn bitmap_char_advance(pixel: f32) -> f32 {
+    6.0 * pixel
+}
+
+fn bitmap_glyph(ch: char) -> Option<[u8; 7]> {
+    Some(match ch.to_ascii_uppercase() {
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '/' => [
+            0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000,
+        ],
+        ' ' => [0; 7],
+        _ => return None,
+    })
 }
 
 fn push_workspace_number(
@@ -1562,5 +1816,15 @@ mod tests {
         let end = pulse.frame(2, now + FOCUS_PULSE_DURATION);
         assert_eq!(end, 0.0);
         assert!(!pulse.is_animating());
+    }
+
+    #[test]
+    fn bitmap_text_normalization_sanitizes_panel_titles() {
+        assert_eq!(
+            normalize_bitmap_text("fox · coordinator"),
+            "FOX COORDINATOR"
+        );
+        assert_eq!(normalize_bitmap_text("agent-12"), "AGENT-12");
+        assert_eq!(bitmap_text_width("NAV", 2.0), 34.0);
     }
 }
