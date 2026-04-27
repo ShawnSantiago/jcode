@@ -183,6 +183,47 @@ fn single_session_ctrl_backspace_deletes_previous_word() {
 }
 
 #[test]
+fn single_session_cursor_editing_inserts_and_deletes_in_middle() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("helo".to_string()));
+    app.handle_key(KeyInput::MoveCursorLeft);
+    app.handle_key(KeyInput::Character("l".to_string()));
+
+    assert_eq!(app.draft, "hello");
+    assert_eq!(app.draft_cursor, 4);
+
+    app.handle_key(KeyInput::DeleteNextChar);
+    assert_eq!(app.draft, "hell");
+}
+
+#[test]
+fn single_session_applies_live_server_events_to_visible_body() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello".to_string()));
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::StartFreshSession {
+            message: "hello".to_string()
+        }
+    );
+    app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+        session_id: "session_desktop_live_123".to_string(),
+    });
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "hi".to_string(),
+    ));
+
+    let live_lines = app.body_lines().join("\n");
+    assert!(live_lines.contains("user: hello"));
+    assert!(live_lines.contains("assistant: hi"));
+    assert!(app.has_background_work());
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::Done);
+    assert!(!app.has_background_work());
+    assert!(app.body_lines().join("\n").contains("assistant: hi"));
+}
+
+#[test]
 fn single_session_without_session_is_native_fresh_draft() {
     let mut app = SingleSessionApp::new(None);
 

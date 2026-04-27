@@ -67,6 +67,13 @@ pub enum KeyInput {
     Enter,
     Backspace,
     DeletePreviousWord,
+    DeleteNextChar,
+    MoveCursorLeft,
+    MoveCursorRight,
+    MoveToLineStart,
+    MoveToLineEnd,
+    DeleteToLineStart,
+    DeleteToLineEnd,
     SubmitDraft,
     SpawnPanel,
     HotkeyHelp,
@@ -485,6 +492,16 @@ impl Workspace {
                 delete_previous_word(&mut self.draft);
                 KeyOutcome::Redraw
             }
+            KeyInput::DeleteToLineStart => {
+                self.draft.clear();
+                KeyOutcome::Redraw
+            }
+            KeyInput::DeleteNextChar
+            | KeyInput::MoveCursorLeft
+            | KeyInput::MoveCursorRight
+            | KeyInput::MoveToLineStart
+            | KeyInput::MoveToLineEnd
+            | KeyInput::DeleteToLineEnd => KeyOutcome::None,
             KeyInput::Character(text) => {
                 self.draft.push_str(&text);
                 KeyOutcome::Redraw

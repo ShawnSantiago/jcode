@@ -5,10 +5,23 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DesktopSessionEvent {
+    Status(String),
+    SessionStarted { session_id: String },
+    TextDelta(String),
+    TextReplace(String),
+    Done,
+    Error(String),
+}
+
+pub type DesktopSessionEventSender = Sender<DesktopSessionEvent>;
 
 pub fn launch_resume_session(session_id: &str, title: &str) -> Result<()> {
     let title = format!("jcode · {}", compact_title(title));
@@ -41,13 +54,57 @@ pub fn send_message_to_session(session_id: &str, _title: &str, message: &str) ->
     Ok(())
 }
 
-#[cfg(unix)]
-pub fn start_fresh_server_session(message: &str) -> Result<String> {
+pub fn spawn_fresh_server_session(
+    message: String,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
     if message.trim().is_empty() {
         anyhow::bail!("empty draft message");
     }
 
+    std::thread::Builder::new()
+        .name("jcode-desktop-fresh-session".to_string())
+        .spawn(move || {
+            if let Err(error) = run_server_session(None, &message, Some(event_tx.clone())) {
+                let _ = event_tx.send(DesktopSessionEvent::Error(format!("{error:#}")));
+            }
+        })
+        .context("failed to spawn desktop session worker")?;
+    Ok(())
+}
+
+pub fn spawn_message_to_session(
+    session_id: String,
+    message: String,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    validate_resume_session_id(&session_id).context("refusing to send to invalid session id")?;
+    if message.trim().is_empty() {
+        anyhow::bail!("empty draft message");
+    }
+
+    std::thread::Builder::new()
+        .name("jcode-desktop-session-message".to_string())
+        .spawn(move || {
+            if let Err(error) =
+                run_server_session(Some(&session_id), &message, Some(event_tx.clone()))
+            {
+                let _ = event_tx.send(DesktopSessionEvent::Error(format!("{error:#}")));
+            }
+        })
+        .context("failed to spawn desktop session worker")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_server_session(
+    target_session_id: Option<&str>,
+    message: &str,
+    event_tx: Option<DesktopSessionEventSender>,
+) -> Result<String> {
+    send_desktop_status(&event_tx, "starting shared server");
     ensure_server_running()?;
+    send_desktop_status(&event_tx, "connecting to shared server");
     let stream = connect_server_with_retry(SERVER_START_TIMEOUT)?;
     let mut writer = stream
         .try_clone()
@@ -59,13 +116,21 @@ pub fn start_fresh_server_session(message: &str) -> Result<String> {
         json!({
             "type": "subscribe",
             "id": 1,
+            "target_session_id": target_session_id,
             "client_has_local_history": false,
             "allow_session_takeover": false,
         }),
     )?;
 
-    let session_id = read_session_id(&mut reader, SERVER_START_TIMEOUT)?;
+    let session_id = read_session_id(&mut reader, SERVER_START_TIMEOUT, event_tx.as_ref())?;
+    send_desktop_event(
+        &event_tx,
+        DesktopSessionEvent::SessionStarted {
+            session_id: session_id.clone(),
+        },
+    );
 
+    send_desktop_status(&event_tx, "sending message");
     write_json_line(
         &mut writer,
         json!({
@@ -76,13 +141,17 @@ pub fn start_fresh_server_session(message: &str) -> Result<String> {
         }),
     )?;
 
-    std::thread::spawn(move || drain_session_events(reader));
+    drain_session_events(reader, event_tx.as_ref());
     Ok(session_id)
 }
 
 #[cfg(not(unix))]
-pub fn start_fresh_server_session(_message: &str) -> Result<String> {
-    anyhow::bail!("desktop fresh server sessions are not implemented on this platform yet")
+fn run_server_session(
+    _target_session_id: Option<&str>,
+    _message: &str,
+    _event_tx: Option<DesktopSessionEventSender>,
+) -> Result<String> {
+    anyhow::bail!("desktop server sessions are not implemented on this platform yet")
 }
 
 #[cfg(unix)]
@@ -127,7 +196,11 @@ fn connect_server_with_retry(timeout: Duration) -> Result<UnixStream> {
 }
 
 #[cfg(unix)]
-fn read_session_id(reader: &mut BufReader<UnixStream>, timeout: Duration) -> Result<String> {
+fn read_session_id(
+    reader: &mut BufReader<UnixStream>,
+    timeout: Duration,
+    event_tx: Option<&DesktopSessionEventSender>,
+) -> Result<String> {
     reader
         .get_ref()
         .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
@@ -146,6 +219,9 @@ fn read_session_id(reader: &mut BufReader<UnixStream>, timeout: Duration) -> Res
                         anyhow::bail!("jcode server sent malformed session event");
                     };
                     return Ok(session_id.to_string());
+                }
+                if let Some(event) = desktop_event_from_server_value(&value) {
+                    send_desktop_event_ref(event_tx, event);
                 }
                 if value.get("type").and_then(Value::as_str) == Some("error") {
                     let message = value
@@ -177,7 +253,10 @@ fn write_json_line(writer: &mut UnixStream, value: Value) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn drain_session_events(mut reader: BufReader<UnixStream>) {
+fn drain_session_events(
+    mut reader: BufReader<UnixStream>,
+    event_tx: Option<&DesktopSessionEventSender>,
+) {
     let _ = reader.get_ref().set_read_timeout(None);
     let mut line = String::new();
     loop {
@@ -186,13 +265,76 @@ fn drain_session_events(mut reader: BufReader<UnixStream>) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
-                    match value.get("type").and_then(Value::as_str) {
-                        Some("done" | "error") => break,
-                        _ => {}
+                    let is_terminal = matches!(
+                        value.get("type").and_then(Value::as_str),
+                        Some("done" | "error")
+                    );
+                    if let Some(event) = desktop_event_from_server_value(&value) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
+                    if is_terminal {
+                        break;
                     }
                 }
             }
         }
+    }
+}
+
+fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent> {
+    match value.get("type").and_then(Value::as_str)? {
+        "session" => value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(|session_id| DesktopSessionEvent::SessionStarted {
+                session_id: session_id.to_string(),
+            }),
+        "text_delta" => value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| DesktopSessionEvent::TextDelta(text.to_string())),
+        "text_replace" => value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| DesktopSessionEvent::TextReplace(text.to_string())),
+        "connection_phase" => value
+            .get("phase")
+            .and_then(Value::as_str)
+            .map(|phase| DesktopSessionEvent::Status(phase.to_string())),
+        "status_detail" => value
+            .get("detail")
+            .and_then(Value::as_str)
+            .map(|detail| DesktopSessionEvent::Status(detail.to_string())),
+        "tool_start" | "tool_exec" => value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| DesktopSessionEvent::Status(format!("using tool {name}"))),
+        "done" => Some(DesktopSessionEvent::Done),
+        "error" => Some(DesktopSessionEvent::Error(
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown server error")
+                .to_string(),
+        )),
+        _ => None,
+    }
+}
+
+fn send_desktop_status(event_tx: &Option<DesktopSessionEventSender>, status: &str) {
+    send_desktop_event(event_tx, DesktopSessionEvent::Status(status.to_string()));
+}
+
+fn send_desktop_event(event_tx: &Option<DesktopSessionEventSender>, event: DesktopSessionEvent) {
+    send_desktop_event_ref(event_tx.as_ref(), event);
+}
+
+fn send_desktop_event_ref(
+    event_tx: Option<&DesktopSessionEventSender>,
+    event: DesktopSessionEvent,
+) {
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(event);
     }
 }
 
@@ -350,5 +492,21 @@ mod tests {
             compact_title("this is a very long title that should become shorter for terminals");
         assert!(title.ends_with('…'));
         assert!(title.chars().count() <= 49);
+    }
+
+    #[test]
+    fn desktop_event_parser_maps_streaming_server_events() {
+        assert_eq!(
+            desktop_event_from_server_value(&json!({"type": "text_delta", "text": "hello"})),
+            Some(DesktopSessionEvent::TextDelta("hello".to_string()))
+        );
+        assert_eq!(
+            desktop_event_from_server_value(&json!({"type": "done", "id": 2})),
+            Some(DesktopSessionEvent::Done)
+        );
+        assert_eq!(
+            desktop_event_from_server_value(&json!({"type": "tool_exec", "name": "bash"})),
+            Some(DesktopSessionEvent::Status("using tool bash".to_string()))
+        );
     }
 }

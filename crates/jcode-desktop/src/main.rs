@@ -15,8 +15,7 @@ use glyphon::{
 };
 use render_helpers::*;
 use single_session::{
-    SINGLE_SESSION_FONT_FAMILY, SingleSessionApp, single_session_lines, single_session_surface,
-    single_session_typography,
+    SINGLE_SESSION_FONT_FAMILY, SingleSessionApp, single_session_surface, single_session_typography,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
@@ -30,6 +29,7 @@ use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
@@ -65,6 +65,7 @@ const SINGLE_SESSION_DRAFT_TOP_OFFSET: f32 = 158.0;
 const SINGLE_SESSION_CARET_WIDTH: f32 = 2.0;
 const SINGLE_SESSION_CARET_COLOR: [f32; 4] = [0.130, 0.150, 0.190, 0.92];
 const SESSION_SPAWN_REFRESH_DELAY: Duration = Duration::from_millis(350);
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(33);
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -159,9 +160,16 @@ async fn run() -> Result<()> {
     let mut canvas = Canvas::new(window).await?;
     let mut modifiers = ModifiersState::empty();
     let mut hot_reloader = DesktopHotReloader::new();
+    let (session_event_tx, session_event_rx) = mpsc::channel();
 
     event_loop.run(move |event, target| {
-        target.set_control_flow(ControlFlow::Wait);
+        if app.has_background_work() {
+            target.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + BACKGROUND_POLL_INTERVAL,
+            ));
+        } else {
+            target.set_control_flow(ControlFlow::Wait);
+        }
 
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
@@ -237,7 +245,17 @@ async fn run() -> Result<()> {
                             title,
                             message,
                         } => {
-                            if let Err(error) = session_launch::send_message_to_session(
+                            if app.is_single_session() {
+                                if let Err(error) = session_launch::spawn_message_to_session(
+                                    session_id.clone(),
+                                    message,
+                                    session_event_tx.clone(),
+                                ) {
+                                    apply_single_session_error(&mut app, error);
+                                }
+                                window.set_title(&app.status_title());
+                                window.request_redraw();
+                            } else if let Err(error) = session_launch::send_message_to_session(
                                 &session_id,
                                 &title,
                                 &message,
@@ -256,20 +274,14 @@ async fn run() -> Result<()> {
                             }
                         }
                         KeyOutcome::StartFreshSession { message } => {
-                            match session_launch::start_fresh_server_session(&message) {
-                                Ok(session_id) => {
-                                    std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
-                                    app.refresh_sessions();
-                                    attach_single_session_by_id(&mut app, &session_id);
-                                    window.set_title(&app.status_title());
-                                    window.request_redraw();
-                                }
-                                Err(error) => {
-                                    eprintln!(
-                                        "jcode-desktop: failed to start fresh server session: {error:#}"
-                                    );
-                                }
+                            if let Err(error) = session_launch::spawn_fresh_server_session(
+                                message,
+                                session_event_tx.clone(),
+                            ) {
+                                apply_single_session_error(&mut app, error);
                             }
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
                         }
                         KeyOutcome::None => {}
                     }
@@ -294,6 +306,14 @@ async fn run() -> Result<()> {
                 _ => {}
             },
             Event::AboutToWait => {
+                if apply_pending_session_events(&mut app, &session_event_rx) {
+                    if let Some(session_id) = app.single_session_live_id() {
+                        attach_single_session_by_id(&mut app, &session_id);
+                    }
+                    window.set_title(&app.status_title());
+                    window.request_redraw();
+                }
+
                 if let Some(relaunch) = hot_reloader.poll() {
                     if let Err(error) = relaunch.spawn() {
                         eprintln!("jcode-desktop: failed to hot reload desktop: {error:#}");
@@ -461,8 +481,16 @@ enum DesktopApp {
 }
 
 impl DesktopApp {
+    fn is_single_session(&self) -> bool {
+        matches!(self, Self::SingleSession(_))
+    }
+
     fn is_workspace(&self) -> bool {
         matches!(self, Self::Workspace(_))
+    }
+
+    fn has_background_work(&self) -> bool {
+        matches!(self, Self::SingleSession(app) if app.has_background_work())
     }
 
     fn status_title(&self) -> String {
@@ -487,6 +515,19 @@ impl DesktopApp {
             }
         }
     }
+
+    fn apply_session_event(&mut self, event: session_launch::DesktopSessionEvent) {
+        if let Self::SingleSession(app) = self {
+            app.apply_session_event(event);
+        }
+    }
+
+    fn single_session_live_id(&self) -> Option<String> {
+        match self {
+            Self::SingleSession(app) => app.live_session_id.clone(),
+            Self::Workspace(_) => None,
+        }
+    }
 }
 
 fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
@@ -496,6 +537,23 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Named(NamedKey::Enter) => KeyInput::Enter,
         Key::Named(NamedKey::Backspace) if modifiers.control_key() => KeyInput::DeletePreviousWord,
         Key::Named(NamedKey::Backspace) => KeyInput::Backspace,
+        Key::Named(NamedKey::Delete) => KeyInput::DeleteNextChar,
+        Key::Named(NamedKey::ArrowLeft) => KeyInput::MoveCursorLeft,
+        Key::Named(NamedKey::ArrowRight) => KeyInput::MoveCursorRight,
+        Key::Named(NamedKey::Home) => KeyInput::MoveToLineStart,
+        Key::Named(NamedKey::End) => KeyInput::MoveToLineEnd,
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("a") => {
+            KeyInput::MoveToLineStart
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("e") => {
+            KeyInput::MoveToLineEnd
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("u") => {
+            KeyInput::DeleteToLineStart
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("k") => {
+            KeyInput::DeleteToLineEnd
+        }
         Key::Character(text) if modifiers.control_key() && text == ";" => KeyInput::SpawnPanel,
         Key::Character(text) if modifiers.control_key() && (text == "?" || text == "/") => {
             KeyInput::HotkeyHelp
@@ -515,9 +573,32 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text == "4" => {
             KeyInput::SetPanelSize(PanelSizePreset::Full)
         }
+        Key::Character(_)
+            if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() =>
+        {
+            KeyInput::Other
+        }
         Key::Character(text) => KeyInput::Character(text.to_string()),
         _ => KeyInput::Other,
     }
+}
+
+fn apply_pending_session_events(
+    app: &mut DesktopApp,
+    session_event_rx: &mpsc::Receiver<session_launch::DesktopSessionEvent>,
+) -> bool {
+    let mut changed = false;
+    while let Ok(event) = session_event_rx.try_recv() {
+        app.apply_session_event(event);
+        changed = true;
+    }
+    changed
+}
+
+fn apply_single_session_error(app: &mut DesktopApp, error: anyhow::Error) {
+    app.apply_session_event(session_launch::DesktopSessionEvent::Error(format!(
+        "{error:#}"
+    )));
 }
 
 struct Canvas<'window> {
@@ -862,12 +943,12 @@ fn push_single_session_caret(
     let typography = single_session_typography();
     let line_height = typography.code_size * typography.code_line_height;
     let draft_top = single_session_draft_top(size);
-    let last_line = app.draft.rsplit('\n').next().unwrap_or_default();
+    let (cursor_line, cursor_column) = app.draft_cursor_line_col();
     let char_width = typography.code_size * 0.58;
     let x = PANEL_TITLE_LEFT_PADDING
-        + (last_line.chars().count() as f32 * char_width)
+        + (cursor_column as f32 * char_width)
             .min((size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(0.0));
-    let y = draft_top + line_height;
+    let y = draft_top + line_height + cursor_line as f32 * line_height;
 
     push_rect(
         vertices,
@@ -893,22 +974,14 @@ fn single_session_text_buffers(
 ) -> Vec<Buffer> {
     let typography = single_session_typography();
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
-    let title = app
-        .session
-        .as_ref()
-        .map(|session| session.title.as_str())
-        .unwrap_or("fresh session");
-    let body = single_session_lines(app.session.as_ref()).join("\n");
-    let draft = if app.draft.trim().is_empty() {
-        "".to_string()
-    } else {
-        format!("draft\n{}", app.draft.trim())
-    };
+    let title = app.title();
+    let body = app.body_lines().join("\n");
+    let draft = format!("draft\n{}", app.draft);
 
     vec![
         single_session_text_buffer(
             font_system,
-            title,
+            &title,
             typography.title_size,
             typography.title_size * typography.meta_line_height,
             content_width,
