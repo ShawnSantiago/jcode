@@ -291,6 +291,120 @@ async fn handle_request(
             }
             Err(err) => Err(err),
         },
+        "type_text" => {
+            let node_id = required_str(&request.params, "node_id");
+            let text = required_str(&request.params, "text");
+            match node_id.and_then(|node_id| Ok((node_id, text?))) {
+                Ok((node_id, text)) => {
+                    let mut store = store.lock().await;
+                    match text_action_for_node(store.state(), node_id, text, true) {
+                        Ok(action) => {
+                            let report = store.dispatch(action);
+                            Ok((
+                                json!({"node_id": node_id, "text": text, "report": report}),
+                                false,
+                            ))
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        }
+        "keypress" => {
+            let key = required_str(&request.params, "key");
+            match key {
+                Ok(key) => {
+                    let node_id = request
+                        .params
+                        .get("node_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("chat.draft");
+                    let mut store = store.lock().await;
+                    match keypress_action(store.state(), node_id, key) {
+                        Ok(Some(action)) => {
+                            let report = store.dispatch(action);
+                            Ok((
+                                json!({"node_id": node_id, "key": key, "report": report}),
+                                false,
+                            ))
+                        }
+                        Ok(None) => Ok((
+                            json!({"node_id": node_id, "key": key, "handled": true}),
+                            false,
+                        )),
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        }
+        "scroll" => {
+            let node_id = required_str(&request.params, "node_id");
+            let delta_y = request
+                .params
+                .get("delta_y")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            match node_id {
+                Ok(node_id) => {
+                    let store = store.lock().await;
+                    let tree = serde_json::to_value(store.semantic_tree()).unwrap_or(Value::Null);
+                    match find_node_json(&tree, node_id) {
+                        Some(node) => Ok((
+                            json!({"node_id": node_id, "delta_y": delta_y, "node": node}),
+                            false,
+                        )),
+                        None => Err(anyhow!("node not found: {node_id}")),
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        }
+        "gesture" => {
+            let gesture_type = required_str(&request.params, "type");
+            match gesture_type {
+                Ok(gesture_type) => Ok((json!({"type": gesture_type, "accepted": true}), false)),
+                Err(err) => Err(err),
+            }
+        }
+        "wait" => {
+            let timeout_ms = request
+                .params
+                .get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(1_000);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                {
+                    let store = store.lock().await;
+                    if wait_condition_matches(&store, &request.params) {
+                        break Ok((json!({"matched": true}), false));
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    break Err(anyhow!("wait timed out after {timeout_ms}ms"));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        "inject_fault" => {
+            let kind = required_str(&request.params, "kind");
+            match kind {
+                Ok(kind) => {
+                    let mut store = store.lock().await;
+                    let action = fault_action(kind, &request.params);
+                    match action {
+                        Ok(action) => {
+                            let report = store.dispatch(action);
+                            Ok((json!({"kind": kind, "report": report}), false))
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        }
         "assert_screen" => {
             let expected = required_str(&request.params, "screen");
             match expected {
@@ -521,6 +635,116 @@ fn required_i32(params: &Value, field: &str) -> Result<i32> {
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow!("missing integer {field}"))?;
     i32::try_from(value).map_err(|_| anyhow!("{field} is outside i32 range"))
+}
+
+fn text_action_for_node(
+    state: &jcode_mobile_core::SimulatorState,
+    node_id: &str,
+    text: &str,
+    append: bool,
+) -> Result<SimulatorAction> {
+    let combine = |existing: &str| {
+        if append {
+            format!("{existing}{text}")
+        } else {
+            text.to_string()
+        }
+    };
+    match node_id {
+        "pair.host" | "host" => Ok(SimulatorAction::SetHost {
+            value: combine(&state.pairing.host),
+        }),
+        "pair.port" | "port" => Ok(SimulatorAction::SetPort {
+            value: combine(&state.pairing.port),
+        }),
+        "pair.code" | "pair_code" | "code" => Ok(SimulatorAction::SetPairCode {
+            value: combine(&state.pairing.pair_code),
+        }),
+        "pair.device_name" | "device_name" => Ok(SimulatorAction::SetDeviceName {
+            value: combine(&state.pairing.device_name),
+        }),
+        "chat.draft" | "draft" => Ok(SimulatorAction::SetDraft {
+            value: combine(&state.draft_message),
+        }),
+        _ => Err(anyhow!("node does not accept text input: {node_id}")),
+    }
+}
+
+fn keypress_action(
+    state: &jcode_mobile_core::SimulatorState,
+    node_id: &str,
+    key: &str,
+) -> Result<Option<SimulatorAction>> {
+    match key.to_ascii_lowercase().as_str() {
+        "enter" | "return" if node_id == "chat.draft" || node_id == "chat.send" => {
+            Ok(Some(SimulatorAction::TapNode {
+                node_id: "chat.send".to_string(),
+            }))
+        }
+        "escape" | "esc" => Ok(Some(SimulatorAction::TapNode {
+            node_id: "chat.interrupt".to_string(),
+        })),
+        "backspace" => {
+            let current = match node_id {
+                "chat.draft" | "draft" => &state.draft_message,
+                "pair.host" | "host" => &state.pairing.host,
+                "pair.port" | "port" => &state.pairing.port,
+                "pair.code" | "pair_code" | "code" => &state.pairing.pair_code,
+                "pair.device_name" | "device_name" => &state.pairing.device_name,
+                _ => return Err(anyhow!("node does not accept key input: {node_id}")),
+            };
+            let mut value = current.clone();
+            value.pop();
+            Ok(Some(text_action_for_node(state, node_id, &value, false)?))
+        }
+        key if key.chars().count() == 1 => {
+            Ok(Some(text_action_for_node(state, node_id, key, true)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn wait_condition_matches(store: &SimulatorStore, params: &Value) -> bool {
+    if let Some(screen) = params.get("screen").and_then(Value::as_str) {
+        let actual = format!("{:?}", store.state().screen).to_lowercase();
+        if actual != screen {
+            return false;
+        }
+    }
+    if let Some(contains) = params.get("contains").and_then(Value::as_str) {
+        let haystack = serde_json::to_string(store.state()).unwrap_or_default();
+        if !haystack.contains(contains) {
+            return false;
+        }
+    }
+    if let Some(node_id) = params.get("node_id").and_then(Value::as_str) {
+        let tree = serde_json::to_value(store.semantic_tree()).unwrap_or(Value::Null);
+        if find_node_json(&tree, node_id).is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+fn fault_action(kind: &str, params: &Value) -> Result<SimulatorAction> {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Injected simulator fault.")
+        .to_string();
+    match kind {
+        "connection_failed" | "server_unreachable" => {
+            Ok(SimulatorAction::ConnectionFailed { message })
+        }
+        "pairing_failed" | "invalid_pairing_code" => Ok(SimulatorAction::PairingFailed { message }),
+        "tool_failed" => Ok(SimulatorAction::LoadScenario {
+            scenario: ScenarioName::ToolFailed,
+        }),
+        "offline" => Ok(SimulatorAction::LoadScenario {
+            scenario: ScenarioName::OfflineQueuedMessage,
+        }),
+        _ => Err(anyhow!("unknown fault kind: {kind}")),
+    }
 }
 
 fn find_node_json<'a>(value: &'a Value, node_id: &str) -> Option<&'a Value> {
@@ -812,6 +1036,72 @@ mod tests {
         .await?;
         assert!(assert_no_error.ok);
 
+        let wait = send_request(
+            &socket,
+            AutomationRequest {
+                id: "wait".to_string(),
+                method: "wait".to_string(),
+                params: json!({"screen": "chat", "node_id": "chat.send", "timeout_ms": 50}),
+            },
+        )
+        .await?;
+        assert!(wait.ok);
+
+        let scroll = send_request(
+            &socket,
+            AutomationRequest {
+                id: "scroll".to_string(),
+                method: "scroll".to_string(),
+                params: json!({"node_id": "chat.messages", "delta_y": 120}),
+            },
+        )
+        .await?;
+        assert!(scroll.ok);
+
+        let gesture = send_request(
+            &socket,
+            AutomationRequest {
+                id: "gesture".to_string(),
+                method: "gesture".to_string(),
+                params: json!({"type": "swipe_up"}),
+            },
+        )
+        .await?;
+        assert!(gesture.ok);
+
+        let type_text = send_request(
+            &socket,
+            AutomationRequest {
+                id: "type-text".to_string(),
+                method: "type_text".to_string(),
+                params: json!({"node_id": "chat.draft", "text": "typed protocol"}),
+            },
+        )
+        .await?;
+        assert!(type_text.ok);
+
+        let keypress = send_request(
+            &socket,
+            AutomationRequest {
+                id: "keypress".to_string(),
+                method: "keypress".to_string(),
+                params: json!({"node_id": "chat.draft", "key": "Enter"}),
+            },
+        )
+        .await?;
+        assert!(keypress.ok);
+
+        let assert_typed_response = send_request(
+            &socket,
+            AutomationRequest {
+                id: "assert-typed-response".to_string(),
+                method: "assert_text".to_string(),
+                params: json!({"contains": "Simulated response to: typed protocol"}),
+            },
+        )
+        .await?;
+        assert!(assert_typed_response.ok);
+
         let set_draft = send_request(
             &socket,
             AutomationRequest {
@@ -879,6 +1169,28 @@ mod tests {
         )
         .await?;
         assert!(assert_replay.ok);
+
+        let inject_fault = send_request(
+            &socket,
+            AutomationRequest {
+                id: "inject-fault".to_string(),
+                method: "inject_fault".to_string(),
+                params: json!({"kind": "tool_failed"}),
+            },
+        )
+        .await?;
+        assert!(inject_fault.ok);
+
+        let assert_fault_text = send_request(
+            &socket,
+            AutomationRequest {
+                id: "assert-fault-text".to_string(),
+                method: "assert_text".to_string(),
+                params: json!({"contains": "Last simulated tool failed."}),
+            },
+        )
+        .await?;
+        assert!(assert_fault_text.ok);
 
         let _ = send_request(
             &socket,

@@ -243,6 +243,25 @@ The default viewport is `390x844` logical pixels. Semantic node IDs remain the
 preferred stable automation surface, while coordinate taps validate layout and
 hit-testing behavior.
 
+### Type, keypress, wait, scroll, gesture, and fault injection
+
+The automation socket also supports higher-level agent operations beyond direct
+state dispatch:
+
+```bash
+cargo run -p jcode-mobile-sim -- type-text chat.draft "hello from typing"
+cargo run -p jcode-mobile-sim -- keypress Enter --node-id chat.draft
+cargo run -p jcode-mobile-sim -- wait --screen chat --contains "Simulated response"
+cargo run -p jcode-mobile-sim -- scroll chat.messages 120
+cargo run -p jcode-mobile-sim -- gesture swipe_up
+cargo run -p jcode-mobile-sim -- inject-fault tool_failed
+```
+
+Text and keypress operations map onto the same reducer actions as semantic
+field setting and tapping. Scroll and gesture currently validate and acknowledge
+agent input against the semantic tree, ready for a richer renderer. Fault
+injection drives deterministic error/offline scenarios.
+
 ### Load a scenario
 
 ```bash
@@ -319,7 +338,7 @@ Not included yet:
 - iOS host integration
 - shared custom renderer backend
 - fake jcode backend that exercises real pairing/WebSocket/protocol flows
-- complete semantic automation operations such as assert/wait/scroll/type/gesture
+- physical gesture physics beyond deterministic acknowledgement
 - Rust-owned mobile protocol adapters equivalent to the current Swift SDK
 
 ## Recommended first workflow

@@ -71,6 +71,49 @@ enum Command {
         x: i32,
         y: i32,
     },
+    TypeText {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        node_id: String,
+        text: String,
+    },
+    Keypress {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        key: String,
+        #[arg(long)]
+        node_id: Option<String>,
+    },
+    Scroll {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        node_id: String,
+        delta_y: i64,
+    },
+    Gesture {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        gesture_type: String,
+    },
+    Wait {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        screen: Option<String>,
+        #[arg(long)]
+        contains: Option<String>,
+        #[arg(long)]
+        node_id: Option<String>,
+        #[arg(long, default_value_t = 1000)]
+        timeout_ms: u64,
+    },
+    InjectFault {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        kind: String,
+        #[arg(long)]
+        message: Option<String>,
+    },
     AssertHit {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -234,6 +277,84 @@ async fn main() -> Result<()> {
         ),
         Command::TapAt { socket, x, y } => print_result(
             send_simple(&resolve_socket(socket), "tap_at", json!({ "x": x, "y": y })).await?,
+        ),
+        Command::TypeText {
+            socket,
+            node_id,
+            text,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "type_text",
+                json!({ "node_id": node_id, "text": text }),
+            )
+            .await?,
+        ),
+        Command::Keypress {
+            socket,
+            key,
+            node_id,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "keypress",
+                json!({ "key": key, "node_id": node_id }),
+            )
+            .await?,
+        ),
+        Command::Scroll {
+            socket,
+            node_id,
+            delta_y,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "scroll",
+                json!({ "node_id": node_id, "delta_y": delta_y }),
+            )
+            .await?,
+        ),
+        Command::Gesture {
+            socket,
+            gesture_type,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "gesture",
+                json!({ "type": gesture_type }),
+            )
+            .await?,
+        ),
+        Command::Wait {
+            socket,
+            screen,
+            contains,
+            node_id,
+            timeout_ms,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "wait",
+                json!({
+                    "screen": screen,
+                    "contains": contains,
+                    "node_id": node_id,
+                    "timeout_ms": timeout_ms,
+                }),
+            )
+            .await?,
+        ),
+        Command::InjectFault {
+            socket,
+            kind,
+            message,
+        } => print_result(
+            send_simple(
+                &resolve_socket(socket),
+                "inject_fault",
+                json!({ "kind": kind, "message": message }),
+            )
+            .await?,
         ),
         Command::AssertHit {
             socket,
