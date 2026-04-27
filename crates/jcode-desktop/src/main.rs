@@ -11,6 +11,8 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
+use std::time::{Duration, Instant};
+
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
 const OUTER_PADDING: f32 = 8.0;
@@ -29,6 +31,8 @@ const MINIMAP_INSET: f32 = 9.0;
 const MINIMAP_LANE_RADIUS: i32 = 2;
 const MINIMAP_ROW_GAP: f32 = 4.0;
 const MINIMAP_COLUMN_GAP: f32 = 2.0;
+const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(150);
+const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -137,7 +141,11 @@ async fn run() -> Result<()> {
                     &workspace,
                     window.current_monitor().map(|monitor| monitor.size()),
                 ) {
-                    Ok(()) => {}
+                    Ok(animation_active) => {
+                        if animation_active {
+                            window.request_redraw();
+                        }
+                    }
                     Err(SurfaceError::Lost | SurfaceError::Outdated) => {
                         canvas.resize(window.inner_size());
                         window.request_redraw();
@@ -195,6 +203,7 @@ struct Canvas<'window> {
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
     size: PhysicalSize<u32>,
+    viewport_animation: AnimatedViewport,
     needs_initial_frame: bool,
 }
 
@@ -306,6 +315,7 @@ impl<'window> Canvas<'window> {
             config,
             render_pipeline,
             size,
+            viewport_animation: AnimatedViewport::default(),
             needs_initial_frame: true,
         })
     }
@@ -326,7 +336,7 @@ impl<'window> Canvas<'window> {
         &mut self,
         workspace: &Workspace,
         monitor_size: Option<PhysicalSize<u32>>,
-    ) -> std::result::Result<(), SurfaceError> {
+    ) -> std::result::Result<bool, SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -336,7 +346,10 @@ impl<'window> Canvas<'window> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("jcode-desktop-render-workspace"),
             });
-        let vertices = build_vertices(workspace, self.size, monitor_size);
+        let target_layout = workspace_render_layout(workspace, self.size, monitor_size);
+        let render_layout = self.viewport_animation.frame(target_layout, Instant::now());
+        let animation_active = self.viewport_animation.is_animating();
+        let vertices = build_vertices(workspace, self.size, render_layout);
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -367,7 +380,7 @@ impl<'window> Canvas<'window> {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-        Ok(())
+        Ok(animation_active)
     }
 }
 
@@ -413,10 +426,91 @@ struct VisibleColumnLayout {
     first_visible_column: i32,
 }
 
+#[derive(Clone, Copy)]
+struct WorkspaceRenderLayout {
+    visible: VisibleColumnLayout,
+    column_width: f32,
+    scroll_offset: f32,
+}
+
+#[derive(Default)]
+struct AnimatedViewport {
+    initialized: bool,
+    start_column_width: f32,
+    start_scroll_offset: f32,
+    current_column_width: f32,
+    current_scroll_offset: f32,
+    target_column_width: f32,
+    target_scroll_offset: f32,
+    started_at: Option<Instant>,
+}
+
+impl AnimatedViewport {
+    fn frame(&mut self, target: WorkspaceRenderLayout, now: Instant) -> WorkspaceRenderLayout {
+        if !self.initialized {
+            self.initialized = true;
+            self.current_column_width = target.column_width;
+            self.current_scroll_offset = target.scroll_offset;
+            self.target_column_width = target.column_width;
+            self.target_scroll_offset = target.scroll_offset;
+            return target;
+        }
+
+        if has_layout_target_changed(self.target_column_width, target.column_width)
+            || has_layout_target_changed(self.target_scroll_offset, target.scroll_offset)
+        {
+            self.start_column_width = self.current_column_width;
+            self.start_scroll_offset = self.current_scroll_offset;
+            self.target_column_width = target.column_width;
+            self.target_scroll_offset = target.scroll_offset;
+            self.started_at = Some(now);
+        }
+
+        if let Some(started_at) = self.started_at {
+            let progress =
+                (now - started_at).as_secs_f32() / VIEWPORT_ANIMATION_DURATION.as_secs_f32();
+            let progress = progress.clamp(0.0, 1.0);
+            let eased = ease_out_cubic(progress);
+            self.current_column_width =
+                lerp(self.start_column_width, self.target_column_width, eased);
+            self.current_scroll_offset =
+                lerp(self.start_scroll_offset, self.target_scroll_offset, eased);
+
+            if progress >= 1.0 {
+                self.current_column_width = self.target_column_width;
+                self.current_scroll_offset = self.target_scroll_offset;
+                self.started_at = None;
+            }
+        }
+
+        WorkspaceRenderLayout {
+            visible: target.visible,
+            column_width: self.current_column_width,
+            scroll_offset: self.current_scroll_offset,
+        }
+    }
+
+    fn is_animating(&self) -> bool {
+        self.started_at.is_some()
+    }
+}
+
+fn has_layout_target_changed(previous: f32, next: f32) -> bool {
+    (previous - next).abs() > VIEWPORT_ANIMATION_EPSILON
+}
+
+fn ease_out_cubic(progress: f32) -> f32 {
+    1.0 - (1.0 - progress).powi(3)
+}
+
+fn lerp(start: f32, end: f32, progress: f32) -> f32 {
+    start + (end - start) * progress
+}
+
 fn build_vertices(
     workspace: &Workspace,
     size: PhysicalSize<u32>,
-    monitor_size: Option<PhysicalSize<u32>>,
+    render_layout: WorkspaceRenderLayout,
 ) -> Vec<Vertex> {
     let width = size.width as f32;
     let height = size.height as f32;
@@ -455,12 +549,7 @@ fn build_vertices(
     );
 
     let active_workspace = workspace.current_workspace();
-    let visible_layout = visible_column_layout(
-        workspace,
-        size.width,
-        monitor_size.map(|size| size.width),
-        active_workspace,
-    );
+    let visible_layout = render_layout.visible;
 
     if workspace.zoomed {
         if let Some(surface) = workspace.focused_surface() {
@@ -483,11 +572,8 @@ fn build_vertices(
     }
 
     let workspace_height = (height - STATUS_BAR_HEIGHT - OUTER_PADDING * 3.0).max(1.0);
-    let workspace_width = (width - OUTER_PADDING * 2.0).max(1.0);
-    let visible_columns_f = visible_layout.visible_columns as f32;
-    let total_gap_width = GAP * (visible_columns_f - 1.0).max(0.0);
-    let column_width = ((workspace_width - total_gap_width) / visible_columns_f).max(1.0);
-    let scroll_offset = visible_layout.first_visible_column as f32 * (column_width + GAP);
+    let column_width = render_layout.column_width;
+    let scroll_offset = render_layout.scroll_offset;
 
     for surface in workspace
         .surfaces
@@ -519,6 +605,31 @@ fn build_vertices(
     );
 
     vertices
+}
+
+fn workspace_render_layout(
+    workspace: &Workspace,
+    size: PhysicalSize<u32>,
+    monitor_size: Option<PhysicalSize<u32>>,
+) -> WorkspaceRenderLayout {
+    let workspace_width = (size.width as f32 - OUTER_PADDING * 2.0).max(1.0);
+    let active_workspace = workspace.current_workspace();
+    let visible = visible_column_layout(
+        workspace,
+        size.width,
+        monitor_size.map(|size| size.width),
+        active_workspace,
+    );
+    let visible_columns_f = visible.visible_columns as f32;
+    let total_gap_width = GAP * (visible_columns_f - 1.0).max(0.0);
+    let column_width = ((workspace_width - total_gap_width) / visible_columns_f).max(1.0);
+    let scroll_offset = visible.first_visible_column as f32 * (column_width + GAP);
+
+    WorkspaceRenderLayout {
+        visible,
+        column_width,
+        scroll_offset,
+    }
 }
 
 fn visible_column_layout(
@@ -984,5 +1095,49 @@ mod tests {
         assert_eq!(inferred_visible_column_count(3000, Some(2000), 0.25), 4);
         assert_eq!(inferred_visible_column_count(1000, Some(0), 0.25), 1);
         assert_eq!(inferred_visible_column_count(1000, None, 0.25), 1);
+    }
+
+    #[test]
+    fn viewport_animation_interpolates_to_new_layout_target() {
+        let mut animation = AnimatedViewport::default();
+        let now = Instant::now();
+        let visible = VisibleColumnLayout {
+            visible_columns: 2,
+            first_visible_column: 0,
+        };
+        let start = WorkspaceRenderLayout {
+            visible,
+            column_width: 200.0,
+            scroll_offset: 0.0,
+        };
+        let target = WorkspaceRenderLayout {
+            visible: VisibleColumnLayout {
+                visible_columns: 2,
+                first_visible_column: 2,
+            },
+            column_width: 300.0,
+            scroll_offset: 600.0,
+        };
+
+        let first_frame = animation.frame(start, now);
+        assert_eq!(first_frame.column_width, 200.0);
+        assert_eq!(first_frame.scroll_offset, 0.0);
+        assert!(!animation.is_animating());
+
+        let transition_start = animation.frame(target, now);
+        assert_eq!(transition_start.column_width, 200.0);
+        assert_eq!(transition_start.scroll_offset, 0.0);
+        assert!(animation.is_animating());
+
+        let middle = animation.frame(target, now + VIEWPORT_ANIMATION_DURATION / 2);
+        assert!(middle.column_width > 200.0);
+        assert!(middle.column_width < 300.0);
+        assert!(middle.scroll_offset > 0.0);
+        assert!(middle.scroll_offset < 600.0);
+
+        let final_frame = animation.frame(target, now + VIEWPORT_ANIMATION_DURATION);
+        assert_eq!(final_frame.column_width, 300.0);
+        assert_eq!(final_frame.scroll_offset, 600.0);
+        assert!(!animation.is_animating());
     }
 }
