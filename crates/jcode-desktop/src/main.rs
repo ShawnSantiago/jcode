@@ -2,7 +2,6 @@ mod workspace;
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
-use std::collections::BTreeMap;
 use wgpu::util::DeviceExt;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -16,6 +15,7 @@ const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
 const OUTER_PADDING: f32 = 28.0;
 const GAP: f32 = 16.0;
+const COLUMN_WIDTH: f32 = 360.0;
 const STATUS_BAR_HEIGHT: f32 = 42.0;
 const HEADER_HEIGHT: f32 = 28.0;
 const FOCUSED_BORDER_WIDTH: f32 = 2.0;
@@ -422,23 +422,28 @@ fn build_vertices(workspace: &Workspace, size: PhysicalSize<u32>) -> Vec<Vertex>
         return vertices;
     }
 
-    let lanes = index_by(workspace.surfaces.iter().map(|surface| surface.lane));
-    let columns = index_by(workspace.surfaces.iter().map(|surface| surface.column));
-    let lane_count = lanes.len().max(1) as f32;
-    let column_count = columns.len().max(1) as f32;
     let workspace_height = (height - STATUS_BAR_HEIGHT - OUTER_PADDING * 2.0).max(1.0);
     let workspace_width = (width - OUTER_PADDING * 2.0).max(1.0);
-    let cell_width = ((workspace_width - GAP * (column_count - 1.0)) / column_count).max(24.0);
-    let cell_height = ((workspace_height - GAP * (lane_count - 1.0)) / lane_count).max(24.0);
+    let column_width = COLUMN_WIDTH.min(workspace_width);
+    let active_workspace = workspace.current_workspace();
+    let focused_column = workspace
+        .focused_surface()
+        .map(|surface| surface.column)
+        .unwrap_or_default() as f32;
+    let scroll_offset =
+        focused_column * (column_width + GAP) + column_width / 2.0 - workspace_width / 2.0;
 
-    for surface in &workspace.surfaces {
-        let column = columns.get(&surface.column).copied().unwrap_or_default() as f32;
-        let lane = lanes.get(&surface.lane).copied().unwrap_or_default() as f32;
+    for surface in workspace
+        .surfaces
+        .iter()
+        .filter(|surface| surface.lane == active_workspace)
+    {
+        let column = surface.column as f32;
         let rect = Rect {
-            x: OUTER_PADDING + column * (cell_width + GAP),
-            y: OUTER_PADDING + lane * (cell_height + GAP),
-            width: cell_width,
-            height: cell_height,
+            x: OUTER_PADDING + column * (column_width + GAP) - scroll_offset,
+            y: OUTER_PADDING,
+            width: column_width,
+            height: workspace_height,
         };
         push_surface(
             &mut vertices,
@@ -450,17 +455,6 @@ fn build_vertices(workspace: &Workspace, size: PhysicalSize<u32>) -> Vec<Vertex>
     }
 
     vertices
-}
-
-fn index_by(values: impl Iterator<Item = i32>) -> BTreeMap<i32, usize> {
-    let mut map = BTreeMap::new();
-    for value in values {
-        if !map.contains_key(&value) {
-            let index = map.len();
-            map.insert(value, index);
-        }
-    }
-    map
 }
 
 fn push_surface(

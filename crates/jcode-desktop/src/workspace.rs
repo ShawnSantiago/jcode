@@ -32,6 +32,8 @@ pub enum KeyOutcome {
 pub struct Surface {
     pub id: u64,
     pub title: String,
+    /// Vertical Niri-style workspace index. Each workspace is rendered as one
+    /// full-height horizontal strip of columns.
     pub lane: i32,
     pub column: i32,
     pub color_index: usize,
@@ -74,16 +76,30 @@ impl Workspace {
             Surface {
                 id: 4,
                 title: "activity".to_string(),
-                lane: 1,
-                column: 0,
+                lane: 0,
+                column: 3,
                 color_index: 3,
             },
             Surface {
                 id: 5,
                 title: "diff".to_string(),
-                lane: 1,
-                column: 1,
+                lane: 0,
+                column: 4,
                 color_index: 4,
+            },
+            Surface {
+                id: 6,
+                title: "review workspace".to_string(),
+                lane: -1,
+                column: 0,
+                color_index: 5,
+            },
+            Surface {
+                id: 7,
+                title: "build workspace".to_string(),
+                lane: 1,
+                column: 0,
+                color_index: 6,
             },
         ];
 
@@ -93,8 +109,14 @@ impl Workspace {
             focused_id: 1,
             zoomed: false,
             draft: String::new(),
-            next_id: 6,
+            next_id: 8,
         }
+    }
+
+    pub fn current_workspace(&self) -> i32 {
+        self.focused_surface()
+            .map(|surface| surface.lane)
+            .unwrap_or_default()
     }
 
     pub fn status_title(&self) -> String {
@@ -107,13 +129,16 @@ impl Workspace {
             .focused_surface()
             .map(|surface| surface.title.as_str())
             .unwrap_or("no surface");
+        let workspace = self.current_workspace();
 
         match self.mode {
             InputMode::Navigation => format!(
-                "Jcode Desktop · {mode}{zoom} · {focused} · h/j/k/l focus · H/J/K/L move · n new · z zoom · i insert · Esc quit"
+                "Jcode Desktop · {mode}{zoom} · workspace {workspace} · {focused} · h/l columns · j/k workspaces · H/L move · n new · z zoom · i insert · Esc quit"
             ),
             InputMode::Insert => {
-                format!("Jcode Desktop · {mode}{zoom} · {focused} · typing captured · Esc NAV")
+                format!(
+                    "Jcode Desktop · {mode}{zoom} · workspace {workspace} · {focused} · typing captured · Esc NAV"
+                )
             }
         }
     }
@@ -148,14 +173,14 @@ impl Workspace {
         };
 
         match text.as_str() {
-            "h" => self.focus(Direction::Left),
-            "j" => self.focus(Direction::Down),
-            "k" => self.focus(Direction::Up),
-            "l" => self.focus(Direction::Right),
-            "H" => self.move_focused(Direction::Left),
-            "J" => self.move_focused(Direction::Down),
-            "K" => self.move_focused(Direction::Up),
-            "L" => self.move_focused(Direction::Right),
+            "h" => self.focus_column(Direction::Left),
+            "j" => self.focus_workspace(Direction::Down),
+            "k" => self.focus_workspace(Direction::Up),
+            "l" => self.focus_column(Direction::Right),
+            "H" => self.move_focused_column(Direction::Left),
+            "J" => self.move_focused_workspace(Direction::Down),
+            "K" => self.move_focused_workspace(Direction::Up),
+            "L" => self.move_focused_column(Direction::Right),
             "i" => {
                 self.mode = InputMode::Insert;
                 true
@@ -196,8 +221,8 @@ impl Workspace {
         }
     }
 
-    fn focus(&mut self, direction: Direction) -> bool {
-        if let Some(next_id) = self.neighbor_id(direction) {
+    fn focus_column(&mut self, direction: Direction) -> bool {
+        if let Some(next_id) = self.column_neighbor_id(direction) {
             self.focused_id = next_id;
             true
         } else {
@@ -205,80 +230,108 @@ impl Workspace {
         }
     }
 
-    fn neighbor_id(&self, direction: Direction) -> Option<u64> {
+    fn focus_workspace(&mut self, direction: Direction) -> bool {
+        let Some(current) = self.focused_surface() else {
+            return false;
+        };
+        let current_lane = current.lane;
+        let current_column = current.column;
+        let target_lane = match direction {
+            Direction::Up => current_lane - 1,
+            Direction::Down => current_lane + 1,
+            Direction::Left | Direction::Right => return false,
+        };
+        let target_id = self.ensure_workspace_surface(target_lane, current_column);
+        self.focused_id = target_id;
+        self.zoomed = false;
+        true
+    }
+
+    fn column_neighbor_id(&self, direction: Direction) -> Option<u64> {
         let current = self.focused_surface()?;
         let current_lane = current.lane;
         let current_column = current.column;
 
         self.surfaces
             .iter()
+            .filter(|surface| surface.lane == current_lane)
             .filter(|surface| match direction {
                 Direction::Left => surface.column < current_column,
                 Direction::Right => surface.column > current_column,
-                Direction::Up => surface.lane < current_lane,
-                Direction::Down => surface.lane > current_lane,
+                Direction::Up | Direction::Down => false,
             })
-            .min_by_key(|surface| match direction {
-                Direction::Left | Direction::Right => (
-                    (surface.column - current_column).abs(),
-                    (surface.lane - current_lane).abs(),
-                    surface.id,
-                ),
-                Direction::Up | Direction::Down => (
-                    (surface.lane - current_lane).abs(),
-                    (surface.column - current_column).abs(),
-                    surface.id,
-                ),
-            })
+            .min_by_key(|surface| ((surface.column - current_column).abs(), surface.id))
             .map(|surface| surface.id)
     }
 
-    fn move_focused(&mut self, direction: Direction) -> bool {
-        let Some(focused_index) = self
-            .surfaces
-            .iter()
-            .position(|surface| surface.id == self.focused_id)
-        else {
+    fn move_focused_column(&mut self, direction: Direction) -> bool {
+        let Some(focused_index) = self.focused_index() else {
             return false;
         };
+        if !matches!(direction, Direction::Left | Direction::Right) {
+            return false;
+        }
 
-        if let Some(neighbor_id) = self.neighbor_id(direction) {
+        if let Some(neighbor_id) = self.column_neighbor_id(direction) {
             if let Some(neighbor_index) = self
                 .surfaces
                 .iter()
                 .position(|surface| surface.id == neighbor_id)
             {
-                let focused_position = (
-                    self.surfaces[focused_index].lane,
-                    self.surfaces[focused_index].column,
-                );
-                let neighbor_position = (
-                    self.surfaces[neighbor_index].lane,
-                    self.surfaces[neighbor_index].column,
-                );
-                self.surfaces[focused_index].lane = neighbor_position.0;
-                self.surfaces[focused_index].column = neighbor_position.1;
-                self.surfaces[neighbor_index].lane = focused_position.0;
-                self.surfaces[neighbor_index].column = focused_position.1;
+                let focused_column = self.surfaces[focused_index].column;
+                let neighbor_column = self.surfaces[neighbor_index].column;
+                self.surfaces[focused_index].column = neighbor_column;
+                self.surfaces[neighbor_index].column = focused_column;
                 return true;
             }
         }
+        false
+    }
 
-        let surface = &mut self.surfaces[focused_index];
-        match direction {
-            Direction::Left => surface.column -= 1,
-            Direction::Right => surface.column += 1,
-            Direction::Up => surface.lane -= 1,
-            Direction::Down => surface.lane += 1,
-        }
+    fn move_focused_workspace(&mut self, direction: Direction) -> bool {
+        let Some(focused_index) = self.focused_index() else {
+            return false;
+        };
+        let lane_delta = match direction {
+            Direction::Up => -1,
+            Direction::Down => 1,
+            Direction::Left | Direction::Right => return false,
+        };
+        self.surfaces[focused_index].lane += lane_delta;
+        self.zoomed = false;
         true
     }
 
+    fn focused_index(&self) -> Option<usize> {
+        self.surfaces
+            .iter()
+            .position(|surface| surface.id == self.focused_id)
+    }
+
+    fn ensure_workspace_surface(&mut self, lane: i32, preferred_column: i32) -> u64 {
+        if let Some(surface) = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.lane == lane)
+            .min_by_key(|surface| ((surface.column - preferred_column).abs(), surface.id))
+        {
+            return surface.id;
+        }
+
+        let id = self.next_id;
+        self.next_id += 1;
+        self.surfaces.push(Surface {
+            id,
+            title: format!("workspace {lane}"),
+            lane,
+            column: preferred_column,
+            color_index: id as usize,
+        });
+        id
+    }
+
     fn add_surface(&mut self) {
-        let lane = self
-            .focused_surface()
-            .map(|surface| surface.lane)
-            .unwrap_or_default();
+        let lane = self.current_workspace();
         let column = self
             .surfaces
             .iter()
@@ -304,16 +357,23 @@ impl Workspace {
         if self.surfaces.len() <= 1 {
             return false;
         }
-        let Some(position) = self
-            .surfaces
-            .iter()
-            .position(|surface| surface.id == self.focused_id)
-        else {
+        let Some(position) = self.focused_index() else {
             return false;
         };
+        let lane = self.surfaces[position].lane;
         self.surfaces.remove(position);
-        let new_position = position.min(self.surfaces.len() - 1);
-        self.focused_id = self.surfaces[new_position].id;
+
+        if let Some(surface) = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.lane == lane)
+            .min_by_key(|surface| surface.column.abs())
+        {
+            self.focused_id = surface.id;
+        } else {
+            let new_position = position.min(self.surfaces.len() - 1);
+            self.focused_id = self.surfaces[new_position].id;
+        }
         self.zoomed = false;
         true
     }
@@ -331,7 +391,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn hjkl_focuses_neighboring_surfaces() {
+    fn h_and_l_focus_neighboring_columns_in_current_workspace() {
         let mut workspace = Workspace::fake();
         assert_eq!(workspace.focused_id, 1);
         assert_eq!(
@@ -340,19 +400,45 @@ mod tests {
         );
         assert_eq!(workspace.focused_id, 2);
         assert_eq!(
-            workspace.handle_key(KeyInput::Character("j".to_string())),
-            KeyOutcome::Redraw
-        );
-        assert_eq!(workspace.focused_id, 5);
-        assert_eq!(
             workspace.handle_key(KeyInput::Character("h".to_string())),
             KeyOutcome::Redraw
         );
-        assert_eq!(workspace.focused_id, 4);
+        assert_eq!(workspace.focused_id, 1);
     }
 
     #[test]
-    fn uppercase_hjkl_swaps_focused_surface_with_neighbor() {
+    fn j_and_k_focus_workspace_below_and_above() {
+        let mut workspace = Workspace::fake();
+        assert_eq!(workspace.current_workspace(), 0);
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("j".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.current_workspace(), 1);
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("k".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.current_workspace(), 0);
+        assert_eq!(
+            workspace.handle_key(KeyInput::Character("k".to_string())),
+            KeyOutcome::Redraw
+        );
+        assert_eq!(workspace.current_workspace(), -1);
+    }
+
+    #[test]
+    fn moving_to_missing_workspace_creates_placeholder_surface() {
+        let mut workspace = Workspace::fake();
+        workspace.handle_key(KeyInput::Character("j".to_string()));
+        workspace.handle_key(KeyInput::Character("j".to_string()));
+        assert_eq!(workspace.current_workspace(), 2);
+        assert!(workspace.surfaces.iter().any(|surface| surface.lane == 2));
+        assert_unique_positions(&workspace);
+    }
+
+    #[test]
+    fn uppercase_h_and_l_swap_focused_surface_with_neighbor() {
         let mut workspace = Workspace::fake();
         workspace.handle_key(KeyInput::Character("L".to_string()));
         assert_eq!(
@@ -361,14 +447,22 @@ mod tests {
                 .map(|surface| (surface.lane, surface.column)),
             Some((0, 1))
         );
+        assert_unique_positions(&workspace);
+    }
+
+    #[test]
+    fn uppercase_j_and_k_move_surface_between_workspaces() {
+        let mut workspace = Workspace::fake();
         workspace.handle_key(KeyInput::Character("J".to_string()));
         assert_eq!(
-            workspace
-                .focused_surface()
-                .map(|surface| (surface.lane, surface.column)),
-            Some((1, 1))
+            workspace.focused_surface().map(|surface| surface.lane),
+            Some(1)
         );
-        assert_unique_positions(&workspace);
+        workspace.handle_key(KeyInput::Character("K".to_string()));
+        assert_eq!(
+            workspace.focused_surface().map(|surface| surface.lane),
+            Some(0)
+        );
     }
 
     #[test]
@@ -395,12 +489,16 @@ mod tests {
     fn new_and_close_surface_update_focus_without_overlapping() {
         let mut workspace = Workspace::fake();
         workspace.handle_key(KeyInput::Character("n".to_string()));
-        assert_eq!(workspace.focused_id, 6);
-        assert_eq!(workspace.surfaces.len(), 6);
+        assert_eq!(workspace.focused_id, 8);
+        assert_eq!(workspace.surfaces.len(), 8);
+        assert_eq!(
+            workspace.focused_surface().map(|surface| surface.lane),
+            Some(0)
+        );
         assert_unique_positions(&workspace);
         workspace.handle_key(KeyInput::Character("x".to_string()));
-        assert_eq!(workspace.surfaces.len(), 5);
-        assert_ne!(workspace.focused_id, 6);
+        assert_eq!(workspace.surfaces.len(), 7);
+        assert_ne!(workspace.focused_id, 8);
     }
 
     fn assert_unique_positions(workspace: &Workspace) {

@@ -80,8 +80,10 @@ Once Phase 0 works, the next prototype is the fake-data spatial workspace. The f
 
 ```text
 Navigation mode:
-  h/j/k/l      focus surfaces
-  H/J/K/L      move the focused surface
+  h/l          focus columns within the current workspace
+  j/k          move to the workspace below/above
+  H/L          move the focused column left/right
+  J/K          move the focused column to the workspace below/above
   n            create a fake session surface
   x            close the focused surface
   z            zoom/unzoom the focused surface
@@ -93,26 +95,22 @@ Insert mode:
   Esc          return to navigation mode
 ```
 
-The initial renderer may use only primitive colored rectangles and the native window title for mode/status text. Full text rendering can follow after the workspace behavior feels right. The visual direction should use a soft static blue/lavender/mint gradient background, muted status colors, and a very thin gray focus ring rather than a bright web-style selection color.
+The initial renderer may use only primitive colored rectangles and the native window title for mode/status text. Full text rendering can follow after the workspace behavior feels right. The visual direction should use a soft static blue/lavender/mint gradient background, muted status colors, and a very thin gray focus ring rather than a bright web-style selection color. The layout direction is Niri-like: each workspace is a vertical lane containing a horizontally scrollable strip of full-height columns. Columns should never be stacked within the same workspace.
 
 The target shape is:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────────────────┐
-│ Jcode Workspace: jcode repo      leader: Space     mode: NAV     4 sessions   2 run │
-├──────────────┬────────────────────────────┬────────────────────────────┬────────────┤
-│ sessions     │ ● fox / coordinator        │   wolf / impl              │ activity   │
-│              │                            │                            │            │
-│ ● fox        │ user: make desktop app     │ user: inspect tui arch     │ build      │
-│ ○ wolf       │                            │                            │ cargo test │
-│ ○ owl        │ assistant: plan surfaces   │ assistant: found protocol  │ 42%        │
-│ ○ bear       │                            │                            │            │
-│              │ tool: read docs            │ tool: grep ServerEvent     │ pending    │
-│ files        │ tool: edit architecture    │ tool: summarize tui        │ approval   │
-│ diffs        │                            │                            │            │
-│ debug        │ composer inactive          │ composer inactive          │            │
-├──────────────┴────────────────────────────┴────────────────────────────┴────────────┤
-│ Space h/j/k/l focus  ·  Space H/J/K/L move  ·  Space n new session  ·  Space / cmd │
+│ workspace 0 · NAV                                                                  │
+├────────────────────┬────────────────────┬────────────────────┬────────────────────┤
+│ ● fox/coordinator  │   wolf/impl        │   owl/review       │   activity         │
+│                    │                    │                    │                    │
+│ full-height column │ full-height column │ full-height column │ full-height column │
+│                    │                    │                    │                    │
+│                    │                    │                    │                    │
+│                    │                    │                    │                    │
+├────────────────────┴────────────────────┴────────────────────┴────────────────────┤
+│ h/l columns · j/k workspaces · H/L move column · J/K move workspace · n new · z zoom│
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -120,7 +118,7 @@ Phase 1 proves the actual product bet:
 
 - multiple visible agent sessions
 - Niri-like spatial layout
-- leader + `h/j/k/l` navigation
+- `h/l` column navigation and `j/k` workspace navigation
 - move/close/zoom surfaces
 - independent fake transcripts
 - activity surface
