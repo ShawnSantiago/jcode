@@ -139,11 +139,22 @@ async fn run() -> Result<()> {
         }
         DesktopApp::Workspace(workspace)
     } else {
-        DesktopApp::SingleSession(SingleSessionApp::new(load_primary_session_card()))
+        fresh_single_session_app()
     };
     window.set_title(&app.status_title());
     let mut canvas = Canvas::new(window).await?;
     let mut modifiers = ModifiersState::empty();
+
+    if !workspace_mode {
+        if let Err(error) = session_launch::launch_new_session() {
+            eprintln!("jcode-desktop: failed to spawn fresh session: {error:#}");
+        } else {
+            std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
+            app.refresh_sessions();
+            window.set_title(&app.status_title());
+            window.request_redraw();
+        }
+    }
 
     event_loop.run(move |event, target| {
         target.set_control_flow(ControlFlow::Wait);
@@ -296,6 +307,10 @@ fn save_desktop_preferences(workspace: &Workspace) {
 
 fn load_primary_session_card() -> Option<workspace::SessionCard> {
     load_session_cards_for_desktop().into_iter().next()
+}
+
+fn fresh_single_session_app() -> DesktopApp {
+    DesktopApp::SingleSession(SingleSessionApp::new(None))
 }
 
 enum DesktopApp {
@@ -1376,6 +1391,16 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("ctrl+;"))
         );
+    }
+
+    #[test]
+    fn default_single_session_app_starts_without_attaching_recent_session() {
+        let DesktopApp::SingleSession(app) = fresh_single_session_app() else {
+            panic!("default desktop app should be single-session mode");
+        };
+
+        assert!(app.session.is_none());
+        assert_eq!(app.open_session(), KeyOutcome::SpawnSession);
     }
 
     #[test]
