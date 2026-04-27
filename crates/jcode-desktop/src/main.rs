@@ -24,13 +24,12 @@ const PANEL_RADIUS: f32 = 8.0;
 const STATUS_RADIUS: f32 = 7.0;
 const ROUNDED_CORNER_SEGMENTS: usize = 6;
 const PANEL_FIT_TOLERANCE: f32 = 0.15;
-const MINIMAP_WIDTH: f32 = 170.0;
-const MINIMAP_HEIGHT: f32 = 96.0;
-const MINIMAP_RADIUS: f32 = 7.0;
-const MINIMAP_INSET: f32 = 9.0;
-const MINIMAP_LANE_RADIUS: i32 = 2;
-const MINIMAP_ROW_GAP: f32 = 4.0;
-const MINIMAP_COLUMN_GAP: f32 = 2.0;
+const STATUS_PREVIEW_LANE_RADIUS: i32 = 2;
+const STATUS_PREVIEW_MAX_WIDTH: f32 = 420.0;
+const STATUS_PREVIEW_HEIGHT: f32 = 14.0;
+const STATUS_PREVIEW_PANEL_WIDTH: f32 = 9.0;
+const STATUS_PREVIEW_PANEL_GAP: f32 = 2.0;
+const STATUS_PREVIEW_GROUP_GAP: f32 = 10.0;
 const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
 
@@ -50,14 +49,12 @@ const FOCUS_RING_COLOR: [f32; 4] = [0.255, 0.275, 0.315, 0.75];
 const UNFOCUSED_BORDER_COLOR: [f32; 4] = [0.235, 0.260, 0.305, 0.40];
 const NAV_STATUS_COLOR: [f32; 4] = [0.184, 0.204, 0.251, 1.0];
 const INSERT_STATUS_COLOR: [f32; 4] = [0.310, 0.435, 0.376, 1.0];
-const MINIMAP_BORDER_COLOR: [f32; 4] = [0.235, 0.260, 0.305, 0.45];
-const MINIMAP_FILL_COLOR: [f32; 4] = [0.110, 0.125, 0.165, 0.16];
-const MINIMAP_ACTIVE_ROW_COLOR: [f32; 4] = [0.184, 0.204, 0.251, 0.30];
-const MINIMAP_INACTIVE_ROW_COLOR: [f32; 4] = [0.235, 0.260, 0.305, 0.12];
-const MINIMAP_SURFACE_COLOR: [f32; 4] = [0.110, 0.125, 0.165, 0.38];
-const MINIMAP_ACTIVE_SURFACE_COLOR: [f32; 4] = [0.110, 0.125, 0.165, 0.58];
-const MINIMAP_FOCUSED_SURFACE_COLOR: [f32; 4] = [0.255, 0.275, 0.315, 0.86];
-const MINIMAP_VIEWPORT_COLOR: [f32; 4] = [0.255, 0.275, 0.315, 0.72];
+const STATUS_PREVIEW_ACTIVE_GROUP_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.16];
+const STATUS_PREVIEW_INACTIVE_SURFACE_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.28];
+const STATUS_PREVIEW_ACTIVE_SURFACE_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.58];
+const STATUS_PREVIEW_FOCUSED_SURFACE_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.92];
+const STATUS_PREVIEW_EMPTY_FOCUSED_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.50];
+const STATUS_PREVIEW_VIEWPORT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.78];
 
 const SHADER: &str = r#"
 struct VertexOutput {
@@ -535,14 +532,15 @@ fn build_vertices(
         InputMode::Navigation => NAV_STATUS_COLOR,
         InputMode::Insert => INSERT_STATUS_COLOR,
     };
+    let status_rect = Rect {
+        x: OUTER_PADDING,
+        y: OUTER_PADDING,
+        width: (width - OUTER_PADDING * 2.0).max(1.0),
+        height: STATUS_BAR_HEIGHT,
+    };
     push_rounded_rect(
         &mut vertices,
-        Rect {
-            x: OUTER_PADDING,
-            y: OUTER_PADDING,
-            width: (width - OUTER_PADDING * 2.0).max(1.0),
-            height: STATUS_BAR_HEIGHT,
-        },
+        status_rect,
         STATUS_RADIUS,
         status_color,
         size,
@@ -550,6 +548,14 @@ fn build_vertices(
 
     let active_workspace = workspace.current_workspace();
     let visible_layout = render_layout.visible;
+    push_status_preview(
+        &mut vertices,
+        workspace,
+        active_workspace,
+        visible_layout,
+        status_rect,
+        size,
+    );
 
     if workspace.zoomed {
         if let Some(surface) = workspace.focused_surface() {
@@ -561,13 +567,6 @@ fn build_vertices(
             };
             push_surface(&mut vertices, rect, surface.color_index, true, size);
         }
-        push_minimap(
-            &mut vertices,
-            workspace,
-            active_workspace,
-            visible_layout,
-            size,
-        );
         return vertices;
     }
 
@@ -595,14 +594,6 @@ fn build_vertices(
             size,
         );
     }
-
-    push_minimap(
-        &mut vertices,
-        workspace,
-        active_workspace,
-        visible_layout,
-        size,
-    );
 
     vertices
 }
@@ -680,123 +671,206 @@ fn inferred_visible_column_count(
     ((window_width as f32 / target_panel_width + PANEL_FIT_TOLERANCE).floor() as u32).clamp(1, 4)
 }
 
-fn push_minimap(
+fn push_status_preview(
     vertices: &mut Vec<Vertex>,
     workspace: &Workspace,
     active_workspace: i32,
     visible_layout: VisibleColumnLayout,
+    status_rect: Rect,
     size: PhysicalSize<u32>,
 ) {
-    let screen_width = size.width as f32;
-    let screen_height = size.height as f32;
-    let width = MINIMAP_WIDTH.min((screen_width - OUTER_PADDING * 2.0).max(1.0));
-    let height = MINIMAP_HEIGHT.min(
-        (screen_height - STATUS_BAR_HEIGHT - OUTER_PADDING * 3.0)
-            .max(1.0)
-            .min(MINIMAP_HEIGHT),
-    );
+    let first_lane = active_workspace - STATUS_PREVIEW_LANE_RADIUS;
+    let last_lane = active_workspace + STATUS_PREVIEW_LANE_RADIUS;
+    let lanes: Vec<StatusPreviewLane> = (first_lane..=last_lane)
+        .map(|lane| status_preview_lane(workspace, lane, active_workspace, visible_layout))
+        .filter(|lane| !lane.is_empty || lane.is_active)
+        .collect();
 
-    if width < 80.0 || height < 48.0 {
+    if lanes.is_empty() {
         return;
     }
 
-    let rect = Rect {
-        x: (screen_width - OUTER_PADDING - width).max(OUTER_PADDING),
-        y: STATUS_BAR_HEIGHT + OUTER_PADDING * 2.0,
-        width,
-        height,
-    };
-    push_rounded_rect(vertices, rect, MINIMAP_RADIUS, MINIMAP_BORDER_COLOR, size);
-    let content_shell = inset_rect(rect, 1.0);
-    push_rounded_rect(
-        vertices,
-        content_shell,
-        (MINIMAP_RADIUS - 1.0).max(1.0),
-        MINIMAP_FILL_COLOR,
-        size,
-    );
-
-    let content = inset_rect(rect, MINIMAP_INSET);
-    let lane_count = (MINIMAP_LANE_RADIUS * 2 + 1) as usize;
-    let row_height = ((content.height - MINIMAP_ROW_GAP * (lane_count as f32 - 1.0))
-        / lane_count as f32)
-        .max(2.0);
-    let first_lane = active_workspace - MINIMAP_LANE_RADIUS;
-    let last_lane = active_workspace + MINIMAP_LANE_RADIUS;
-    let viewport_first_column = visible_layout.first_visible_column;
-    let viewport_last_column =
-        viewport_first_column + visible_layout.visible_columns.saturating_sub(1) as i32;
-    let (min_column, max_column) = workspace
-        .surfaces
+    let full_width = lanes.iter().map(StatusPreviewLane::width).sum::<f32>()
+        + STATUS_PREVIEW_GROUP_GAP * lanes.len().saturating_sub(1) as f32;
+    let max_width = STATUS_PREVIEW_MAX_WIDTH.min((status_rect.width - 24.0).max(1.0));
+    if max_width < 24.0 {
+        return;
+    }
+    let scale = (max_width / full_width).min(1.0);
+    let panel_width = (STATUS_PREVIEW_PANEL_WIDTH * scale).max(2.0);
+    let panel_gap = (STATUS_PREVIEW_PANEL_GAP * scale).max(1.0);
+    let group_gap = (STATUS_PREVIEW_GROUP_GAP * scale).max(4.0);
+    let scaled_width = lanes
         .iter()
-        .filter(|surface| surface.lane >= first_lane && surface.lane <= last_lane)
-        .map(|surface| surface.column)
-        .fold(
-            (viewport_first_column, viewport_last_column),
-            |(min, max), column| (min.min(column), max.max(column)),
-        );
-    let column_count = (max_column - min_column + 1).max(1) as f32;
-    let column_width =
-        ((content.width - MINIMAP_COLUMN_GAP * (column_count - 1.0)) / column_count).max(1.0);
-    let column_pitch = column_width + MINIMAP_COLUMN_GAP;
+        .map(|lane| lane.scaled_width(panel_width, panel_gap))
+        .sum::<f32>()
+        + group_gap * lanes.len().saturating_sub(1) as f32;
+    let strip_height = STATUS_PREVIEW_HEIGHT.min((status_rect.height - 8.0).max(1.0));
+    let strip_y = status_rect.y + (status_rect.height - strip_height) / 2.0;
+    let mut cursor_x = status_rect.x + (status_rect.width - scaled_width) / 2.0;
 
-    for lane in first_lane..=last_lane {
-        let row_index = (lane - first_lane) as f32;
-        let row = Rect {
-            x: content.x,
-            y: content.y + row_index * (row_height + MINIMAP_ROW_GAP),
-            width: content.width,
-            height: row_height,
+    for lane in lanes {
+        let lane_width = lane.scaled_width(panel_width, panel_gap);
+        let lane_rect = Rect {
+            x: cursor_x - 3.0,
+            y: strip_y - 3.0,
+            width: lane_width + 6.0,
+            height: strip_height + 6.0,
         };
-        let active_row = lane == active_workspace;
-        let row_color = if active_row {
-            MINIMAP_ACTIVE_ROW_COLOR
-        } else {
-            MINIMAP_INACTIVE_ROW_COLOR
-        };
-        push_rounded_rect(vertices, row, 2.5, row_color, size);
+
+        if lane.is_active {
+            push_rounded_rect(
+                vertices,
+                lane_rect,
+                5.0,
+                STATUS_PREVIEW_ACTIVE_GROUP_COLOR,
+                size,
+            );
+        }
+
+        if lane.is_empty {
+            push_rounded_rect(
+                vertices,
+                Rect {
+                    x: cursor_x + lane_width / 2.0 - 2.0,
+                    y: strip_y + strip_height / 2.0 - 2.0,
+                    width: 4.0,
+                    height: 4.0,
+                },
+                2.0,
+                STATUS_PREVIEW_EMPTY_FOCUSED_COLOR,
+                size,
+            );
+            cursor_x += lane_width + group_gap;
+            continue;
+        }
 
         for surface in workspace
             .surfaces
             .iter()
-            .filter(|surface| surface.lane == lane)
+            .filter(|surface| surface.lane == lane.lane)
         {
-            let x = content.x + (surface.column - min_column) as f32 * column_pitch;
-            let surface_rect = Rect {
-                x,
-                y: row.y + 2.0,
-                width: column_width.min(content.x + content.width - x).max(1.0),
-                height: (row.height - 4.0).max(1.0),
-            };
-            let color = if workspace.is_focused(surface.id) {
-                MINIMAP_FOCUSED_SURFACE_COLOR
-            } else if active_row {
-                MINIMAP_ACTIVE_SURFACE_COLOR
+            let column_offset = (surface.column - lane.min_column) as f32;
+            let surface_x = cursor_x + column_offset * (panel_width + panel_gap);
+            let focused = workspace.is_focused(surface.id);
+            let color = if focused {
+                STATUS_PREVIEW_FOCUSED_SURFACE_COLOR
+            } else if lane.is_active {
+                STATUS_PREVIEW_ACTIVE_SURFACE_COLOR
             } else {
-                MINIMAP_SURFACE_COLOR
+                STATUS_PREVIEW_INACTIVE_SURFACE_COLOR
             };
-            push_rounded_rect(vertices, surface_rect, 2.0, color, size);
-        }
-
-        if active_row {
-            let viewport_x = content.x + (viewport_first_column - min_column) as f32 * column_pitch;
-            let viewport_width = (visible_layout.visible_columns as f32 * column_width
-                + visible_layout.visible_columns.saturating_sub(1) as f32 * MINIMAP_COLUMN_GAP)
-                .min(content.x + content.width - viewport_x)
-                .max(1.0);
-            push_stroked_rect(
+            let tick_width = if focused {
+                panel_width
+            } else {
+                panel_width * 0.56
+            };
+            let tick_x = surface_x + (panel_width - tick_width) / 2.0;
+            push_rounded_rect(
                 vertices,
                 Rect {
-                    x: viewport_x,
-                    y: row.y,
-                    width: viewport_width,
-                    height: row.height,
+                    x: tick_x,
+                    y: strip_y,
+                    width: tick_width.max(2.0),
+                    height: strip_height,
                 },
-                1.0,
-                MINIMAP_VIEWPORT_COLOR,
+                2.0,
+                color,
                 size,
             );
         }
+
+        if lane.is_active {
+            let viewport_x = cursor_x
+                + (visible_layout.first_visible_column - lane.min_column) as f32
+                    * (panel_width + panel_gap);
+            let viewport_width = visible_layout.visible_columns as f32 * panel_width
+                + visible_layout.visible_columns.saturating_sub(1) as f32 * panel_gap;
+            push_stroked_rect(
+                vertices,
+                Rect {
+                    x: viewport_x - 1.5,
+                    y: strip_y - 2.0,
+                    width: (viewport_width + 3.0).min(cursor_x + lane_width - viewport_x + 1.5),
+                    height: strip_height + 4.0,
+                },
+                1.0,
+                STATUS_PREVIEW_VIEWPORT_COLOR,
+                size,
+            );
+        }
+
+        cursor_x += lane_width + group_gap;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StatusPreviewLane {
+    lane: i32,
+    min_column: i32,
+    max_column: i32,
+    is_active: bool,
+    is_empty: bool,
+}
+
+impl StatusPreviewLane {
+    fn column_count(&self) -> i32 {
+        (self.max_column - self.min_column + 1).max(1)
+    }
+
+    fn width(&self) -> f32 {
+        self.scaled_width(STATUS_PREVIEW_PANEL_WIDTH, STATUS_PREVIEW_PANEL_GAP)
+    }
+
+    fn scaled_width(&self, panel_width: f32, panel_gap: f32) -> f32 {
+        let column_count = self.column_count() as f32;
+        column_count * panel_width + (column_count - 1.0).max(0.0) * panel_gap
+    }
+}
+
+fn status_preview_lane(
+    workspace: &Workspace,
+    lane: i32,
+    active_workspace: i32,
+    visible_layout: VisibleColumnLayout,
+) -> StatusPreviewLane {
+    let is_active = lane == active_workspace;
+    let viewport_first_column = visible_layout.first_visible_column;
+    let viewport_last_column =
+        viewport_first_column + visible_layout.visible_columns.saturating_sub(1) as i32;
+    let mut min_column = if is_active {
+        viewport_first_column
+    } else {
+        i32::MAX
+    };
+    let mut max_column = if is_active {
+        viewport_last_column
+    } else {
+        i32::MIN
+    };
+    let mut is_empty = true;
+
+    for surface in workspace
+        .surfaces
+        .iter()
+        .filter(|surface| surface.lane == lane)
+    {
+        min_column = min_column.min(surface.column);
+        max_column = max_column.max(surface.column);
+        is_empty = false;
+    }
+
+    if is_empty && !is_active {
+        min_column = 0;
+        max_column = 0;
+    }
+
+    StatusPreviewLane {
+        lane,
+        min_column,
+        max_column,
+        is_active,
+        is_empty,
     }
 }
 
