@@ -1126,6 +1126,17 @@ struct Canvas<'window> {
     viewport_animation: AnimatedViewport,
     focus_pulse: FocusPulse,
     needs_initial_frame: bool,
+    single_session_text_key: Option<SingleSessionTextKey>,
+    single_session_text_buffers: Vec<Buffer>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SingleSessionTextKey {
+    size: (u32, u32),
+    title: String,
+    body: String,
+    draft: String,
+    status: String,
 }
 
 impl<'window> Canvas<'window> {
@@ -1250,6 +1261,8 @@ impl<'window> Canvas<'window> {
             viewport_animation: AnimatedViewport::default(),
             focus_pulse: FocusPulse::default(),
             needs_initial_frame: true,
+            single_session_text_key: None,
+            single_session_text_buffers: Vec::new(),
         })
     }
 
@@ -1260,9 +1273,19 @@ impl<'window> Canvas<'window> {
         }
 
         self.size = size;
+        self.single_session_text_key = None;
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
+    }
+
+    fn refresh_cached_single_session_text_buffers(&mut self, app: &SingleSessionApp) {
+        let key = single_session_text_key(app, self.size);
+        if self.single_session_text_key.as_ref() != Some(&key) {
+            self.single_session_text_buffers =
+                single_session_text_buffers_from_key(&key, self.size, &mut self.font_system);
+            self.single_session_text_key = Some(key);
+        }
     }
 
     fn render(
@@ -1301,12 +1324,13 @@ impl<'window> Canvas<'window> {
                 )
             }
         };
-        let text_buffers = match app {
-            DesktopApp::SingleSession(single_session) => {
-                single_session_text_buffers(single_session, self.size, &mut self.font_system)
-            }
-            DesktopApp::Workspace(_) => Vec::new(),
-        };
+        if let DesktopApp::SingleSession(single_session) = app {
+            self.refresh_cached_single_session_text_buffers(single_session);
+        } else {
+            self.single_session_text_key = None;
+            self.single_session_text_buffers.clear();
+        }
+        let text_buffers = &self.single_session_text_buffers;
         if let DesktopApp::SingleSession(single_session) = app {
             push_single_session_caret(
                 &mut vertices,
@@ -1597,22 +1621,41 @@ fn single_session_draft_top(size: PhysicalSize<u32>) -> f32 {
     (size.height as f32 - SINGLE_SESSION_DRAFT_TOP_OFFSET).max(112.0)
 }
 
+#[cfg(test)]
 fn single_session_text_buffers(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     font_system: &mut FontSystem,
 ) -> Vec<Buffer> {
+    let key = single_session_text_key(app, size);
+    single_session_text_buffers_from_key(&key, size, font_system)
+}
+
+fn single_session_text_key(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+) -> SingleSessionTextKey {
+    SingleSessionTextKey {
+        size: (size.width, size.height),
+        title: app.title(),
+        body: single_session_visible_body(app, size).join("\n"),
+        draft: visualize_composer_whitespace(&app.composer_text()),
+        status: app.composer_status_line(),
+    }
+}
+
+fn single_session_text_buffers_from_key(
+    key: &SingleSessionTextKey,
+    size: PhysicalSize<u32>,
+    font_system: &mut FontSystem,
+) -> Vec<Buffer> {
     let typography = single_session_typography();
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
-    let title = app.title();
-    let body = single_session_visible_body(app, size).join("\n");
-    let draft = visualize_composer_whitespace(&app.composer_text());
-    let status = app.composer_status_line();
 
     vec![
         single_session_text_buffer(
             font_system,
-            &title,
+            &key.title,
             typography.title_size,
             typography.title_size * typography.meta_line_height,
             content_width,
@@ -1620,7 +1663,7 @@ fn single_session_text_buffers(
         ),
         single_session_text_buffer(
             font_system,
-            &body,
+            &key.body,
             typography.body_size,
             typography.body_size * typography.body_line_height,
             content_width,
@@ -1628,7 +1671,7 @@ fn single_session_text_buffers(
         ),
         single_session_text_buffer(
             font_system,
-            &draft,
+            &key.draft,
             typography.code_size,
             typography.code_size * typography.code_line_height,
             content_width,
@@ -1636,7 +1679,7 @@ fn single_session_text_buffers(
         ),
         single_session_text_buffer(
             font_system,
-            &status,
+            &key.status,
             typography.meta_size,
             typography.meta_size * typography.meta_line_height,
             content_width,
