@@ -323,6 +323,32 @@ fn ctrl_enter_submits_insert_draft_to_focused_session() {
 }
 
 #[test]
+fn submit_draft_opens_focused_session_in_navigation_mode() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::OpenSession {
+            session_id: "a".to_string(),
+            title: "alpha".to_string()
+        }
+    );
+}
+
+#[test]
+fn paste_text_appends_to_workspace_insert_draft() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::PasteText),
+        KeyOutcome::PasteText
+    );
+    assert!(workspace.paste_text("hello  paste"));
+    assert_eq!(workspace.draft, "hello  paste");
+}
+
+#[test]
 fn empty_or_placeholder_draft_does_not_submit() {
     let mut workspace = Workspace::fake();
     workspace.handle_key(KeyInput::Character("i".to_string()));

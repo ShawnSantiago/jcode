@@ -408,6 +408,14 @@ impl Workspace {
         self.focused_id == surface_id
     }
 
+    pub fn paste_text(&mut self, text: &str) -> bool {
+        if self.mode != InputMode::Insert || text.is_empty() {
+            return false;
+        }
+        self.draft.push_str(text);
+        true
+    }
+
     fn handle_navigation_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
             KeyInput::SpawnPanel => {
@@ -422,7 +430,13 @@ impl Workspace {
                 self.panel_size = size;
                 return KeyOutcome::Redraw;
             }
-            KeyInput::SubmitDraft => return KeyOutcome::None,
+            KeyInput::SubmitDraft => {
+                if let Some((session_id, title)) = self.focused_session_target() {
+                    return KeyOutcome::OpenSession { session_id, title };
+                }
+                self.mode = InputMode::Insert;
+                return KeyOutcome::Redraw;
+            }
             KeyInput::CancelGeneration
             | KeyInput::ScrollBodyPages(_)
             | KeyInput::CycleModel(_)
@@ -502,7 +516,7 @@ impl Workspace {
                 self.panel_size = size;
                 KeyOutcome::Redraw
             }
-            KeyInput::SubmitDraft => self.submit_draft(),
+            KeyInput::SubmitDraft | KeyInput::QueueDraft => self.submit_draft(),
             KeyInput::Escape => {
                 self.mode = InputMode::Navigation;
                 KeyOutcome::Redraw
@@ -538,9 +552,8 @@ impl Workspace {
             | KeyInput::JumpPrompt(_)
             | KeyInput::CopyLatestResponse
             | KeyInput::CycleModel(_)
-            | KeyInput::AttachClipboardImage
-            | KeyInput::PasteText
-            | KeyInput::QueueDraft => KeyOutcome::None,
+            | KeyInput::AttachClipboardImage => KeyOutcome::None,
+            KeyInput::PasteText => KeyOutcome::PasteText,
             KeyInput::Character(text) => {
                 self.draft.push_str(&text);
                 KeyOutcome::Redraw

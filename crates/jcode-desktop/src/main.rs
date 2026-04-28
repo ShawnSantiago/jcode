@@ -384,7 +384,7 @@ async fn run() -> Result<()> {
                         }
                         KeyOutcome::PasteText => {
                             match clipboard_text() {
-                                Ok(text) => app.paste_single_session_text(&text),
+                                Ok(text) => app.paste_text(&text),
                                 Err(error) => apply_single_session_error(&mut app, error),
                             }
                             window.set_title(&app.status_title());
@@ -869,9 +869,12 @@ impl DesktopApp {
         }
     }
 
-    fn paste_single_session_text(&mut self, text: &str) {
-        if let Self::SingleSession(app) = self {
-            app.paste_text(text);
+    fn paste_text(&mut self, text: &str) {
+        match self {
+            Self::SingleSession(app) => app.paste_text(text),
+            Self::Workspace(workspace) => {
+                workspace.paste_text(text);
+            }
         }
     }
 
