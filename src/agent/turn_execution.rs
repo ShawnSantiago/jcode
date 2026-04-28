@@ -466,6 +466,35 @@ impl Agent {
         (history, images)
     }
 
+    pub fn get_history_and_rendered_images_with_compacted_history(
+        &self,
+        compacted_history_visible: usize,
+    ) -> (
+        Vec<HistoryMessage>,
+        Vec<crate::session::RenderedImage>,
+        Option<crate::session::RenderedCompactedHistoryInfo>,
+    ) {
+        let (messages, images, compacted_info) =
+            crate::session::render_messages_and_images_with_compacted_history(
+                &self.session,
+                compacted_history_visible,
+            );
+        let history = messages
+            .into_iter()
+            .map(|msg| HistoryMessage {
+                role: msg.role,
+                content: msg.content,
+                tool_calls: if msg.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(msg.tool_calls)
+                },
+                tool_data: msg.tool_data,
+            })
+            .collect();
+        (history, images, compacted_info)
+    }
+
     pub fn get_tool_call_summaries(&self, limit: usize) -> Vec<crate::protocol::ToolCallSummary> {
         crate::session::summarize_tool_calls(&self.session, limit)
     }

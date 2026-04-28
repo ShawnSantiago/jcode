@@ -19,8 +19,9 @@ pub use crash::{
     find_session_by_name_or_id, recover_crashed_sessions,
 };
 pub use render::{
-    RenderedImage, RenderedImageSource, RenderedMessage, has_rendered_images, render_images,
-    render_messages, render_messages_and_images, summarize_tool_calls,
+    RenderedCompactedHistoryInfo, RenderedImage, RenderedImageSource, RenderedMessage,
+    has_rendered_images, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history, summarize_tool_calls,
 };
 
 /// Session exit status - why the session ended

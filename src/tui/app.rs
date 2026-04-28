@@ -377,6 +377,14 @@ pub(super) enum MouseScrollTarget {
     ChangelogOverlay,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct CompactedHistoryLazyState {
+    pub total_messages: usize,
+    pub visible_messages: usize,
+    pub remaining_messages: usize,
+    pub pending_request_visible: Option<usize>,
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
 pub struct App {
@@ -390,6 +398,7 @@ pub struct App {
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,
+    compacted_history_lazy: CompactedHistoryLazyState,
     input: String,
     cursor_pos: usize,
     scroll_offset: usize,

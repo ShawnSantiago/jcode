@@ -695,6 +695,42 @@ pub(in crate::tui::app) fn handle_server_event(
 
             false
         }
+        ServerEvent::CompactedHistory {
+            session_id,
+            messages,
+            images,
+            compacted_total,
+            compacted_visible,
+            compacted_remaining,
+            ..
+        } => {
+            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+                crate::logging::info(&format!(
+                    "Ignoring compacted history for inactive session {}",
+                    session_id
+                ));
+                return false;
+            }
+            let restored_messages = messages
+                .into_iter()
+                .map(|msg| DisplayMessage {
+                    role: msg.role,
+                    content: msg.content,
+                    tool_calls: msg.tool_calls.unwrap_or_default(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: msg.tool_data,
+                })
+                .collect();
+            app.apply_compacted_history_window(
+                restored_messages,
+                images,
+                compacted_total,
+                compacted_visible,
+                compacted_remaining,
+            );
+            true
+        }
         ServerEvent::SidePanelState { snapshot } => {
             app.set_side_panel_snapshot(snapshot);
             false
