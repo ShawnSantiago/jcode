@@ -683,6 +683,51 @@ fn test_render_messages_honors_background_task_display_role_override() {
 }
 
 #[test]
+fn test_render_messages_hides_compacted_leading_history() {
+    let mut session = Session::create_with_id(
+        "session_render_compacted_history_test".to_string(),
+        None,
+        Some("render compacted history test".to_string()),
+    );
+
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "old prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "old response".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "current prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "old prompt and response".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 2,
+        original_turn_count: 2,
+        compacted_count: 2,
+    });
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "system");
+    assert!(rendered[0].content.contains("2 historical messages hidden"));
+    assert_eq!(rendered[1].role, "user");
+    assert_eq!(rendered[1].content, "current prompt");
+}
+
+#[test]
 fn test_render_messages_and_images_share_tool_resolution_and_labels() {
     let mut session = Session::create_with_id(
         "session_render_bundle_test".to_string(),

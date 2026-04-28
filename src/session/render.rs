@@ -130,8 +130,25 @@ pub fn render_messages_and_images(session: &Session) -> (Vec<RenderedMessage>, V
     let mut rendered: Vec<RenderedMessage> = Vec::new();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
+    let compacted_count = session
+        .compaction
+        .as_ref()
+        .map(|state| state.compacted_count.min(session.messages.len()))
+        .unwrap_or(0);
 
-    for msg in &session.messages {
+    if compacted_count > 0 {
+        rendered.push(RenderedMessage {
+            role: "system".to_string(),
+            content: format!(
+                "Earlier conversation compacted — {} historical messages hidden from the UI.",
+                compacted_count
+            ),
+            tool_calls: Vec::new(),
+            tool_data: None,
+        });
+    }
+
+    for msg in session.messages.iter().skip(compacted_count) {
         let role = match msg.display_role {
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
