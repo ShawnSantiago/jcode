@@ -285,6 +285,114 @@ fn single_session_assistant_markdown_is_prepared_for_desktop_rendering() {
 }
 
 #[test]
+fn single_session_body_styled_lines_follow_roles_and_overlays() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::user("question\nmore context"));
+    app.messages.push(SingleSessionMessage::assistant(
+        "answer\n\n```rust\nfn main() {}\n```",
+    ));
+    app.messages.push(SingleSessionMessage::tool("bash done"));
+    app.messages
+        .push(SingleSessionMessage::meta("model switched"));
+
+    let lines = app.body_styled_lines();
+    assert_eq!(
+        style_for_text(&lines, "1  question"),
+        Some(SingleSessionLineStyle::User)
+    );
+    assert_eq!(
+        style_for_text(&lines, "   more context"),
+        Some(SingleSessionLineStyle::UserContinuation)
+    );
+    assert_eq!(
+        style_for_text(&lines, "answer"),
+        Some(SingleSessionLineStyle::Assistant)
+    );
+    assert_eq!(
+        style_for_text(&lines, "``` rust"),
+        Some(SingleSessionLineStyle::Code)
+    );
+    assert_eq!(
+        style_for_text(&lines, "    fn main() {}"),
+        Some(SingleSessionLineStyle::Code)
+    );
+    assert_eq!(
+        style_for_text(&lines, "• bash done"),
+        Some(SingleSessionLineStyle::Tool)
+    );
+    assert_eq!(
+        style_for_text(&lines, "  model switched"),
+        Some(SingleSessionLineStyle::Meta)
+    );
+
+    app.handle_key(KeyInput::HotkeyHelp);
+    let help = app.body_styled_lines();
+    assert_eq!(
+        style_for_text(&help, "desktop shortcuts"),
+        Some(SingleSessionLineStyle::OverlayTitle)
+    );
+    assert_eq!(
+        style_for_text(
+            &help,
+            "  Ctrl+V      paste clipboard image when no text is present"
+        ),
+        Some(SingleSessionLineStyle::Overlay)
+    );
+}
+
+#[test]
+fn glyphon_body_buffer_uses_line_style_colors() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages.push(SingleSessionMessage::user("question"));
+    app.messages.push(SingleSessionMessage::assistant(
+        "answer\n\n```rust\nfn main() {}\n```",
+    ));
+    app.messages.push(SingleSessionMessage::tool("bash done"));
+    app.messages
+        .push(SingleSessionMessage::meta("model switched"));
+    let mut font_system = FontSystem::new();
+
+    let buffers = single_session_text_buffers(&app, PhysicalSize::new(1200, 760), &mut font_system);
+    let body = &buffers[1];
+
+    assert_eq!(
+        first_glyph_color_for_text(body, "1  question"),
+        Some(single_session_line_color(SingleSessionLineStyle::User))
+    );
+    assert_eq!(
+        first_glyph_color_for_text(body, "answer"),
+        Some(single_session_line_color(SingleSessionLineStyle::Assistant))
+    );
+    assert_eq!(
+        first_glyph_color_for_text(body, "``` rust"),
+        Some(single_session_line_color(SingleSessionLineStyle::Code))
+    );
+    assert_eq!(
+        first_glyph_color_for_text(body, "• bash done"),
+        Some(single_session_line_color(SingleSessionLineStyle::Tool))
+    );
+    assert_eq!(
+        first_glyph_color_for_text(body, "  model switched"),
+        Some(single_session_line_color(SingleSessionLineStyle::Meta))
+    );
+}
+
+fn style_for_text(lines: &[SingleSessionStyledLine], text: &str) -> Option<SingleSessionLineStyle> {
+    lines
+        .iter()
+        .find(|line| line.text == text)
+        .map(|line| line.style)
+}
+
+fn first_glyph_color_for_text(buffer: &Buffer, text: &str) -> Option<TextColor> {
+    buffer
+        .layout_runs()
+        .find(|run| run.text == text)
+        .and_then(|run| run.glyphs.first().and_then(|glyph| glyph.color_opt))
+}
+
+#[test]
 fn single_session_tool_events_create_transcript_cards() {
     let mut app = SingleSessionApp::new(None);
     app.apply_session_event(session_launch::DesktopSessionEvent::ToolStarted {

@@ -16,8 +16,8 @@ use glyphon::{
 };
 use render_helpers::*;
 use single_session::{
-    SINGLE_SESSION_FONT_FAMILY, SelectionPoint, SingleSessionApp, single_session_surface,
-    single_session_typography,
+    SINGLE_SESSION_FONT_FAMILY, SelectionPoint, SingleSessionApp, SingleSessionLineStyle,
+    SingleSessionStyledLine, single_session_surface, single_session_typography,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
@@ -94,6 +94,15 @@ const STATUS_TEXT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.88];
 const PANEL_TITLE_COLOR: [f32; 4] = [0.090, 0.105, 0.135, 0.86];
 const PANEL_BODY_COLOR: [f32; 4] = [0.070, 0.082, 0.110, 0.88];
 const ASSISTANT_TEXT_COLOR: [f32; 4] = [0.030, 0.165, 0.190, 0.92];
+const USER_TEXT_COLOR: [f32; 4] = [0.115, 0.145, 0.430, 0.94];
+const USER_CONTINUATION_TEXT_COLOR: [f32; 4] = [0.135, 0.155, 0.360, 0.86];
+const TOOL_TEXT_COLOR: [f32; 4] = [0.530, 0.330, 0.070, 0.90];
+const META_TEXT_COLOR: [f32; 4] = [0.255, 0.300, 0.380, 0.76];
+const CODE_TEXT_COLOR: [f32; 4] = [0.235, 0.260, 0.310, 0.92];
+const STATUS_TEXT_ACCENT_COLOR: [f32; 4] = [0.235, 0.375, 0.310, 0.90];
+const ERROR_TEXT_COLOR: [f32; 4] = [0.675, 0.150, 0.150, 0.92];
+const OVERLAY_TEXT_COLOR: [f32; 4] = [0.185, 0.215, 0.285, 0.84];
+const OVERLAY_SELECTION_TEXT_COLOR: [f32; 4] = [0.080, 0.120, 0.210, 0.96];
 const PANEL_SECTION_COLOR: [f32; 4] = [0.085, 0.100, 0.130, 0.78];
 const SELECTION_HIGHLIGHT_COLOR: [f32; 4] = [0.220, 0.420, 0.700, 0.22];
 const STATUS_PREVIEW_ACCENTS: [[f32; 3]; 8] = [
@@ -1297,7 +1306,7 @@ struct Canvas<'window> {
 struct SingleSessionTextKey {
     size: (u32, u32),
     title: String,
-    body: String,
+    body: Vec<SingleSessionStyledLine>,
     draft: String,
     status: String,
 }
@@ -1799,7 +1808,7 @@ fn single_session_text_key(
     SingleSessionTextKey {
         size: (size.width, size.height),
         title: app.title(),
-        body: single_session_visible_body(app, size).join("\n"),
+        body: single_session_visible_styled_body(app, size),
         draft: visualize_composer_whitespace(&app.composer_text()),
         status: app.composer_status_line(),
     }
@@ -1822,7 +1831,7 @@ fn single_session_text_buffers_from_key(
             content_width,
             48.0,
         ),
-        single_session_text_buffer(
+        single_session_styled_text_buffer(
             font_system,
             &key.body,
             typography.body_size,
@@ -1850,12 +1859,22 @@ fn single_session_text_buffers_from_key(
 }
 
 fn single_session_visible_body(app: &SingleSessionApp, size: PhysicalSize<u32>) -> Vec<String> {
+    single_session_visible_styled_body(app, size)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+fn single_session_visible_styled_body(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+) -> Vec<SingleSessionStyledLine> {
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
     let available_height =
         (single_session_draft_top(size) - PANEL_BODY_TOP_PADDING - 12.0).max(line_height);
     let visible_lines = ((available_height / line_height).floor() as usize).max(1);
-    let lines = app.body_lines();
+    let lines = app.body_styled_lines();
     if lines.len() <= visible_lines {
         return lines;
     }
@@ -1923,6 +1942,68 @@ fn single_session_text_buffer(
     );
     buffer.shape_until_scroll(font_system);
     buffer
+}
+
+fn single_session_styled_text_buffer(
+    font_system: &mut FontSystem,
+    lines: &[SingleSessionStyledLine],
+    font_size: f32,
+    line_height: f32,
+    width: f32,
+    height: f32,
+) -> Buffer {
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    buffer.set_size(font_system, width, height);
+    let segments = single_session_styled_text_segments(lines);
+    buffer.set_rich_text(
+        font_system,
+        segments
+            .iter()
+            .map(|(text, style)| (text.as_str(), single_session_line_attrs(*style))),
+        Shaping::Basic,
+    );
+    buffer.shape_until_scroll(font_system);
+    buffer
+}
+
+fn single_session_styled_text_segments(
+    lines: &[SingleSessionStyledLine],
+) -> Vec<(String, SingleSessionLineStyle)> {
+    let mut segments = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.text.is_empty() {
+            segments.push((line.text.clone(), line.style));
+        }
+        if index + 1 < lines.len() {
+            segments.push(("\n".to_string(), SingleSessionLineStyle::Blank));
+        }
+    }
+    if segments.is_empty() {
+        segments.push((String::new(), SingleSessionLineStyle::Blank));
+    }
+    segments
+}
+
+fn single_session_line_attrs(style: SingleSessionLineStyle) -> Attrs<'static> {
+    Attrs::new()
+        .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
+        .color(single_session_line_color(style))
+}
+
+fn single_session_line_color(style: SingleSessionLineStyle) -> TextColor {
+    text_color(match style {
+        SingleSessionLineStyle::Assistant => ASSISTANT_TEXT_COLOR,
+        SingleSessionLineStyle::Code => CODE_TEXT_COLOR,
+        SingleSessionLineStyle::User => USER_TEXT_COLOR,
+        SingleSessionLineStyle::UserContinuation => USER_CONTINUATION_TEXT_COLOR,
+        SingleSessionLineStyle::Tool => TOOL_TEXT_COLOR,
+        SingleSessionLineStyle::Meta | SingleSessionLineStyle::Blank => META_TEXT_COLOR,
+        SingleSessionLineStyle::Status => STATUS_TEXT_ACCENT_COLOR,
+        SingleSessionLineStyle::Error => ERROR_TEXT_COLOR,
+        SingleSessionLineStyle::OverlayTitle => PANEL_TITLE_COLOR,
+        SingleSessionLineStyle::Overlay => OVERLAY_TEXT_COLOR,
+        SingleSessionLineStyle::OverlaySelection => OVERLAY_SELECTION_TEXT_COLOR,
+    })
 }
 
 fn single_session_text_areas(buffers: &[Buffer], size: PhysicalSize<u32>) -> Vec<TextArea<'_>> {

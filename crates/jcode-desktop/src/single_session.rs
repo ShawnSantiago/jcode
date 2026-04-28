@@ -88,6 +88,37 @@ pub(crate) struct SelectionLineSegment {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SingleSessionStyledLine {
+    pub(crate) text: String,
+    pub(crate) style: SingleSessionLineStyle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SingleSessionLineStyle {
+    Assistant,
+    Code,
+    User,
+    UserContinuation,
+    Tool,
+    Meta,
+    Status,
+    Error,
+    OverlayTitle,
+    Overlay,
+    OverlaySelection,
+    Blank,
+}
+
+impl SingleSessionStyledLine {
+    fn new(text: impl Into<String>, style: SingleSessionLineStyle) -> Self {
+        Self {
+            text: text.into(),
+            style,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StdinResponseState {
     pub(crate) request_id: String,
     pub(crate) prompt: String,
@@ -681,14 +712,21 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn body_lines(&self) -> Vec<String> {
+        self.body_styled_lines()
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
+    }
+
+    pub(crate) fn body_styled_lines(&self) -> Vec<SingleSessionStyledLine> {
         if let Some(stdin_response) = &self.stdin_response {
-            return stdin_response_lines(stdin_response);
+            return stdin_response_styled_lines(stdin_response);
         }
         if self.model_picker.open {
-            return model_picker_lines(&self.model_picker);
+            return model_picker_styled_lines(&self.model_picker);
         }
         if self.show_help {
-            return single_session_help_lines();
+            return single_session_help_styled_lines();
         }
         if !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
         {
@@ -696,30 +734,33 @@ impl SingleSessionApp {
             let mut user_turn = 1;
             for message in &self.messages {
                 if !lines.is_empty() {
-                    lines.push(String::new());
+                    lines.push(blank_styled_line());
                 }
                 append_chat_message_lines(&mut lines, message, &mut user_turn);
             }
             if !self.streaming_response.is_empty() {
                 if !lines.is_empty() {
-                    lines.push(String::new());
+                    lines.push(blank_styled_line());
                 }
                 append_assistant_lines(&mut lines, self.streaming_response.trim_end());
             }
             if let Some(error) = &self.error {
                 if !lines.is_empty() {
-                    lines.push(String::new());
+                    lines.push(blank_styled_line());
                 }
-                lines.push(format!("error: {error}"));
+                lines.push(styled_line(
+                    format!("error: {error}"),
+                    SingleSessionLineStyle::Error,
+                ));
             }
             return lines;
         }
 
         if let Some(status) = &self.status {
-            return vec![status.clone()];
+            return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
         }
 
-        single_session_lines(self.session.as_ref())
+        single_session_styled_lines(self.session.as_ref())
     }
 
     pub(crate) fn apply_session_event(&mut self, event: DesktopSessionEvent) {
@@ -1285,7 +1326,15 @@ impl SingleSessionApp {
     }
 }
 
-fn stdin_response_lines(state: &StdinResponseState) -> Vec<String> {
+fn styled_line(text: impl Into<String>, style: SingleSessionLineStyle) -> SingleSessionStyledLine {
+    SingleSessionStyledLine::new(text, style)
+}
+
+fn blank_styled_line() -> SingleSessionStyledLine {
+    styled_line(String::new(), SingleSessionLineStyle::Blank)
+}
+
+fn stdin_response_styled_lines(state: &StdinResponseState) -> Vec<SingleSessionStyledLine> {
     let kind = if state.is_password {
         "interactive password input"
     } else {
@@ -1299,15 +1348,32 @@ fn stdin_response_lines(state: &StdinResponseState) -> Vec<String> {
         state.input.replace(' ', "·")
     };
     vec![
-        format!("{kind} requested"),
-        format!("tool: {}", state.tool_call_id),
-        format!("request: {}", state.request_id),
-        format!("prompt: {}", state.prompt),
-        String::new(),
-        format!("input: {input}"),
-        String::new(),
-        "Enter send · Ctrl+Enter send · Shift+Enter newline · Ctrl+V paste · Ctrl+U clear · Ctrl+C cancel"
-            .to_string(),
+        styled_line(
+            format!("{kind} requested"),
+            SingleSessionLineStyle::OverlayTitle,
+        ),
+        styled_line(
+            format!("tool: {}", state.tool_call_id),
+            SingleSessionLineStyle::Tool,
+        ),
+        styled_line(
+            format!("request: {}", state.request_id),
+            SingleSessionLineStyle::Meta,
+        ),
+        styled_line(
+            format!("prompt: {}", state.prompt),
+            SingleSessionLineStyle::Meta,
+        ),
+        blank_styled_line(),
+        styled_line(
+            format!("input: {input}"),
+            SingleSessionLineStyle::OverlaySelection,
+        ),
+        blank_styled_line(),
+        styled_line(
+            "Enter send · Ctrl+Enter send · Shift+Enter newline · Ctrl+V paste · Ctrl+U clear · Ctrl+C cancel",
+            SingleSessionLineStyle::Overlay,
+        ),
     ]
 }
 
@@ -1331,41 +1397,64 @@ fn byte_index_at_char_column(line: &str, column: usize) -> usize {
         .unwrap_or(line.len())
 }
 
-fn model_picker_lines(picker: &ModelPickerState) -> Vec<String> {
+fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyledLine> {
     let mut lines = vec![
-        "desktop model/account picker".to_string(),
-        format!(
-            "current: {}",
-            model_picker_current_label(
-                picker.provider_name.as_deref(),
-                picker.current_model.as_deref(),
-            )
+        styled_line(
+            "desktop model/account picker",
+            SingleSessionLineStyle::OverlayTitle,
         ),
-        "↑/↓ select · type filter · Backspace edit filter · Enter switch · Ctrl+R reload · Esc close"
-            .to_string(),
-        format!(
-            "filter: {}",
-            if picker.filter.is_empty() {
-                "<none>"
-            } else {
-                picker.filter.as_str()
-            }
+        styled_line(
+            format!(
+                "current: {}",
+                model_picker_current_label(
+                    picker.provider_name.as_deref(),
+                    picker.current_model.as_deref(),
+                )
+            ),
+            SingleSessionLineStyle::Meta,
         ),
-        String::new(),
+        styled_line(
+            "↑/↓ select · type filter · Backspace edit filter · Enter switch · Ctrl+R reload · Esc close",
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "filter: {}",
+                if picker.filter.is_empty() {
+                    "<none>"
+                } else {
+                    picker.filter.as_str()
+                }
+            ),
+            SingleSessionLineStyle::Meta,
+        ),
+        blank_styled_line(),
     ];
 
     if picker.loading {
-        lines.push("loading models from shared server...".to_string());
+        lines.push(styled_line(
+            "loading models from shared server...",
+            SingleSessionLineStyle::Status,
+        ));
     }
 
     if let Some(error) = &picker.error {
-        lines.push(format!("error: {error}"));
+        lines.push(styled_line(
+            format!("error: {error}"),
+            SingleSessionLineStyle::Error,
+        ));
     }
 
     let visible = picker.filtered_indices();
     if visible.is_empty() && !picker.loading {
-        lines.push("no matching models".to_string());
-        lines.push("try clearing the filter or pressing Ctrl+R to reload the catalog".to_string());
+        lines.push(styled_line(
+            "no matching models",
+            SingleSessionLineStyle::Status,
+        ));
+        lines.push(styled_line(
+            "try clearing the filter or pressing Ctrl+R to reload the catalog",
+            SingleSessionLineStyle::Overlay,
+        ));
         return lines;
     }
 
@@ -1385,13 +1474,23 @@ fn model_picker_lines(picker: &ModelPickerState) -> Vec<String> {
         } else {
             " "
         };
-        lines.push(format!(
-            "{selector} {current_marker} {}",
-            model_choice_display_line(choice)
+        lines.push(styled_line(
+            format!(
+                "{selector} {current_marker} {}",
+                model_choice_display_line(choice)
+            ),
+            if position == picker.selected {
+                SingleSessionLineStyle::OverlaySelection
+            } else {
+                SingleSessionLineStyle::Overlay
+            },
         ));
     }
     if visible.len() > limit {
-        lines.push(format!("… {} more models", visible.len() - limit));
+        lines.push(styled_line(
+            format!("… {} more models", visible.len() - limit),
+            SingleSessionLineStyle::Overlay,
+        ));
     }
 
     lines
@@ -1452,46 +1551,58 @@ fn dedupe_model_choices(choices: Vec<DesktopModelChoice>) -> Vec<DesktopModelCho
     deduped
 }
 
-pub(crate) fn single_session_help_lines() -> Vec<String> {
-    vec![
-        "desktop shortcuts".to_string(),
-        String::new(),
-        "chat".to_string(),
-        "  Enter       send prompt".to_string(),
-        "  Shift+Enter insert newline".to_string(),
-        "  Ctrl+Enter  queue prompt (desktop queue follow-up pending)".to_string(),
-        "  Ctrl+C      interrupt running generation".to_string(),
-        "  Ctrl+Shift+C copy latest assistant response".to_string(),
-        "  Ctrl+V      paste clipboard text".to_string(),
-        "  Ctrl+V      paste clipboard image when no text is present".to_string(),
-        "  Ctrl+I      attach clipboard image to next prompt".to_string(),
-        "  Ctrl+Shift+I clear pending image attachments".to_string(),
-        "  Ctrl+Shift+M open model/account picker".to_string(),
-        "  Ctrl+M/N    switch to next/previous model".to_string(),
-        String::new(),
-        "navigation".to_string(),
-        "  PageUp/PageDown scroll transcript".to_string(),
-        "  Alt+Up/Down jump between user prompts".to_string(),
-        "  Mouse wheel scroll transcript".to_string(),
-        String::new(),
-        "editing".to_string(),
-        "  Ctrl+A/E    start/end of line".to_string(),
-        "  Ctrl+U/K    delete to line start/end".to_string(),
-        "  Ctrl+Backspace delete previous word".to_string(),
-        "  Alt+B/F     move by word".to_string(),
-        "  Alt+D       delete next word".to_string(),
-        "  Ctrl+Z      undo input edit".to_string(),
-        String::new(),
-        "window".to_string(),
-        "  Ctrl+;      reset/spawn fresh desktop session".to_string(),
-        "  Ctrl+R      refresh session metadata".to_string(),
-        "  Ctrl+?      toggle this help".to_string(),
-        "  Esc         close help or quit".to_string(),
+fn single_session_help_styled_lines() -> Vec<SingleSessionStyledLine> {
+    [
+        "desktop shortcuts",
+        "",
+        "chat",
+        "  Enter       send prompt",
+        "  Shift+Enter insert newline",
+        "  Ctrl+Enter  queue prompt (desktop queue follow-up pending)",
+        "  Ctrl+C      interrupt running generation",
+        "  Ctrl+Shift+C copy latest assistant response",
+        "  Ctrl+V      paste clipboard text",
+        "  Ctrl+V      paste clipboard image when no text is present",
+        "  Ctrl+I      attach clipboard image to next prompt",
+        "  Ctrl+Shift+I clear pending image attachments",
+        "  Ctrl+Shift+M open model/account picker",
+        "  Ctrl+M/N    switch to next/previous model",
+        "",
+        "navigation",
+        "  PageUp/PageDown scroll transcript",
+        "  Alt+Up/Down jump between user prompts",
+        "  Mouse wheel scroll transcript",
+        "",
+        "editing",
+        "  Ctrl+A/E    start/end of line",
+        "  Ctrl+U/K    delete to line start/end",
+        "  Ctrl+Backspace delete previous word",
+        "  Alt+B/F     move by word",
+        "  Alt+D       delete next word",
+        "  Ctrl+Z      undo input edit",
+        "",
+        "window",
+        "  Ctrl+;      reset/spawn fresh desktop session",
+        "  Ctrl+R      refresh session metadata",
+        "  Ctrl+?      toggle this help",
+        "  Esc         close help or quit",
     ]
+    .into_iter()
+    .map(|line| {
+        let style = if line.is_empty() {
+            SingleSessionLineStyle::Blank
+        } else if line.starts_with("  ") {
+            SingleSessionLineStyle::Overlay
+        } else {
+            SingleSessionLineStyle::OverlayTitle
+        };
+        styled_line(line, style)
+    })
+    .collect()
 }
 
 fn append_chat_message_lines(
-    lines: &mut Vec<String>,
+    lines: &mut Vec<SingleSessionStyledLine>,
     message: &SingleSessionMessage,
     user_turn: &mut usize,
 ) {
@@ -1508,14 +1619,20 @@ fn append_chat_message_lines(
     }
 }
 
-fn append_user_lines(lines: &mut Vec<String>, turn: usize, content: &str) {
+fn append_user_lines(lines: &mut Vec<SingleSessionStyledLine>, turn: usize, content: &str) {
     let mut content_lines = content.lines();
     let Some(first) = content_lines.next() else {
         return;
     };
-    lines.push(format!("{turn}  {first}"));
+    lines.push(styled_line(
+        format!("{turn}  {first}"),
+        SingleSessionLineStyle::User,
+    ));
     for line in content_lines {
-        lines.push(format!("   {line}"));
+        lines.push(styled_line(
+            format!("   {line}"),
+            SingleSessionLineStyle::UserContinuation,
+        ));
     }
 }
 
@@ -1526,11 +1643,11 @@ fn is_user_prompt_line(line: &str) -> bool {
     !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()) && !rest.trim().is_empty()
 }
 
-fn append_assistant_lines(lines: &mut Vec<String>, content: &str) {
+fn append_assistant_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
     lines.extend(render_assistant_markdown_lines(content));
 }
 
-fn render_assistant_markdown_lines(content: &str) -> Vec<String> {
+fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine> {
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut list_stack = Vec::<Option<u64>>::new();
@@ -1539,19 +1656,23 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<String> {
     for event in Parser::new(content) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                flush_current_line(&mut lines, &mut current);
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant);
                 current.push_str(heading_prefix(level));
             }
-            Event::End(TagEnd::Heading(_)) => flush_current_line(&mut lines, &mut current),
+            Event::End(TagEnd::Heading(_)) => {
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant)
+            }
             Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => flush_current_line(&mut lines, &mut current),
+            Event::End(TagEnd::Paragraph) => {
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant)
+            }
             Event::Start(Tag::List(start)) => list_stack.push(start),
             Event::End(TagEnd::List(_)) => {
                 list_stack.pop();
-                flush_current_line(&mut lines, &mut current);
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant);
             }
             Event::Start(Tag::Item) => {
-                flush_current_line(&mut lines, &mut current);
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant);
                 if let Some(Some(next)) = list_stack.last_mut() {
                     current.push_str(&format!("{next}. "));
                     *next += 1;
@@ -1559,25 +1680,33 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<String> {
                     current.push_str("• ");
                 }
             }
-            Event::End(TagEnd::Item) => flush_current_line(&mut lines, &mut current),
+            Event::End(TagEnd::Item) => {
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant)
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
-                flush_current_line(&mut lines, &mut current);
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant);
                 let lang = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => format!(" {lang}"),
                     _ => String::new(),
                 };
-                lines.push(format!("```{lang}"));
+                lines.push(styled_line(
+                    format!("```{lang}"),
+                    SingleSessionLineStyle::Code,
+                ));
                 in_code_block = true;
             }
             Event::End(TagEnd::CodeBlock) => {
-                flush_current_line(&mut lines, &mut current);
-                lines.push("```".to_string());
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Code);
+                lines.push(styled_line("```", SingleSessionLineStyle::Code));
                 in_code_block = false;
             }
             Event::Text(text) => {
                 if in_code_block {
                     for line in text.lines() {
-                        lines.push(format!("    {line}"));
+                        lines.push(styled_line(
+                            format!("    {line}"),
+                            SingleSessionLineStyle::Code,
+                        ));
                     }
                 } else {
                     current.push_str(&text);
@@ -1588,26 +1717,36 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<String> {
                 current.push_str(&code);
                 current.push('`');
             }
-            Event::SoftBreak | Event::HardBreak => flush_current_line(&mut lines, &mut current),
+            Event::SoftBreak | Event::HardBreak => {
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant)
+            }
             Event::Rule => {
-                flush_current_line(&mut lines, &mut current);
-                lines.push("───".to_string());
+                flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant);
+                lines.push(styled_line("───", SingleSessionLineStyle::Meta));
             }
             _ => {}
         }
     }
 
-    flush_current_line(&mut lines, &mut current);
+    flush_current_line(&mut lines, &mut current, SingleSessionLineStyle::Assistant);
     if lines.is_empty() && !content.trim().is_empty() {
-        lines.extend(content.lines().map(ToOwned::to_owned));
+        lines.extend(
+            content
+                .lines()
+                .map(|line| styled_line(line, SingleSessionLineStyle::Assistant)),
+        );
     }
     lines
 }
 
-fn flush_current_line(lines: &mut Vec<String>, current: &mut String) {
+fn flush_current_line(
+    lines: &mut Vec<SingleSessionStyledLine>,
+    current: &mut String,
+    style: SingleSessionLineStyle,
+) {
     let trimmed = current.trim_end();
     if !trimmed.is_empty() {
-        lines.push(trimmed.to_string());
+        lines.push(styled_line(trimmed, style));
     }
     current.clear();
 }
@@ -1621,18 +1760,24 @@ fn heading_prefix(level: HeadingLevel) -> &'static str {
     }
 }
 
-fn append_tool_lines(lines: &mut Vec<String>, content: &str) {
+fn append_tool_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
     if content.is_empty() {
         return;
     }
-    lines.push(format!("• {content}"));
+    lines.push(styled_line(
+        format!("• {content}"),
+        SingleSessionLineStyle::Tool,
+    ));
 }
 
-fn append_meta_lines(lines: &mut Vec<String>, content: &str) {
+fn append_meta_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
     if content.is_empty() {
         return;
     }
-    lines.push(format!("  {content}"));
+    lines.push(styled_line(
+        format!("  {content}"),
+        SingleSessionLineStyle::Meta,
+    ));
 }
 
 fn previous_char_boundary(text: &str, cursor: usize) -> usize {
@@ -1737,29 +1882,71 @@ pub(crate) fn single_session_surface(
 }
 
 pub(crate) fn single_session_lines(session: Option<&workspace::SessionCard>) -> Vec<String> {
+    single_session_styled_lines(session)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+pub(crate) fn single_session_styled_lines(
+    session: Option<&workspace::SessionCard>,
+) -> Vec<SingleSessionStyledLine> {
     let Some(session) = session else {
         return vec![
-            "single session mode".to_string(),
-            "fresh desktop-native session draft".to_string(),
-            "type here without nav or insert modes".to_string(),
-            "ctrl+enter will send once desktop-native execution is connected".to_string(),
-            "ctrl+; clears this draft and starts another fresh desktop session".to_string(),
-            "run with --workspace for the niri layout wrapper".to_string(),
+            styled_line("single session mode", SingleSessionLineStyle::OverlayTitle),
+            styled_line(
+                "fresh desktop-native session draft",
+                SingleSessionLineStyle::Status,
+            ),
+            styled_line(
+                "type here without nav or insert modes",
+                SingleSessionLineStyle::Overlay,
+            ),
+            styled_line(
+                "ctrl+enter will send once desktop-native execution is connected",
+                SingleSessionLineStyle::Overlay,
+            ),
+            styled_line(
+                "ctrl+; clears this draft and starts another fresh desktop session",
+                SingleSessionLineStyle::Overlay,
+            ),
+            styled_line(
+                "run with --workspace for the niri layout wrapper",
+                SingleSessionLineStyle::Overlay,
+            ),
         ];
     };
 
     let mut lines = vec![
-        "single session mode".to_string(),
-        session.subtitle.clone(),
-        session.detail.clone(),
+        styled_line("single session mode", SingleSessionLineStyle::OverlayTitle),
+        styled_line(session.subtitle.clone(), SingleSessionLineStyle::Status),
+        styled_line(session.detail.clone(), SingleSessionLineStyle::Meta),
     ];
     if !session.preview_lines.is_empty() {
-        lines.push("recent transcript".to_string());
-        lines.extend(session.preview_lines.clone());
+        lines.push(styled_line(
+            "recent transcript",
+            SingleSessionLineStyle::OverlayTitle,
+        ));
+        lines.extend(
+            session
+                .preview_lines
+                .iter()
+                .cloned()
+                .map(|line| styled_line(line, SingleSessionLineStyle::Assistant)),
+        );
     }
     if !session.detail_lines.is_empty() {
-        lines.push("expanded transcript".to_string());
-        lines.extend(session.detail_lines.clone());
+        lines.push(styled_line(
+            "expanded transcript",
+            SingleSessionLineStyle::OverlayTitle,
+        ));
+        lines.extend(
+            session
+                .detail_lines
+                .iter()
+                .cloned()
+                .map(|line| styled_line(line, SingleSessionLineStyle::Assistant)),
+        );
     }
     lines
 }
