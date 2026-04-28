@@ -412,6 +412,24 @@ impl SingleSessionApp {
                     "model switched to {label}"
                 )));
             }
+            DesktopSessionEvent::StdinRequest {
+                request_id,
+                prompt,
+                is_password,
+                tool_call_id,
+            } => {
+                self.status = Some("interactive input requested".to_string());
+                let prompt = prompt.trim();
+                let prompt = if prompt.is_empty() {
+                    "interactive input requested"
+                } else {
+                    prompt
+                };
+                let sensitive = if is_password { " password" } else { "" };
+                self.messages.push(SingleSessionMessage::meta(format!(
+                    "interactive{sensitive} input requested by {tool_call_id} ({request_id}): {prompt}"
+                )));
+            }
             DesktopSessionEvent::Done => {
                 self.finish_streaming_response();
                 self.is_processing = false;

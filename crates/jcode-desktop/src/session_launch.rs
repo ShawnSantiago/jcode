@@ -31,6 +31,12 @@ pub enum DesktopSessionEvent {
         model: String,
         provider_name: Option<String>,
     },
+    StdinRequest {
+        request_id: String,
+        prompt: String,
+        is_password: bool,
+        tool_call_id: String,
+    },
     Reloading {
         new_socket: Option<String>,
     },
@@ -712,6 +718,27 @@ fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent>
                     .map(ToOwned::to_owned),
             }
         }),
+        "stdin_request" => Some(DesktopSessionEvent::StdinRequest {
+            request_id: value
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            prompt: value
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("interactive input requested")
+                .to_string(),
+            is_password: value
+                .get("is_password")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            tool_call_id: value
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+        }),
         "reloading" => Some(DesktopSessionEvent::Reloading {
             new_socket: value
                 .get("new_socket")
@@ -966,6 +993,21 @@ mod tests {
             Some(DesktopSessionEvent::ModelChanged {
                 model: "claude-opus-4-5".to_string(),
                 provider_name: Some("Claude".to_string())
+            })
+        );
+        assert_eq!(
+            desktop_event_from_server_value(&json!({
+                "type": "stdin_request",
+                "request_id": "stdin-1",
+                "prompt": "Password:",
+                "is_password": true,
+                "tool_call_id": "tool-1"
+            })),
+            Some(DesktopSessionEvent::StdinRequest {
+                request_id: "stdin-1".to_string(),
+                prompt: "Password:".to_string(),
+                is_password: true,
+                tool_call_id: "tool-1".to_string()
             })
         );
     }

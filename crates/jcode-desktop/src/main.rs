@@ -505,6 +505,24 @@ fn run_headless_chat_smoke(message: String) -> Result<()> {
                     })
                 );
             }
+            session_launch::DesktopSessionEvent::StdinRequest {
+                request_id,
+                prompt,
+                is_password,
+                tool_call_id,
+            } => {
+                last_status = Some("interactive input requested".to_string());
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "stdin_request",
+                        "request_id": request_id,
+                        "prompt": prompt,
+                        "is_password": is_password,
+                        "tool_call_id": tool_call_id,
+                    })
+                );
+            }
             session_launch::DesktopSessionEvent::Done => {
                 let response = response.trim().to_string();
                 if response.is_empty() {

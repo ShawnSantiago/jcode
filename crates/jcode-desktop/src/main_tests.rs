@@ -344,6 +344,22 @@ fn single_session_model_cycle_updates_status_and_transcript() {
 }
 
 #[test]
+fn single_session_stdin_request_is_visible_in_transcript() {
+    let mut app = SingleSessionApp::new(None);
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::StdinRequest {
+        request_id: "stdin-1".to_string(),
+        prompt: "Password:".to_string(),
+        is_password: true,
+        tool_call_id: "tool-1".to_string(),
+    });
+
+    assert_eq!(app.status.as_deref(), Some("interactive input requested"));
+    let body = app.body_lines().join("\n");
+    assert!(body.contains("interactive password input requested by tool-1 (stdin-1): Password:"));
+}
+
+#[test]
 fn single_session_prompt_jump_moves_between_user_turns() {
     let mut app = SingleSessionApp::new(None);
     for index in 0..4 {
