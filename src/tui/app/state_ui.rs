@@ -799,6 +799,83 @@ fn cache_ratio_pct(numerator: u64, denominator: u64) -> u8 {
     }
 }
 
+fn opt_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn opt_usize(value: Option<usize>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn opt_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("`{}`", value))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn push_cache_signature(
+    lines: &mut Vec<String>,
+    label: &str,
+    signature: Option<&KvCacheRequestSignature>,
+) {
+    if let Some(signature) = signature {
+        lines.push(format!(
+            "- {}.system_static_hash: `{:016x}`",
+            label, signature.system_static_hash
+        ));
+        lines.push(format!(
+            "- {}.tools_hash: `{:016x}`",
+            label, signature.tools_hash
+        ));
+        lines.push(format!(
+            "- {}.messages_hash: `{:016x}`",
+            label, signature.messages_hash
+        ));
+        lines.push(format!(
+            "- {}.message_count: **{}**",
+            label, signature.message_count
+        ));
+        lines.push(format!(
+            "- {}.tool_count: **{}**",
+            label, signature.tool_count
+        ));
+    } else {
+        lines.push(format!("- {}: None", label));
+    }
+}
+
+fn push_cache_baseline(lines: &mut Vec<String>, label: &str, baseline: Option<&KvCacheBaseline>) {
+    if let Some(baseline) = baseline {
+        lines.push(format!(
+            "- {}.input_tokens: **{}**",
+            label, baseline.input_tokens
+        ));
+        lines.push(format!(
+            "- {}.age_secs: **{}**",
+            label,
+            baseline.completed_at.elapsed().as_secs()
+        ));
+        lines.push(format!("- {}.provider: `{}`", label, baseline.provider));
+        lines.push(format!("- {}.model: `{}`", label, baseline.model));
+        lines.push(format!(
+            "- {}.upstream_provider: {}",
+            label,
+            opt_string(baseline.upstream_provider.as_deref())
+        ));
+        push_cache_signature(
+            lines,
+            &format!("{}.signature", label),
+            baseline.signature.as_ref(),
+        );
+    } else {
+        lines.push(format!("- {}: None", label));
+    }
+}
+
 fn format_cache_stats(app: &App) -> String {
     let reported = app.total_cache_reported_input_tokens;
     let read = app.total_cache_read_tokens;
@@ -806,60 +883,287 @@ fn format_cache_stats(app: &App) -> String {
     let optimal = app.total_cache_optimal_input_tokens;
     let read_pct = cache_ratio_pct(read, reported);
     let write_pct = cache_ratio_pct(write, reported);
-    let optimal_pct = if optimal > 0 {
-        Some(cache_ratio_pct(read, optimal))
-    } else {
-        None
-    };
+    let optimal_pct = (optimal > 0).then(|| cache_ratio_pct(read, optimal));
     let ttl = if crate::provider::anthropic::is_cache_ttl_1h() {
         "1 hour"
     } else {
         "5 minutes"
     };
+    let current_provider = if app.is_remote {
+        app.remote_provider_name
+            .clone()
+            .unwrap_or_else(|| app.provider.name().to_string())
+    } else {
+        app.provider.name().to_string()
+    };
+    let current_model = if app.is_remote {
+        app.remote_provider_model
+            .clone()
+            .unwrap_or_else(|| app.provider.model())
+    } else {
+        app.provider.model()
+    };
+
+    let persisted_usage = app
+        .session
+        .messages
+        .iter()
+        .filter_map(|message| message.token_usage.as_ref())
+        .fold((0_u64, 0_u64, 0_u64, 0_u64, 0_usize), |acc, usage| {
+            (
+                acc.0.saturating_add(usage.input_tokens),
+                acc.1.saturating_add(usage.output_tokens),
+                acc.2
+                    .saturating_add(usage.cache_read_input_tokens.unwrap_or(0)),
+                acc.3
+                    .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0)),
+                acc.4.saturating_add(1),
+            )
+        });
 
     let mut lines = Vec::new();
     lines.push("**KV cache stats**".to_string());
     lines.push(String::new());
-    lines.push(format!("- TTL setting: **{}**", ttl));
-    if reported == 0 {
-        lines.push("- No provider cache telemetry recorded in this session yet.".to_string());
+    lines.push("Raw session/cache diagnostic state for this client. Cache telemetry is provider-reported when available.".to_string());
+    lines.push(String::new());
+
+    lines.push("**Current route / settings**".to_string());
+    lines.push(format!("- cache_ttl_setting: **{}**", ttl));
+    lines.push(format!("- is_remote: **{}**", app.is_remote));
+    lines.push(format!("- is_replay: **{}**", app.is_replay));
+    lines.push(format!("- current_provider: `{}`", current_provider));
+    lines.push(format!("- current_model: `{}`", current_model));
+    lines.push(format!(
+        "- upstream_provider: {}",
+        opt_string(app.upstream_provider.as_deref())
+    ));
+    lines.push(format!(
+        "- connection_type: {}",
+        opt_string(app.connection_type.as_deref())
+    ));
+    lines.push(format!(
+        "- status_detail: {}",
+        opt_string(app.status_detail.as_deref())
+    ));
+    lines.push(String::new());
+
+    lines.push("**Session token totals (raw counters)**".to_string());
+    lines.push(format!(
+        "- total_input_tokens: **{}**",
+        app.total_input_tokens
+    ));
+    lines.push(format!(
+        "- total_output_tokens: **{}**",
+        app.total_output_tokens
+    ));
+    lines.push(format!("- total_cost_usd: **{:.6}**", app.total_cost));
+    lines.push(format!(
+        "- cached_prompt_price_per_1m: {}",
+        app.cached_prompt_price
+            .map(|price| format!("{:.6}", price))
+            .unwrap_or_else(|| "None".to_string())
+    ));
+    lines.push(format!(
+        "- cached_completion_price_per_1m: {}",
+        app.cached_completion_price
+            .map(|price| format!("{:.6}", price))
+            .unwrap_or_else(|| "None".to_string())
+    ));
+    lines.push(format!("- context_limit: **{}**", app.context_limit));
+    lines.push(format!(
+        "- last_turn_input_tokens: {}",
+        opt_u64(app.last_turn_input_tokens)
+    ));
+    lines.push(format!(
+        "- last_api_completed_age_secs: {}",
+        app.last_api_completed
+            .map(|instant| instant.elapsed().as_secs().to_string())
+            .unwrap_or_else(|| "None".to_string())
+    ));
+    lines.push(format!(
+        "- last_api_completed_provider: {}",
+        opt_string(app.last_api_completed_provider.as_deref())
+    ));
+    lines.push(format!(
+        "- last_api_completed_model: {}",
+        opt_string(app.last_api_completed_model.as_deref())
+    ));
+    lines.push(String::new());
+
+    lines.push("**Provider cache telemetry totals**".to_string());
+    lines.push(format!(
+        "- total_cache_reported_input_tokens: **{}**",
+        reported
+    ));
+    lines.push(format!("- total_cache_read_tokens: **{}**", read));
+    lines.push(format!("- total_cache_creation_tokens: **{}**", write));
+    lines.push(format!(
+        "- total_cache_optimal_input_tokens: **{}**",
+        optimal
+    ));
+    lines.push(format!(
+        "- cache_read_pct_of_reported_input: **{}%**",
+        read_pct
+    ));
+    lines.push(format!(
+        "- cache_write_pct_of_reported_input: **{}%**",
+        write_pct
+    ));
+    lines.push(format!(
+        "- cache_read_pct_of_optimal_input: {}",
+        optimal_pct
+            .map(|pct| format!("{}%", pct))
+            .unwrap_or_else(|| "None".to_string())
+    ));
+    lines.push(format!(
+        "- last_cache_reported_input_tokens: {}",
+        opt_u64(app.last_cache_reported_input_tokens)
+    ));
+    lines.push(format!(
+        "- last_cache_read_tokens: {}",
+        opt_u64(app.last_cache_read_tokens)
+    ));
+    lines.push(format!(
+        "- last_cache_optimal_input_tokens: {}",
+        opt_u64(app.last_cache_optimal_input_tokens)
+    ));
+    lines.push(format!(
+        "- cache_next_optimal_input_tokens: {}",
+        opt_u64(app.cache_next_optimal_input_tokens)
+    ));
+    lines.push(String::new());
+
+    lines.push("**Current / live stream counters**".to_string());
+    lines.push(format!(
+        "- streaming_input_tokens: **{}**",
+        app.streaming_input_tokens
+    ));
+    lines.push(format!(
+        "- streaming_output_tokens: **{}**",
+        app.streaming_output_tokens
+    ));
+    lines.push(format!(
+        "- streaming_total_output_tokens: **{}**",
+        app.streaming_total_output_tokens
+    ));
+    lines.push(format!(
+        "- streaming_cache_read_tokens: {}",
+        opt_u64(app.streaming_cache_read_tokens)
+    ));
+    lines.push(format!(
+        "- streaming_cache_creation_tokens: {}",
+        opt_u64(app.streaming_cache_creation_tokens)
+    ));
+    lines.push(format!("- status: `{:?}`", app.status));
+    lines.push(format!("- is_processing: **{}**", app.is_processing));
+    lines.push(format!(
+        "- processing_started_age_secs: {}",
+        app.processing_started
+            .map(|instant| instant.elapsed().as_secs().to_string())
+            .unwrap_or_else(|| "None".to_string())
+    ));
+    lines.push(format!(
+        "- last_stream_activity_age_secs: {}",
+        app.last_stream_activity
+            .map(|instant| instant.elapsed().as_secs().to_string())
+            .unwrap_or_else(|| "None".to_string())
+    ));
+    lines.push(format!(
+        "- stream_message_ended: **{}**",
+        app.stream_message_ended
+    ));
+    lines.push(format!(
+        "- streaming_tool_calls_len: **{}**",
+        app.streaming_tool_calls.len()
+    ));
+    lines.push(String::new());
+
+    lines.push("**KV cache tracker state**".to_string());
+    lines.push(format!(
+        "- kv_cache_turn_number: {}",
+        opt_usize(app.kv_cache_turn_number)
+    ));
+    lines.push(format!(
+        "- kv_cache_turn_call_index: **{}**",
+        app.kv_cache_turn_call_index
+    ));
+    lines.push(format!(
+        "- kv_cache_miss_samples_len: **{}**",
+        app.kv_cache_miss_samples.len()
+    ));
+    push_cache_baseline(&mut lines, "baseline", app.kv_cache_baseline.as_ref());
+    if let Some(request) = app.pending_kv_cache_request.as_ref() {
+        lines.push("- pending_request: present".to_string());
+        lines.push(format!(
+            "- pending_request.turn_number: **{}**",
+            request.turn_number
+        ));
+        lines.push(format!(
+            "- pending_request.call_index: **{}**",
+            request.call_index
+        ));
+        lines.push(format!(
+            "- pending_request.provider: `{}`",
+            request.provider
+        ));
+        lines.push(format!("- pending_request.model: `{}`", request.model));
+        lines.push(format!(
+            "- pending_request.upstream_provider: {}",
+            opt_string(request.upstream_provider.as_deref())
+        ));
+        lines.push(format!(
+            "- pending_request.baseline_messages_prefix_matches: **{:?}**",
+            request.baseline_messages_prefix_matches
+        ));
+        push_cache_signature(
+            &mut lines,
+            "pending_request.signature",
+            request.signature.as_ref(),
+        );
+        push_cache_baseline(
+            &mut lines,
+            "pending_request.baseline",
+            request.baseline.as_ref(),
+        );
     } else {
-        lines.push(format!("- Reported input: **{}** tokens", reported));
-        lines.push(format!("- Cache read: **{}** tokens ({}%)", read, read_pct));
-        lines.push(format!(
-            "- Cache write: **{}** tokens ({}%)",
-            write, write_pct
-        ));
-        if let Some(optimal_pct) = optimal_pct {
-            lines.push(format!(
-                "- Optimal baseline input: **{}** tokens; read vs optimal: **{}%**",
-                optimal, optimal_pct
-            ));
-        }
+        lines.push("- pending_request: None".to_string());
     }
+    lines.push(String::new());
 
-    if let Some(baseline) = app.kv_cache_baseline.as_ref() {
-        lines.push(format!(
-            "- Current baseline: **{}** input tokens, age **{}s**, provider `{}` model `{}`{}",
-            baseline.input_tokens,
-            baseline.completed_at.elapsed().as_secs(),
-            baseline.provider,
-            baseline.model,
-            baseline
-                .upstream_provider
-                .as_ref()
-                .map(|upstream| format!(" upstream `{}`", upstream))
-                .unwrap_or_default()
-        ));
-    }
+    lines.push("**Persisted transcript token usage**".to_string());
+    lines.push(format!(
+        "- session.messages_len: **{}**",
+        app.session.messages.len()
+    ));
+    lines.push(format!(
+        "- messages_with_token_usage: **{}**",
+        persisted_usage.4
+    ));
+    lines.push(format!(
+        "- persisted_input_tokens: **{}**",
+        persisted_usage.0
+    ));
+    lines.push(format!(
+        "- persisted_output_tokens: **{}**",
+        persisted_usage.1
+    ));
+    lines.push(format!(
+        "- persisted_cache_read_input_tokens: **{}**",
+        persisted_usage.2
+    ));
+    lines.push(format!(
+        "- persisted_cache_creation_input_tokens: **{}**",
+        persisted_usage.3
+    ));
+    lines.push(String::new());
 
+    lines.push("**Recent miss attributions**".to_string());
     if app.kv_cache_miss_samples.is_empty() {
-        lines.push("- Recent misses: none attributed.".to_string());
+        lines.push("- none attributed".to_string());
     } else {
-        lines.push("- Recent misses:".to_string());
-        for sample in app.kv_cache_miss_samples.iter().rev().take(5) {
+        for sample in app.kv_cache_miss_samples.iter().rev() {
             lines.push(format!(
-                "  - turn {} call {}: **{}** missed tokens ({})",
+                "- turn={} call={} missed_tokens={} reason=`{}`",
                 sample.turn_number,
                 sample.call_index,
                 sample.missed_tokens,
