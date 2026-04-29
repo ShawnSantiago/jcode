@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+pub use jcode_message_types::{InputShellResult, ToolCall};
+
 mod notifications;
 
 pub use notifications::{
-    InputShellResult, ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
+    ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
     background_task_display_label, background_task_status_notice,
     format_background_task_notification_markdown, format_background_task_progress_markdown,
     format_input_shell_result_markdown, input_shell_status_notice,
@@ -563,34 +565,6 @@ impl ToolDefinition {
 
     pub fn aggregate_prompt_token_estimate(defs: &[ToolDefinition]) -> usize {
         defs.iter().map(Self::prompt_token_estimate).sum()
-    }
-}
-
-/// A tool call from the model
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolCall {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub input: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<String>,
-}
-
-impl ToolCall {
-    pub fn intent_from_input(input: &serde_json::Value) -> Option<String> {
-        input
-            .get("intent")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|intent| !intent.is_empty())
-            .map(ToString::to_string)
-    }
-
-    pub fn refresh_intent_from_input(&mut self) {
-        self.intent = Self::intent_from_input(&self.input);
     }
 }
 

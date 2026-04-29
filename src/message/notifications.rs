@@ -1,20 +1,5 @@
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InputShellResult {
-    pub command: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    pub output: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    pub duration_ms: u64,
-    #[serde(default)]
-    pub truncated: bool,
-    #[serde(default)]
-    pub failed_to_start: bool,
-}
-
 fn sanitize_fenced_block(text: &str) -> String {
     text.replace("```", "``\u{200b}`")
 }
