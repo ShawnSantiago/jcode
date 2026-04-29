@@ -8,11 +8,11 @@ fn test_default_system_prompt_no_claude_code_identity() {
 
     assert!(
         !prompt.contains("claude code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'. Found in system.md"
+        "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'. Found in system_prompt.md"
     );
     assert!(
         !prompt.contains("claude-code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT contain 'claude-code'. Found in system.md"
+        "DEFAULT_SYSTEM_PROMPT should NOT contain 'claude-code'. Found in system_prompt.md"
     );
 }
 

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Default system prompt for jcode (embedded at compile time)
-pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system.md");
+pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 const SELFDEV_HINT_PROMPT: &str = include_str!("prompt/selfdev_hint.txt");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 
