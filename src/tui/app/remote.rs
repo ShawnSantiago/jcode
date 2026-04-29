@@ -352,6 +352,16 @@ pub(super) async fn handle_bus_event(
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
         }
+        Ok(BusEvent::ClipboardPasteCompleted(result)) => {
+            app.handle_clipboard_paste_completed(result);
+        }
+        Ok(BusEvent::ModelRefreshCompleted(result)) => {
+            app.handle_model_refresh_completed(result);
+        }
+        Ok(BusEvent::GitStatusCompleted(result)) => {
+            super::commands::handle_git_status_completed(app, result);
+        }
+        Ok(BusEvent::MermaidRenderCompleted) => {}
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
         }

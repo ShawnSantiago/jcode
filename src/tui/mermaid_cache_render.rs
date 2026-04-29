@@ -305,6 +305,7 @@ fn deferred_render_worker(rx: mpsc::Receiver<DeferredRenderTask>) {
             pending.remove(&task.render_key);
         }
         bump_deferred_render_epoch();
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
     }
 }
 

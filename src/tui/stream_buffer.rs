@@ -43,6 +43,10 @@ impl StreamBuffer {
             return Some(chunk);
         }
 
+        if self.last_flush.elapsed() >= self.timeout {
+            return self.flush();
+        }
+
         None
     }
 

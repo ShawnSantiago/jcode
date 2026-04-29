@@ -942,8 +942,7 @@ fn run_git_command(repo_dir: &std::path::Path, args: &[&str]) -> Result<String, 
         .to_string())
 }
 
-fn build_git_status_message(app: &App) -> Result<String, String> {
-    let repo_dir = git_command_repo_dir(app)?;
+fn build_git_status_message_for_dir(repo_dir: PathBuf) -> Result<String, String> {
     let repo_root =
         run_git_command(&repo_dir, &["rev-parse", "--show-toplevel"]).map_err(|error| {
             format!(
@@ -987,10 +986,17 @@ fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
-    match build_git_status_message(app) {
-        Ok(message) => {
-            app.push_display_message(DisplayMessage::system(message));
-            app.set_status_notice("Git status");
+    let session_id = active_session_id(app);
+    match git_command_repo_dir(app) {
+        Ok(repo_dir) => {
+            app.set_status_notice("Git status loading...");
+            std::thread::spawn(move || {
+                let result = build_git_status_message_for_dir(repo_dir);
+                Bus::global().publish(BusEvent::GitStatusCompleted(GitStatusCompleted {
+                    session_id,
+                    result,
+                }));
+            });
         }
         Err(error) => app.push_display_message(DisplayMessage::error(error)),
     }

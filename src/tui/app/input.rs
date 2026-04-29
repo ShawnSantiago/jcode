@@ -4,7 +4,10 @@ use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, SkillRegistry,
     commands, ctrl_bracket_fallback_to_esc, is_context_limit_error, remote,
 };
-use crate::bus::{Bus, BusEvent, InputShellCompleted};
+use crate::bus::{
+    Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
+    InputShellCompleted,
+};
 use crate::util::truncate_str;
 use anyhow::Result;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -118,51 +121,11 @@ pub(super) struct PreparedInput {
 }
 
 pub(super) fn paste_image_from_clipboard(app: &mut App) {
-    if let Some((media_type, base64_data)) = super::clipboard_image() {
-        attach_image(app, media_type, base64_data);
-        return;
-    }
-
-    if let Ok(mut clipboard) = arboard::Clipboard::new()
-        && let Ok(text) = clipboard.get_text()
-    {
-        if let Some(url) = super::extract_image_url(&text) {
-            app.set_status_notice("Downloading image...");
-            if let Some((media_type, base64_data)) = super::download_image_url(&url) {
-                attach_image(app, media_type, base64_data);
-            } else {
-                app.set_status_notice("Failed to download image");
-            }
-        } else {
-            handle_paste(app, text);
-        }
-        return;
-    }
-
-    app.set_status_notice("No image in clipboard");
+    app.set_status_notice("Reading clipboard image...");
+    spawn_clipboard_paste(app, ClipboardPasteKind::ImageOnly);
 }
 
 pub(super) fn paste_from_clipboard(app: &mut App) {
-    paste_from_clipboard_with(
-        app,
-        || {
-            let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                return None;
-            };
-            clipboard.get_text().ok()
-        },
-        super::clipboard_image,
-    );
-}
-
-fn paste_from_clipboard_with<GetText, GetImage>(
-    app: &mut App,
-    get_text: GetText,
-    get_image: GetImage,
-) where
-    GetText: FnOnce() -> Option<String>,
-    GetImage: FnOnce() -> Option<(String, String)>,
-{
     let dictation_cfg = crate::config::config().dictation.clone();
     if should_toggle_inflight_dictation_before_clipboard_lookup(
         app.dictation_in_flight,
@@ -173,21 +136,106 @@ fn paste_from_clipboard_with<GetText, GetImage>(
         return;
     }
 
-    if let Some(text) = get_text() {
-        handle_paste(app, text);
-        return;
-    }
+    app.set_status_notice("Reading clipboard...");
+    spawn_clipboard_paste(app, ClipboardPasteKind::Smart);
+}
 
-    if let Some((media_type, base64_data)) = get_image() {
-        attach_image(app, media_type, base64_data);
-        return;
-    }
+fn active_clipboard_session_id(app: &App) -> String {
+    app.active_client_session_id()
+        .unwrap_or(app.session.id.as_str())
+        .to_string()
+}
 
-    if app.handle_empty_clipboard_paste() {
-        return;
-    }
+fn publish_clipboard_result(
+    session_id: String,
+    kind: ClipboardPasteKind,
+    content: ClipboardPasteContent,
+) {
+    Bus::global().publish(BusEvent::ClipboardPasteCompleted(ClipboardPasteCompleted {
+        session_id,
+        kind,
+        content,
+    }));
+}
 
-    app.set_status_notice("No text or image in clipboard");
+fn spawn_clipboard_paste(app: &App, kind: ClipboardPasteKind) {
+    let session_id = active_clipboard_session_id(app);
+    let task_kind = kind.clone();
+    spawn_blocking_or_thread(move || {
+        let content = read_clipboard_for_paste(&task_kind);
+        publish_clipboard_result(session_id, task_kind, content);
+    });
+}
+
+fn spawn_blocking_or_thread<F>(task: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(task);
+    } else {
+        std::thread::spawn(task);
+    }
+}
+
+fn read_clipboard_text() -> Option<String> {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return None;
+    };
+    clipboard.get_text().ok()
+}
+
+fn image_content(media_type: String, base64_data: String) -> ClipboardPasteContent {
+    ClipboardPasteContent::Image {
+        media_type,
+        base64_data,
+    }
+}
+
+fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
+    super::download_image_url(url)
+        .map(|(media_type, base64_data)| image_content(media_type, base64_data))
+}
+
+fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent {
+    match kind {
+        ClipboardPasteKind::Smart => {
+            if let Some(text) = read_clipboard_text() {
+                if let Some(url) = super::extract_image_url(&text)
+                    && let Some(content) = download_image_url_content(&url)
+                {
+                    return content;
+                }
+                return ClipboardPasteContent::Text(text);
+            }
+            if let Some((media_type, base64_data)) = super::clipboard_image() {
+                return image_content(media_type, base64_data);
+            }
+            ClipboardPasteContent::Empty
+        }
+        ClipboardPasteKind::ImageOnly => {
+            if let Some((media_type, base64_data)) = super::clipboard_image() {
+                return image_content(media_type, base64_data);
+            }
+            if let Some(text) = read_clipboard_text() {
+                if let Some(url) = super::extract_image_url(&text) {
+                    return download_image_url_content(&url).unwrap_or_else(|| {
+                        ClipboardPasteContent::Error("Failed to download image".to_string())
+                    });
+                }
+                return ClipboardPasteContent::Text(text);
+            }
+            ClipboardPasteContent::Empty
+        }
+        ClipboardPasteKind::ImageUrl { fallback_text } => {
+            let Some(url) = fallback_text.as_deref().and_then(super::extract_image_url) else {
+                return ClipboardPasteContent::Empty;
+            };
+            download_image_url_content(&url).unwrap_or_else(|| {
+                ClipboardPasteContent::Error("Failed to download image".to_string())
+            })
+        }
+    }
 }
 
 fn should_toggle_inflight_dictation_before_clipboard_lookup(
@@ -268,13 +316,26 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     if let Some(url) = super::extract_image_url(&text) {
         crate::logging::info(&format!("Downloading image from pasted URL: {}", url));
         app.set_status_notice("Downloading image...");
-        if let Some((media_type, base64_data)) = super::download_image_url(&url) {
-            attach_image(app, media_type, base64_data);
-            return;
-        }
-        app.set_status_notice("Failed to download image");
+        let session_id = active_clipboard_session_id(app);
+        spawn_blocking_or_thread(move || {
+            let content = download_image_url_content(&url).unwrap_or_else(|| {
+                ClipboardPasteContent::Error("Failed to download image".to_string())
+            });
+            publish_clipboard_result(
+                session_id,
+                ClipboardPasteKind::ImageUrl {
+                    fallback_text: Some(text),
+                },
+                content,
+            );
+        });
+        return;
     }
 
+    handle_text_paste(app, text);
+}
+
+fn handle_text_paste(app: &mut App, text: String) {
     crate::logging::info(&format!(
         "Text paste: {} chars, {} lines",
         text.len(),
@@ -292,6 +353,63 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
             if line_count == 1 { "" } else { "s" }
         );
         insert_input_text(app, &placeholder);
+    }
+}
+
+impl App {
+    pub(in crate::tui::app) fn handle_clipboard_paste_completed(
+        &mut self,
+        result: ClipboardPasteCompleted,
+    ) -> bool {
+        if self.active_client_session_id() != Some(result.session_id.as_str()) {
+            return false;
+        }
+
+        match result.content {
+            ClipboardPasteContent::Image {
+                media_type,
+                base64_data,
+            } => {
+                attach_image(self, media_type, base64_data);
+                true
+            }
+            ClipboardPasteContent::Text(text) => {
+                handle_text_paste(self, text);
+                true
+            }
+            ClipboardPasteContent::Empty => {
+                match result.kind {
+                    ClipboardPasteKind::Smart => {
+                        if !self.handle_empty_clipboard_paste() {
+                            self.set_status_notice("No text or image in clipboard");
+                        }
+                    }
+                    ClipboardPasteKind::ImageOnly => {
+                        self.set_status_notice("No image in clipboard")
+                    }
+                    ClipboardPasteKind::ImageUrl { fallback_text } => {
+                        if let Some(text) = fallback_text {
+                            handle_text_paste(self, text);
+                        } else {
+                            self.set_status_notice("Failed to download image");
+                        }
+                    }
+                }
+                true
+            }
+            ClipboardPasteContent::Error(message) => {
+                if let ClipboardPasteKind::ImageUrl {
+                    fallback_text: Some(text),
+                } = result.kind
+                {
+                    self.set_status_notice(message);
+                    handle_text_paste(self, text);
+                } else {
+                    self.set_status_notice(message);
+                }
+                true
+            }
+        }
     }
 }
 
@@ -1881,7 +1999,10 @@ impl App {
             self.is_processing = true;
             self.status = ProcessingStatus::Sending;
 
-            match self.run_turn_interactive(terminal, event_stream).await {
+            match self
+                .run_turn_interactive(terminal, event_stream, None)
+                .await
+            {
                 Ok(()) => {
                     self.last_stream_error = None;
                 }

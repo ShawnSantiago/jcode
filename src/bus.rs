@@ -241,6 +241,43 @@ pub struct InputShellCompleted {
     pub result: crate::message::InputShellResult,
 }
 
+#[derive(Clone, Debug)]
+pub enum ClipboardPasteKind {
+    Smart,
+    ImageOnly,
+    ImageUrl { fallback_text: Option<String> },
+}
+
+#[derive(Clone, Debug)]
+pub enum ClipboardPasteContent {
+    Text(String),
+    Image {
+        media_type: String,
+        base64_data: String,
+    },
+    Empty,
+    Error(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct ClipboardPasteCompleted {
+    pub session_id: String,
+    pub kind: ClipboardPasteKind,
+    pub content: ClipboardPasteContent,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelRefreshCompleted {
+    pub session_id: String,
+    pub result: std::result::Result<crate::provider::ModelCatalogRefreshSummary, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GitStatusCompleted {
+    pub session_id: String,
+    pub result: std::result::Result<String, String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidePanelUpdated {
     pub session_id: String,
@@ -324,6 +361,12 @@ pub enum BusEvent {
     LoginCompleted(LoginCompleted),
     /// Local `!cmd` shell command completed from the input line
     InputShellCompleted(InputShellCompleted),
+    /// Clipboard paste/image URL work completed off the UI thread
+    ClipboardPasteCompleted(ClipboardPasteCompleted),
+    /// Local model catalog refresh completed off the UI thread
+    ModelRefreshCompleted(ModelRefreshCompleted),
+    /// Local git status command completed off the UI thread
+    GitStatusCompleted(GitStatusCompleted),
     /// Update check status from background thread
     UpdateStatus(UpdateStatus),
     /// Interactive client update status for a specific session
@@ -347,6 +390,8 @@ pub enum BusEvent {
     ModelsUpdated,
     /// Side panel pages were updated for a session
     SidePanelUpdated(SidePanelUpdated),
+    /// Deferred Mermaid rendering completed and cached content may now be visible
+    MermaidRenderCompleted,
 }
 
 pub struct Bus {

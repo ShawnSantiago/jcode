@@ -577,11 +577,20 @@ impl App {
         }
 
         self.last_side_panel_refresh = Some(now);
-        if crate::side_panel::refresh_linked_page_content(&mut self.side_panel, None) {
-            self.sync_diagram_fit_context();
-            self.prewarm_focused_side_panel();
-            return true;
-        }
+        let mut snapshot = self.side_panel.clone();
+        let session_id = self.active_client_session_id().map(str::to_string);
+        std::thread::spawn(move || {
+            if crate::side_panel::refresh_linked_page_content(&mut snapshot, None)
+                && let Some(session_id) = session_id
+            {
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::SidePanelUpdated(
+                    crate::bus::SidePanelUpdated {
+                        session_id,
+                        snapshot,
+                    },
+                ));
+            }
+        });
 
         false
     }

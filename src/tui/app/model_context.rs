@@ -488,8 +488,9 @@ impl App {
                             self.push_display_message(DisplayMessage::system(
                                 "✓ Context compacted. Retrying...".to_string(),
                             ));
-                            let retry_result =
-                                self.run_turn_interactive(terminal, event_stream).await;
+                            let retry_result = self
+                                .run_turn_interactive(terminal, event_stream, None)
+                                .await;
                             self.messages.clear();
                             return match retry_result {
                                 Ok(()) => {
@@ -525,8 +526,9 @@ impl App {
                                 self.push_display_message(DisplayMessage::system(
                                     format!("⚡ Emergency truncation: shortened {} large tool result(s). Retrying...", truncated),
                                 ));
-                                let retry_result =
-                                    self.run_turn_interactive(terminal, event_stream).await;
+                                let retry_result = self
+                                    .run_turn_interactive(terminal, event_stream, None)
+                                    .await;
                                 self.messages.clear();
                                 return match retry_result {
                                     Ok(()) => {
@@ -567,8 +569,9 @@ impl App {
                                 self.push_display_message(DisplayMessage::system(
                                     "✓ Context compacted (emergency). Retrying...".to_string(),
                                 ));
-                                let retry_result =
-                                    self.run_turn_interactive(terminal, event_stream).await;
+                                let retry_result = self
+                                    .run_turn_interactive(terminal, event_stream, None)
+                                    .await;
                                 self.messages.clear();
                                 return match retry_result {
                                     Ok(()) => {
@@ -658,7 +661,9 @@ impl App {
         self.status = ProcessingStatus::Sending;
 
         // Retry the turn
-        let result = self.run_turn_interactive(terminal, event_stream).await;
+        let result = self
+            .run_turn_interactive(terminal, event_stream, None)
+            .await;
         self.messages.clear();
         match result {
             Ok(()) => {
@@ -983,35 +988,36 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if is_refresh_model_list_command(trimmed) {
         app.set_status_notice("Refreshing model list...");
         let provider = app.provider.clone();
-        let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tokio::task::block_in_place(|| handle.block_on(provider.refresh_model_catalog()))
-        } else {
-            match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime.block_on(provider.refresh_model_catalog()),
-                Err(error) => Err(anyhow::anyhow!(error)),
-            }
-        };
+        let session_id = app
+            .active_client_session_id()
+            .unwrap_or(app.session.id.as_str())
+            .to_string();
 
-        match result {
-            Ok(summary) => {
-                app.push_display_message(DisplayMessage::system(format_model_refresh_summary(
-                    &summary,
-                )));
-                app.set_status_notice(format!(
-                    "Model list refreshed: +{} models, +{} routes, ~{} changed",
-                    summary.models_added, summary.routes_added, summary.routes_changed
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let result = provider
+                    .refresh_model_catalog()
+                    .await
+                    .map_err(|error| error.to_string());
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelRefreshCompleted(
+                    crate::bus::ModelRefreshCompleted { session_id, result },
                 ));
-            }
-            Err(error) => {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to refresh model list: {}",
-                    error
-                )));
-                app.set_status_notice("Model list refresh failed");
-            }
+            });
+        } else {
+            std::thread::spawn(move || {
+                let result = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime
+                        .block_on(provider.refresh_model_catalog())
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelRefreshCompleted(
+                    crate::bus::ModelRefreshCompleted { session_id, result },
+                ));
+            });
         }
         return true;
     }
@@ -1292,6 +1298,36 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+impl App {
+    pub(super) fn handle_model_refresh_completed(
+        &mut self,
+        completed: crate::bus::ModelRefreshCompleted,
+    ) {
+        if self.active_client_session_id() != Some(completed.session_id.as_str()) {
+            return;
+        }
+        match completed.result {
+            Ok(summary) => {
+                self.invalidate_model_picker_cache();
+                self.push_display_message(DisplayMessage::system(format_model_refresh_summary(
+                    &summary,
+                )));
+                self.set_status_notice(format!(
+                    "Model list refreshed: +{} models, +{} routes, ~{} changed",
+                    summary.models_added, summary.routes_added, summary.routes_changed
+                ));
+            }
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to refresh model list: {}",
+                    error
+                )));
+                self.set_status_notice("Model list refresh failed");
+            }
+        }
+    }
 }
 
 pub(super) fn is_refresh_model_list_command(trimmed: &str) -> bool {

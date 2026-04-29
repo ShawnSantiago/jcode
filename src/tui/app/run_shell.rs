@@ -40,7 +40,7 @@ impl App {
             if self.pending_turn {
                 self.pending_turn = false;
                 // Process turn while still handling input
-                self.process_turn_with_input(&mut terminal, &mut event_stream)
+                self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
                     .await;
                 needs_redraw = true;
             } else if self.pending_queued_dispatch {

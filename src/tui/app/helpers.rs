@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-static AMBIENT_INFO_CACHE: Mutex<Option<(std::time::Instant, bool, Option<AmbientWidgetData>)>> =
-    Mutex::new(None);
+static AMBIENT_INFO_CACHE: Mutex<
+    Option<(std::time::Instant, bool, Option<AmbientWidgetData>, bool)>,
+> = Mutex::new(None);
 
 #[derive(Clone)]
 pub(super) struct CachedContextInfo {
@@ -932,24 +933,38 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    static CACHE: Mutex<Option<(Instant, Option<GitInfo>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, Option<GitInfo>, bool)>> = Mutex::new(None);
 
     const TTL: Duration = Duration::from_secs(5);
 
-    if let Ok(guard) = CACHE.lock()
-        && let Some((ts, ref cached)) = *guard
-        && ts.elapsed() < TTL
-    {
-        return cached.clone();
-    }
-
-    let result = gather_git_info_inner();
-
     if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some((Instant::now(), result.clone()));
-    }
+        if let Some((ts, cached, refreshing)) = guard.as_mut() {
+            if ts.elapsed() < TTL {
+                return cached.clone();
+            }
+            if *refreshing {
+                return cached.clone();
+            }
+            let stale = cached.clone();
+            *refreshing = true;
+            std::thread::spawn(|| {
+                let result = gather_git_info_inner();
+                if let Ok(mut guard) = CACHE.lock() {
+                    *guard = Some((Instant::now(), result, false));
+                }
+            });
+            return stale;
+        }
 
-    result
+        *guard = Some((Instant::now() - TTL - Duration::from_secs(1), None, true));
+        std::thread::spawn(|| {
+            let result = gather_git_info_inner();
+            if let Ok(mut guard) = CACHE.lock() {
+                *guard = Some((Instant::now(), result, false));
+            }
+        });
+    }
+    None
 }
 
 pub(super) fn gather_todos_for_session(session_id: Option<&str>) -> Vec<TodoItem> {
@@ -957,7 +972,7 @@ pub(super) fn gather_todos_for_session(session_id: Option<&str>) -> Vec<TodoItem
     use std::sync::{LazyLock, Mutex};
     use std::time::Instant;
 
-    type TodosCache = HashMap<String, (Instant, Vec<TodoItem>)>;
+    type TodosCache = HashMap<String, (Instant, Vec<TodoItem>, bool)>;
 
     static CACHE: LazyLock<Mutex<TodosCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     const TTL: Duration = Duration::from_secs(1);
@@ -966,27 +981,50 @@ pub(super) fn gather_todos_for_session(session_id: Option<&str>) -> Vec<TodoItem
         return Vec::new();
     };
 
-    if let Ok(cache) = CACHE.lock()
-        && let Some((ts, todos)) = cache.get(session_id)
-        && ts.elapsed() < TTL
-    {
-        return todos.clone();
-    }
-
-    let todos = crate::todo::load_todos(session_id).unwrap_or_default();
-
     if let Ok(mut cache) = CACHE.lock() {
-        cache.insert(session_id.to_string(), (Instant::now(), todos.clone()));
-    }
+        if let Some((ts, todos, refreshing)) = cache.get_mut(session_id) {
+            if ts.elapsed() < TTL {
+                return todos.clone();
+            }
+            if *refreshing {
+                return todos.clone();
+            }
+            let stale = todos.clone();
+            *refreshing = true;
+            let session_id = session_id.to_string();
+            std::thread::spawn(move || {
+                let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
+                if let Ok(mut cache) = CACHE.lock() {
+                    cache.insert(session_id, (Instant::now(), todos, false));
+                }
+            });
+            return stale;
+        }
 
-    todos
+        let session_id = session_id.to_string();
+        cache.insert(
+            session_id.clone(),
+            (
+                Instant::now() - TTL - Duration::from_secs(1),
+                Vec::new(),
+                true,
+            ),
+        );
+        std::thread::spawn(move || {
+            let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
+            if let Ok(mut cache) = CACHE.lock() {
+                cache.insert(session_id, (Instant::now(), todos, false));
+            }
+        });
+    }
+    Vec::new()
 }
 
 pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    static CACHE: Mutex<Option<(Instant, Option<MemoryInfo>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, Option<MemoryInfo>, bool)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_secs(2);
 
     if !memory_enabled {
@@ -1005,24 +1043,75 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         None
     };
 
-    if let Ok(guard) = CACHE.lock()
-        && let Some((ts, ref cached)) = *guard
-        && ts.elapsed() < TTL
-    {
-        return match cached.clone() {
-            Some(mut info) => {
-                info.activity = activity.clone();
-                info.sidecar_model = sidecar_model.clone();
-                Some(info)
+    if let Ok(mut guard) = CACHE.lock() {
+        if let Some((ts, cached, refreshing)) = guard.as_mut() {
+            if ts.elapsed() < TTL || *refreshing {
+                return match cached.clone() {
+                    Some(mut info) => {
+                        info.activity = activity.clone();
+                        info.sidecar_model = sidecar_model.clone();
+                        Some(info)
+                    }
+                    None => activity.clone().map(|activity| MemoryInfo {
+                        sidecar_available: crate::memory::memory_sidecar_enabled(),
+                        sidecar_model: sidecar_model.clone(),
+                        activity: Some(activity),
+                        ..Default::default()
+                    }),
+                };
             }
-            None => activity.clone().map(|activity| MemoryInfo {
-                sidecar_available: crate::memory::memory_sidecar_enabled(),
-                sidecar_model: sidecar_model.clone(),
-                activity: Some(activity),
-                ..Default::default()
-            }),
-        };
+            let stale = match cached.clone() {
+                Some(mut info) => {
+                    info.activity = activity.clone();
+                    info.sidecar_model = sidecar_model.clone();
+                    Some(info)
+                }
+                None => activity.clone().map(|activity| MemoryInfo {
+                    sidecar_available: crate::memory::memory_sidecar_enabled(),
+                    sidecar_model: sidecar_model.clone(),
+                    activity: Some(activity),
+                    ..Default::default()
+                }),
+            };
+            *refreshing = true;
+            std::thread::spawn(|| {
+                let result = gather_memory_info_inner();
+                if let Ok(mut guard) = CACHE.lock() {
+                    *guard = Some((Instant::now(), result, false));
+                }
+            });
+            return stale;
+        }
+
+        *guard = Some((Instant::now() - TTL - Duration::from_secs(1), None, true));
+        std::thread::spawn(|| {
+            let result = gather_memory_info_inner();
+            if let Ok(mut guard) = CACHE.lock() {
+                *guard = Some((Instant::now(), result, false));
+            }
+        });
     }
+
+    activity.map(|activity| MemoryInfo {
+        sidecar_available: crate::memory::memory_sidecar_enabled(),
+        sidecar_model,
+        activity: Some(activity),
+        ..Default::default()
+    })
+}
+
+fn gather_memory_info_inner() -> Option<MemoryInfo> {
+    let activity = crate::memory::get_activity();
+    let sidecar_model = if crate::memory::memory_sidecar_enabled() {
+        let sidecar = crate::sidecar::Sidecar::new();
+        Some(format!(
+            "{} · {}",
+            sidecar.backend_name(),
+            sidecar.model_name()
+        ))
+    } else {
+        None
+    };
 
     use crate::memory::MemoryManager;
 
@@ -1059,7 +1148,7 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         global_graph.as_ref(),
     );
 
-    let result = if total_count > 0 || activity.is_some() || sidecar_model.is_some() {
+    if total_count > 0 || activity.is_some() || sidecar_model.is_some() {
         Some(MemoryInfo {
             total_count,
             project_count,
@@ -1073,27 +1162,55 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         })
     } else {
         None
-    };
-
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some((Instant::now(), result.clone()));
     }
-
-    result
 }
 
 pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidgetData> {
     use std::time::Instant;
     const TTL: Duration = Duration::from_secs(2);
 
-    if let Ok(guard) = AMBIENT_INFO_CACHE.lock()
-        && let Some((ts, cached_enabled, ref cached)) = *guard
-        && cached_enabled == ambient_enabled
-        && ts.elapsed() < TTL
-    {
-        return cached.clone();
+    if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
+        if let Some((ts, cached_enabled, cached, refreshing)) = guard.as_mut() {
+            if *cached_enabled == ambient_enabled && ts.elapsed() < TTL {
+                return cached.clone();
+            }
+            if *cached_enabled == ambient_enabled && *refreshing {
+                return cached.clone();
+            }
+            let stale = if *cached_enabled == ambient_enabled {
+                cached.clone()
+            } else {
+                None
+            };
+            *refreshing = true;
+            *cached_enabled = ambient_enabled;
+            std::thread::spawn(move || {
+                let result = gather_ambient_info_inner(ambient_enabled);
+                if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
+                    *guard = Some((Instant::now(), ambient_enabled, result, false));
+                }
+            });
+            return stale;
+        }
+
+        *guard = Some((
+            Instant::now() - TTL - Duration::from_secs(1),
+            ambient_enabled,
+            None,
+            true,
+        ));
+        std::thread::spawn(move || {
+            let result = gather_ambient_info_inner(ambient_enabled);
+            if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
+                *guard = Some((Instant::now(), ambient_enabled, result, false));
+            }
+        });
     }
 
+    None
+}
+
+fn gather_ambient_info_inner(ambient_enabled: bool) -> Option<AmbientWidgetData> {
     let state = crate::ambient::AmbientState::load().unwrap_or_default();
     let manager = crate::ambient::AmbientManager::new().ok();
     let queue_items: Vec<_> = manager
@@ -1113,9 +1230,6 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
         .copied();
 
     if !ambient_enabled && reminder_count == 0 {
-        if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
-            *guard = Some((Instant::now(), ambient_enabled, None));
-        }
         return None;
     }
 
@@ -1147,7 +1261,7 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
             .to_string()
     });
 
-    let result = Some(AmbientWidgetData {
+    Some(AmbientWidgetData {
         show_widget: ambient_enabled || reminder_count > 1,
         status: state.status,
         queue_count,
@@ -1160,13 +1274,7 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
         next_reminder_wake: next_reminder_item
             .map(|item| format_countdown_until(item.scheduled_for)),
         budget_percent: None,
-    });
-
-    if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
-        *guard = Some((Instant::now(), ambient_enabled, result.clone()));
-    }
-
-    result
+    })
 }
 
 #[cfg(test)]

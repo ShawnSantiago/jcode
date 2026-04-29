@@ -12,6 +12,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::RecvError;
 
 const BACKGROUND_PROGRESS_NOTICE_MIN_INTERVAL: Duration = Duration::from_millis(400);
@@ -21,8 +22,12 @@ pub(super) async fn process_turn_with_input(
     app: &mut App,
     terminal: &mut DefaultTerminal,
     event_stream: &mut EventStream,
+    bus_receiver: &mut Receiver<BusEvent>,
 ) {
-    match app.run_turn_interactive(terminal, event_stream).await {
+    match app
+        .run_turn_interactive(terminal, event_stream, Some(bus_receiver))
+        .await
+    {
         Ok(()) => {
             app.last_stream_error = None;
         }
@@ -99,7 +104,11 @@ pub(super) fn handle_terminal_event(
     event: Option<std::result::Result<Event, std::io::Error>>,
 ) -> Result<bool> {
     let mut needs_redraw = apply_terminal_event(app, terminal, event)?;
-    while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+    const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
+    for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
+        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+            break;
+        }
         if let Ok(event) = crossterm::event::read() {
             needs_redraw |= apply_terminal_event(app, terminal, Some(Ok(event)))?;
         }
@@ -124,6 +133,18 @@ pub(super) fn handle_bus_event(
             handle_input_shell_completed(app, shell);
             true
         }
+        Ok(BusEvent::ClipboardPasteCompleted(result)) => {
+            app.handle_clipboard_paste_completed(result)
+        }
+        Ok(BusEvent::ModelRefreshCompleted(result)) => {
+            app.handle_model_refresh_completed(result);
+            true
+        }
+        Ok(BusEvent::GitStatusCompleted(result)) => {
+            super::commands::handle_git_status_completed(app, result);
+            true
+        }
+        Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
             true
@@ -270,7 +291,7 @@ fn apply_terminal_event(
             app.handle_mouse_event(mouse);
             Ok(true)
         }
-        Some(Ok(Event::Resize(_, _))) => Ok(true),
+        Some(Ok(Event::Resize(_, _))) => Ok(app.should_redraw_after_resize()),
         _ => Ok(false),
     }
 }

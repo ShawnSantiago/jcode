@@ -31,7 +31,8 @@ impl App {
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
+        bus_receiver: &mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>,
     ) {
-        local::process_turn_with_input(self, terminal, event_stream).await;
+        local::process_turn_with_input(self, terminal, event_stream, bus_receiver).await;
     }
 }

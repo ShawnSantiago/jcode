@@ -27,6 +27,7 @@ impl App {
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
+        mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
         let mut redraw_period = crate::tui::redraw_interval(self);
@@ -164,6 +165,16 @@ impl App {
                     _ = redraw_interval.tick() => {
                         terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
                     }
+                    bus_event = async {
+                        match bus_receiver.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => futures::future::pending::<std::result::Result<crate::bus::BusEvent, tokio::sync::broadcast::error::RecvError>>().await,
+                        }
+                    } => {
+                        if super::local::handle_bus_event(self, bus_event) {
+                            self.redraw_now(terminal)?;
+                        }
+                    }
                     // Poll API call
                     result = &mut api_future => {
                         break result?;
@@ -202,6 +213,16 @@ impl App {
                         // Poll for background compaction completion during streaming
                         self.poll_compaction_completion();
                         terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                    }
+                    bus_event = async {
+                        match bus_receiver.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => futures::future::pending::<std::result::Result<crate::bus::BusEvent, tokio::sync::broadcast::error::RecvError>>().await,
+                        }
+                    } => {
+                        if super::local::handle_bus_event(self, bus_event) {
+                            self.redraw_now(terminal)?;
+                        }
                     }
                     // Handle keyboard input
                     event = event_stream.next() => {
@@ -1010,6 +1031,7 @@ impl App {
                         }
                         // Listen for subagent/batch status updates
                         bus_event = bus_receiver.recv() => {
+                            let mut needs_redraw = false;
                             match bus_event {
                                 Ok(BusEvent::SubagentStatus(status)) => {
                                     if status.session_id == self.session.id {
@@ -1019,19 +1041,27 @@ impl App {
                                             status.status
                                         };
                                         self.subagent_status = Some(display);
+                                        needs_redraw = true;
                                     }
                                 }
                                 Ok(BusEvent::BatchProgress(progress)) => {
                                     if progress.session_id == self.session.id {
                                         self.batch_progress = Some(progress);
+                                        needs_redraw = true;
                                     }
                                 }
                                 Ok(BusEvent::SidePanelUpdated(update)) => {
                                     if update.session_id == self.session.id {
                                         self.set_side_panel_snapshot(update.snapshot);
+                                        needs_redraw = true;
                                     }
                                 }
-                                _ => {}
+                                other => {
+                                    needs_redraw |= super::local::handle_bus_event(self, other);
+                                }
+                            }
+                            if needs_redraw {
+                                self.redraw_now(terminal)?;
                             }
                         }
                         // Redraw periodically
