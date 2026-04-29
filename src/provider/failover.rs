@@ -57,27 +57,7 @@ impl FailoverDecision {
 
 impl MultiProvider {
     pub(super) fn provider_is_configured(&self, provider: ActiveProvider) -> bool {
-        match provider {
-            ActiveProvider::Claude => self.has_claude_runtime(),
-            ActiveProvider::OpenAI => self.openai_provider().is_some(),
-            ActiveProvider::Copilot => self
-                .copilot_api
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some(),
-            ActiveProvider::Antigravity => self.antigravity_provider().is_some(),
-            ActiveProvider::Gemini => self.gemini_provider().is_some(),
-            ActiveProvider::Cursor => self
-                .cursor
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some(),
-            ActiveProvider::OpenRouter => self
-                .openrouter
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some(),
-        }
+        self.reconcile_auth_if_provider_missing(provider)
     }
 
     pub(super) fn provider_precheck_unavailable_reason(

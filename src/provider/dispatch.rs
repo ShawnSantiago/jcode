@@ -62,6 +62,7 @@ impl MultiProvider {
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.reconcile_auth_if_provider_missing(provider);
         match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -177,6 +178,7 @@ impl MultiProvider {
         system_dynamic: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.reconcile_auth_if_provider_missing(provider);
         match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {

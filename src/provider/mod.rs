@@ -816,6 +816,8 @@ impl MultiProvider {
             anyhow::bail!("Model cannot be empty");
         }
 
+        self.reconcile_auth_if_provider_missing(provider);
+
         match provider {
             ActiveProvider::Claude => {
                 let model = Self::model_name_for_provider(provider, model);
