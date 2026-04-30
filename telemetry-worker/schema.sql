@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_telemetry_id ON events(telemetry_id);
 CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_event_created_telemetry ON events(event, created_at, telemetry_id);
+CREATE INDEX IF NOT EXISTS idx_events_event_telemetry_created ON events(event, telemetry_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_step ON events(step);

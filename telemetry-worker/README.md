@@ -54,6 +54,7 @@ npm run migrate:usage
 npm run migrate:phase123
 npm run migrate:workflow
 npm run migrate:tokens
+npm run migrate:dashboard-indexes
 
 # Run the health dashboard query
 npm run health

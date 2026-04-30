@@ -2,25 +2,42 @@
 -- Usage:
 --   wrangler d1 execute jcode-telemetry --remote --file=health.sql
 
-WITH counts AS (
+WITH install_ids AS (
+    SELECT DISTINCT telemetry_id
+    FROM events INDEXED BY idx_events_event_telemetry_created
+    WHERE event = 'install'
+), lifecycle AS (
+    SELECT telemetry_id, created_at
+    FROM events INDEXED BY idx_events_event_telemetry_created
+    WHERE event IN ('session_end', 'session_crash')
+), session_starts_by_id AS (
+    SELECT DISTINCT telemetry_id
+    FROM events INDEXED BY idx_events_event_telemetry_created
+    WHERE event = 'session_start'
+), event_counts AS (
     SELECT
         SUM(CASE WHEN event = 'install' THEN 1 ELSE 0 END) AS install_events,
         SUM(CASE WHEN event = 'session_start' THEN 1 ELSE 0 END) AS session_starts,
         SUM(CASE WHEN event = 'session_end' THEN 1 ELSE 0 END) AS session_ends,
-        SUM(CASE WHEN event = 'session_crash' THEN 1 ELSE 0 END) AS session_crashes,
-        COUNT(DISTINCT CASE WHEN event = 'install' THEN telemetry_id END) AS install_ids,
-        COUNT(DISTINCT CASE WHEN event IN ('session_end', 'session_crash') THEN telemetry_id END) AS lifecycle_ids,
-        COUNT(DISTINCT CASE WHEN event = 'session_start' THEN telemetry_id END) AS session_start_ids,
-        COUNT(DISTINCT CASE WHEN event IN ('session_end', 'session_crash') AND telemetry_id NOT IN (
-            SELECT telemetry_id FROM events WHERE event = 'install'
-        ) THEN telemetry_id END) AS lifecycle_ids_without_install
-    FROM events
+        SUM(CASE WHEN event = 'session_crash' THEN 1 ELSE 0 END) AS session_crashes
+    FROM events INDEXED BY idx_events_event_created_telemetry
+    WHERE event IN ('install', 'session_start', 'session_end', 'session_crash')
+), identity_counts AS (
+    SELECT
+        (SELECT COUNT(*) FROM install_ids) AS install_ids,
+        (SELECT COUNT(DISTINCT telemetry_id) FROM lifecycle) AS lifecycle_ids,
+        (SELECT COUNT(*) FROM session_starts_by_id) AS session_start_ids,
+        (SELECT COUNT(DISTINCT lifecycle.telemetry_id)
+         FROM lifecycle
+         LEFT JOIN install_ids USING (telemetry_id)
+         WHERE install_ids.telemetry_id IS NULL) AS lifecycle_ids_without_install
 ),
 meaningful AS (
     SELECT
         COUNT(*) AS meaningful_sessions,
         COUNT(DISTINCT telemetry_id) AS meaningful_users_30d
     FROM events
+    INDEXED BY idx_events_event_created_telemetry
     WHERE event IN ('session_end', 'session_crash')
       AND created_at > datetime('now', '-30 days')
       AND (
@@ -59,8 +76,7 @@ outliers AS (
     FROM (
         SELECT telemetry_id, COUNT(*) AS session_events,
                ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS rn
-        FROM events
-        WHERE event IN ('session_end', 'session_crash')
+        FROM lifecycle
         GROUP BY telemetry_id
     )
 )
@@ -79,4 +95,4 @@ SELECT
     top5_session_events,
     total_session_events,
     ROUND(CAST(session_ends + session_crashes AS REAL) / NULLIF(session_starts, 0), 3) AS lifecycle_completion_ratio
-FROM counts, meaningful, outliers;
+FROM event_counts, identity_counts, meaningful, outliers;
