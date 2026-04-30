@@ -4,7 +4,6 @@
 //! doesn't expose a usage API. Data persists to ~/.jcode/copilot_usage.json.
 
 use chrono::{Datelike, Utc};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -16,95 +15,68 @@ fn usage_path() -> PathBuf {
         .join("copilot_usage.json")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CopilotUsageTracker {
-    pub today: DayUsage,
-    pub month: MonthUsage,
-    pub all_time: AllTimeUsage,
+pub use jcode_core::copilot_usage_types::{
+    AllTimeUsage, CopilotUsageTracker, DayUsage, MonthUsage,
+};
+
+fn roll_if_needed(tracker: &mut CopilotUsageTracker) {
+    let now = Utc::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let month = format!("{}-{:02}", now.year(), now.month());
+
+    if tracker.today.date != today {
+        tracker.today = DayUsage {
+            date: today,
+            ..Default::default()
+        };
+    }
+    if tracker.month.month != month {
+        tracker.month = MonthUsage {
+            month,
+            ..Default::default()
+        };
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DayUsage {
-    pub date: String,
-    pub requests: u64,
-    pub premium_requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+fn record_usage(
+    tracker: &mut CopilotUsageTracker,
+    input_tokens: u64,
+    output_tokens: u64,
+    is_premium: bool,
+) {
+    roll_if_needed(tracker);
+
+    tracker.today.requests += 1;
+    tracker.today.input_tokens += input_tokens;
+    tracker.today.output_tokens += output_tokens;
+    if is_premium {
+        tracker.today.premium_requests += 1;
+    }
+
+    tracker.month.requests += 1;
+    tracker.month.input_tokens += input_tokens;
+    tracker.month.output_tokens += output_tokens;
+    if is_premium {
+        tracker.month.premium_requests += 1;
+    }
+
+    tracker.all_time.requests += 1;
+    tracker.all_time.input_tokens += input_tokens;
+    tracker.all_time.output_tokens += output_tokens;
+    if is_premium {
+        tracker.all_time.premium_requests += 1;
+    }
+
+    save_tracker(tracker);
+}
+fn load_tracker() -> CopilotUsageTracker {
+    let path = usage_path();
+    crate::storage::read_json(&path).unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MonthUsage {
-    pub month: String,
-    pub requests: u64,
-    pub premium_requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AllTimeUsage {
-    pub requests: u64,
-    pub premium_requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-impl CopilotUsageTracker {
-    fn load() -> Self {
-        let path = usage_path();
-        crate::storage::read_json(&path).unwrap_or_default()
-    }
-
-    fn save(&self) {
-        let path = usage_path();
-        let _ = crate::storage::write_json(&path, self);
-    }
-
-    fn roll_if_needed(&mut self) {
-        let now = Utc::now();
-        let today = now.format("%Y-%m-%d").to_string();
-        let month = format!("{}-{:02}", now.year(), now.month());
-
-        if self.today.date != today {
-            self.today = DayUsage {
-                date: today,
-                ..Default::default()
-            };
-        }
-        if self.month.month != month {
-            self.month = MonthUsage {
-                month,
-                ..Default::default()
-            };
-        }
-    }
-
-    fn record(&mut self, input_tokens: u64, output_tokens: u64, is_premium: bool) {
-        self.roll_if_needed();
-
-        self.today.requests += 1;
-        self.today.input_tokens += input_tokens;
-        self.today.output_tokens += output_tokens;
-        if is_premium {
-            self.today.premium_requests += 1;
-        }
-
-        self.month.requests += 1;
-        self.month.input_tokens += input_tokens;
-        self.month.output_tokens += output_tokens;
-        if is_premium {
-            self.month.premium_requests += 1;
-        }
-
-        self.all_time.requests += 1;
-        self.all_time.input_tokens += input_tokens;
-        self.all_time.output_tokens += output_tokens;
-        if is_premium {
-            self.all_time.premium_requests += 1;
-        }
-
-        self.save();
-    }
+fn save_tracker(tracker: &CopilotUsageTracker) {
+    let path = usage_path();
+    let _ = crate::storage::write_json(&path, tracker);
 }
 
 /// Record a completed Copilot request.
@@ -113,8 +85,8 @@ pub fn record_request(input_tokens: u64, output_tokens: u64, is_premium: bool) {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let tracker = guard.get_or_insert_with(CopilotUsageTracker::load);
-    tracker.record(input_tokens, output_tokens, is_premium);
+    let tracker = guard.get_or_insert_with(load_tracker);
+    record_usage(tracker, input_tokens, output_tokens, is_premium);
 }
 
 /// Get current usage snapshot.
@@ -123,14 +95,17 @@ pub fn get_usage() -> CopilotUsageTracker {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let tracker = guard.get_or_insert_with(CopilotUsageTracker::load);
-    tracker.roll_if_needed();
+    let tracker = guard.get_or_insert_with(load_tracker);
+    roll_if_needed(tracker);
     tracker.clone()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AllTimeUsage, CopilotUsageTracker, DayUsage, MonthUsage, TRACKER, usage_path};
+    use super::{
+        AllTimeUsage, CopilotUsageTracker, DayUsage, MonthUsage, TRACKER, load_tracker,
+        save_tracker, usage_path,
+    };
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
 
@@ -213,8 +188,8 @@ mod tests {
             },
         };
 
-        tracker.save();
-        let loaded = CopilotUsageTracker::load();
+        save_tracker(&tracker);
+        let loaded = load_tracker();
 
         assert_eq!(loaded.today.date, "2026-03-06");
         assert_eq!(loaded.today.requests, 2);
