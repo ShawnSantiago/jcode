@@ -40,6 +40,7 @@ pub struct ClaudeCredentials {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: i64,
+    pub scopes: Vec<String>,
     pub subscription_type: Option<String>,
 }
 
@@ -54,6 +55,8 @@ pub struct AnthropicAccount {
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// Multi-account jcode auth.json format.
@@ -150,6 +153,8 @@ struct ClaudeOAuth {
     expires_at: i64,
     #[serde(rename = "subscriptionType")]
     subscription_type: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 // -- OpenCode auth.json format --
@@ -203,6 +208,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
             expires: legacy.expires,
             email: None,
             subscription_type: Some("max".to_string()),
+            scopes: Vec::new(),
         });
         auth.active_anthropic_account = Some("default".to_string());
         let _ = save_auth_file(&auth);
@@ -475,6 +481,7 @@ pub fn load_credentials_for_account(label: &str) -> Result<ClaudeCredentials> {
         access_token: account.access.clone(),
         refresh_token: account.refresh.clone(),
         expires_at: account.expires,
+        scopes: account.scopes.clone(),
         subscription_type: account.subscription_type.clone(),
     })
 }
@@ -501,6 +508,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
         access_token: account.access.clone(),
         refresh_token: account.refresh.clone(),
         expires_at: account.expires,
+        scopes: account.scopes.clone(),
         subscription_type: account
             .subscription_type
             .clone()
@@ -524,6 +532,7 @@ fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
         access_token: oauth.access_token,
         refresh_token: oauth.refresh_token,
         expires_at: oauth.expires_at,
+        scopes: oauth.scopes,
         subscription_type: oauth.subscription_type,
     })
 }
@@ -540,6 +549,7 @@ pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
             access_token: anthropic.access,
             refresh_token: anthropic.refresh,
             expires_at: anthropic.expires,
+            scopes: Vec::new(),
             subscription_type: Some("max".to_string()),
         })
         .or_else(|| {
@@ -547,6 +557,7 @@ pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
                 expires_at: tokens.expires_at,
+                scopes: Vec::new(),
                 subscription_type: Some("max".to_string()),
             })
         })

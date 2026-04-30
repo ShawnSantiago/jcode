@@ -187,6 +187,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
             refresh: "test-refresh-token".to_string(),
             expires: i64::MAX,
             email: None,
+            scopes: Vec::new(),
             subscription_type: None,
         })
         .expect("save test Claude auth");
@@ -227,6 +228,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             refresh: "test-refresh-token".to_string(),
             expires: i64::MAX,
             email: None,
+            scopes: Vec::new(),
             subscription_type: None,
         })
         .expect("save test Claude auth");

@@ -805,6 +805,7 @@ mod tests {
             refresh: "claude-refresh".to_string(),
             expires: 4_102_444_800_000,
             email: None,
+            scopes: Vec::new(),
             subscription_type: None,
         })
         .expect("write Claude test auth");

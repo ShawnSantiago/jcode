@@ -1,5 +1,5 @@
 use crate::auth::claude as claude_auth;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,7 +10,12 @@ use std::time::Duration;
 /// Claude Code OAuth configuration
 pub mod claude {
     pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-    pub const AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
+    /// Claude Code uses the Claude.ai OAuth surface for tokens that can call
+    /// `/v1/messages` with the `user:inference` scope. The platform/console
+    /// authorize endpoint can mint tokens that refresh successfully but are not
+    /// accepted by the inference API.
+    pub const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+    pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
     pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
     pub const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
@@ -49,6 +54,43 @@ pub struct OAuthTokens {
     pub expires_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+fn parse_oauth_scopes(scope: Option<&str>) -> Vec<String> {
+    scope
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|scope| !scope.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+pub(crate) fn claude_scopes_have_inference(scopes: &[String]) -> bool {
+    scopes.iter().any(|scope| {
+        matches!(
+            scope.as_str(),
+            "user:inference"
+                | "user:ccr_inference"
+                | "user:voice"
+                | "org:service_key_inference"
+                | "workspace:developer"
+                | "workspace:inference"
+        )
+    })
+}
+
+fn ensure_claude_inference_scope(scopes: &[String], action: &str) -> Result<()> {
+    if scopes.is_empty() || claude_scopes_have_inference(scopes) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Claude OAuth {} returned a token without the required user:inference scope (scopes: {}). Re-run `jcode login --provider claude` so jcode opens the Claude.ai OAuth flow, or import/use a fresh Claude Code login.",
+        action,
+        scopes.join(" ")
+    )
 }
 
 /// Generate PKCE code verifier and challenge
@@ -666,16 +708,20 @@ async fn exchange_claude_code_at_url(
         refresh_token: String,
         expires_in: i64,
         id_token: Option<String>,
+        scope: Option<String>,
     }
 
     let tokens: TokenResponse = resp.json().await?;
     let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+    let scopes = parse_oauth_scopes(tokens.scope.as_deref());
+    ensure_claude_inference_scope(&scopes, "token exchange")?;
 
     Ok(OAuthTokens {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at,
         id_token: tokens.id_token,
+        scopes,
     })
 }
 
@@ -765,6 +811,7 @@ async fn exchange_openai_code_at_url(
         refresh_token: tokens.refresh_token,
         expires_at,
         id_token: tokens.id_token,
+        scopes: Vec::new(),
     })
 }
 
@@ -874,6 +921,7 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
         expires: tokens.expires_at,
         email: None,
         subscription_type: None,
+        scopes: tokens.scopes.clone(),
     };
     claude_auth::upsert_account(account)?;
     Ok(())
@@ -932,6 +980,7 @@ pub fn load_claude_tokens() -> Result<OAuthTokens> {
             refresh_token: creds.refresh_token,
             expires_at: creds.expires_at,
             id_token: None,
+            scopes: creds.scopes,
         });
     }
 
@@ -946,6 +995,7 @@ pub fn load_claude_tokens_for_account(label: &str) -> Result<OAuthTokens> {
         refresh_token: creds.refresh_token,
         expires_at: creds.expires_at,
         id_token: None,
+        scopes: creds.scopes,
     })
 }
 
@@ -963,6 +1013,7 @@ struct ClaudeRefreshTokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: i64,
+    scope: Option<String>,
 }
 
 fn claude_refresh_error_is_invalid_scope(err: &anyhow::Error) -> bool {
@@ -1017,18 +1068,21 @@ async fn refresh_claude_tokens_inner(
             crate::logging::warn(
                 "Claude token refresh rejected Claude Code scopes; retrying without an explicit scope for legacy token compatibility",
             );
-            send_claude_refresh_request(refresh_token, None)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Claude token refresh fallback without scope failed after scoped refresh error: {err:#}"
-                    )
-                })?
+            match send_claude_refresh_request(refresh_token, None).await {
+                Ok(tokens) => tokens,
+                Err(fallback_err) => {
+                    anyhow::bail!(
+                        "Claude token refresh fallback without scope failed: {fallback_err:#}; scoped refresh error: {err:#}"
+                    );
+                }
+            }
         }
         Err(err) => return Err(err),
     };
 
     let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+    let scopes = parse_oauth_scopes(tokens.scope.as_deref());
+    ensure_claude_inference_scope(&scopes, "token refresh")?;
     let oauth_tokens = OAuthTokens {
         access_token: tokens.access_token,
         refresh_token: tokens
@@ -1036,6 +1090,7 @@ async fn refresh_claude_tokens_inner(
             .unwrap_or_else(|| refresh_token.to_string()),
         expires_at,
         id_token: None,
+        scopes,
     };
 
     let save_label = label.map(ToString::to_string).unwrap_or_else(|| {
@@ -1151,6 +1206,7 @@ async fn refresh_openai_tokens_inner(
             refresh_token: tokens.refresh_token,
             expires_at,
             id_token: tokens.id_token,
+            scopes: Vec::new(),
         };
 
         if let Some(label) = label {
@@ -1317,6 +1373,7 @@ async fn exchange_code_at_url(
         refresh_token: tokens.refresh_token,
         expires_at,
         id_token: tokens.id_token,
+        scopes: Vec::new(),
     })
 }
 
@@ -1359,6 +1416,7 @@ async fn refresh_tokens_at_url(token_url: &str, refresh_token: &str) -> Result<O
         refresh_token: tokens.refresh_token,
         expires_at,
         id_token: None,
+        scopes: Vec::new(),
     })
 }
 

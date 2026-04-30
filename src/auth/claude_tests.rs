@@ -40,6 +40,7 @@ fn jcode_auth_file_roundtrip() {
             refresh: "ref_456".to_string(),
             expires: 9999999999999,
             email: None,
+            scopes: Vec::new(),
             subscription_type: Some("max".to_string()),
         }],
         active_anthropic_account: Some("work".to_string()),
@@ -130,6 +131,7 @@ fn jcode_auth_file_multi_account() {
                 access: "acc_personal".to_string(),
                 refresh: "ref_personal".to_string(),
                 expires: 1000,
+                scopes: Vec::new(),
                 subscription_type: Some("pro".to_string()),
                 email: None,
             },
@@ -139,6 +141,7 @@ fn jcode_auth_file_multi_account() {
                 refresh: "ref_work".to_string(),
                 expires: 2000,
                 email: None,
+                scopes: Vec::new(),
                 subscription_type: Some("max".to_string()),
             },
         ],
@@ -188,6 +191,7 @@ fn anthropic_account_email_serialized_when_present() {
         refresh: "ref".to_string(),
         expires: 0,
         email: Some("user@example.com".to_string()),
+        scopes: Vec::new(),
         subscription_type: Some("max".to_string()),
     };
     let json = serde_json::to_string(&account).unwrap();
@@ -203,6 +207,7 @@ fn anthropic_account_email_omitted_when_none() {
         refresh: "ref".to_string(),
         expires: 0,
         email: None,
+        scopes: Vec::new(),
         subscription_type: Some("max".to_string()),
     };
     let json = serde_json::to_string(&account).unwrap();
@@ -217,6 +222,7 @@ fn anthropic_account_subscription_type_serialized_when_present() {
         refresh: "ref".to_string(),
         expires: 0,
         email: None,
+        scopes: Vec::new(),
         subscription_type: Some("max".to_string()),
     };
     let json = serde_json::to_string(&account).unwrap();
@@ -231,6 +237,7 @@ fn anthropic_account_subscription_type_omitted_when_none() {
         access: "acc".to_string(),
         refresh: "ref".to_string(),
         expires: 0,
+        scopes: Vec::new(),
         subscription_type: None,
         email: None,
     };
@@ -247,6 +254,7 @@ fn update_account_profile_sets_email() {
         refresh: "ref".to_string(),
         expires: 1,
         email: None,
+        scopes: Vec::new(),
         subscription_type: None,
     });
 

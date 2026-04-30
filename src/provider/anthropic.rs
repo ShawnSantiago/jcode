@@ -539,6 +539,15 @@ impl AnthropicProvider {
         let fresh_creds =
             auth::claude::load_credentials().context("Failed to load Claude credentials")?;
 
+        if !fresh_creds.scopes.is_empty()
+            && !oauth::claude_scopes_have_inference(&fresh_creds.scopes)
+        {
+            anyhow::bail!(
+                "Claude OAuth credentials are missing the required user:inference scope (scopes: {}). Run `jcode login --provider claude` to mint a fresh Claude.ai OAuth token, or import/use a fresh Claude Code login.",
+                fresh_creds.scopes.join(" ")
+            );
+        }
+
         let now = chrono::Utc::now().timestamp_millis();
 
         // Check if token needs refresh (expired or expiring within 5 minutes)
@@ -1336,9 +1345,13 @@ async fn force_refresh_oauth_token(
 
     let active_label =
         auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
-    let refreshed = oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label)
-        .await
-        .context("OAuth refresh endpoint rejected the refresh token")?;
+    let refreshed =
+        match oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label).await {
+            Ok(refreshed) => refreshed,
+            Err(err) => {
+                anyhow::bail!("OAuth refresh endpoint rejected the refresh token: {err:#}");
+            }
+        };
 
     {
         let mut cached = credentials.write().await;
@@ -1537,6 +1550,7 @@ fn is_oauth_auth_error(error_str: &str) -> bool {
         || error_str.contains("authentication_error")
         || error_str.contains("invalid token")
         || error_str.contains("invalid_grant")
+        || error_str.contains("does not meet scope requirement")
         || ((error_str.contains("401 unauthorized") || error_str.contains("403 forbidden"))
             && (error_str.contains("oauth") || error_str.contains("token")))
 }

@@ -56,6 +56,7 @@ fn oauth_tokens_serialization_roundtrip() -> Result<()> {
         refresh_token: "rt_def".to_string(),
         expires_at: 1234567890,
         id_token: Some("idt_ghi".to_string()),
+        scopes: Vec::new(),
     };
     let json = serde_json::to_string(&tokens)?;
     let parsed: OAuthTokens = serde_json::from_str(&json)?;
@@ -73,6 +74,7 @@ fn oauth_tokens_without_id_token() -> Result<()> {
         refresh_token: "rt".to_string(),
         expires_at: 0,
         id_token: None,
+        scopes: Vec::new(),
     };
     let json = serde_json::to_string(&tokens)?;
     assert!(!json.contains("id_token"));
@@ -92,6 +94,7 @@ fn save_openai_tokens_uses_jcode_home_sandbox() -> Result<()> {
         refresh_token: "rt_sandbox".to_string(),
         expires_at: 1234567890,
         id_token: Some("id_sandbox".to_string()),
+        scopes: Vec::new(),
     };
 
     save_openai_tokens(&tokens)?;
@@ -112,6 +115,10 @@ fn claude_oauth_constants() {
     assert!(!claude::CLIENT_ID.is_empty());
     assert_eq!(
         claude::AUTHORIZE_URL,
+        "https://claude.com/cai/oauth/authorize"
+    );
+    assert_eq!(
+        claude::CONSOLE_AUTHORIZE_URL,
         "https://platform.claude.com/oauth/authorize"
     );
     assert_eq!(
@@ -123,6 +130,7 @@ fn claude_oauth_constants() {
         claude::REDIRECT_URI,
         "https://platform.claude.com/oauth/code/callback"
     );
+    assert!(claude::SCOPES.contains("user:inference"));
     assert!(claude::SCOPES.contains("user:sessions:claude_code"));
     assert!(claude::REFRESH_SCOPES.contains("user:file_upload"));
 }

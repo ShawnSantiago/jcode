@@ -144,6 +144,22 @@ fn claude_refresh_invalid_scope_detection_matches_anthropic_error() {
 }
 
 #[test]
+fn claude_scope_validation_requires_inference_when_scope_is_reported() {
+    let ok = vec!["user:profile".to_string(), "user:inference".to_string()];
+    assert!(ensure_claude_inference_scope(&ok, "token refresh").is_ok());
+
+    let missing = vec!["org:create_api_key".to_string(), "user:profile".to_string()];
+    let err = ensure_claude_inference_scope(&missing, "token refresh")
+        .expect_err("reported scopes without inference should fail")
+        .to_string();
+    assert!(err.contains("user:inference"), "unexpected error: {err}");
+
+    // Some mock/legacy token endpoints omit `scope`; absence should not be
+    // treated as proof that the token is bad.
+    assert!(ensure_claude_inference_scope(&[], "token refresh").is_ok());
+}
+
+#[test]
 fn claude_refresh_request_targets_correct_url() -> Result<()> {
     let (url, _ct, _body) = build_claude_refresh_request("rt");
     assert_eq!(url, "https://platform.claude.com/v1/oauth/token");
@@ -245,6 +261,8 @@ fn claude_auth_url_contains_required_params() -> Result<()> {
     assert_eq!(require_param(&params, "code_challenge")?, challenge);
     assert_eq!(require_param(&params, "code_challenge_method")?, "S256");
     assert_eq!(require_param(&params, "state")?, verifier);
+    assert_eq!(parsed.host_str(), Some("claude.com"));
+    assert_eq!(parsed.path(), "/cai/oauth/authorize");
     Ok(())
 }
 
@@ -538,6 +556,46 @@ async fn claude_exchange_uses_claude_code_token_headers() -> Result<()> {
         headers.get("sec-fetch-mode").is_none(),
         "unexpected Sec-Fetch-Mode: {headers:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn claude_exchange_rejects_token_without_inference_scope() -> Result<()> {
+    let success_body = serde_json::json!({
+        "access_token": "at",
+        "refresh_token": "rt",
+        "expires_in": 3600,
+        "scope": "org:create_api_key user:profile"
+    })
+    .to_string();
+    let (port, _handle) = mock_token_server(200, &success_body).await;
+
+    let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
+    let err = exchange_claude_code_at_url(&url, "verifier", "plain_code", "https://r")
+        .await
+        .expect_err("token without user:inference should be rejected")
+        .to_string();
+
+    assert!(err.contains("user:inference"), "unexpected error: {err}");
+    assert!(err.contains("Claude.ai OAuth"), "unexpected error: {err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn claude_exchange_preserves_returned_scopes() -> Result<()> {
+    let success_body = serde_json::json!({
+        "access_token": "at",
+        "refresh_token": "rt",
+        "expires_in": 3600,
+        "scope": "user:profile user:inference user:sessions:claude_code"
+    })
+    .to_string();
+    let (port, _handle) = mock_token_server(200, &success_body).await;
+
+    let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
+    let tokens = exchange_claude_code_at_url(&url, "verifier", "plain_code", "https://r").await?;
+
+    assert!(tokens.scopes.iter().any(|scope| scope == "user:inference"));
     Ok(())
 }
 
