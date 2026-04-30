@@ -144,9 +144,14 @@ run_jcode() {
 configured_json="$out_dir/configured-providers.json"
 if [[ "$mode" == "configured" ]]; then
   echo "Discovering configured providers..."
+  rm -f "$configured_json"
   if ! run_jcode auth-test --all-configured --no-smoke --no-tool-smoke --json --output "$configured_json" >/tmp/jcode-auth-matrix-discovery.out 2>/tmp/jcode-auth-matrix-discovery.err; then
-    cat /tmp/jcode-auth-matrix-discovery.err >&2 || true
-    echo "warning: configured-provider discovery failed; continuing with explicit matrix and skipping only obvious unconfigured failures" >&2
+    if [[ -s "$configured_json" ]]; then
+      echo "note: configured-provider discovery reported non-ready providers; continuing with per-provider classification" >&2
+    else
+      cat /tmp/jcode-auth-matrix-discovery.err >&2 || true
+      echo "warning: configured-provider discovery failed; continuing with explicit matrix and skipping only obvious unconfigured failures" >&2
+    fi
   fi
 fi
 
