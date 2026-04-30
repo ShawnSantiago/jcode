@@ -1,11 +1,12 @@
 use super::{
     CommunicateInput, CommunicateTool, cleanup_candidate_session_ids,
     default_await_target_statuses, default_cleanup_target_statuses, format_awaited_members,
-    format_members, format_plan_status,
+    format_awaited_members_with_reports, format_members, format_plan_status,
+    latest_assistant_report,
 };
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::protocol::{
-    AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, Request, ServerEvent,
+    AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, HistoryMessage, Request, ServerEvent,
     SessionActivitySnapshot, ToolCallSummary,
 };
 use crate::provider::{EventStream, Provider};
@@ -16,6 +17,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +48,61 @@ fn format_plan_status_includes_next_ready() {
     assert!(text.contains("Next up: task-2"));
     assert!(text.contains("Newly ready: task-3"));
     assert!(text.contains("Blocked: task-4"));
+}
+
+#[test]
+fn latest_assistant_report_uses_last_non_empty_assistant_message() {
+    let messages = vec![
+        HistoryMessage {
+            role: "assistant".to_string(),
+            content: " earlier ".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        },
+        HistoryMessage {
+            role: "user".to_string(),
+            content: "ignored".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        },
+        HistoryMessage {
+            role: "assistant".to_string(),
+            content: " final report ".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        },
+    ];
+
+    assert_eq!(
+        latest_assistant_report(&messages).as_deref(),
+        Some("final report")
+    );
+}
+
+#[test]
+fn format_awaited_members_includes_completion_reports() {
+    let members = vec![AwaitedMemberStatus {
+        session_id: "session_worker".to_string(),
+        friendly_name: Some("worker".to_string()),
+        status: "ready".to_string(),
+        done: true,
+    }];
+    let reports = HashMap::from([(
+        "session_worker".to_string(),
+        "Outcome: finished. Validation: tests passed.".to_string(),
+    )]);
+
+    let output = format_awaited_members_with_reports(
+        true,
+        "All 1 members are done: worker",
+        &members,
+        &reports,
+    )
+    .output;
+
+    assert!(output.contains("Completion reports:"));
+    assert!(output.contains("--- worker (ready) ---"));
+    assert!(output.contains("Outcome: finished"));
 }
 
 #[test]

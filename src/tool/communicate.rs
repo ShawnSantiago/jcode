@@ -10,6 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 const REQUEST_ID: u64 = 1;
 
@@ -667,10 +668,43 @@ fn format_context_history(target: &str, messages: &[HistoryMessage]) -> ToolOutp
     }
 }
 
+#[cfg(test)]
 fn format_awaited_members(
     completed: bool,
     summary: &str,
     members: &[AwaitedMemberStatus],
+) -> ToolOutput {
+    format_awaited_members_with_reports(completed, summary, members, &HashMap::new())
+}
+
+fn truncate_completion_report(report: &str) -> String {
+    const MAX_REPORT_CHARS: usize = 4000;
+    let report = report.trim();
+    if report.chars().count() <= MAX_REPORT_CHARS {
+        return report.to_string();
+    }
+    let suffix = "\n\n[Report truncated by jcode.]";
+    let keep = MAX_REPORT_CHARS.saturating_sub(suffix.chars().count());
+    let mut out: String = report.chars().take(keep).collect();
+    out.push_str(suffix);
+    out
+}
+
+fn latest_assistant_report(messages: &[HistoryMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != "assistant" {
+            return None;
+        }
+        let report = message.content.trim();
+        (!report.is_empty()).then(|| truncate_completion_report(report))
+    })
+}
+
+fn format_awaited_members_with_reports(
+    completed: bool,
+    summary: &str,
+    members: &[AwaitedMemberStatus],
+    reports: &HashMap<String, String>,
 ) -> ToolOutput {
     let mut output = if completed {
         format!("All members done. {}\n", summary)
@@ -693,7 +727,61 @@ fn format_awaited_members(
         }
     }
 
+    let mut report_members: Vec<_> = members
+        .iter()
+        .filter_map(|member| {
+            reports
+                .get(&member.session_id)
+                .map(|report| (member, report))
+        })
+        .collect();
+    report_members.sort_by(|(left, _), (right, _)| left.session_id.cmp(&right.session_id));
+    if !report_members.is_empty() {
+        let duplicate_names =
+            duplicate_friendly_names(members.iter().map(|member| member.friendly_name.as_deref()));
+        output.push_str("\nCompletion reports:\n");
+        for (member, report) in report_members {
+            let name = display_friendly_name(
+                member.friendly_name.as_deref(),
+                &member.session_id,
+                &duplicate_names,
+            );
+            output.push_str(&format!(
+                "\n--- {} ({}) ---\n{}\n",
+                name, member.status, report
+            ));
+        }
+    }
+
     ToolOutput::new(output)
+}
+
+async fn fetch_awaited_member_reports(
+    ctx: &ToolContext,
+    members: &[AwaitedMemberStatus],
+) -> HashMap<String, String> {
+    let mut reports = HashMap::new();
+    for member in members.iter().filter(|member| member.done) {
+        let request = Request::CommReadContext {
+            id: REQUEST_ID,
+            session_id: ctx.session_id.clone(),
+            target_session: member.session_id.clone(),
+        };
+        match send_request(request).await {
+            Ok(ServerEvent::CommContextHistory { messages, .. }) => {
+                if let Some(report) = latest_assistant_report(&messages) {
+                    reports.insert(member.session_id.clone(), report);
+                }
+            }
+            Ok(response) => {
+                if check_error(&response).is_some() {
+                    continue;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    reports
 }
 
 fn default_await_target_statuses() -> Vec<String> {
@@ -1711,7 +1799,12 @@ impl Tool for CommunicateTool {
                         members,
                         summary,
                         ..
-                    }) => Ok(format_awaited_members(completed, &summary, &members)),
+                    }) => {
+                        let reports = fetch_awaited_member_reports(&ctx, &members).await;
+                        Ok(format_awaited_members_with_reports(
+                            completed, &summary, &members, &reports,
+                        ))
+                    }
                     Ok(response) => {
                         ensure_success(&response)?;
                         Ok(ToolOutput::new("Await completed."))
