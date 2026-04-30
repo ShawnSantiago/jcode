@@ -25,6 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::logging;
 use crate::storage;
+pub use jcode_core::gateway_types::{PairedDevice, PairingCode};
 
 /// Default gateway port ("jc" on phone keypad = 52, but we use 7643)
 pub const DEFAULT_PORT: u16 = 7643;
@@ -55,29 +56,11 @@ impl Default for GatewayConfig {
 // Device registry (persisted to ~/.jcode/devices.json)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PairedDevice {
-    pub id: String,
-    pub name: String,
-    pub token_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub apns_token: Option<String>,
-    pub paired_at: String,
-    pub last_seen: String,
-}
-
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DeviceRegistry {
     pub devices: Vec<PairedDevice>,
     #[serde(default)]
     pub pending_codes: Vec<PairingCode>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PairingCode {
-    pub code: String,
-    pub created_at: String,
-    pub expires_at: String,
 }
 
 impl DeviceRegistry {
