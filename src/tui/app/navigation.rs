@@ -713,6 +713,14 @@ impl App {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             return false;
         }
+        if let Some(ref picker_cell) = self.login_picker_overlay {
+            picker_cell.borrow_mut().handle_overlay_mouse(mouse);
+            return false;
+        }
+        if let Some(ref picker_cell) = self.account_picker_overlay {
+            picker_cell.borrow_mut().handle_overlay_mouse(mouse);
+            return false;
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         let layout = super::super::ui::last_layout_snapshot();

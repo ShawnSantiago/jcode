@@ -1888,7 +1888,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     if let Some(picker_cell) = app.login_picker_overlay() {
-        let picker = picker_cell.borrow();
+        let mut picker = picker_cell.borrow_mut();
         picker.render(frame);
         finalize_frame_metrics(
             app,
@@ -1901,7 +1901,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     if let Some(picker_cell) = app.account_picker_overlay() {
-        let picker = picker_cell.borrow();
+        let mut picker = picker_cell.borrow_mut();
         picker.render(frame);
         finalize_frame_metrics(
             app,

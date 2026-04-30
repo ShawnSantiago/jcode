@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -127,6 +127,7 @@ pub struct AccountPicker {
     selected: usize,
     filter: String,
     summary: Option<AccountPickerSummary>,
+    last_action_list_area: Option<Rect>,
 }
 
 pub enum OverlayAction {
@@ -181,6 +182,7 @@ impl AccountPicker {
             selected: 0,
             filter: String::new(),
             summary: Some(summary),
+            last_action_list_area: None,
         };
         picker.apply_filter();
         picker
@@ -190,6 +192,47 @@ impl AccountPicker {
         self.filtered
             .get(self.selected)
             .and_then(|idx| self.items.get(*idx))
+    }
+
+    fn visible_window_start(&self, available_items: usize) -> usize {
+        self.selected
+            .saturating_sub(available_items.saturating_sub(1).min(available_items / 2))
+    }
+
+    fn visible_index_for_action_row(&self, row: u16, list_height: u16) -> Option<usize> {
+        if self.filtered.is_empty() {
+            return None;
+        }
+
+        let available_items = (list_height as usize).max(1);
+        let start = self.visible_window_start(available_items);
+        let end = (start + available_items).min(self.filtered.len());
+        let mut current_provider: Option<&str> = None;
+        let mut rendered_row = 0u16;
+
+        for visible_idx in start..end {
+            let item = &self.items[self.filtered[visible_idx]];
+            if current_provider != Some(item.provider_id.as_str()) {
+                current_provider = Some(item.provider_id.as_str());
+                if rendered_row == row {
+                    return None;
+                }
+                rendered_row = rendered_row.saturating_add(1);
+                if rendered_row >= list_height {
+                    return None;
+                }
+            }
+
+            if rendered_row == row {
+                return Some(visible_idx);
+            }
+            rendered_row = rendered_row.saturating_add(1);
+            if rendered_row > row && rendered_row >= list_height {
+                return None;
+            }
+        }
+
+        None
     }
 
     fn apply_filter(&mut self) {
@@ -421,7 +464,35 @@ impl AccountPicker {
         Ok(OverlayAction::Continue)
     }
 
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
+        let Some(list_inner) = self.last_action_list_area else {
+            return;
+        };
+        let inside_list = mouse.column >= list_inner.x
+            && mouse.column < list_inner.x.saturating_add(list_inner.width)
+            && mouse.row >= list_inner.y
+            && mouse.row < list_inner.y.saturating_add(list_inner.height);
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp if inside_list => {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            MouseEventKind::ScrollDown if inside_list => {
+                let max = self.filtered.len().saturating_sub(1);
+                self.selected = (self.selected + 1).min(max);
+            }
+            MouseEventKind::Down(MouseButton::Left) if inside_list => {
+                let row = mouse.row.saturating_sub(list_inner.y);
+                if let Some(visible_idx) = self.visible_index_for_action_row(row, list_inner.height)
+                {
+                    self.selected = visible_idx;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame) {
         let area = centered_rect(OVERLAY_PERCENT_X, OVERLAY_PERCENT_Y, frame.area());
 
         let block = Block::default()
@@ -431,6 +502,8 @@ impl AccountPicker {
                 Span::styled(" run  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Up/Down "),
                 Span::styled(" navigate  ", Style::default().fg(MUTED_DARK)),
+                hotkey(" Click "),
+                Span::styled(" select  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" type "),
                 Span::styled(" filter  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Esc "),
@@ -468,7 +541,7 @@ impl AccountPicker {
         let footer = Paragraph::new(Line::from(vec![
             Span::styled("Focus ", Style::default().fg(MUTED_DARK)),
             Span::styled(
-                "saved accounts stay surfaced here; use Left/Right to jump provider groups, type to narrow further, or use `/account <provider> settings` for the full text view.",
+                "saved accounts stay surfaced here; click actions to focus them, use Left/Right to jump provider groups, or use `/account <provider> settings` for the full text view.",
                 Style::default().fg(MUTED),
             ),
         ]));
@@ -515,7 +588,7 @@ impl AccountPicker {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
-    fn render_action_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_action_list(&mut self, frame: &mut Frame, area: Rect) {
         let title = if self.filtered.is_empty() {
             " Providers & Quick Actions ".to_string()
         } else {
@@ -535,11 +608,10 @@ impl AccountPicker {
             .border_style(Style::default().fg(PANEL_BORDER_ACTIVE));
         let list_inner = block.inner(area);
         frame.render_widget(block, area);
+        self.last_action_list_area = Some(list_inner);
 
         let available_items = (list_inner.height as usize).max(1);
-        let start = self
-            .selected
-            .saturating_sub(available_items.saturating_sub(1).min(available_items / 2));
+        let start = self.visible_window_start(available_items);
         let end = (start + available_items).min(self.filtered.len());
 
         let mut lines = Vec::new();
@@ -876,7 +948,7 @@ mod tests {
 
     #[test]
     fn test_account_picker_preserves_underlying_background_outside_panels() {
-        let picker = AccountPicker::new(
+        let mut picker = AccountPicker::new(
             " Accounts ",
             vec![AccountPickerItem::action(
                 "openai",
@@ -906,6 +978,65 @@ mod tests {
         let probe = &terminal.backend().buffer()[(overlay.x + overlay.width - 3, overlay.y + 2)];
         assert_eq!(probe.symbol(), "X");
         assert_ne!(probe.bg, Color::Rgb(18, 21, 30));
+    }
+
+    #[test]
+    fn test_account_picker_mouse_click_selects_visible_action_after_group_header() {
+        let mut picker = AccountPicker::new(
+            " Accounts ",
+            vec![
+                AccountPickerItem::action(
+                    "openai",
+                    "OpenAI",
+                    "Provider settings",
+                    "configured",
+                    AccountPickerCommand::SubmitInput("/account openai settings".to_string()),
+                ),
+                AccountPickerItem::action(
+                    "openai",
+                    "OpenAI",
+                    "Login / refresh",
+                    "OAuth",
+                    AccountPickerCommand::SubmitInput("/account openai login".to_string()),
+                ),
+            ],
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|frame| picker.render(frame))
+            .expect("draw failed");
+
+        let list_area = picker
+            .last_action_list_area
+            .expect("render should record action list area");
+
+        let initially_selected = picker.selected;
+        picker.handle_overlay_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list_area.x + 1,
+            row: list_area.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert_eq!(
+            picker.selected, initially_selected,
+            "provider group header rows should not be selectable"
+        );
+
+        let expected_first_action = picker.items[picker.filtered[0]].title.clone();
+        // Row 0 is the provider group header; row 1 is the first sorted action.
+        picker.handle_overlay_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list_area.x + 1,
+            row: list_area.y + 1,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert_eq!(
+            picker.selected_item().map(|item| item.title.as_str()),
+            Some(expected_first_action.as_str())
+        );
     }
 
     #[test]

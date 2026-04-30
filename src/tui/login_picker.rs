@@ -1,6 +1,6 @@
 use crate::auth::AuthState;
 use crate::provider_catalog::LoginProviderDescriptor;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -112,6 +112,7 @@ pub struct LoginPicker {
     selected: usize,
     filter: String,
     summary: LoginPickerSummary,
+    last_provider_list_area: Option<Rect>,
 }
 
 #[expect(
@@ -137,6 +138,7 @@ impl LoginPicker {
             selected: 0,
             filter: String::new(),
             summary,
+            last_provider_list_area: None,
         };
         picker.apply_filter();
         picker
@@ -166,6 +168,21 @@ impl LoginPicker {
         self.filtered
             .get(self.selected)
             .and_then(|idx| self.items.get(*idx))
+    }
+
+    fn visible_window_start(&self, available_items: usize) -> usize {
+        self.selected
+            .saturating_sub(available_items.saturating_sub(1).min(available_items / 2))
+    }
+
+    fn visible_index_for_list_row(&self, row: u16, list_height: u16) -> Option<usize> {
+        if self.filtered.is_empty() {
+            return None;
+        }
+        let available_items = (list_height as usize).max(1);
+        let start = self.visible_window_start(available_items);
+        let visible_idx = start + row as usize;
+        (visible_idx < (start + available_items).min(self.filtered.len())).then_some(visible_idx)
     }
 
     fn apply_filter(&mut self) {
@@ -243,7 +260,34 @@ impl LoginPicker {
         Ok(OverlayAction::Continue)
     }
 
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
+        let Some(list_inner) = self.last_provider_list_area else {
+            return;
+        };
+        let inside_list = mouse.column >= list_inner.x
+            && mouse.column < list_inner.x.saturating_add(list_inner.width)
+            && mouse.row >= list_inner.y
+            && mouse.row < list_inner.y.saturating_add(list_inner.height);
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp if inside_list => {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            MouseEventKind::ScrollDown if inside_list => {
+                let max = self.filtered.len().saturating_sub(1);
+                self.selected = (self.selected + 1).min(max);
+            }
+            MouseEventKind::Down(MouseButton::Left) if inside_list => {
+                let row = mouse.row.saturating_sub(list_inner.y);
+                if let Some(visible_idx) = self.visible_index_for_list_row(row, list_inner.height) {
+                    self.selected = visible_idx;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame) {
         let area = centered_rect(OVERLAY_PERCENT_X, OVERLAY_PERCENT_Y, frame.area());
 
         let block = Block::default()
@@ -253,6 +297,8 @@ impl LoginPicker {
                 Span::styled(" login  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Up/Down "),
                 Span::styled(" navigate  ", Style::default().fg(MUTED_DARK)),
+                hotkey(" Click "),
+                Span::styled(" select  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" type "),
                 Span::styled(" filter  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Esc "),
@@ -290,7 +336,7 @@ impl LoginPicker {
         let footer = Paragraph::new(Line::from(vec![
             Span::styled("Tip ", Style::default().fg(MUTED_DARK)),
             Span::styled(
-                "Move through providers on the left; the focused provider expands on the right with setup and account details.",
+                "Move or click through providers on the left; the focused provider expands on the right with setup and account details.",
                 Style::default().fg(MUTED),
             ),
         ]));
@@ -355,7 +401,7 @@ impl LoginPicker {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
-    fn render_provider_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_provider_list(&mut self, frame: &mut Frame, area: Rect) {
         let title = if self.filtered.is_empty() {
             " Providers ".to_string()
         } else {
@@ -375,11 +421,10 @@ impl LoginPicker {
             .border_style(Style::default().fg(PANEL_BORDER_ACTIVE));
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        self.last_provider_list_area = Some(inner);
 
         let available_items = inner.height.max(1) as usize;
-        let start = self
-            .selected
-            .saturating_sub(available_items.saturating_sub(1).min(available_items / 2));
+        let start = self.visible_window_start(available_items);
         let end = (start + available_items).min(self.filtered.len());
 
         let mut lines = Vec::new();
@@ -841,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_login_picker_preserves_underlying_background_outside_panels() {
-        let picker = LoginPicker::with_summary(
+        let mut picker = LoginPicker::with_summary(
             " Login ",
             vec![LoginPickerItem::new(
                 1,
@@ -874,5 +919,48 @@ mod tests {
         let probe = &terminal.backend().buffer()[(overlay.x + overlay.width - 3, overlay.y + 2)];
         assert_eq!(probe.symbol(), "X");
         assert_ne!(probe.bg, Color::Rgb(18, 21, 30));
+    }
+
+    #[test]
+    fn test_login_picker_mouse_click_selects_visible_provider() {
+        let mut picker = LoginPicker::with_summary(
+            " Login ",
+            vec![
+                LoginPickerItem::new(
+                    1,
+                    crate::provider_catalog::OPENAI_LOGIN_PROVIDER,
+                    AuthState::NotConfigured,
+                    "not configured",
+                ),
+                LoginPickerItem::new(
+                    2,
+                    crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
+                    AuthState::Available,
+                    "OAuth configured",
+                ),
+            ],
+            LoginPickerSummary::default(),
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|frame| picker.render(frame))
+            .expect("draw failed");
+
+        let list_area = picker
+            .last_provider_list_area
+            .expect("render should record provider list area");
+        picker.handle_overlay_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list_area.x + 1,
+            row: list_area.y + 1,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert_eq!(
+            picker.selected_item().map(|item| item.provider.id),
+            Some("claude")
+        );
     }
 }
