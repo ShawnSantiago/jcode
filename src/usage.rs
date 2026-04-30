@@ -8,7 +8,7 @@ mod display;
 mod openai_helpers;
 mod provider_fetch;
 pub use accessors::*;
-pub use jcode_core::usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
+pub use jcode_usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
 use provider_fetch::*;
 
 use anyhow::{Context, Result};

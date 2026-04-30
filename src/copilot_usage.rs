@@ -15,9 +15,7 @@ fn usage_path() -> PathBuf {
         .join("copilot_usage.json")
 }
 
-pub use jcode_core::copilot_usage_types::{
-    AllTimeUsage, CopilotUsageTracker, DayUsage, MonthUsage,
-};
+pub use jcode_usage_types::{AllTimeUsage, CopilotUsageTracker, DayUsage, MonthUsage};
 
 fn roll_if_needed(tracker: &mut CopilotUsageTracker) {
     let now = Utc::now();
