@@ -3,6 +3,7 @@ use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, ModelRoute, Provider};
 use crate::tool::Registry;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 
@@ -88,9 +89,21 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
     let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
-    handle_notify_auth_changed(42, &provider, &agent, &client_event_tx).await;
+    handle_notify_auth_changed(
+        42,
+        &provider,
+        &provider,
+        &sessions,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
 
     let mut saw_done = false;
     let mut saw_models = None;
@@ -106,10 +119,17 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
                 saw_done = true;
             }
             ServerEvent::AvailableModelsUpdated {
+                provider_name,
+                provider_model,
                 available_models,
                 available_model_routes,
             } => {
-                saw_models = Some((available_models, available_model_routes));
+                saw_models = Some((
+                    provider_name,
+                    provider_model,
+                    available_models,
+                    available_model_routes,
+                ));
                 break;
             }
             _ => {}
@@ -117,8 +137,10 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
     }
 
     assert!(saw_done, "expected immediate Done ack");
-    let (available_models, available_model_routes) =
+    let (provider_name, provider_model, available_models, available_model_routes) =
         saw_models.expect("expected AvailableModelsUpdated event");
+    assert_eq!(provider_name.as_deref(), Some("mock-auth"));
+    assert_eq!(provider_model.as_deref(), Some("logged-in-model"));
     assert_eq!(
         available_models,
         vec!["logged-in-model".to_string(), "second-model".to_string()]
@@ -128,6 +150,61 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
             && route.provider == "MockAuth"
             && route.api_method == "mock-auth"
     }));
+}
+
+#[tokio::test]
+async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let current_provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let busy_provider = Arc::new(AuthChangeMockProvider::new());
+    let busy_state = Arc::clone(&busy_provider.state);
+    let busy_provider: Arc<dyn Provider> = busy_provider;
+    let registry = Registry::empty();
+    let current_agent = Arc::new(Mutex::new(Agent::new(
+        Arc::clone(&current_provider),
+        registry.clone(),
+    )));
+    let busy_agent = Arc::new(Mutex::new(Agent::new(busy_provider, registry)));
+    let busy_guard = busy_agent.lock().await;
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "busy-session".to_string(),
+        Arc::clone(&busy_agent),
+    )])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed(
+        43,
+        &current_provider,
+        &current_provider,
+        &sessions,
+        &current_agent,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(
+        matches!(
+            client_event_rx.recv().await,
+            Some(ServerEvent::Done { id: 43 })
+        ),
+        "expected immediate Done ack before waiting for the busy session"
+    );
+    assert!(
+        !*busy_state.logged_in.read().unwrap(),
+        "busy session provider should not refresh until its agent lock is released"
+    );
+
+    drop(busy_guard);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if *busy_state.logged_in.read().unwrap() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    panic!("busy session provider was not refreshed after it became idle");
 }
 
 #[tokio::test]
@@ -154,10 +231,17 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
                 saw_done = true;
             }
             ServerEvent::AvailableModelsUpdated {
+                provider_name,
+                provider_model,
                 available_models,
                 available_model_routes,
             } => {
-                saw_models = Some((available_models, available_model_routes));
+                saw_models = Some((
+                    provider_name,
+                    provider_model,
+                    available_models,
+                    available_model_routes,
+                ));
                 break;
             }
             _ => {}
@@ -165,8 +249,10 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
     }
 
     assert!(saw_done, "expected immediate Done ack");
-    let (available_models, available_model_routes) =
+    let (provider_name, provider_model, available_models, available_model_routes) =
         saw_models.expect("expected AvailableModelsUpdated event");
+    assert_eq!(provider_name.as_deref(), Some("mock-auth"));
+    assert_eq!(provider_model.as_deref(), Some("logged-out-model"));
     assert_eq!(available_models, vec!["logged-out-model".to_string()]);
     assert!(available_model_routes.iter().any(|route| {
         route.model == "logged-out-model"

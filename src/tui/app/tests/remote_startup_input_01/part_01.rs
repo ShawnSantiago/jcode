@@ -660,6 +660,8 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
     app.is_remote = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec![
                 "claude-opus-4.6".to_string(),
                 "grok-code-fast-1".to_string(),

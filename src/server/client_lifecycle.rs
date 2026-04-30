@@ -31,6 +31,7 @@ use super::provider_control::{
     handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
     handle_set_reasoning_effort, handle_set_service_tier, handle_set_transport,
     handle_switch_anthropic_account, handle_switch_openai_account,
+    try_available_models_updated_event,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileAccess, SessionControlHandle,
@@ -48,7 +49,6 @@ use crate::transport::Stream;
 use anyhow::Result;
 use futures::FutureExt;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
-use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -865,7 +865,7 @@ pub(super) async fn handle_client(
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
-    let mut last_available_models_snapshot: Option<(Vec<String>, String)> = None;
+    let mut last_available_models_snapshot: Option<String> = None;
     const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
 
     // Create a new session for this client
@@ -1172,41 +1172,28 @@ pub(super) async fn handle_client(
             bus_event = bus_rx.recv(), if client_subscribed => {
                 match bus_event {
                     Ok(BusEvent::ModelsUpdated) => {
-                        let (models, model_routes) = if let Ok(agent_guard) = agent.try_lock() {
-                            (
-                                agent_guard.available_models_display(),
-                                agent_guard.model_routes(),
-                            )
-                        } else {
+                        let Some(event) = try_available_models_updated_event(&agent) else {
                             crate::logging::info(&format!(
                                 "Skipping ModelsUpdated push for busy connection {}",
                                 client_connection_id
                             ));
                             continue;
                         };
-                        let routes_json = serde_json::to_string(&model_routes).unwrap_or_default();
-                        if last_available_models_snapshot
-                            .as_ref()
-                            .map(|(prev_models, prev_routes)| prev_models == &models && prev_routes == &routes_json)
-                            .unwrap_or(false)
-                        {
+                        let encoded_event = crate::protocol::encode_event(&event);
+                        if last_available_models_snapshot.as_ref() == Some(&encoded_event) {
                             continue;
                         }
-                        let event = ServerEvent::AvailableModelsUpdated {
-                            available_models: models.clone(),
-                            available_model_routes: model_routes,
-                        };
-                        let encoded_len = crate::protocol::encode_event(&event).len();
+                        let encoded_len = encoded_event.len();
                         if encoded_len > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
                             crate::logging::warn(&format!(
                                 "Skipping oversized bus AvailableModelsUpdated frame for connection {} ({} bytes)",
                                 client_connection_id, encoded_len
                             ));
-                            last_available_models_snapshot = Some((models, routes_json));
+                            last_available_models_snapshot = Some(encoded_event);
                             continue;
                         }
                         let _ = client_event_tx.send(event);
-                        last_available_models_snapshot = Some((models, routes_json));
+                        last_available_models_snapshot = Some(encoded_event);
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -1734,7 +1721,15 @@ pub(super) async fn handle_client(
             }
 
             Request::NotifyAuthChanged { id } => {
-                handle_notify_auth_changed(id, &provider, &agent, &client_event_tx).await;
+                handle_notify_auth_changed(
+                    id,
+                    &provider,
+                    &provider_template,
+                    &sessions,
+                    &agent,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::SwitchAnthropicAccount { id, label } => {
@@ -2632,13 +2627,9 @@ async fn cancel_processing_message(
     }
 }
 
-fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<(Vec<String>, String)> {
-    let Ok(agent_guard) = agent.try_lock() else {
-        return None;
-    };
-    let models = agent_guard.available_models_display();
-    let routes_json = serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
-    Some((models, routes_json))
+fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
+    let event = try_available_models_updated_event(agent)?;
+    Some(crate::protocol::encode_event(&event))
 }
 
 fn queue_soft_interrupt(

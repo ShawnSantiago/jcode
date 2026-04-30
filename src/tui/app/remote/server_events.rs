@@ -860,6 +860,8 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::AvailableModelsUpdated {
+            provider_name,
+            provider_model,
             available_models,
             available_model_routes,
         } => {
@@ -880,9 +882,26 @@ pub(in crate::tui::app) fn handle_server_event(
                     summary.models_added, summary.routes_added, summary.routes_changed
                 ));
             }
+            let mut provider_meta_changed = false;
+            if let Some(name) = provider_name
+                && app.remote_provider_name.as_deref() != Some(name.as_str())
+            {
+                app.remote_provider_name = Some(name);
+                provider_meta_changed = true;
+            }
+            if let Some(model) = provider_model
+                && app.remote_provider_model.as_deref() != Some(model.as_str())
+            {
+                app.update_context_limit_for_model(&model);
+                app.remote_provider_model = Some(model);
+                provider_meta_changed = true;
+            }
             app.remote_available_entries = available_models;
             app.remote_model_options = available_model_routes;
             app.invalidate_model_picker_cache();
+            if provider_meta_changed {
+                app.update_terminal_title();
+            }
             false
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {

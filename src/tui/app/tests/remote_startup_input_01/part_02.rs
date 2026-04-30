@@ -18,6 +18,8 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
 
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("OpenAI".to_string()),
+            provider_model: Some("new-model".to_string()),
             available_models: vec!["new-model".to_string(), "second-model".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
                 model: "new-model".to_string(),
@@ -39,6 +41,8 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
     assert_eq!(app.remote_model_options[0].model, "new-model");
     assert_eq!(app.remote_model_options[0].provider, "OpenAI");
     assert!(app.remote_model_options[0].available);
+    assert_eq!(app.remote_provider_name.as_deref(), Some("OpenAI"));
+    assert_eq!(app.remote_provider_model.as_deref(), Some("new-model"));
 }
 
 #[test]
@@ -94,6 +98,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
 
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: None,
+            provider_model: None,
             available_models: vec!["old-model".to_string(), "new-model".to_string()],
             available_model_routes: vec![
                 crate::provider::ModelRoute {
