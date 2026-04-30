@@ -110,6 +110,7 @@ Known broad-filter hazards observed during modularization:
 - `side_panel` selects unrelated pinned UI/layout and latency benchmark tests.
 - `usage` selects app-display tests in addition to pure usage tests.
 - `session::` selects live-attach server tests and picker behavior beyond session persistence.
+- `ambient` selects TUI/helper integration tests with config and schedule state beyond ambient module persistence/runtime tests.
 
 Document precise filters next to each domain crate/module. Broad filters are still useful for periodic sweeps, but they should not block a DTO-only extraction when precise tests and compile checks pass.
 
@@ -119,7 +120,8 @@ Focused validation matrix after the current DTO splits:
 | --- | --- | --- | --- |
 | Usage DTOs | `cargo check --profile selfdev -p jcode-usage-types -p jcode --bin jcode` | Prefer exact tests under usage/copilot usage modules. Avoid bare `usage` as a required gate because it selects display/UI tests too. | DTO crate owns report and local counter contracts. Runtime fetch/cache/display stay root. |
 | Gateway DTOs | `cargo check --profile selfdev -p jcode-gateway-types -p jcode --bin jcode` | Focus gateway persistence/auth tests by exact test names when available. | Pairing/token HTTP/WebSocket behavior stays root. |
-| Ambient DTOs | `cargo check --profile selfdev -p jcode-ambient-types -p jcode --bin jcode` | Scheduler/type consumers only. Do not move `AmbientState` until root persistence methods are separated. | Queue/runtime/prompt behavior stays root. |
+| Ambient DTOs | `cargo check --profile selfdev -p jcode-ambient-types -p jcode --bin jcode` | Scheduler/type consumers only. | Ambient DTO crate owns usage records only. Queue/runtime/prompt behavior stays root. |
+| Ambient behavior modules | `cargo check --profile selfdev -p jcode --bin jcode` | `cargo test --profile selfdev -p jcode ambient::ambient_tests --lib`; `cargo test --profile selfdev -p jcode ambient::scheduler::tests --lib`; `cargo test --profile selfdev -p jcode ambient::runner::runner_tests --lib` | Avoid bare `ambient` as a required gate for module-only refactors because it selects cross-module TUI/config state tests. |
 | Memory activity DTOs | `cargo check --profile selfdev -p jcode-memory-types -p jcode-core -p jcode --bin jcode` | `cargo test --profile selfdev -p jcode runtime_memory_log --lib`; `cargo test --profile selfdev -p jcode tui::info_widget::tests --lib` | `memory::activity` currently matches no tests, so use consumer tests. |
 | Goal/todo/catchup core DTOs | `cargo check --profile selfdev -p jcode-core -p jcode --bin jcode` | Exact goal/todo/catchup filters if behavior changes. | Currently small/stable enough to leave in `jcode-core`; revisit if churn grows. |
 
