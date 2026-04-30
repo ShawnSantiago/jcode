@@ -51,7 +51,13 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
         &mut remote,
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+    let needs_redraw =
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+    assert!(
+        needs_redraw,
+        "remote Done must redraw after finalizing the response"
+    );
 
     let footers: Vec<&DisplayMessage> = app
         .display_messages()

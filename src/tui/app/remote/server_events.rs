@@ -255,11 +255,13 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::Done { id } => {
             let mut auto_poked = false;
+            let mut completed_current_message = false;
             crate::logging::info(&format!(
                 "Client received Done id={}, current_message_id={:?}",
                 id, app.current_message_id
             ));
             if app.current_message_id == Some(id) {
+                completed_current_message = true;
                 app.clear_pending_remote_retry();
                 if let Some(chunk) = app.stream_buffer.flush() {
                     app.append_streaming_text(&chunk);
@@ -315,7 +317,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     ));
                 }
             }
-            auto_poked
+            completed_current_message || auto_poked
         }
         ServerEvent::Error {
             message,
