@@ -2,9 +2,9 @@ use std::process::{Child, Command, Stdio};
 
 const DISABLE_ENV: &str = "JCODE_DISABLE_POWER_INHIBIT";
 
-/// Best-effort inhibitor that keeps Linux laptops awake while Jcode is actively
-/// streaming/processing. On systemd systems this asks logind to ignore sleep and
-/// lid-switch sleep requests for as long as the helper process is alive.
+/// Best-effort inhibitor that keeps laptops awake while Jcode is actively
+/// streaming/processing. The helper process is kept alive only while active work
+/// exists, then killed immediately so normal power management resumes.
 pub(crate) struct PowerInhibitor {
     child: Option<Child>,
     available: bool,
@@ -14,7 +14,7 @@ impl PowerInhibitor {
     pub(crate) fn new() -> Self {
         Self {
             child: None,
-            available: cfg!(target_os = "linux") && std::env::var_os(DISABLE_ENV).is_none(),
+            available: current_platform().is_some() && std::env::var_os(DISABLE_ENV).is_none(),
         }
     }
 
@@ -36,7 +36,12 @@ impl PowerInhibitor {
         }
         self.release();
 
-        match build_inhibit_command().spawn() {
+        let Some(platform) = current_platform() else {
+            self.available = false;
+            return;
+        };
+
+        match build_inhibit_command(platform).spawn() {
             Ok(child) => {
                 self.child = Some(child);
             }
@@ -65,7 +70,30 @@ fn child_is_running(child: &mut Child) -> bool {
     matches!(child.try_wait(), Ok(None))
 }
 
-fn build_inhibit_command() -> Command {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InhibitPlatform {
+    LinuxSystemd,
+    MacosCaffeinate,
+}
+
+fn current_platform() -> Option<InhibitPlatform> {
+    if cfg!(target_os = "linux") {
+        Some(InhibitPlatform::LinuxSystemd)
+    } else if cfg!(target_os = "macos") {
+        Some(InhibitPlatform::MacosCaffeinate)
+    } else {
+        None
+    }
+}
+
+fn build_inhibit_command(platform: InhibitPlatform) -> Command {
+    match platform {
+        InhibitPlatform::LinuxSystemd => build_linux_systemd_inhibit_command(),
+        InhibitPlatform::MacosCaffeinate => build_macos_caffeinate_command(),
+    }
+}
+
+fn build_linux_systemd_inhibit_command() -> Command {
     let mut command = Command::new("systemd-inhibit");
     command
         .arg("--what=sleep:handle-lid-switch")
@@ -79,17 +107,57 @@ fn build_inhibit_command() -> Command {
     command
 }
 
+fn build_macos_caffeinate_command() -> Command {
+    let mut command = Command::new("caffeinate");
+    command
+        // -i prevents idle sleep. -s prevents system sleep while on AC power.
+        // We intentionally do not use -d so the display can sleep/turn off.
+        .arg("-i")
+        .arg("-s")
+        .arg("sleep")
+        .arg("infinity")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn linux_inhibitor_blocks_sleep_and_lid_switch() {
-        let args = super::build_inhibit_command()
+    use super::InhibitPlatform;
+
+    fn command_name(command: &std::process::Command) -> String {
+        command.get_program().to_string_lossy().to_string()
+    }
+
+    fn command_args(command: &std::process::Command) -> Vec<String> {
+        command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    }
 
+    #[test]
+    fn linux_inhibitor_blocks_sleep_and_lid_switch() {
+        let command = super::build_inhibit_command(InhibitPlatform::LinuxSystemd);
+        let args = command_args(&command);
+
+        assert_eq!(command_name(&command), "systemd-inhibit");
         assert!(args.contains(&"--what=sleep:handle-lid-switch".to_string()));
         assert!(args.contains(&"--who=jcode".to_string()));
+        assert!(args.contains(&"sleep".to_string()));
+        assert!(args.contains(&"infinity".to_string()));
+    }
+
+    #[test]
+    fn macos_inhibitor_prevents_system_sleep_without_display_assertion() {
+        let command = super::build_inhibit_command(InhibitPlatform::MacosCaffeinate);
+        let args = command_args(&command);
+
+        assert_eq!(command_name(&command), "caffeinate");
+        assert!(args.contains(&"-i".to_string()));
+        assert!(args.contains(&"-s".to_string()));
+        assert!(!args.contains(&"-d".to_string()));
         assert!(args.contains(&"sleep".to_string()));
         assert!(args.contains(&"infinity".to_string()));
     }
