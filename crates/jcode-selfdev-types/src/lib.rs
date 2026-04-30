@@ -40,6 +40,23 @@ impl SelfDevBuildTarget {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinaryVersionReport {
+    pub version: Option<String>,
+    pub git_hash: Option<String>,
+}
+
+/// Which binary to use.
+#[derive(Debug, Clone)]
+pub enum BinaryChoice {
+    /// Use the stable version.
+    Stable(String),
+    /// Use the canary version for testing.
+    Canary(String),
+    /// Use current running binary because no versioned builds exist yet.
+    Current,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceState {
     pub repo_scope: String,

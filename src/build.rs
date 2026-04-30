@@ -34,15 +34,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub use jcode_selfdev_types::{
-    BuildInfo, CanaryStatus, CrashInfo, DevBinarySourceMetadata, MigrationContext,
-    PendingActivation, PublishedBuild, SelfDevBuildCommand, SelfDevBuildTarget, SourceState,
+    BinaryChoice, BinaryVersionReport, BuildInfo, CanaryStatus, CrashInfo, DevBinarySourceMetadata,
+    MigrationContext, PendingActivation, PublishedBuild, SelfDevBuildCommand, SelfDevBuildTarget,
+    SourceState,
 };
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-struct BinaryVersionReport {
-    version: Option<String>,
-    git_hash: Option<String>,
-}
 
 /// Manifest tracking build versions and their status
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -202,17 +197,6 @@ pub fn rollback_pending_activation_for_session(session_id: &str) -> Result<Optio
     manifest.pending_activation = None;
     manifest.save()?;
     Ok(Some(pending.new_version))
-}
-
-/// Which binary to use
-#[derive(Debug, Clone)]
-pub enum BinaryChoice {
-    /// Use the stable version
-    Stable(String),
-    /// Use the canary version (for testing)
-    Canary(String),
-    /// Use current running binary (no versioned builds yet)
-    Current,
 }
 
 /// Install a binary at a specific immutable version path.
