@@ -16,7 +16,8 @@ mod preview_request;
 use helpers::{
     agent_model_default_summary, agent_model_target_label, catchup_candidates,
     catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openrouter_route_model_id, picker_route_model_spec, save_agent_model_override,
+    openai_compatible_profile_id_for_route, openrouter_route_model_id, picker_route_model_spec,
+    save_agent_model_override,
 };
 
 impl App {
@@ -497,6 +498,7 @@ impl App {
                 "copilot" => 1,
                 "cursor" => 2,
                 "api-key" => 3,
+                method if method.starts_with("openai-compatible") => 3,
                 "openrouter" => 4,
                 _ => 5,
             };
@@ -1581,6 +1583,8 @@ impl App {
                             format!("cursor:{}", bare_name)
                         } else if r.provider == "Antigravity" {
                             format!("antigravity:{}", bare_name)
+                        } else if openai_compatible_profile_id_for_route(r).is_some() {
+                            bare_name.clone()
                         } else if r.api_method == "openrouter" && r.provider != "auto" {
                             if bare_name.contains('/') {
                                 format!("{}@{}", bare_name, r.provider)
@@ -1602,7 +1606,10 @@ impl App {
                             "cursor" => Some("cursor"),
                             "cli" if r.provider == "Antigravity" => Some("antigravity"),
                             "openrouter" => Some("openrouter"),
-                            _ => None,
+                            method if method.starts_with("openai-compatible") => {
+                                openai_compatible_profile_id_for_route(r)
+                            }
+                            _ => openai_compatible_profile_id_for_route(r),
                         };
                         (spec, pkey)
                     } else {

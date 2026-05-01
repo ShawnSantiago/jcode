@@ -127,6 +127,8 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
         format!("cursor:{}", bare_name)
     } else if route.provider == "Antigravity" {
         format!("antigravity:{}", bare_name)
+    } else if let Some(profile_id) = openai_compatible_profile_id_for_route(route) {
+        format!("{}:{}", profile_id, bare_name)
     } else if route.api_method == "openrouter" && route.provider != "auto" {
         format!(
             "{}@{}",
@@ -136,6 +138,23 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
     } else {
         bare_name
     }
+}
+
+pub(super) fn openai_compatible_profile_id_for_route(route: &PickerOption) -> Option<&str> {
+    if let Some(("openai-compatible", profile_id)) = route.api_method.split_once(':') {
+        let profile_id = profile_id.trim();
+        if !profile_id.is_empty() {
+            return Some(profile_id);
+        }
+    }
+
+    if route.api_method == "openai-compatible" {
+        return crate::provider_catalog::openai_compatible_profile_id_for_display_name(
+            &route.provider,
+        );
+    }
+
+    None
 }
 
 pub(super) fn model_entry_saved_spec(entry: &PickerEntry) -> String {

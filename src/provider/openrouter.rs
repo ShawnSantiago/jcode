@@ -16,7 +16,9 @@ use crate::message::{
 };
 use crate::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
-    load_api_key_from_env_or_config, normalize_api_base, openai_compatible_profiles,
+    load_api_key_from_env_or_config, normalize_api_base, openai_compatible_profile_by_id,
+    openai_compatible_profile_id_for_api_base, openai_compatible_profile_static_context_limits,
+    openai_compatible_profile_static_models, openai_compatible_profiles,
     resolve_openai_compatible_profile,
 };
 use anyhow::{Context, Result};
@@ -483,7 +485,9 @@ pub struct OpenRouterProvider {
     auth: ProviderAuth,
     supports_provider_features: bool,
     supports_model_catalog: bool,
+    profile_id: Option<String>,
     static_models: Vec<String>,
+    static_context_limits: HashMap<String, usize>,
     send_openrouter_headers: bool,
     models_cache: Arc<RwLock<ModelsCache>>,
     model_catalog_refresh: Arc<Mutex<ModelCatalogRefreshState>>,
@@ -551,6 +555,19 @@ impl OpenRouterProvider {
             .filter(|id| !id.is_empty())
             .map(ToString::to_string)
             .collect::<Vec<_>>();
+        let static_context_limits = profile
+            .models
+            .iter()
+            .filter_map(|model| {
+                let id = model.id.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                model
+                    .context_window
+                    .map(|limit| (id.to_ascii_lowercase(), limit))
+            })
+            .collect::<HashMap<_, _>>();
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
@@ -566,7 +583,9 @@ impl OpenRouterProvider {
                     profile.provider_type,
                     crate::config::NamedProviderType::OpenRouter
                 ),
+            profile_id: Some(profile_name.to_string()),
             static_models,
+            static_context_limits,
             send_openrouter_headers: false,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
@@ -608,6 +627,24 @@ impl OpenRouterProvider {
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
         let auth = Self::resolve_auth()?;
+        let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .and_then(|id| openai_compatible_profile_by_id(&id).map(|_| id))
+            .or_else(|| {
+                autodetected_profile
+                    .as_ref()
+                    .map(|profile| profile.id.clone())
+            })
+            .or_else(|| {
+                openai_compatible_profile_id_for_api_base(&api_base).map(ToString::to_string)
+            });
+        let static_context_limits = profile_id
+            .as_deref()
+            .and_then(openai_compatible_profile_by_id)
+            .map(openai_compatible_profile_static_context_limits)
+            .unwrap_or_default();
         let static_models = std::env::var("JCODE_OPENROUTER_STATIC_MODELS")
             .ok()
             .map(|raw| {
@@ -617,7 +654,13 @@ impl OpenRouterProvider {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                autodetected_profile
+                    .as_ref()
+                    .and_then(|profile| openai_compatible_profile_by_id(&profile.id))
+                    .map(openai_compatible_profile_static_models)
+                    .unwrap_or_default()
+            });
 
         if std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE").is_none()
             && let Some(profile) = autodetected_profile.as_ref()
@@ -650,7 +693,9 @@ impl OpenRouterProvider {
             auth,
             supports_provider_features,
             supports_model_catalog,
+            profile_id,
             static_models,
+            static_context_limits,
             send_openrouter_headers,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
@@ -810,7 +855,9 @@ impl OpenRouterProvider {
                 auth,
                 supports_provider_features: true,
                 supports_model_catalog: true,
+                profile_id: None,
                 static_models: Vec::new(),
+                static_context_limits: HashMap::new(),
                 send_openrouter_headers: true,
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),

@@ -676,6 +676,15 @@ impl Provider for OpenRouterProvider {
             models
         };
 
+        let merge_static_models = |mut models: Vec<String>| {
+            for model in &self.static_models {
+                if !model.trim().is_empty() && !models.iter().any(|existing| existing == model) {
+                    models.push(model.clone());
+                }
+            }
+            with_current_model(models)
+        };
+
         if !self.supports_model_catalog {
             if !self.static_models.is_empty() {
                 return with_current_model(self.static_models.clone());
@@ -698,7 +707,7 @@ impl Provider for OpenRouterProvider {
             {
                 self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
             }
-            return with_current_model(cache.models.iter().map(|m| m.id.clone()).collect());
+            return merge_static_models(cache.models.iter().map(|m| m.id.clone()).collect());
         }
 
         if let Some(cache_entry) = load_disk_cache_entry() {
@@ -711,7 +720,11 @@ impl Provider for OpenRouterProvider {
                 cache.cached_at = Some(cache_entry.cached_at);
             }
             self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
-            return with_current_model(cache_entry.models.into_iter().map(|m| m.id).collect());
+            return merge_static_models(cache_entry.models.into_iter().map(|m| m.id).collect());
+        }
+
+        if !self.static_models.is_empty() {
+            return with_current_model(self.static_models.clone());
         }
 
         let model = self.model();
@@ -806,6 +819,17 @@ impl Provider for OpenRouterProvider {
         {
             return ctx as usize;
         }
+        let normalized_model_id = model_id.trim().to_ascii_lowercase();
+        if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
+            return *limit;
+        }
+        if let Some(profile_id) = self.profile_id.as_deref()
+            && let Some(limit) = crate::provider_catalog::openai_compatible_profile_context_limit(
+                profile_id, &model_id,
+            )
+        {
+            return limit;
+        }
         crate::provider::context_limit_for_model_with_provider(&model_id, Some(self.name()))
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
     }
@@ -820,7 +844,9 @@ impl Provider for OpenRouterProvider {
             auth: self.auth.clone(),
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
+            profile_id: self.profile_id.clone(),
             static_models: self.static_models.clone(),
+            static_context_limits: self.static_context_limits.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
             models_cache: Arc::clone(&self.models_cache),
             model_catalog_refresh: Arc::clone(&self.model_catalog_refresh),

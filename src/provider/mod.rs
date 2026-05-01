@@ -787,6 +787,19 @@ impl MultiProvider {
         }
     }
 
+    fn openai_compatible_model_prefix(
+        model: &str,
+    ) -> Option<(crate::provider_catalog::OpenAiCompatibleProfile, &str)> {
+        let (prefix, rest) = model.split_once(':')?;
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+
+        let profile = crate::provider_catalog::openai_compatible_profile_by_id(prefix)?;
+        Some((profile, rest))
+    }
+
     fn explicit_model_provider_prefix(model: &str) -> Option<(ActiveProvider, &'static str, &str)> {
         if let Some(rest) = model.strip_prefix("copilot:") {
             Some((ActiveProvider::Copilot, "copilot:", rest))
@@ -816,6 +829,23 @@ impl MultiProvider {
             Self::provider_label(target),
             Self::provider_label(forced),
             Self::provider_key(target),
+        );
+    }
+
+    fn ensure_provider_lock_allows_openai_compatible_profile(
+        &self,
+        requested_model: &str,
+    ) -> Result<()> {
+        let Some(forced) = self.forced_provider else {
+            return Ok(());
+        };
+        if forced == ActiveProvider::OpenRouter {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Model '{}' targets an OpenAI-compatible provider but --provider is locked to {}. Remove the provider-specific model prefix or use `--provider openai-compatible`.",
+            requested_model,
+            Self::provider_label(forced),
         );
     }
 
@@ -912,6 +942,35 @@ impl MultiProvider {
                 Ok(())
             }
         }
+    }
+
+    fn set_model_on_openai_compatible_profile(
+        &self,
+        profile: crate::provider_catalog::OpenAiCompatibleProfile,
+        model: &str,
+    ) -> Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+        let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+        if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
+            anyhow::bail!(
+                "{} credentials not available. Run `jcode login --provider {}` first.",
+                resolved.display_name,
+                resolved.id,
+            );
+        }
+
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
+        let provider = Arc::new(openrouter::OpenRouterProvider::new()?);
+        provider.set_model(model)?;
+        *self
+            .openrouter
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+        self.set_active_provider(ActiveProvider::OpenRouter);
+        Ok(())
     }
 }
 
@@ -1018,6 +1077,12 @@ impl Provider for MultiProvider {
         let requested_model = model.trim();
         if requested_model.is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
+        {
+            self.ensure_provider_lock_allows_openai_compatible_profile(requested_model)?;
+            return self.set_model_on_openai_compatible_profile(profile, target_model);
         }
 
         // Provider-prefixed model names are explicit routing directives. They
@@ -1366,7 +1431,42 @@ impl Provider for MultiProvider {
                     }
                 }
             }
-        } else {
+        }
+
+        let mut added_direct_openai_compatible_routes = false;
+        for profile in crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+        {
+            if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
+                continue;
+            }
+            let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+            let api_method = format!("openai-compatible:{}", resolved.id);
+            for model in crate::provider_catalog::openai_compatible_profile_static_models(profile) {
+                let already_present = routes.iter().any(|route| {
+                    route.model == model
+                        && route.provider == resolved.display_name
+                        && (route.api_method == "openai-compatible"
+                            || route.api_method == api_method)
+                });
+                if already_present {
+                    added_direct_openai_compatible_routes = true;
+                    continue;
+                }
+                routes.push(ModelRoute {
+                    model,
+                    provider: resolved.display_name.clone(),
+                    api_method: api_method.clone(),
+                    available: true,
+                    detail: resolved.api_base.clone(),
+                    cheapness: None,
+                });
+                added_direct_openai_compatible_routes = true;
+            }
+        }
+
+        if !has_openrouter && !added_direct_openai_compatible_routes {
             // OpenRouter not configured - show a few popular models as unavailable
             routes.push(ModelRoute {
                 model: "openrouter models".to_string(),

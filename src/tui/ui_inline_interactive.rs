@@ -51,6 +51,10 @@ fn pad_center_display(text: &str, width: usize) -> String {
     )
 }
 
+fn api_method_display(raw: &str) -> &str {
+    raw.split_once(':').map(|(method, _)| method).unwrap_or(raw)
+}
+
 fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
     let default_marker = if entry.is_default { " ⚙" } else { "" };
     let suffix = if entry.recommended && !entry.is_current {
@@ -185,7 +189,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
                 route.provider.clone()
             };
             max_provider_len = max_provider_len.max(display_width(provider_label.as_str()));
-            max_via_len = max_via_len.max(display_width(route.api_method.as_str()));
+            max_via_len = max_via_len.max(display_width(api_method_display(&route.api_method)));
         }
     }
 
@@ -293,7 +297,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         let route = entry.active_option();
         if let Some(r) = route {
             max_provider_len = max_provider_len.max(display_width(r.provider.as_str()));
-            max_via_len = max_via_len.max(display_width(r.api_method.as_str()));
+            max_via_len = max_via_len.max(display_width(api_method_display(&r.api_method)));
         }
         if is_account_picker {
             let (title, _) = account_picker_entry_title(entry, show_account_provider_badge);
@@ -645,7 +649,9 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             Style::default().fg(rgb(140, 180, 255))
         };
 
-        let via_raw = route.map(|r| r.api_method.as_str()).unwrap_or("—");
+        let via_raw = route
+            .map(|r| api_method_display(&r.api_method))
+            .unwrap_or("—");
         let vw = via_width.saturating_sub(1);
         let via_display = format!(" {}", pad_left_display(via_raw, vw));
         let via_style = if unavailable {

@@ -7,7 +7,28 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
     let prev_home = std::env::var_os("JCODE_HOME");
     let prev_subscription =
         std::env::var_os(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
+    let saved_profile_env = [
+        "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "KIMI_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]
+    .map(|key| (key, std::env::var_os(key)));
     crate::env::set_var("JCODE_HOME", temp.path());
+    for (key, _) in &saved_profile_env {
+        crate::env::remove_var(key);
+    }
     crate::subscription_catalog::clear_runtime_env();
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
@@ -28,6 +49,13 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         );
     } else {
         crate::env::remove_var(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
+    }
+    for (key, value) in saved_profile_env {
+        if let Some(value) = value {
+            crate::env::set_var(key, value);
+        } else {
+            crate::env::remove_var(key);
+        }
     }
     crate::subscription_catalog::clear_runtime_env();
     result
