@@ -321,6 +321,28 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
 }
 
 #[test]
+fn named_openai_compatible_loads_api_key_from_env_file() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp dir");
+    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
+    write_test_api_key(&temp, "custom.env", "CUSTOM_API_KEY", "from-env-file");
+
+    let config = crate::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key_env: Some("CUSTOM_API_KEY".to_string()),
+        env_file: Some("custom.env".to_string()),
+        default_model: Some("custom-model".to_string()),
+        ..Default::default()
+    };
+
+    OpenRouterProvider::new_named_openai_compatible("custom", &config)
+        .expect("provider should load key from env file");
+}
+
+#[test]
 fn custom_compatible_provider_preserves_claude_like_model_ids() {
     let provider = make_custom_compatible_provider();
 

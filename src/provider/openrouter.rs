@@ -174,6 +174,25 @@ fn configured_env_file_name() -> String {
     }
 }
 
+fn load_named_profile_api_key(
+    env_key: &str,
+    profile: &crate::config::NamedProviderConfig,
+) -> Option<String> {
+    if let Some(env_file) = profile
+        .env_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return load_api_key_from_env_or_config(env_key, env_file);
+    }
+
+    std::env::var(env_key)
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
 fn parse_env_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -490,17 +509,14 @@ impl OpenRouterProvider {
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
-        let key_label = profile
+        let key_env = profile
             .api_key_env
             .as_deref()
             .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or("inline api_key")
-            .to_string();
-        let key = profile
-            .api_key_env
-            .as_deref()
-            .and_then(|name| std::env::var(name).ok())
+            .filter(|v| !v.is_empty());
+        let key_label = key_env.unwrap_or("inline api_key").to_string();
+        let key = key_env
+            .and_then(|name| load_named_profile_api_key(name, profile))
             .or_else(|| profile.api_key.clone());
         let auth = match profile.auth {
             crate::config::NamedProviderAuth::None => ProviderAuth::None {
