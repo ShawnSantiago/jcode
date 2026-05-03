@@ -808,6 +808,44 @@ impl Session {
         true
     }
 
+    /// Refresh the initial immutable session-context message if the session has
+    /// not started a real conversation yet. This covers remote/client-server
+    /// startup where the server creates an Agent before the subscribing client
+    /// sends the terminal working directory that tools will use.
+    pub fn refresh_initial_session_context_message(&mut self) -> bool {
+        if self.messages.iter().any(is_visible_conversation_message) {
+            return false;
+        }
+
+        let Some(message) = self.messages.iter_mut().find(|message| {
+            message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => text.starts_with(SESSION_CONTEXT_PREFIX),
+                _ => false,
+            })
+        }) else {
+            return false;
+        };
+
+        let context =
+            crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
+        let wrapped = format!("<system-reminder>\n{}\n</system-reminder>", context.trim());
+        for block in &mut message.content {
+            if let ContentBlock::Text { text, .. } = block
+                && text.starts_with(SESSION_CONTEXT_PREFIX)
+            {
+                if *text == wrapped {
+                    return false;
+                }
+                *text = wrapped;
+                self.mark_memory_profile_dirty();
+                self.mark_messages_full_dirty();
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Get the display name for this session (short memorable name if available)
     pub fn display_name(&self) -> &str {
         self.short_name

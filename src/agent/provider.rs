@@ -120,6 +120,7 @@ impl Agent {
             return;
         }
         self.session.working_dir = Some(dir.to_string());
+        self.session.refresh_initial_session_context_message();
         self.log_env_snapshot("working_dir");
     }
 
