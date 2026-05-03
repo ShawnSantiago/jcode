@@ -1056,9 +1056,14 @@ pub(super) fn get_tool_summary_with_budget(
             }
         }
         "agentgrep" => {
-            let Some(mode) = tool.input.get("mode").and_then(|v| v.as_str()) else {
-                return "grep".to_string();
-            };
+            // agentgrep defaults to grep mode when `mode` is omitted. Mirror the
+            // tool schema here so batch sub-call rows still show the useful
+            // query/path summary instead of the unhelpful bare `grep` label.
+            let mode = tool
+                .input
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("grep");
             match mode {
                 "grep" | "find" => {
                     let query = tool

@@ -478,6 +478,52 @@ fn test_render_batch_subcall_line_keeps_full_bash_summary_when_row_fits() {
 }
 
 #[test]
+fn test_agentgrep_summary_uses_default_grep_mode_query() {
+    let tool = ToolCall {
+        id: "agentgrep-default-mode".to_string(),
+        name: "agentgrep".to_string(),
+        input: serde_json::json!({
+            "query": "pending_soft_interrupt",
+            "path": "src/tui"
+        }),
+        intent: None,
+    };
+
+    let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(120));
+
+    assert_eq!(summary, "grep 'pending_soft_interrupt'");
+}
+
+#[test]
+fn test_render_batch_subcall_line_shows_first_subcall_token_badge() {
+    let tool = ToolCall {
+        id: "agentgrep-default-mode".to_string(),
+        name: "agentgrep".to_string(),
+        input: serde_json::json!({
+            "query": "pending_soft_interrupt",
+            "path": "src/tui"
+        }),
+        intent: None,
+    };
+
+    let line = tools_ui::render_batch_subcall_line(
+        &tool,
+        "✓",
+        rgb(100, 180, 100),
+        50,
+        Some(120),
+        Some("query: pending_soft_interrupt\nmatches: 1 in 1 files\n"),
+    );
+    let rendered = extract_line_text(&line);
+
+    assert!(
+        rendered.contains("agentgrep grep 'pending_soft_interrupt'"),
+        "rendered={rendered:?}"
+    );
+    assert!(rendered.contains("tok"), "rendered={rendered:?}");
+}
+
+#[test]
 fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
     let cases = vec![
         (
