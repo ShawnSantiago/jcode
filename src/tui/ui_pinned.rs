@@ -11,7 +11,8 @@ use crate::tui::mermaid;
 use layout_support::{clamp_side_panel_image_rows, estimate_side_panel_image_rows_with_font};
 use layout_support::{
     estimate_side_panel_image_layout, estimate_side_panel_image_layout_with_font,
-    fit_image_area_with_font, plan_fit_image_render, side_panel_viewport_scroll_x,
+    fit_image_area_with_font, plan_fit_image_render, scaled_image_rows,
+    side_panel_viewport_scroll_x,
 };
 #[cfg(test)]
 use std::cell::RefCell;
@@ -140,6 +141,7 @@ struct SidePanelRenderKey {
     inner_height: u16,
     has_protocol: bool,
     centered: bool,
+    image_zoom_percent: u8,
     mermaid_epoch: u64,
 }
 
@@ -1166,8 +1168,14 @@ pub(super) fn draw_side_panel_markdown(
         return;
     };
     let has_protocol = mermaid::protocol_type().is_some();
-    let rendered_full_width =
-        render_side_panel_markdown_cached(page, content_shell_area, has_protocol, centered);
+    let image_zoom_percent = app.side_panel_image_zoom_percent();
+    let rendered_full_width = render_side_panel_markdown_cached_with_zoom(
+        page,
+        content_shell_area,
+        has_protocol,
+        centered,
+        image_zoom_percent,
+    );
 
     let mut title_parts = vec![Span::styled(" side ", Style::default().fg(tool_color()))];
     title_parts.push(Span::styled(
@@ -1189,8 +1197,17 @@ pub(super) fn draw_side_panel_markdown(
         ));
         title_parts.push(Span::styled(" scroll ", Style::default().fg(dim_color())));
         if focused {
-            title_parts.push(Span::styled(" h/l pan ", Style::default().fg(dim_color())));
+            title_parts.push(Span::styled(
+                " h/l pan +/- zoom ",
+                Style::default().fg(dim_color()),
+            ));
         }
+    }
+    if image_zoom_percent != 100 {
+        title_parts.push(Span::styled(
+            format!(" zoom {}% ", image_zoom_percent),
+            Style::default().fg(accent_color()),
+        ));
     }
 
     let Some(content_shell_area) =
@@ -1209,7 +1226,13 @@ pub(super) fn draw_side_panel_markdown(
         return;
     }
     let rendered = if show_native_scrollbar {
-        render_side_panel_markdown_cached(page, content_inner, has_protocol, centered)
+        render_side_panel_markdown_cached_with_zoom(
+            page,
+            content_inner,
+            has_protocol,
+            centered,
+            image_zoom_percent,
+        )
     } else {
         rendered_full_width
     };
@@ -1456,6 +1479,16 @@ fn render_side_panel_markdown_cached(
     has_protocol: bool,
     centered: bool,
 ) -> PinnedRenderedCache {
+    render_side_panel_markdown_cached_with_zoom(page, inner, has_protocol, centered, 100)
+}
+
+fn render_side_panel_markdown_cached_with_zoom(
+    page: &crate::side_panel::SidePanelPage,
+    inner: Rect,
+    has_protocol: bool,
+    centered: bool,
+    image_zoom_percent: u8,
+) -> PinnedRenderedCache {
     let content_signature = side_panel_content_signature(page);
     let key = SidePanelRenderKey {
         page_id: page.id.clone(),
@@ -1464,6 +1497,7 @@ fn render_side_panel_markdown_cached(
         inner_height: inner.height,
         has_protocol,
         centered,
+        image_zoom_percent,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
     };
 
@@ -1502,12 +1536,27 @@ fn render_side_panel_markdown_cached(
 
     for (idx, line) in rendered_markdown.rendered_markdown.iter().enumerate() {
         if let Some(hash) = rendered_markdown.placeholder_hashes[idx] {
-            let image_layout = estimate_side_panel_image_layout(
+            let mut image_layout = estimate_side_panel_image_layout(
                 hash,
                 inner,
                 text_lines.len(),
                 rendered_markdown.has_following_content_after[idx],
             );
+            if image_zoom_percent != 100
+                && let Some((_, _, height)) = mermaid::get_cached_png(hash)
+            {
+                let (_, cell_h) = mermaid::get_font_size().unwrap_or((8, 16));
+                let image_h_cells =
+                    super::diagram_pane::div_ceil_u32(height.max(1), cell_h.max(1) as u32).max(1);
+                let rows = scaled_image_rows(image_h_cells, image_zoom_percent)
+                    .max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS);
+                image_layout = SidePanelImageLayout {
+                    rows,
+                    render_mode: SidePanelImageRenderMode::ScrollableViewport {
+                        zoom_percent: image_zoom_percent,
+                    },
+                };
+            }
             image_placements.push(PinnedImagePlacement {
                 after_text_line: text_lines.len(),
                 hash,

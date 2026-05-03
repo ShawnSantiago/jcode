@@ -536,6 +536,7 @@ impl App {
         if focused_changed {
             self.diff_pane_scroll = 0;
             self.diff_pane_scroll_x = 0;
+            self.side_panel_image_zoom_percent = 100;
             self.diff_pane_auto_scroll = true;
         }
         if focused_changed {

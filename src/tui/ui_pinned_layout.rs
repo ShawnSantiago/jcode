@@ -148,7 +148,7 @@ fn area_utilization_percent(used: Rect, total: Rect) -> u16 {
     (used_area.saturating_mul(100) / total_area) as u16
 }
 
-fn scaled_image_rows(image_h_cells: u32, zoom_percent: u8) -> u16 {
+pub(super) fn scaled_image_rows(image_h_cells: u32, zoom_percent: u8) -> u16 {
     if image_h_cells == 0 || zoom_percent == 0 {
         return 0;
     }

@@ -126,16 +126,6 @@ pub(super) fn paste_image_from_clipboard(app: &mut App) {
 }
 
 pub(super) fn paste_from_clipboard(app: &mut App) {
-    let dictation_cfg = crate::config::config().dictation.clone();
-    if should_toggle_inflight_dictation_before_clipboard_lookup(
-        app.dictation_in_flight,
-        dictation_cfg.command.as_str(),
-        app.dictation_key.binding.is_some(),
-    ) {
-        app.handle_dictation_trigger();
-        return;
-    }
-
     app.set_status_notice("Reading clipboard...");
     spawn_clipboard_paste(app, ClipboardPasteKind::Smart);
 }
@@ -179,10 +169,55 @@ where
 }
 
 fn read_clipboard_text() -> Option<String> {
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && let Some(text) = read_wayland_clipboard_text()
+    {
+        return Some(text);
+    }
+
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         return None;
     };
     clipboard.get_text().ok()
+}
+
+fn read_wayland_clipboard_text() -> Option<String> {
+    let types_output = std::process::Command::new("wl-paste")
+        .arg("--list-types")
+        .output()
+        .ok()?;
+    if !types_output.status.success() {
+        return None;
+    }
+
+    let types = String::from_utf8_lossy(&types_output.stdout);
+    let wl_type = preferred_wayland_text_type(&types)?;
+    let output = std::process::Command::new("wl-paste")
+        .args(["--type", wl_type, "--no-newline"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8(output.stdout).ok()
+}
+
+fn preferred_wayland_text_type(types: &str) -> Option<&'static str> {
+    let has_type = |needle: &str| types.lines().any(|line| line.trim() == needle);
+    if has_type("text/plain;charset=utf-8") {
+        Some("text/plain;charset=utf-8")
+    } else if has_type("text/plain") {
+        Some("text/plain")
+    } else if has_type("UTF8_STRING") {
+        Some("UTF8_STRING")
+    } else if has_type("TEXT") {
+        Some("TEXT")
+    } else if has_type("STRING") {
+        Some("STRING")
+    } else {
+        None
+    }
 }
 
 fn image_content(media_type: String, base64_data: String) -> ClipboardPasteContent {
@@ -198,28 +233,47 @@ fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
 }
 
 fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent {
+    read_clipboard_for_paste_with(
+        kind,
+        read_clipboard_text,
+        super::clipboard_image,
+        download_image_url_content,
+    )
+}
+
+fn read_clipboard_for_paste_with<ReadText, ReadImage, DownloadImageUrl>(
+    kind: &ClipboardPasteKind,
+    mut read_text: ReadText,
+    mut read_image: ReadImage,
+    mut download_image_url: DownloadImageUrl,
+) -> ClipboardPasteContent
+where
+    ReadText: FnMut() -> Option<String>,
+    ReadImage: FnMut() -> Option<(String, String)>,
+    DownloadImageUrl: FnMut(&str) -> Option<ClipboardPasteContent>,
+{
     match kind {
         ClipboardPasteKind::Smart => {
-            if let Some(text) = read_clipboard_text() {
+            if let Some(text) = read_text() {
                 if let Some(url) = super::extract_image_url(&text)
-                    && let Some(content) = download_image_url_content(&url)
+                    && let Some(content) = download_image_url(&url)
                 {
                     return content;
                 }
                 return ClipboardPasteContent::Text(text);
             }
-            if let Some((media_type, base64_data)) = super::clipboard_image() {
+            if let Some((media_type, base64_data)) = read_image() {
                 return image_content(media_type, base64_data);
             }
             ClipboardPasteContent::Empty
         }
         ClipboardPasteKind::ImageOnly => {
-            if let Some((media_type, base64_data)) = super::clipboard_image() {
+            if let Some((media_type, base64_data)) = read_image() {
                 return image_content(media_type, base64_data);
             }
-            if let Some(text) = read_clipboard_text() {
+            if let Some(text) = read_text() {
                 if let Some(url) = super::extract_image_url(&text) {
-                    return download_image_url_content(&url).unwrap_or_else(|| {
+                    return download_image_url(&url).unwrap_or_else(|| {
                         ClipboardPasteContent::Error("Failed to download image".to_string())
                     });
                 }
@@ -231,53 +285,75 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
             let Some(url) = fallback_text.as_deref().and_then(super::extract_image_url) else {
                 return ClipboardPasteContent::Empty;
             };
-            download_image_url_content(&url).unwrap_or_else(|| {
+            download_image_url(&url).unwrap_or_else(|| {
                 ClipboardPasteContent::Error("Failed to download image".to_string())
             })
         }
     }
 }
 
-fn should_toggle_inflight_dictation_before_clipboard_lookup(
-    dictation_in_flight: bool,
-    command: &str,
-    has_explicit_dictation_key: bool,
-) -> bool {
-    dictation_in_flight
-        && super::dictation::should_fallback_from_empty_clipboard(
-            command,
-            has_explicit_dictation_key,
-        )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::should_toggle_inflight_dictation_before_clipboard_lookup;
+    use super::{
+        ClipboardPasteContent, ClipboardPasteKind, preferred_wayland_text_type,
+        read_clipboard_for_paste_with,
+    };
 
     #[test]
-    fn inflight_dictation_takes_precedence_for_empty_clipboard_fallback() {
-        assert!(should_toggle_inflight_dictation_before_clipboard_lookup(
-            true,
-            "~/.local/bin/live-transcribe",
-            false,
-        ));
+    fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some("plain text".to_string()),
+            || Some(("image/png".to_string(), "base64".to_string())),
+            |_| None,
+        );
+
+        match content {
+            ClipboardPasteContent::Text(text) => assert_eq!(text, "plain text"),
+            other => panic!("expected text paste, got {other:?}"),
+        }
     }
 
     #[test]
-    fn inflight_dictation_does_not_take_precedence_without_fallback_config() {
-        assert!(!should_toggle_inflight_dictation_before_clipboard_lookup(
-            true, "", false,
-        ));
-        assert!(!should_toggle_inflight_dictation_before_clipboard_lookup(
-            true,
-            "~/.local/bin/live-transcribe",
-            true,
-        ));
-        assert!(!should_toggle_inflight_dictation_before_clipboard_lookup(
-            false,
-            "~/.local/bin/live-transcribe",
-            false,
-        ));
+    fn smart_paste_uses_image_only_when_no_text_is_available() {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || None,
+            || Some(("image/png".to_string(), "base64".to_string())),
+            |_| None,
+        );
+
+        match content {
+            ClipboardPasteContent::Image {
+                media_type,
+                base64_data,
+            } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(base64_data, "base64");
+            }
+            other => panic!("expected image paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smart_paste_empty_clipboard_stays_empty_not_dictation() {
+        let content =
+            read_clipboard_for_paste_with(&ClipboardPasteKind::Smart, || None, || None, |_| None);
+
+        assert!(
+            matches!(content, ClipboardPasteContent::Empty),
+            "expected empty paste, got {content:?}"
+        );
+    }
+
+    #[test]
+    fn wayland_text_type_prefers_utf8_plain_text() {
+        let types = "text/plain\ntext/plain;charset=utf-8\nTEXT\nSTRING\nUTF8_STRING\n";
+
+        assert_eq!(
+            preferred_wayland_text_type(types),
+            Some("text/plain;charset=utf-8")
+        );
     }
 }
 
@@ -380,9 +456,7 @@ impl App {
             ClipboardPasteContent::Empty => {
                 match result.kind {
                     ClipboardPasteKind::Smart => {
-                        if !self.handle_empty_clipboard_paste() {
-                            self.set_status_notice("No text or image in clipboard");
-                        }
+                        self.set_status_notice("No text or image in clipboard");
                     }
                     ClipboardPasteKind::ImageOnly => {
                         self.set_status_notice("No image in clipboard")
@@ -937,6 +1011,10 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
             | KeyCode::Home
             | KeyCode::Char('G')
             | KeyCode::End
+            | KeyCode::Char('+')
+            | KeyCode::Char('=')
+            | KeyCode::Char('-')
+            | KeyCode::Char('0')
             | KeyCode::Esc => return true,
             _ => {}
         }

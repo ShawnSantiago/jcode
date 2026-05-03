@@ -1152,6 +1152,9 @@ impl crate::tui::TuiState for App {
     fn diff_pane_scroll_x(&self) -> i32 {
         self.diff_pane_scroll_x
     }
+    fn side_panel_image_zoom_percent(&self) -> u8 {
+        self.side_panel_image_zoom_percent
+    }
     fn diff_pane_focus(&self) -> bool {
         self.diff_pane_focus
     }

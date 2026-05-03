@@ -1079,6 +1079,9 @@ impl TuiState for BenchState {
     fn diff_pane_scroll_x(&self) -> i32 {
         self.diff_pane_scroll_x
     }
+    fn side_panel_image_zoom_percent(&self) -> u8 {
+        100
+    }
     fn diff_pane_focus(&self) -> bool {
         self.diff_pane_focus
     }

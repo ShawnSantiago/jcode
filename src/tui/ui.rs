@@ -141,6 +141,7 @@ use memory_ui::{
 };
 use memory_ui::{group_into_tiles, render_memory_tiles, split_by_display_width};
 use messages::get_cached_message_lines;
+#[cfg_attr(test, allow(unused_imports))]
 pub(crate) use messages::{
     render_assistant_message, render_background_task_message, render_swarm_message,
     render_system_message, render_tool_message, render_usage_message,

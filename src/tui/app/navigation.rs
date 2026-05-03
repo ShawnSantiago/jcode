@@ -171,6 +171,30 @@ impl App {
             .clamp(-4096, 4096);
     }
 
+    pub(super) fn adjust_side_panel_image_zoom(&mut self, delta_percent: i16) {
+        let current = self.side_panel_image_zoom_percent as i16;
+        let next = current.saturating_add(delta_percent).clamp(25, 250) as u8;
+        if next == self.side_panel_image_zoom_percent {
+            return;
+        }
+        self.side_panel_image_zoom_percent = next;
+        self.diff_pane_scroll_x = 0;
+        crate::tui::clear_side_panel_render_caches();
+        crate::tui::mermaid::clear_image_state();
+        self.set_status_notice(format!("Side image zoom: {}%", next));
+    }
+
+    pub(super) fn reset_side_panel_image_zoom(&mut self) {
+        if self.side_panel_image_zoom_percent == 100 {
+            return;
+        }
+        self.side_panel_image_zoom_percent = 100;
+        self.diff_pane_scroll_x = 0;
+        crate::tui::clear_side_panel_render_caches();
+        crate::tui::mermaid::clear_image_state();
+        self.set_status_notice("Side image zoom: fit".to_string());
+    }
+
     pub(super) fn handle_diff_pane_focus_key(
         &mut self,
         code: KeyCode,
@@ -213,6 +237,15 @@ impl App {
             }
             KeyCode::Char('l') | KeyCode::Right if self.side_panel.focused_page().is_some() => {
                 self.pan_diff_pane_x(4);
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') if self.side_panel.focused_page().is_some() => {
+                self.adjust_side_panel_image_zoom(10);
+            }
+            KeyCode::Char('-') if self.side_panel.focused_page().is_some() => {
+                self.adjust_side_panel_image_zoom(-10);
+            }
+            KeyCode::Char('0') if self.side_panel.focused_page().is_some() => {
+                self.reset_side_panel_image_zoom();
             }
             KeyCode::Esc => {
                 self.set_diff_pane_focus(false);
@@ -903,20 +936,28 @@ impl App {
             // in chat while inspecting pinned content. But when the side panel is visible, redraw
             // immediately so scroll/pan feels responsive instead of waiting for the next tick.
             let side_panel_visible = self.side_panel.focused_page().is_some();
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::SidePane, -1);
+            if side_panel_visible && mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.adjust_side_panel_image_zoom(10),
+                    MouseEventKind::ScrollDown => self.adjust_side_panel_image_zoom(-10),
+                    _ => {}
                 }
-                MouseEventKind::ScrollDown => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::SidePane, 1);
+            } else {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.enqueue_mouse_scroll(MouseScrollTarget::SidePane, -1);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.enqueue_mouse_scroll(MouseScrollTarget::SidePane, 1);
+                    }
+                    MouseEventKind::ScrollLeft if self.side_panel.focused_page().is_some() => {
+                        self.pan_diff_pane_x(-1);
+                    }
+                    MouseEventKind::ScrollRight if self.side_panel.focused_page().is_some() => {
+                        self.pan_diff_pane_x(1);
+                    }
+                    _ => {}
                 }
-                MouseEventKind::ScrollLeft if self.side_panel.focused_page().is_some() => {
-                    self.pan_diff_pane_x(-1);
-                }
-                MouseEventKind::ScrollRight if self.side_panel.focused_page().is_some() => {
-                    self.pan_diff_pane_x(1);
-                }
-                _ => {}
             }
             immediate_redraw = side_panel_visible;
             handled_scroll = true;

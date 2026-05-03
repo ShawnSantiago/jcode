@@ -356,6 +356,9 @@ impl crate::tui::TuiState for TestState {
     fn diff_pane_scroll_x(&self) -> i32 {
         0
     }
+    fn side_panel_image_zoom_percent(&self) -> u8 {
+        100
+    }
     fn diff_pane_focus(&self) -> bool {
         false
     }

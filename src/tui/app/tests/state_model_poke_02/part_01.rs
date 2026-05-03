@@ -56,6 +56,41 @@ fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
 }
 
 #[test]
+fn test_tool_side_panel_focus_supports_image_zoom_keys() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
+    assert!(app.diff_pane_focus);
+
+    app.handle_key(KeyCode::Char('+'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.side_panel_image_zoom_percent, 110);
+
+    app.handle_key(KeyCode::Char('-'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.side_panel_image_zoom_percent, 100);
+
+    app.handle_key(KeyCode::Char('+'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('0'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.side_panel_image_zoom_percent, 100);
+}
+
+#[test]
 fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
@@ -93,6 +128,47 @@ fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change()
         "side-panel horizontal pan should request an immediate redraw"
     );
     assert_eq!(app.diff_pane_scroll_x, 3);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
+fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel_image_zoom_percent = 100;
+    app.diff_pane_focus = false;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    crate::tui::ui::record_layout_snapshot(
+        Rect::new(0, 0, 40, 20),
+        None,
+        Some(Rect::new(40, 0, 20, 20)),
+        None,
+    );
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 45,
+        row: 5,
+        modifiers: KeyModifiers::CONTROL,
+    });
+
+    assert!(
+        !scroll_only,
+        "side-panel image zoom should request an immediate redraw"
+    );
+    assert_eq!(app.side_panel_image_zoom_percent, 110);
     assert!(!app.diff_pane_focus);
 }
 

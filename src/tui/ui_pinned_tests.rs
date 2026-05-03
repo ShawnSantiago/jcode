@@ -151,6 +151,42 @@ fn side_panel_markdown_image_path_renders_as_image_placement() {
 }
 
 #[test]
+fn side_panel_image_zoom_uses_scrollable_viewport_layout() {
+    with_serialized_mermaid_state(|| {
+        clear_side_panel_render_caches();
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-side-panel-image-zoom-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp image dir");
+        let path = dir.join("generated.png");
+        ::image::RgbaImage::from_pixel(80, 80, ::image::Rgba([0, 0, 255, 255]))
+            .save(&path)
+            .expect("write temp png");
+
+        let page = sample_mermaid_page(format!(
+            "# Generated image\n\n![Generated image]({})",
+            path.display()
+        ));
+        let rendered = render_side_panel_markdown_cached_with_zoom(
+            &page,
+            Rect::new(0, 0, 40, 20),
+            true,
+            false,
+            150,
+        );
+
+        assert_eq!(rendered.image_placements.len(), 1);
+        assert_eq!(
+            rendered.image_placements[0].render_mode,
+            SidePanelImageRenderMode::ScrollableViewport { zoom_percent: 150 }
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
 fn side_panel_mermaid_prefers_viewport_when_downscaled_fit_wastes_space() {
     let layout =
         estimate_side_panel_image_layout_with_font(226, 504, 36, 30, 0, false, Some((8, 16)));

@@ -426,6 +426,7 @@ pub(super) struct ScrollTestState {
     diff_mode: crate::config::DiffDisplayMode,
     diff_pane_scroll: usize,
     diff_pane_scroll_x: i32,
+    side_panel_image_zoom_percent: u8,
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     is_processing: bool,
@@ -463,6 +464,7 @@ impl ScrollTestState {
             diff_mode: app.diff_mode,
             diff_pane_scroll: app.diff_pane_scroll,
             diff_pane_scroll_x: app.diff_pane_scroll_x,
+            side_panel_image_zoom_percent: app.side_panel_image_zoom_percent,
             diff_pane_focus: app.diff_pane_focus,
             diff_pane_auto_scroll: app.diff_pane_auto_scroll,
             is_processing: app.is_processing,
@@ -499,6 +501,7 @@ impl ScrollTestState {
         app.diff_mode = self.diff_mode;
         app.diff_pane_scroll = self.diff_pane_scroll;
         app.diff_pane_scroll_x = self.diff_pane_scroll_x;
+        app.side_panel_image_zoom_percent = self.side_panel_image_zoom_percent;
         app.diff_pane_focus = self.diff_pane_focus;
         app.diff_pane_auto_scroll = self.diff_pane_auto_scroll;
         app.is_processing = self.is_processing;
