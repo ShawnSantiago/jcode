@@ -5,3 +5,5 @@ ios_simulator_screenshot.png
 /.wrangler/
 /tmp/
 /.jcode/generated-images/
+/.omc/
+/.playwright-mcp/
