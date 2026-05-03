@@ -68,19 +68,16 @@ The current code organization is mixed:
 - **Workspace crates** already isolate several heavy or stable seams.
 - **Subdirectories under `src/`** increasingly reflect domain boundaries, especially for `agent`, `cli`, `server`, `tool`, and `tui`.
 
-Current workspace members from `Cargo.toml`:
+Current workspace members from `Cargo.toml` are grouped roughly as follows:
 
 - root package: `jcode`
-- `crates/jcode-agent-runtime`
-- `crates/jcode-embedding`
-- `crates/jcode-pdf`
-- `crates/jcode-azure-auth`
-- `crates/jcode-notify-email`
-- `crates/jcode-provider-metadata`
-- `crates/jcode-provider-core`
-- `crates/jcode-provider-openrouter`
-- `crates/jcode-provider-gemini`
-- `crates/jcode-tui-workspace`
+- foundation/runtime support: `jcode-agent-runtime`, `jcode-core`, `jcode-storage`, `jcode-terminal-launch`
+- data-contract crates: `jcode-ambient-types`, `jcode-auth-types`, `jcode-background-types`, `jcode-batch-types`, `jcode-config-types`, `jcode-gateway-types`, `jcode-memory-types`, `jcode-message-types`, `jcode-selfdev-types`, `jcode-session-types`, `jcode-side-panel-types`, `jcode-task-types`, `jcode-usage-types`
+- protocol and planning: `jcode-protocol`, `jcode-plan`
+- heavy or optional integrations: `jcode-embedding`, `jcode-pdf`, `jcode-notify-email`
+- auth and providers: `jcode-azure-auth`, `jcode-provider-core`, `jcode-provider-metadata`, `jcode-provider-openrouter`, `jcode-provider-gemini`
+- TUI extraction seams: `jcode-tui-core`, `jcode-tui-markdown`, `jcode-tui-mermaid`, `jcode-tui-render`, `jcode-tui-workspace`
+- product surfaces outside the main TUI binary: `jcode-desktop`, `jcode-mobile-core`, `jcode-mobile-sim`
 
 ### What the root crate still owns
 
@@ -105,6 +102,23 @@ These splits already exist and should be treated as real architectural footholds
 | Crate | Current role |
 |---|---|
 | `jcode-agent-runtime` | shared interrupt and lightweight runtime primitives for agent execution |
+| `jcode-ambient-types` | usage and rate-limit records shared by ambient/background flows |
+| `jcode-auth-types` | provider-neutral auth state and credential metadata |
+| `jcode-background-types` | background-task status and progress DTOs |
+| `jcode-batch-types` | batch tool progress DTOs, currently depending only on message types internally |
+| `jcode-config-types` | stable configuration data contracts |
+| `jcode-core` | low-level utilities such as IDs, env helpers, fs helpers, stdin detection, and formatting |
+| `jcode-gateway-types` | gateway-facing data contracts |
+| `jcode-memory-types` | memory subsystem data contracts |
+| `jcode-message-types` | message content and transport-adjacent data contracts |
+| `jcode-protocol` | client/server protocol surface built from stable type crates and provider-core values |
+| `jcode-plan` | plan/task graph data model shared across coordination flows |
+| `jcode-selfdev-types` | self-development request/status data contracts |
+| `jcode-session-types` | session DTOs, currently depending only on message types internally |
+| `jcode-side-panel-types` | side-panel page and update data contracts |
+| `jcode-task-types` | task/tool scheduling data contracts |
+| `jcode-usage-types` | usage accounting data contracts |
+| `jcode-storage` | storage helpers layered on `jcode-core` |
 | `jcode-embedding` | ONNX/tokenizer-based embedding implementation and heavy inference deps |
 | `jcode-pdf` | PDF text extraction |
 | `jcode-azure-auth` | Azure bearer token retrieval |
@@ -113,7 +127,15 @@ These splits already exist and should be treated as real architectural footholds
 | `jcode-provider-core` | shared provider value types, route/cost types, shared HTTP client, schema helpers |
 | `jcode-provider-openrouter` | OpenRouter-specific catalog/cache/support helpers |
 | `jcode-provider-gemini` | Gemini schema/model/support helpers |
+| `jcode-tui-core` | low-level terminal UI primitives that do not need full app state |
+| `jcode-tui-markdown` | markdown wrapping/rendering, layered on mermaid/workspace support |
+| `jcode-tui-mermaid` | mermaid parsing, rendering, caching, viewport, and widget support |
+| `jcode-tui-render` | reusable TUI layout/render helpers |
 | `jcode-tui-workspace` | workspace-map data/model/widget rendering |
+| `jcode-terminal-launch` | terminal process launch helpers |
+| `jcode-mobile-core` | shared headless mobile simulator state/protocol/visual model |
+| `jcode-mobile-sim` | mobile simulator CLI/app surface layered on `jcode-mobile-core` |
+| `jcode-desktop` | desktop app surface and session/workspace rendering experiments |
 
 These are already aligned with the compile-performance plan's strategy: isolate heavy dependencies and stable helper surfaces first.
 
