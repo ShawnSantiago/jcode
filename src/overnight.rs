@@ -302,6 +302,10 @@ pub struct OvernightProgressCard {
 #[derive(Debug, Clone)]
 pub struct OvernightLaunch {
     pub manifest: OvernightManifest,
+    /// Initial coordinator prompt to enqueue in the visible launching session.
+    /// When present, the TUI should run this as a normal user turn so tool calls,
+    /// spawned agents, and streaming output are visible like any other session.
+    pub initial_prompt: Option<String>,
 }
 
 pub struct OvernightStartOptions {
@@ -488,15 +492,23 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     )?;
     render_review_html(&manifest)?;
 
-    spawn_supervisor(
-        manifest.clone(),
-        child,
-        options.provider,
-        options.registry,
-        child_is_canary,
-    );
+    let initial_prompt = if options.use_current_session {
+        Some(build_visible_current_session_prompt(&manifest))
+    } else {
+        spawn_supervisor(
+            manifest.clone(),
+            child,
+            options.provider,
+            options.registry,
+            child_is_canary,
+        );
+        None
+    };
 
-    Ok(OvernightLaunch { manifest })
+    Ok(OvernightLaunch {
+        manifest,
+        initial_prompt,
+    })
 }
 
 fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Result<Session> {
@@ -1979,6 +1991,55 @@ Initial steps:
         validation = manifest.validation_dir.display(),
         review_html = manifest.review_path.display(),
         preflight_summary = preflight_summary(preflight),
+    )
+}
+
+fn build_visible_current_session_prompt(manifest: &OvernightManifest) -> String {
+    let mission = manifest
+        .mission
+        .as_deref()
+        .unwrap_or("Continue the current session's highest-value work, prioritizing verified, low-risk progress.");
+    format!(
+        r#"You are now the visible Overnight Coordinator for Jcode run `{run_id}`.
+
+The user expects this current session to become the overnight session. Keep all work visible here: your normal tool calls, any spawned/swarm helper agents, their reports, and validation should be observable from this session like a normal interactive run.
+
+Target wake/report time: `{target_wake_at}`
+Soft post-wake grace window ends: `{post_wake_grace_until}`
+
+Mission:
+{mission}
+
+Operating contract:
+- Do not wait for the user. If you need user judgment/credentials/taste, record it and switch to another useful task.
+- Optimize for verified, low-risk progress. Prefer objective bugs, repros, regression tests, bounded quality fixes, and clear validation.
+- Avoid broad rewrites, taste-based decisions, risky migrations, payments, sending email, pushing to remotes, deleting data, or external side effects unless explicitly allowed.
+- Spawn helper/swarm agents only when valuable, and keep their work headed/visible from this session. Prefer read-only scouts/verifiers over many editors.
+- Watch RAM/load/battery and avoid concurrent heavy builds or tests unless resources are clearly healthy.
+
+Review/log requirements:
+- Keep `{review_notes}` updated as you work.
+- For each meaningful task, maintain one task-card JSON in `{task_cards}` using `{task_card_schema}`.
+- Task cards should include Before/After, evidence, validation, files changed, risk, status, and outcome.
+- Put useful command outputs in `{validation}`.
+- The generated review page is `{review_html}`.
+
+Initial steps:
+1. Inspect current repo/session state, including git status and current todos.
+2. Build a ranked queue of verifiable candidate tasks.
+3. Pick the highest-confidence bounded task.
+4. Prove/reproduce before fixing.
+5. Validate, update review notes/task cards, and continue with the next bounded task until the target wake/report time.
+"#,
+        run_id = manifest.run_id,
+        target_wake_at = manifest.target_wake_at.to_rfc3339(),
+        post_wake_grace_until = manifest.post_wake_grace_until.to_rfc3339(),
+        mission = mission,
+        review_notes = manifest.review_notes_path.display(),
+        task_cards = manifest.task_cards_dir.display(),
+        task_card_schema = manifest.task_cards_dir.join("task-card-schema.md").display(),
+        validation = manifest.validation_dir.display(),
+        review_html = manifest.review_path.display(),
     )
 }
 

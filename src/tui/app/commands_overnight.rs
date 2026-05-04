@@ -1,7 +1,9 @@
-use super::{App, DisplayMessage};
+use super::{App, DisplayMessage, ProcessingStatus};
+use crate::message::{ContentBlock, Message, Role};
 use crate::overnight::{OvernightCommand, OvernightStartOptions};
 use crate::provider::Provider;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub(super) fn handle_overnight_command(app: &mut App, trimmed: &str) -> bool {
     let Some(command) = crate::overnight::parse_overnight_command(trimmed) else {
@@ -36,7 +38,12 @@ pub(super) fn handle_overnight_command(app: &mut App, trimmed: &str) -> bool {
                 Ok(launch) => {
                     let manifest = launch.manifest;
                     app.upsert_overnight_display_card(&manifest);
-                    app.set_status_notice("Overnight started");
+                    if let Some(prompt) = launch.initial_prompt {
+                        start_visible_overnight_turn(app, prompt);
+                        app.set_status_notice("Overnight started in current session");
+                    } else {
+                        app.set_status_notice("Overnight started");
+                    }
                 }
                 Err(error) => app.push_display_message(DisplayMessage::error(format!(
                     "Failed to start overnight run: {}",
@@ -48,6 +55,44 @@ pub(super) fn handle_overnight_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     true
+}
+
+fn start_visible_overnight_turn(app: &mut App, content: String) {
+    app.commit_pending_streaming_assistant_message();
+    app.add_provider_message(Message::user(&content));
+    app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: content,
+            cache_control: None,
+        }],
+    );
+    let _ = app.session.save();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Sending;
+    app.clear_streaming_render_state();
+    app.stream_buffer.clear();
+    app.thought_line_inserted = false;
+    app.thinking_prefix_emitted = false;
+    app.thinking_buffer.clear();
+    app.streaming_tool_calls.clear();
+    app.batch_progress = None;
+    app.streaming_input_tokens = 0;
+    app.streaming_output_tokens = 0;
+    app.streaming_cache_read_tokens = None;
+    app.streaming_cache_creation_tokens = None;
+    app.upstream_provider = None;
+    app.status_detail = None;
+    app.streaming_tps_start = None;
+    app.streaming_tps_elapsed = Duration::ZERO;
+    app.streaming_tps_collect_output = false;
+    app.streaming_total_output_tokens = 0;
+    app.streaming_tps_observed_output_tokens = 0;
+    app.streaming_tps_observed_elapsed = Duration::ZERO;
+    app.processing_started = Some(Instant::now());
+    app.visible_turn_started = Some(Instant::now());
+    app.pending_turn = true;
 }
 
 fn show_overnight_help(app: &mut App) {
