@@ -149,7 +149,7 @@ impl Default for VersionedPlan {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanGraphSummary {
     pub ready_ids: Vec<String>,
     pub blocked_ids: Vec<String>,

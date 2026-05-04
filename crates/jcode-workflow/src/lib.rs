@@ -1,6 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod ralplan;
+
+pub use ralplan::{
+    RalplanConsensusExecutor, RalplanDraft, RalplanDraftContext, RalplanPlanValidationError,
+    RalplanReview, RalplanReviewContext, RalplanReviewVerdict, RalplanRunOptions, RalplanRunResult,
+    RalplanTerminalStatus, run_ralplan_consensus, validate_ralplan_plan,
+};
+
 pub const WORKFLOW_STATE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
