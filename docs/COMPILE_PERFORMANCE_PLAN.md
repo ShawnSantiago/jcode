@@ -366,6 +366,11 @@ Start with the highest-leverage cache boundaries:
   runtime availability, and cache hydration on top of those core helpers.
 - Validation: `cargo test -p jcode-provider-core models:: --quiet`,
   `cargo check -p jcode-provider-core --quiet`, and `cargo check -p jcode --quiet` pass.
+- 2026-05-05: moved the global `Provider` trait and `EventStream` alias into `jcode-provider-core`.
+  Root `src/provider/mod.rs` now re-exports the contract while continuing to own concrete provider
+  implementations and `MultiProvider` composition. This is the main provider seam needed before a
+  future `jcode-provider` runtime crate can be introduced safely.
+- Validation: `cargo check -p jcode-provider-core --quiet` and `cargo check -p jcode --quiet` pass.
 
 - 2026-05-05: moved the stable provider-facing `ToolDefinition` contract from `src/message.rs` into
   `jcode-message-types` and re-exported it from the root message facade. This is a prerequisite for
