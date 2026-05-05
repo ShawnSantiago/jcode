@@ -266,6 +266,15 @@ Start with the highest-leverage cache boundaries:
   cache boundary for the heaviest embedding dependencies.
 - Follow-up: gather more realistic before/after timing data using controlled
   touched-file benchmarks rather than fully hot no-op rebuilds.
+- 2026-05-05: made the `embeddings` feature opt-in instead of part of default
+  features. The crate boundary was already in place, but ordinary `cargo check`
+  / `cargo build` still compiled the `tract` / `tokenizers` subtree unless
+  developers remembered `--no-default-features`. Default builds now keep `pdf`
+  enabled but skip local embedding inference; full local inference remains
+  available via `--features embeddings` or `JCODE_DEV_FEATURE_PROFILE=full`.
+  Validation: `cargo tree -p jcode --edges normal --depth 1` includes
+  `jcode-pdf` but not `jcode-embedding`; adding `--features embeddings` includes
+  both; `cargo check -p jcode --quiet` passes.
 
 - 2026-03-24: moved PDF extraction behind the new `crates/jcode-pdf` workspace
   crate and fixed the `--no-default-features` build path by making PDF support
