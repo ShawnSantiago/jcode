@@ -7,127 +7,22 @@ use crate::message::{ContentBlock, Role};
 use crate::session::{Session, SessionStatus, StoredMessage};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use jcode_import_core::{
+    ClaudeCodeContent, ClaudeCodeContentBlock, ClaudeCodeEntry, ClaudeCodeSessionInfo,
+    SessionIndexEntry, SessionsIndex, claude_code_session_info_from_index,
+    claude_text_from_content, clean_optional_text, ordered_claude_code_message_entries,
+    parse_rfc3339_string, resolve_claude_session_path,
+};
+pub use jcode_import_core::{
+    imported_claude_code_session_id, imported_codex_session_id, imported_opencode_session_id,
+    imported_pi_session_id,
+};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
-
-/// Entry in the Claude Code sessions-index.json file
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionIndexEntry {
-    pub session_id: String,
-    pub full_path: String,
-    #[serde(default)]
-    pub file_mtime: Option<u64>,
-    #[serde(default)]
-    pub first_prompt: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub message_count: Option<u32>,
-    #[serde(default)]
-    pub created: Option<String>,
-    #[serde(default)]
-    pub modified: Option<String>,
-    #[serde(default)]
-    pub git_branch: Option<String>,
-    #[serde(default)]
-    pub project_path: Option<String>,
-    #[serde(default)]
-    pub is_sidechain: Option<bool>,
-}
-
-/// Claude Code sessions-index.json format
-#[derive(Debug, Deserialize)]
-pub struct SessionsIndex {
-    pub version: u32,
-    pub entries: Vec<SessionIndexEntry>,
-}
-
-/// Info about a Claude Code session for listing
-#[derive(Debug, Clone)]
-pub struct ClaudeCodeSessionInfo {
-    pub session_id: String,
-    pub first_prompt: String,
-    pub summary: Option<String>,
-    pub message_count: u32,
-    pub created: Option<DateTime<Utc>>,
-    pub modified: Option<DateTime<Utc>>,
-    pub project_path: Option<String>,
-    pub full_path: String,
-}
-
-/// Entry in a Claude Code JSONL session file
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeCodeEntry {
-    #[serde(rename = "type")]
-    entry_type: String,
-    uuid: Option<String>,
-    parent_uuid: Option<String>,
-    #[serde(rename = "sessionId")]
-    _session_id: Option<String>,
-    cwd: Option<String>,
-    message: Option<ClaudeCodeMessage>,
-    timestamp: Option<String>,
-    #[serde(default)]
-    is_sidechain: bool,
-}
-
-/// Message content in Claude Code format
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeCodeMessage {
-    role: String,
-    #[serde(default)]
-    model: Option<String>,
-    // Content can be a string or array
-    #[serde(default)]
-    content: ClaudeCodeContent,
-}
-
-/// Content can be either a plain string or array of blocks
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(untagged)]
-enum ClaudeCodeContent {
-    #[default]
-    Empty,
-    Text(String),
-    Blocks(Vec<ClaudeCodeContentBlock>),
-}
-
-/// Individual content block in Claude Code format
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClaudeCodeContentBlock {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: String,
-        #[serde(default)]
-        #[serde(rename = "signature")]
-        _signature: Option<String>,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-    ToolResult {
-        tool_use_id: String,
-        content: String,
-        #[serde(default)]
-        is_error: Option<bool>,
-    },
-    #[serde(other)]
-    Unknown,
-}
 
 /// Discover all Claude Code project directories under ~/.claude/projects.
 fn discover_project_dirs() -> Result<Vec<PathBuf>> {
@@ -161,84 +56,6 @@ fn discover_projects() -> Result<Vec<PathBuf>> {
         .collect())
 }
 
-fn parse_rfc3339_string(value: Option<&str>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-fn clean_optional_text(value: Option<String>) -> Option<String> {
-    value.and_then(|text| {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn resolve_claude_session_path(project_dir: &Path, entry: &SessionIndexEntry) -> Option<PathBuf> {
-    let indexed_path = PathBuf::from(&entry.full_path);
-    let fallback_path = project_dir.join(format!("{}.jsonl", entry.session_id));
-    if indexed_path.exists() {
-        Some(indexed_path)
-    } else if fallback_path.exists() {
-        Some(fallback_path)
-    } else {
-        None
-    }
-}
-
-fn claude_code_session_info_from_index(
-    path: &Path,
-    entry: &SessionIndexEntry,
-) -> Option<ClaudeCodeSessionInfo> {
-    let message_count = entry.message_count.filter(|count| *count > 0)?;
-    let summary = clean_optional_text(entry.summary.clone());
-    let first_prompt =
-        clean_optional_text(entry.first_prompt.clone()).or_else(|| summary.clone())?;
-
-    Some(ClaudeCodeSessionInfo {
-        session_id: entry.session_id.clone(),
-        first_prompt,
-        summary,
-        message_count,
-        created: parse_rfc3339_string(entry.created.as_deref()),
-        modified: parse_rfc3339_string(entry.modified.as_deref()),
-        project_path: clean_optional_text(entry.project_path.clone()),
-        full_path: path.to_string_lossy().to_string(),
-    })
-}
-
-fn claude_text_from_content(content: &ClaudeCodeContent) -> Option<String> {
-    match content {
-        ClaudeCodeContent::Empty => None,
-        ClaudeCodeContent::Text(text) => {
-            let text = text.trim();
-            if text.is_empty() {
-                None
-            } else {
-                Some(text.to_string())
-            }
-        }
-        ClaudeCodeContent::Blocks(blocks) => {
-            let text = blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ClaudeCodeContentBlock::Text { text } => Some(text.trim()),
-                    ClaudeCodeContentBlock::Thinking { thinking, .. } => Some(thinking.trim()),
-                    ClaudeCodeContentBlock::ToolResult { content, .. } => Some(content.trim()),
-                    _ => None,
-                })
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.is_empty() { None } else { Some(text) }
-        }
-    }
-}
-
 fn load_claude_code_entries(path: &Path) -> Result<Vec<ClaudeCodeEntry>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read session file: {}", path.display()))?;
@@ -262,76 +79,6 @@ fn load_claude_code_entries(path: &Path) -> Result<Vec<ClaudeCodeEntry>> {
     Ok(entries)
 }
 
-fn ordered_claude_code_message_entries(entries: &[ClaudeCodeEntry]) -> Vec<&ClaudeCodeEntry> {
-    let message_entries: Vec<&ClaudeCodeEntry> = entries
-        .iter()
-        .filter(|e| {
-            (e.entry_type == "user" || e.entry_type == "assistant")
-                && e.message.is_some()
-                && !e.is_sidechain
-        })
-        .collect();
-
-    let mut uuid_to_entry: HashMap<String, &ClaudeCodeEntry> = HashMap::new();
-    for entry in &message_entries {
-        if let Some(ref uuid) = entry.uuid {
-            uuid_to_entry.insert(uuid.clone(), entry);
-        }
-    }
-
-    let mut ordered_entries: Vec<&ClaudeCodeEntry> = Vec::new();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    let roots: Vec<&ClaudeCodeEntry> = message_entries
-        .iter()
-        .filter(|e| {
-            e.parent_uuid.is_none()
-                || !uuid_to_entry.contains_key(e.parent_uuid.as_deref().unwrap_or_default())
-        })
-        .copied()
-        .collect();
-
-    for root in roots {
-        let mut current = root;
-        loop {
-            if let Some(ref uuid) = current.uuid {
-                if visited.contains(uuid) {
-                    break;
-                }
-                visited.insert(uuid.clone());
-            }
-            ordered_entries.push(current);
-
-            let next = message_entries.iter().find(|e| {
-                e.parent_uuid.as_ref() == current.uuid.as_ref()
-                    && e.uuid
-                        .as_ref()
-                        .map(|u| !visited.contains(u))
-                        .unwrap_or(true)
-            });
-
-            match next {
-                Some(n) => current = n,
-                None => break,
-            }
-        }
-    }
-
-    for entry in message_entries {
-        if entry
-            .uuid
-            .as_ref()
-            .map(|uuid| visited.contains(uuid))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        ordered_entries.push(entry);
-    }
-
-    ordered_entries
-}
-
 fn claude_code_session_info_from_file(
     path: &Path,
     indexed: Option<&SessionIndexEntry>,
@@ -346,7 +93,7 @@ fn claude_code_session_info_from_file(
         .or_else(|| {
             entries
                 .iter()
-                .find_map(|entry| entry._session_id.clone())
+                .find_map(|entry| entry.session_id.clone())
                 .or_else(|| {
                     path.file_stem()
                         .and_then(|stem| stem.to_str())
@@ -627,25 +374,6 @@ pub fn import_session(session_id: &str) -> Result<Session> {
     import_session_from_file(&session_file, session_id)
 }
 
-pub fn imported_claude_code_session_id(session_id: &str) -> String {
-    format!("imported_cc_{}", session_id)
-}
-
-pub fn imported_codex_session_id(session_id: &str) -> String {
-    format!("imported_codex_{}", session_id)
-}
-
-pub fn imported_opencode_session_id(session_id: &str) -> String {
-    format!("imported_opencode_{}", session_id)
-}
-
-pub fn imported_pi_session_id(session_path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(session_path.as_bytes());
-    let digest = hasher.finalize();
-    format!("imported_pi_{}", hex::encode(&digest[..8]))
-}
-
 pub fn imported_session_id_for_target(
     target: &crate::tui::session_picker::ResumeTarget,
 ) -> Option<String> {
@@ -754,69 +482,10 @@ pub fn import_session_from_file(path: &Path, session_id: &str) -> Result<Session
         }
     }
 
-    // Filter to actual messages (user/assistant types, not progress/snapshots)
-    let message_entries: Vec<&ClaudeCodeEntry> = entries
-        .iter()
-        .filter(|e| {
-            (e.entry_type == "user" || e.entry_type == "assistant")
-                && e.message.is_some()
-                && !e.is_sidechain
-        })
-        .collect();
-
-    // Build a map of uuid -> entry for ordering
-    let mut uuid_to_entry: HashMap<String, &ClaudeCodeEntry> = HashMap::new();
-    for entry in &message_entries {
-        if let Some(ref uuid) = entry.uuid {
-            uuid_to_entry.insert(uuid.clone(), entry);
-        }
-    }
-
-    // Find root entries (no parent or parent not in our message set)
-    // Then build the conversation in order by following parent_uuid links
-    let mut ordered_entries: Vec<&ClaudeCodeEntry> = Vec::new();
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // Find entry with no parent (or parent is not a message entry)
-    let roots: Vec<&ClaudeCodeEntry> = message_entries
-        .iter()
-        .filter(|e| {
-            e.parent_uuid.is_none()
-                || !uuid_to_entry.contains_key(e.parent_uuid.as_deref().unwrap_or_default())
-        })
-        .copied()
-        .collect();
-
-    // For each root, follow the chain
-    for root in roots {
-        let mut current = root;
-        loop {
-            if let Some(ref uuid) = current.uuid {
-                if visited.contains(uuid) {
-                    break;
-                }
-                visited.insert(uuid.clone());
-            }
-            ordered_entries.push(current);
-
-            // Find next entry that has this one as parent
-            let next = message_entries.iter().find(|e| {
-                e.parent_uuid.as_ref() == current.uuid.as_ref()
-                    && e.uuid
-                        .as_ref()
-                        .map(|u| !visited.contains(u))
-                        .unwrap_or(true)
-            });
-
-            match next {
-                Some(n) => current = n,
-                None => break,
-            }
-        }
-    }
+    let ordered_entries = ordered_claude_code_message_entries(&entries);
 
     // Extract metadata from entries
-    let first_entry = ordered_entries.first();
+    let first_entry = ordered_entries.first().copied();
     let working_dir = first_entry.and_then(|e| e.cwd.clone());
     // Get model from first assistant message (user messages don't have model)
     let model = ordered_entries
