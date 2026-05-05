@@ -120,6 +120,7 @@ async function insertEvent(env, body) {
       ["arch", body.arch],
       ["feedback_rating", body.feedback_rating || null],
       ["feedback_reason", body.feedback_reason || null],
+      ["feedback_text", body.feedback_text || null],
       ...common,
     ].filter(([name]) => columns.has(name)));
   }

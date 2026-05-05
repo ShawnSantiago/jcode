@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS events (
     milestone_elapsed_ms INTEGER,
     feedback_rating TEXT,
     feedback_reason TEXT,
+    feedback_text TEXT,
     session_start_hour_utc INTEGER,
     session_start_weekday_utc INTEGER,
     session_end_hour_utc INTEGER,

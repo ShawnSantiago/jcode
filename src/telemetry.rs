@@ -137,9 +137,11 @@ struct FeedbackEvent {
     version: String,
     os: &'static str,
     arch: &'static str,
-    feedback_rating: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     feedback_reason: Option<String>,
+    feedback_text: String,
     schema_version: u32,
     build_channel: String,
     is_git_checkout: bool,
@@ -787,20 +789,17 @@ pub fn record_setup_step_once(step: &'static str) {
     emit_onboarding_step_once(step, None, None);
 }
 
-pub fn record_feedback(rating: &str, reason: Option<&str>) {
+pub fn record_feedback(text: &str) {
     if !is_enabled() {
         return;
     }
     let Some(id) = get_or_create_id() else {
         return;
     };
-    let normalized_rating = sanitize_telemetry_label(rating).to_ascii_lowercase();
-    if normalized_rating.is_empty() {
+    let feedback_text = sanitize_feedback_text(text);
+    if feedback_text.is_empty() {
         return;
     }
-    let normalized_reason = reason
-        .map(sanitize_telemetry_label)
-        .filter(|value| !value.is_empty());
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = FeedbackEvent {
         event_id: new_event_id(),
@@ -810,8 +809,9 @@ pub fn record_feedback(rating: &str, reason: Option<&str>) {
         version: version(),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
-        feedback_rating: normalized_rating,
-        feedback_reason: normalized_reason,
+        feedback_rating: None,
+        feedback_reason: None,
+        feedback_text,
         schema_version,
         build_channel,
         is_git_checkout: git_checkout,
@@ -821,6 +821,17 @@ pub fn record_feedback(rating: &str, reason: Option<&str>) {
     if let Ok(payload) = serde_json::to_value(&event) {
         let _ = send_payload(payload, DeliveryMode::Background);
     }
+}
+
+fn sanitize_feedback_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(2000)
+        .collect()
 }
 
 fn update_active_days(id: &str) -> (u32, u32) {

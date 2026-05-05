@@ -51,8 +51,9 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | Field | Example | Purpose |
 |-------|---------|----------|
 | `event` | `"feedback"` | Event type |
-| `feedback_rating` | `"up"` / `"down"` | Explicit product sentiment |
-| `feedback_reason` | `"slow"` | Optional coarse reason bucket |
+| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback explicitly submitted with `/feedback ...` |
+| `feedback_rating` | `"up"` / `"down"` | Legacy explicit product sentiment, if present |
+| `feedback_reason` | `"slow"` | Legacy optional coarse reason bucket, if present |
 
 ### Session Start Event
 
@@ -199,7 +200,7 @@ Most events also carry a few coarse quality / cleanup fields:
 ## What We Do NOT Collect
 
 - No file paths, project names, or directory structures
-- No code, prompts, or LLM responses
+- No code, prompts, or LLM responses, except text explicitly submitted with `/feedback ...`
 - No tool inputs or tool outputs
 - No MCP server names or configurations
 - No IP addresses (Cloudflare Workers don't log these by default)

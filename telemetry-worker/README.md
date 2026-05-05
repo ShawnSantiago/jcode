@@ -55,6 +55,7 @@ npm run migrate:phase123
 npm run migrate:workflow
 npm run migrate:tokens
 npm run migrate:dashboard-indexes
+npm run migrate:feedback-text
 
 # Run the health dashboard query
 npm run health
@@ -102,8 +103,8 @@ wrangler d1 execute jcode-telemetry --command "SELECT auth_provider, COUNT(DISTI
 # Onboarding funnel steps
 wrangler d1 execute jcode-telemetry --command "SELECT step, COUNT(DISTINCT telemetry_id) AS users FROM events WHERE event = 'onboarding_step' GROUP BY step ORDER BY users DESC"
 
-# Explicit feedback breakdown
-wrangler d1 execute jcode-telemetry --command "SELECT feedback_rating, feedback_reason, COUNT(*) AS events FROM events WHERE event = 'feedback' GROUP BY feedback_rating, feedback_reason ORDER BY events DESC"
+# Recent explicit feedback
+wrangler d1 execute jcode-telemetry --command "SELECT created_at, feedback_text, feedback_rating, feedback_reason, version, build_channel FROM events WHERE event = 'feedback' ORDER BY created_at DESC LIMIT 50"
 
 # Session starts by UTC hour (workflow timing)
 wrangler d1 execute jcode-telemetry --command "SELECT session_start_hour_utc, COUNT(*) AS sessions FROM events WHERE event = 'session_start' GROUP BY session_start_hour_utc ORDER BY session_start_hour_utc"
