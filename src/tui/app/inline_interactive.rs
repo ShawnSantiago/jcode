@@ -645,60 +645,60 @@ impl App {
                     let is_this_current =
                         *name == current_model && current_effort.as_deref() == Some(*effort);
                     let or_created = openrouter_created_timestamp(name);
-                    entries.push(PickerEntry {
-                        name: display_name,
-                        options: entry_routes.clone(),
-                        action: PickerAction::Model,
-                        selected_option: 0,
-                        is_current: is_this_current,
-                        recommended: RECOMMENDED_MODELS.contains(&name.as_str())
-                            && (*effort == "xhigh" || *effort == "high")
-                            && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                                || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                                || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                                || entry_routes.iter().any(|r| {
-                                    (r.api_method == "claude-oauth"
-                                        || r.api_method == "openai-oauth"
-                                        || r.api_method == "openai-api-key"
-                                        || r.api_method == "copilot")
-                                        && r.available
-                                })),
-                        recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
-                        old: old_threshold_secs > 0
-                            && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
-                        created_date: or_created.map(format_created),
-                        effort: Some(effort.to_string()),
-                        is_default: is_config_default(name),
-                    });
+                    for route in &entry_routes {
+                        entries.push(PickerEntry {
+                            name: display_name.clone(),
+                            options: vec![route.clone()],
+                            action: PickerAction::Model,
+                            selected_option: 0,
+                            is_current: is_this_current,
+                            recommended: RECOMMENDED_MODELS.contains(&name.as_str())
+                                && (*effort == "xhigh" || *effort == "high")
+                                && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                                    || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                                    || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
+                                    || ((route.api_method == "claude-oauth"
+                                        || route.api_method == "openai-oauth"
+                                        || route.api_method == "openai-api-key"
+                                        || route.api_method == "copilot")
+                                        && route.available)),
+                            recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
+                            old: old_threshold_secs > 0
+                                && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
+                            created_date: or_created.map(format_created),
+                            effort: Some(effort.to_string()),
+                            is_default: is_config_default(name),
+                        });
+                    }
                 }
             } else {
                 let or_created = openrouter_created_timestamp(name);
                 let is_old = old_threshold_secs > 0
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
-                let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
-                    && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                        || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                        || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                        || entry_routes.iter().any(|r| {
-                            (r.api_method == "claude-oauth"
-                                || r.api_method == "openai-oauth"
-                                || r.api_method == "openai-api-key"
-                                || r.api_method == "copilot")
-                                && r.available
-                        }));
-                entries.push(PickerEntry {
-                    name: name.clone(),
-                    options: entry_routes,
-                    action: PickerAction::Model,
-                    selected_option: 0,
-                    is_current: *name == current_model,
-                    recommended: is_recommended,
-                    recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
-                    old: is_old,
-                    created_date: or_created.map(format_created),
-                    effort: None,
-                    is_default: is_config_default(name),
-                });
+                for route in entry_routes {
+                    let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
+                        && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                            || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                            || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
+                            || ((route.api_method == "claude-oauth"
+                                || route.api_method == "openai-oauth"
+                                || route.api_method == "openai-api-key"
+                                || route.api_method == "copilot")
+                                && route.available));
+                    entries.push(PickerEntry {
+                        name: name.clone(),
+                        options: vec![route],
+                        action: PickerAction::Model,
+                        selected_option: 0,
+                        is_current: *name == current_model,
+                        recommended: is_recommended,
+                        recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
+                        old: is_old,
+                        created_date: or_created.map(format_created),
+                        effort: None,
+                        is_default: is_config_default(name),
+                    });
+                }
             }
         }
 
@@ -755,6 +755,16 @@ impl App {
                 .then(a_avail.cmp(&b_avail))
                 .then(a_old.cmp(&b_old))
                 .then(a.name.cmp(&b.name))
+                .then_with(|| {
+                    a.active_option()
+                        .map(|route| route.provider.as_str())
+                        .cmp(&b.active_option().map(|route| route.provider.as_str()))
+                })
+                .then_with(|| {
+                    a.active_option()
+                        .map(|route| route.api_method.as_str())
+                        .cmp(&b.active_option().map(|route| route.api_method.as_str()))
+                })
         });
         let entries_ms = entries_started.elapsed().as_millis();
         let total_ms = picker_started.elapsed().as_millis();

@@ -109,6 +109,35 @@ fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
 }
 
 #[test]
+fn named_openai_compatible_provider_exposes_static_models_as_routes() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
+
+    let profile = crate::config::NamedProviderConfig {
+        base_url: "https://llm.example.com/v1".to_string(),
+        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
+        model_catalog: true,
+        default_model: Some("glm-51-nvfp4".to_string()),
+        models: vec![crate::config::NamedProviderModelConfig {
+            id: "glm-51-nvfp4".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("comtegra-test", &profile)
+        .expect("named profile should initialize");
+    let routes = provider.model_routes();
+
+    assert!(routes.iter().any(|route| {
+        route.model == "glm-51-nvfp4"
+            && route.api_method == "openai-compatible:comtegra-test"
+            && route.available
+    }));
+}
+
+#[test]
 fn test_configured_api_base_accepts_https() {
     let _lock = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();

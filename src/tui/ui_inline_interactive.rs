@@ -189,13 +189,6 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         return marker_width + title_width + state_width;
     }
 
-    // Model names, provider names, and method labels are often long. Prefer using
-    // the available terminal width instead of shrinking the picker to its minimum
-    // content width, which makes both the left and right columns feel clipped.
-    if picker.kind == crate::tui::PickerKind::Model {
-        return max_width;
-    }
-
     let mut max_model_len = display_width(picker.primary_label());
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
     let mut max_via_len = display_width(picker.tertiary_label());
@@ -214,9 +207,27 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         }
     }
 
-    let mut provider_width = (max_provider_len + 1).min(if is_preview { 16 } else { 20 });
-    let mut via_width = (max_via_len + 1).min(12);
-    let model_cap = if is_preview { 42 } else { 56 };
+    let provider_cap = if picker.kind == crate::tui::PickerKind::Model {
+        if is_preview { 24 } else { 32 }
+    } else if is_preview {
+        16
+    } else {
+        20
+    };
+    let via_cap = if picker.kind == crate::tui::PickerKind::Model {
+        16
+    } else {
+        12
+    };
+    let mut provider_width = (max_provider_len + 1).min(provider_cap);
+    let mut via_width = (max_via_len + 1).min(via_cap);
+    let model_cap = if picker.kind == crate::tui::PickerKind::Model {
+        max_width
+    } else if is_preview {
+        42
+    } else {
+        56
+    };
     let min_model_width = max_model_len.clamp(6, 8);
 
     let budget = max_width.saturating_sub(marker_width);
@@ -870,7 +881,14 @@ mod tests {
     fn picker_render_width_uses_intrinsic_content_width() {
         let picker = sample_picker();
         let width = picker_render_width(&picker, 120);
-        assert_eq!(width, 120, "model picker should use available width");
+        assert!(
+            width < 120,
+            "model picker should fit content, not fill the window"
+        );
+        assert!(
+            width >= 40,
+            "model picker should still fit its visible columns"
+        );
     }
 
     #[test]
@@ -886,9 +904,9 @@ mod tests {
             height: area.height,
         };
 
-        assert_eq!(
-            render_area.x, area.x,
-            "full-width model picker should not waste horizontal space"
+        assert!(
+            render_area.x > area.x,
+            "content-fit picker should center when possible"
         );
         assert_eq!(render_area.width, width);
     }

@@ -752,6 +752,46 @@ impl Provider for OpenRouterProvider {
         self.available_models_display()
     }
 
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        let provider_label = self
+            .profile_id
+            .as_deref()
+            .and_then(openai_compatible_profile_by_id)
+            .map(|profile| profile.display_name.to_string())
+            .unwrap_or_else(|| {
+                if self.supports_provider_features {
+                    "OpenRouter".to_string()
+                } else {
+                    "OpenAI-compatible".to_string()
+                }
+            });
+        let api_method = if self.supports_provider_features {
+            "openrouter".to_string()
+        } else if let Some(profile_id) = self.profile_id.as_deref() {
+            format!("openai-compatible:{}", profile_id)
+        } else {
+            "openai-compatible".to_string()
+        };
+        let detail = if self.supports_provider_features {
+            String::new()
+        } else {
+            self.api_base.clone()
+        };
+
+        self.available_models_display()
+            .into_iter()
+            .filter(|model| crate::provider::is_listable_model_name(model))
+            .map(|model| crate::provider::ModelRoute {
+                model,
+                provider: provider_label.clone(),
+                api_method: api_method.clone(),
+                available: true,
+                detail: detail.clone(),
+                cheapness: None,
+            })
+            .collect()
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         if !self.supports_model_catalog {
             return Ok(());
