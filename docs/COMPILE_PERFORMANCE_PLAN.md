@@ -358,6 +358,12 @@ Start with the highest-leverage cache boundaries:
   `jcode-message-types` and re-exported it from the root message facade. This is a prerequisite for
   shrinking the provider trait and tool registry surfaces away from root-crate-only message types.
 - Validation: `cargo test -p jcode-message-types --quiet` and `cargo check -p jcode --quiet` pass.
+- 2026-05-05: introduced `jcode-tool-types` for stable tool execution output DTOs and moved
+  `ToolOutput` / `ToolImage` out of `src/tool/mod.rs`. Root tool modules continue using the same
+  names via a facade re-export, but provider/agent/server seams can now depend on a narrow tool
+  result contract without depending on the root tool registry.
+- Validation: `cargo check -p jcode-tool-types --quiet`, `cargo test -p jcode-tool-types --quiet`,
+  and `cargo check -p jcode --quiet` pass.
 
 - 2026-03-30: moved the workspace-map subsystem into the new `crates/jcode-tui-workspace` crate.
 - Boundary decision: move **workspace map data/model + widget rendering** first, while keeping the surrounding
