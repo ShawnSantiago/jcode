@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub const BACKGROUND_UPDATE_THRESHOLD: Duration = Duration::from_secs(15);
@@ -41,6 +42,34 @@ pub struct GitHubAsset {
     pub browser_download_url: String,
     #[serde(rename = "size")]
     pub _size: u64,
+}
+
+pub enum PreparedUpdate {
+    None {
+        current: String,
+    },
+    Stable {
+        release: GitHubRelease,
+        estimate: UpdateEstimate,
+    },
+    MainSource {
+        latest_sha: String,
+        estimate: UpdateEstimate,
+    },
+}
+
+pub enum UpdateCheckResult {
+    NoUpdate,
+    UpdateAvailable {
+        current: String,
+        latest: String,
+        _release: GitHubRelease,
+    },
+    UpdateInstalled {
+        version: String,
+        path: PathBuf,
+    },
+    Error(String),
 }
 
 pub fn format_duration_estimate(duration: Duration) -> String {

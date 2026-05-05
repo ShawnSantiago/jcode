@@ -7,7 +7,8 @@ use jcode_update_core::{
     verify_asset_checksum_text, version_is_newer,
 };
 pub use jcode_update_core::{
-    DownloadProgress, GitHubAsset, GitHubRelease, UpdateEstimate, format_download_progress_bar,
+    DownloadProgress, GitHubAsset, GitHubRelease, PreparedUpdate, UpdateCheckResult,
+    UpdateEstimate, format_download_progress_bar,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -20,20 +21,6 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60); // minimum gap 
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_PROGRESS_UPDATE_STEP: u64 = 1_048_576;
-
-pub enum PreparedUpdate {
-    None {
-        current: String,
-    },
-    Stable {
-        release: GitHubRelease,
-        estimate: UpdateEstimate,
-    },
-    MainSource {
-        latest_sha: String,
-        estimate: UpdateEstimate,
-    },
-}
 
 pub fn print_centered(msg: &str) {
     let width = crossterm::terminal::size()
@@ -912,20 +899,6 @@ pub fn download_and_install_blocking_with_progress(
     record_release_update_duration(started.elapsed());
 
     Ok(versioned_path)
-}
-
-pub enum UpdateCheckResult {
-    NoUpdate,
-    UpdateAvailable {
-        current: String,
-        latest: String,
-        _release: GitHubRelease,
-    },
-    UpdateInstalled {
-        version: String,
-        path: PathBuf,
-    },
-    Error(String),
 }
 
 pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
