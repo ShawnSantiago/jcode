@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 use git::{render_git_compact, render_git_widget};
-pub use graph::build_graph_topology;
+pub use graph::{GraphEdge, GraphNode, build_graph_topology};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
 use memory_utils::{
     compact_memory_model_label, memory_active_summary, memory_last_trace_summary,
@@ -452,36 +452,6 @@ pub struct MemoryInfo {
     pub graph_nodes: Vec<GraphNode>,
     /// Directed edges into graph_nodes
     pub graph_edges: Vec<GraphEdge>,
-}
-
-/// A node in the mini graph visualization
-#[derive(Debug, Clone)]
-pub struct GraphNode {
-    /// Stable node ID from memory graph (mem:*, tag:*, cluster:*)
-    pub id: String,
-    /// Human-readable display label
-    pub label: String,
-    /// Category: "fact", "preference", "correction", "tag"
-    pub kind: String,
-    /// Whether this node is a memory (vs tag/cluster)
-    pub is_memory: bool,
-    /// Whether this node is active (superseded memories are inactive)
-    pub is_active: bool,
-    /// Effective confidence score (0.0-1.0)
-    pub confidence: f32,
-    /// Number of connections (degree)
-    pub degree: usize,
-}
-
-/// A directed edge in the memory graph visualization
-#[derive(Debug, Clone)]
-pub struct GraphEdge {
-    /// Source index into MemoryInfo::graph_nodes
-    pub source: usize,
-    /// Target index into MemoryInfo::graph_nodes
-    pub target: usize,
-    /// Edge kind (has_tag, supersedes, contradicts, ...)
-    pub kind: String,
 }
 
 pub use jcode_tui_mermaid::DiagramInfo;
