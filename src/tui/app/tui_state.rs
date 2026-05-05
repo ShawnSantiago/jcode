@@ -469,7 +469,7 @@ impl crate::tui::TuiState for App {
 
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         // In remote mode, use tokens from server
-        // Standalone mode doesn't currently track total tokens
+        // Independent mode doesn't currently track total tokens
         self.remote_total_tokens
     }
 

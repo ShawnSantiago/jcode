@@ -257,7 +257,7 @@ fn test_should_failover_when_status_code_starts_message() {
 }
 
 #[test]
-fn test_should_not_failover_on_non_standalone_status_digits() {
+fn test_should_not_failover_on_non_independent_status_digits() {
     let err = anyhow::anyhow!("backend returned code 14290");
     assert!(!MultiProvider::classify_failover_error(&err).should_failover());
 }

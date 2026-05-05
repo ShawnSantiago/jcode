@@ -515,7 +515,7 @@ Current provider-boundary stance:
 - **Done:** `jcode-provider-openrouter` for OpenRouter-specific catalog/cache/ranking/model-spec support.
 - **Done:** `jcode-provider-gemini` for Gemini Code Assist schema/types and pure model support helpers.
 - **Done:** `jcode-provider-core::openai_schema` for pure OpenAI schema adaptation / strict-normalization helpers.
-- **Not done yet:** `Provider` trait / `EventStream` extraction and fully standalone provider impl crates.
+- **Not done yet:** `Provider` trait / `EventStream` extraction and fully independent provider impl crates.
 - **Reason:** the trait side still depends on `message.rs`, auth flows, runtime behavior, and provider-specific
   streaming logic; the current staged split avoids turning that unstable seam into a low-value high-churn crate.
 

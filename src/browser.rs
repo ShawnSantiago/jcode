@@ -533,7 +533,7 @@ fn install_native_host_manifest() -> Result<bool> {
     let manifest_dir = native_messaging_hosts_dir()?;
     let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
 
-    // Check if an existing manifest is already valid (from standalone install or previous setup)
+    // Check if an existing manifest is already valid (from independent install or previous setup)
     if manifest_path.exists()
         && let Ok(contents) = std::fs::read_to_string(&manifest_path)
         && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents)

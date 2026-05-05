@@ -865,7 +865,7 @@ Do not try to do these in the first wave:
 - moving mermaid/markdown rendering into core
 - redesigning all overlays/widgets at once
 - introducing a giant Redux-style universal action enum from day one
-- making standalone and workspace modes separate apps
+- making independent and workspace modes separate apps
 
 ## Bottom Line
 

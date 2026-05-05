@@ -29,7 +29,7 @@ impl Agent {
     }
 
     /// Build a transcript string for memory extraction
-    /// This is a standalone method so it can be called before spawning async tasks
+    /// This is a independent method so it can be called before spawning async tasks
     pub fn build_transcript_for_extraction(&self) -> String {
         let mut transcript = String::new();
         for msg in &self.session.messages {

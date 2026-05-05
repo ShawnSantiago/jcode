@@ -391,11 +391,11 @@ mod tests {
         let rect = Rect::new(0, 0, 40, 8);
         let data = data();
 
-        let standalone = first_line_text(render_model_widget(&data, rect));
+        let independent = first_line_text(render_model_widget(&data, rect));
         let overview = first_line_text(render_model_info(&data, rect));
 
-        assert!(standalone.contains("(hi)"));
-        assert!(standalone.contains("[fast]"));
+        assert!(independent.contains("(hi)"));
+        assert!(independent.contains("[fast]"));
         assert!(overview.contains("(hi)"));
         assert!(overview.contains("[fast]"));
     }

@@ -355,7 +355,7 @@ fn test_streaming_repaint_does_not_leave_bracket_artifact() {
     );
     assert!(
         !text.lines().any(|line| line.trim() == "["),
-        "stale standalone '[' artifact should not persist after repaint"
+        "stale independent '[' artifact should not persist after repaint"
     );
 }
 
