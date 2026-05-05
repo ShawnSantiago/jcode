@@ -26,99 +26,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
-/// Default token budget (200k tokens - matches Claude's actual context limit)
-const DEFAULT_TOKEN_BUDGET: usize = 200_000;
-
-/// Trigger compaction at this percentage of budget
-const COMPACTION_THRESHOLD: f32 = 0.80;
-
-/// If context is above this threshold when compaction starts, do a synchronous
-/// hard-compact (drop old messages) so the API call doesn't fail.
-const CRITICAL_THRESHOLD: f32 = 0.95;
-
-/// Minimum threshold for manual compaction (can compact at any time above this)
-const MANUAL_COMPACT_MIN_THRESHOLD: f32 = 0.10;
-
-/// Keep this many recent turns verbatim (not summarized)
-const RECENT_TURNS_TO_KEEP: usize = 10;
-
-/// Absolute minimum turns to keep during emergency compaction
-const MIN_TURNS_TO_KEEP: usize = 2;
-
-/// Max chars for a single tool result during emergency truncation
-const EMERGENCY_TOOL_RESULT_MAX_CHARS: usize = 4000;
-
-/// Approximate chars per token for estimation
-const CHARS_PER_TOKEN: usize = 4;
-
-/// Fixed token overhead for system prompt + tool definitions.
-/// These are not counted in message content but do count toward the context limit.
-/// Estimated conservatively: ~8k tokens for system prompt + ~10k for 50+ tools.
-const SYSTEM_OVERHEAD_TOKENS: usize = 18_000;
-
-// ── Proactive mode constants ────────────────────────────────────────────────
-
-/// Rolling window size for token history (proactive/semantic modes)
-const TOKEN_HISTORY_WINDOW: usize = 20;
-
-// ── Semantic mode constants ─────────────────────────────────────────────────
-
-/// Maximum characters to embed per message (first N chars capture semantic content)
-const EMBED_MAX_CHARS_PER_MSG: usize = 512;
-
-/// Rolling window of per-turn embeddings used for topic-shift detection
-const EMBEDDING_HISTORY_WINDOW: usize = 10;
-
-/// Per-manager semantic embedding cache capacity.
-///
-/// This avoids repeated embedding lookups for the same truncated message and
-/// goal texts across successive semantic compaction checks.
-const SEMANTIC_EMBED_CACHE_CAPACITY: usize = 256;
-
-const SUMMARY_PROMPT: &str = r#"Summarize our conversation so you can continue this work later.
-
-Write in natural language with these sections:
-- **Context:** What we're working on and why (1-2 sentences)
-- **What we did:** Key actions taken, files changed, problems solved
-- **Current state:** What works, what's broken, what's next
-- **User preferences:** Specific requirements or decisions they made
-
-Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets."#;
-
-/// A completed summary covering turns up to a certain point
-#[derive(Debug, Clone)]
-pub struct Summary {
-    pub text: String,
-    pub openai_encrypted_content: Option<String>,
-    pub covers_up_to_turn: usize,
-    pub original_turn_count: usize,
-}
-
-/// Event emitted when compaction is applied
-#[derive(Debug, Clone)]
-pub struct CompactionEvent {
-    pub trigger: String,
-    pub pre_tokens: Option<u64>,
-    pub post_tokens: Option<u64>,
-    pub tokens_saved: Option<u64>,
-    pub duration_ms: Option<u64>,
-    pub messages_dropped: Option<usize>,
-    pub messages_compacted: Option<usize>,
-    pub summary_chars: Option<usize>,
-    pub active_messages: Option<usize>,
-}
-
-/// What happened when ensure_context_fits was called
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompactionAction {
-    /// Nothing needed — context is fine
-    None,
-    /// Background summarization started (context 80-95%)
-    BackgroundStarted { trigger: String },
-    /// Emergency hard compact performed (context >= 95%)
-    /// Contains number of messages dropped
-    HardCompacted(usize),
-}
+use jcode_compaction_core::build_compaction_prompt;
+pub use jcode_compaction_core::{
+    CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
+    CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
+    EMERGENCY_TOOL_RESULT_MAX_CHARS, MANUAL_COMPACT_MIN_THRESHOLD, MIN_TURNS_TO_KEEP,
+    RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS,
+    Summary, TOKEN_HISTORY_WINDOW, compacted_summary_text_block, mean_embedding,
+};
 
 /// Result from background compaction task
 struct CompactionResult {
@@ -1195,10 +1110,7 @@ impl CompactionManager {
                         encrypted_content: encrypted_content.clone(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
-                        text: format!(
-                            "## Previous Conversation Summary\n\n{}\n\n---\n\n",
-                            summary.text
-                        ),
+                        text: compacted_summary_text_block(&summary.text),
                         cache_control: None,
                     });
 
@@ -1236,10 +1148,7 @@ impl CompactionManager {
                         encrypted_content: encrypted_content.clone(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
-                        text: format!(
-                            "## Previous Conversation Summary\n\n{}\n\n---\n\n",
-                            summary.text
-                        ),
+                        text: compacted_summary_text_block(&summary.text),
                         cache_control: None,
                     });
                 vec![Message {
@@ -1638,44 +1547,6 @@ impl Default for CompactionManager {
     }
 }
 
-/// Stats about compaction state
-#[derive(Debug, Clone)]
-pub struct CompactionStats {
-    pub total_turns: usize,
-    pub active_messages: usize,
-    pub has_summary: bool,
-    pub is_compacting: bool,
-    pub token_estimate: usize,
-    pub effective_tokens: usize,
-    pub observed_input_tokens: Option<u64>,
-    pub context_usage: f32,
-}
-
-/// Compute the mean (centroid) embedding of a set of embedding vectors.
-/// The result is L2-normalized so it can be compared with cosine similarity.
-fn mean_embedding(embeddings: &[&Vec<f32>], dim: usize) -> Vec<f32> {
-    let mut mean = vec![0f32; dim];
-    for emb in embeddings {
-        for (i, v) in emb.iter().enumerate() {
-            if i < dim {
-                mean[i] += v;
-            }
-        }
-    }
-    let n = embeddings.len().max(1) as f32;
-    for v in &mut mean {
-        *v /= n;
-    }
-    // L2-normalize so cosine_similarity (dot product) is meaningful.
-    let norm: f32 = mean.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for v in &mut mean {
-            *v /= norm;
-        }
-    }
-    mean
-}
-
 /// Generate summary using the provider
 async fn generate_compaction_artifact(
     provider: Arc<dyn Provider>,
@@ -1735,66 +1606,10 @@ async fn generate_compaction_artifact(
         }
     }
 
-    // Build the conversation text for summarization
-    let mut conversation_text = String::new();
-
-    // Include existing summary if present
-    if let Some(ref summary) = existing_summary {
-        conversation_text.push_str("## Previous Summary\n\n");
-        conversation_text.push_str(&summary.text);
-        conversation_text.push_str("\n\n## New Conversation\n\n");
-    }
-
-    // Add messages
-    for msg in &messages {
-        let role_str = match msg.role {
-            Role::User => "User",
-            Role::Assistant => "Assistant",
-        };
-
-        conversation_text.push_str(&format!("**{}:**\n", role_str));
-
-        for block in &msg.content {
-            match block {
-                ContentBlock::Text { text, .. } => {
-                    conversation_text.push_str(text);
-                    conversation_text.push('\n');
-                }
-                ContentBlock::ToolUse { name, input, .. } => {
-                    conversation_text.push_str(&format!("[Tool: {} - {}]\n", name, input));
-                }
-                ContentBlock::ToolResult { content, .. } => {
-                    let truncated = if content.len() > 500 {
-                        format!("{}... (truncated)", crate::util::truncate_str(content, 500))
-                    } else {
-                        content.clone()
-                    };
-                    conversation_text.push_str(&format!("[Result: {}]\n", truncated));
-                }
-                ContentBlock::Reasoning { .. } => {}
-                ContentBlock::Image { .. } => {
-                    conversation_text.push_str("[Image]\n");
-                }
-                ContentBlock::OpenAICompaction { .. } => {
-                    conversation_text.push_str("[OpenAI native compaction]\n");
-                }
-            }
-        }
-        conversation_text.push('\n');
-    }
-
-    // Truncate conversation text if it would exceed the provider's context limit.
     let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
-    let overhead = SUMMARY_PROMPT.len() + 50;
-    if conversation_text.len() + overhead > max_prompt_chars && max_prompt_chars > overhead {
-        let budget = max_prompt_chars - overhead;
-        conversation_text = crate::util::truncate_str(&conversation_text, budget).to_string();
-        conversation_text
-            .push_str("\n\n... [earlier conversation truncated to fit context window]\n");
-    }
+    let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
 
     // Generate summary using simple completion
-    let prompt = format!("{}\n\n---\n\n{}", conversation_text, SUMMARY_PROMPT);
     let summary = provider
         .complete_simple(
             &prompt,
