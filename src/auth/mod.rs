@@ -68,6 +68,12 @@ fn auth_timing_logging_enabled() -> bool {
     env_truthy("JCODE_AUTH_TIMING")
 }
 
+fn openai_api_key_configured() -> bool {
+    crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn copilot_auth_state_from_credentials() -> (AuthState, bool) {
     if !copilot::has_copilot_credentials_fast() {
         return (AuthState::NotConfigured, false);
@@ -568,11 +574,7 @@ impl AuthStatus {
         }
 
         // Fall back to env var (or combine with OAuth)
-        if std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-        {
+        if openai_api_key_configured() {
             status.openai_has_api_key = true;
             status.openai = AuthState::Available;
         }
@@ -706,11 +708,7 @@ impl AuthStatus {
                 status.openai = AuthState::Available;
             }
         }
-        if std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-        {
+        if openai_api_key_configured() {
             status.openai_has_api_key = true;
             status.openai = AuthState::Available;
         }

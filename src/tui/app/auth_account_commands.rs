@@ -1076,6 +1076,6 @@ mod tests {
         assert!(markdown.contains("**OpenAI** (`openai`)"));
         assert!(markdown.contains("**Next steps**"));
         assert!(markdown.contains("jcode login --provider openai"));
-        assert!(markdown.contains("jcode auth-test --provider openai"));
+        assert!(markdown.contains("Review current state: `jcode auth status --json`"));
     }
 }

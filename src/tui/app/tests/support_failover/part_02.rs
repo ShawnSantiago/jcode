@@ -393,6 +393,14 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                model: "openai/gpt-5.5".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openrouter".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
                 model: "glm-51-nvfp4".to_string(),
                 provider: "Comtegra GPU Cloud".to_string(),
                 api_method: "openai-compatible:comtegra".to_string(),

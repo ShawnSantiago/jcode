@@ -63,6 +63,14 @@ fn api_method_display(raw: &str) -> &str {
     }
 }
 
+fn route_provider_display(provider: &str, api_method: &str) -> String {
+    if api_method == "openrouter" && provider != "auto" && !provider.contains("OpenRouter") {
+        format!("OpenRouter/{}", provider)
+    } else {
+        provider.to_string()
+    }
+}
+
 fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
     let default_marker = if entry.is_default { " ⚙" } else { "" };
     let is_new = entry
@@ -197,10 +205,11 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         let entry = &picker.entries[fi];
         max_model_len = max_model_len.max(display_width(picker_entry_display_name(entry).as_str()));
         if let Some(route) = entry.active_option() {
+            let provider_label = route_provider_display(&route.provider, &route.api_method);
             let provider_label = if entry.option_count() > 1 {
-                format!("{} ({})", route.provider, entry.option_count())
+                format!("{} ({})", provider_label, entry.option_count())
             } else {
-                route.provider.clone()
+                provider_label
             };
             max_provider_len = max_provider_len.max(display_width(provider_label.as_str()));
             max_via_len = max_via_len.max(display_width(api_method_display(&route.api_method)));
@@ -665,11 +674,13 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         };
 
         let route_count = entry.option_count();
-        let provider_raw = route.map(|r| r.provider.as_str()).unwrap_or("—");
+        let provider_raw = route
+            .map(|r| route_provider_display(&r.provider, &r.api_method))
+            .unwrap_or_else(|| "—".to_string());
         let provider_label = if col == 0 && route_count > 1 {
             format!("{} ({})", provider_raw, route_count)
         } else {
-            provider_raw.to_string()
+            provider_raw
         };
         let pw = provider_width.saturating_sub(1);
         let provider_display = format!(" {}", pad_left_display(provider_label.as_str(), pw));

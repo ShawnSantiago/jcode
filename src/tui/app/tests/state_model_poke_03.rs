@@ -534,6 +534,11 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         text
     );
     assert!(
+        text.contains("openai/gpt-5.5") && text.contains("OpenRouter/OpenAI"),
+        "OpenRouter endpoint routes should not look like native OpenAI API-key rows, got:\n{}",
+        text
+    );
+    assert!(
         !text.contains("(2)"),
         "provider routes should not be hidden behind stacked option counts, got:\n{}",
         text
