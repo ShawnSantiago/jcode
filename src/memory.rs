@@ -17,7 +17,6 @@ use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,10 +29,13 @@ mod pending;
 #[path = "memory_prompt.rs"]
 mod prompt_support;
 
-pub use crate::memory_types::{MemoryCategory, MemoryEntry, Reinforcement, TrustLevel};
+pub use crate::memory_types::{
+    MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement, TrustLevel,
+    format_relevant_display_prompt, format_relevant_prompt,
+};
 use crate::memory_types::{
-    collect_skill_query_terms, memory_matches_search, normalize_memory_search_text,
-    normalize_search_text, skill_retrieval_bonus,
+    collect_skill_query_terms, format_entries_for_prompt, memory_matches_search, memory_score,
+    normalize_memory_search_text, normalize_search_text, skill_retrieval_bonus,
 };
 pub use activity::{
     activity_snapshot, add_event, apply_remote_activity_snapshot, check_staleness, clear_activity,
@@ -50,43 +52,11 @@ pub use pending::{
     take_pending_memory,
 };
 use pending::{begin_memory_check, finish_memory_check};
-use prompt_support::format_entries_for_prompt;
-pub(crate) use prompt_support::{
-    format_context_for_extraction, format_context_for_relevance, format_relevant_display_prompt,
-    format_relevant_prompt,
-};
+pub(crate) use prompt_support::{format_context_for_extraction, format_context_for_relevance};
 
 const LEGACY_NOTE_CATEGORY: &str = "note";
-
-pub type MemoryEventSink = Arc<dyn Fn(crate::protocol::ServerEvent) + Send + Sync>;
-
-pub fn memory_sidecar_enabled() -> bool {
-    crate::config::config().agents.memory_sidecar_enabled
-}
-
-fn emit_memory_activity(event_tx: Option<&MemoryEventSink>) {
-    let (Some(event_tx), Some(activity)) = (event_tx, activity_snapshot()) else {
-        return;
-    };
-    (event_tx)(crate::protocol::ServerEvent::MemoryActivity { activity });
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryScope {
-    Project,
-    Global,
-    All,
-}
-
-impl MemoryScope {
-    fn includes_project(self) -> bool {
-        matches!(self, Self::Project | Self::All)
-    }
-
-    fn includes_global(self) -> bool {
-        matches!(self, Self::Global | Self::All)
-    }
-}
+const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
+const MEMORY_RELEVANCE_MAX_RESULTS: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct LegacyNotesFile {
@@ -103,112 +73,17 @@ struct LegacyNoteEntry {
     tag: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MemoryStore {
-    pub entries: Vec<MemoryEntry>,
-    #[serde(default)]
-    pub metadata: HashMap<String, String>,
+pub type MemoryEventSink = Arc<dyn Fn(crate::protocol::ServerEvent) + Send + Sync>;
+
+pub fn memory_sidecar_enabled() -> bool {
+    crate::config::config().agents.memory_sidecar_enabled
 }
 
-impl MemoryStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add(&mut self, entry: MemoryEntry) -> String {
-        let id = entry.id.clone();
-        self.entries.push(entry);
-        id
-    }
-
-    pub fn by_category(&self, category: &MemoryCategory) -> Vec<&MemoryEntry> {
-        self.entries
-            .iter()
-            .filter(|e| &e.category == category)
-            .collect()
-    }
-
-    pub fn search(&self, query: &str) -> Vec<&MemoryEntry> {
-        let query_lower = normalize_search_text(query);
-        if query_lower.is_empty() {
-            return Vec::new();
-        }
-
-        self.entries
-            .iter()
-            .filter(|e| memory_matches_search(e, &query_lower))
-            .collect()
-    }
-
-    pub fn get(&self, id: &str) -> Option<&MemoryEntry> {
-        self.entries.iter().find(|e| e.id == id)
-    }
-
-    pub fn remove(&mut self, id: &str) -> Option<MemoryEntry> {
-        if let Some(pos) = self.entries.iter().position(|e| e.id == id) {
-            Some(self.entries.remove(pos))
-        } else {
-            None
-        }
-    }
-
-    pub fn get_relevant(&self, limit: usize) -> Vec<&MemoryEntry> {
-        top_k_by_score(
-            self.entries
-                .iter()
-                .filter(|entry| entry.active)
-                .map(|entry| (entry, memory_score(entry) as f32)),
-            limit,
-        )
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .collect()
-    }
-
-    pub fn format_for_prompt(&self, limit: usize) -> Option<String> {
-        let relevant: Vec<MemoryEntry> = self.get_relevant(limit).into_iter().cloned().collect();
-        format_entries_for_prompt(&relevant, limit)
-    }
-}
-
-const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
-const MEMORY_RELEVANCE_MAX_RESULTS: usize = 10;
-
-fn memory_score(entry: &MemoryEntry) -> f64 {
-    // Skip inactive memories
-    if !entry.active {
-        return 0.0;
-    }
-
-    let mut score = 0.0;
-
-    // Recency factor (decays over time)
-    let age_hours = (Utc::now() - entry.updated_at).num_hours() as f64;
-    score += 100.0 / (1.0 + age_hours / 24.0);
-
-    // Access frequency bonus
-    score += (entry.access_count as f64).sqrt() * 10.0;
-
-    // Category importance
-    score += match entry.category {
-        MemoryCategory::Correction => 50.0,
-        MemoryCategory::Preference => 30.0,
-        MemoryCategory::Fact => 20.0,
-        MemoryCategory::Entity => 10.0,
-        MemoryCategory::Custom(_) => 5.0,
+fn emit_memory_activity(event_tx: Option<&MemoryEventSink>) {
+    let (Some(event_tx), Some(activity)) = (event_tx, activity_snapshot()) else {
+        return;
     };
-
-    // Trust level multiplier
-    score *= match entry.trust {
-        TrustLevel::High => 1.5,
-        TrustLevel::Medium => 1.0,
-        TrustLevel::Low => 0.7,
-    };
-
-    // Consolidation strength bonus
-    score += (entry.strength as f64).ln() * 5.0;
-
-    score
+    (event_tx)(crate::protocol::ServerEvent::MemoryActivity { activity });
 }
 
 trait MemoryEntryEmbeddingExt {

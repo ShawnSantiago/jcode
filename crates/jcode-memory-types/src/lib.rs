@@ -442,7 +442,234 @@ impl MemoryCategory {
     }
 }
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryScope {
+    Project,
+    Global,
+    All,
+}
+
+impl MemoryScope {
+    pub fn includes_project(self) -> bool {
+        matches!(self, Self::Project | Self::All)
+    }
+
+    pub fn includes_global(self) -> bool {
+        matches!(self, Self::Global | Self::All)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MemoryStore {
+    pub entries: Vec<MemoryEntry>,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, entry: MemoryEntry) -> String {
+        let id = entry.id.clone();
+        self.entries.push(entry);
+        id
+    }
+
+    pub fn by_category(&self, category: &MemoryCategory) -> Vec<&MemoryEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| &entry.category == category)
+            .collect()
+    }
+
+    pub fn search(&self, query: &str) -> Vec<&MemoryEntry> {
+        let query_lower = normalize_search_text(query);
+        if query_lower.is_empty() {
+            return Vec::new();
+        }
+
+        self.entries
+            .iter()
+            .filter(|entry| memory_matches_search(entry, &query_lower))
+            .collect()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&MemoryEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<MemoryEntry> {
+        if let Some(pos) = self.entries.iter().position(|entry| entry.id == id) {
+            Some(self.entries.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    pub fn get_relevant(&self, limit: usize) -> Vec<&MemoryEntry> {
+        ranking::top_k_by_score(
+            self.entries
+                .iter()
+                .filter(|entry| entry.active)
+                .map(|entry| (entry, memory_score(entry) as f32)),
+            limit,
+        )
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect()
+    }
+
+    pub fn format_for_prompt(&self, limit: usize) -> Option<String> {
+        let relevant: Vec<MemoryEntry> = self.get_relevant(limit).into_iter().cloned().collect();
+        format_entries_for_prompt(&relevant, limit)
+    }
+}
+
+pub fn memory_score(entry: &MemoryEntry) -> f64 {
+    if !entry.active {
+        return 0.0;
+    }
+
+    let mut score = 0.0;
+    let age_hours = (Utc::now() - entry.updated_at).num_hours() as f64;
+    score += 100.0 / (1.0 + age_hours / 24.0);
+    score += (entry.access_count as f64).sqrt() * 10.0;
+    score += match entry.category {
+        MemoryCategory::Correction => 50.0,
+        MemoryCategory::Preference => 30.0,
+        MemoryCategory::Fact => 20.0,
+        MemoryCategory::Entity => 10.0,
+        MemoryCategory::Custom(_) => 5.0,
+    };
+    score *= match entry.trust {
+        TrustLevel::High => 1.5,
+        TrustLevel::Medium => 1.0,
+        TrustLevel::Low => 0.7,
+    };
+    score += (entry.strength as f64).ln() * 5.0;
+    score
+}
+
+fn selected_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Vec<&MemoryEntry> {
+    let mut selected = Vec::new();
+    let mut seen_content = HashSet::new();
+
+    for entry in entries.iter().filter(|entry| entry.active) {
+        if selected.len() >= limit {
+            break;
+        }
+
+        let dedupe_key = entry
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if dedupe_key.is_empty() || !seen_content.insert(dedupe_key) {
+            continue;
+        }
+
+        selected.push(entry);
+    }
+
+    selected
+}
+
+pub fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    format_entries_for_prompt_with_header(entries, limit, false, false)
+}
+
+pub fn format_relevant_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    format_entries_for_prompt(entries, limit).map(|formatted| format!("# Memory\n\n{formatted}"))
+}
+
+pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    format_entries_for_prompt_with_header(entries, limit, true, true)
+}
+
+fn format_entries_for_prompt_with_header(
+    entries: &[MemoryEntry],
+    limit: usize,
+    include_header: bool,
+    include_updated_at_comments: bool,
+) -> Option<String> {
+    let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
+
+    for entry in selected_entries_for_prompt(entries, limit) {
+        sections
+            .entry(entry.category.clone())
+            .or_default()
+            .push(entry);
+    }
+
+    if sections.is_empty() {
+        return None;
+    }
+
+    let mut output = String::new();
+    let order = [
+        MemoryCategory::Correction,
+        MemoryCategory::Fact,
+        MemoryCategory::Preference,
+        MemoryCategory::Entity,
+    ];
+
+    let mut write_section = |title: &str, items: Vec<&MemoryEntry>| {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&format!("## {title}\n"));
+        for (idx, item) in items.into_iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", idx + 1, item.content.trim()));
+            if include_updated_at_comments {
+                output.push_str(&format!(
+                    "<!-- updated_at: {} -->\n",
+                    item.updated_at.to_rfc3339()
+                ));
+            }
+        }
+    };
+
+    for cat in &order {
+        if let Some(items) = sections.remove(cat) {
+            let title = match cat {
+                MemoryCategory::Correction => "Corrections",
+                MemoryCategory::Fact => "Facts",
+                MemoryCategory::Preference => "Preferences",
+                MemoryCategory::Entity => "Entities",
+                MemoryCategory::Custom(_) => "Custom",
+            };
+            write_section(title, items);
+        }
+    }
+
+    let mut custom_sections: BTreeMap<String, Vec<&MemoryEntry>> = BTreeMap::new();
+    for (cat, items) in sections {
+        match cat {
+            MemoryCategory::Custom(name) => {
+                custom_sections.insert(name, items);
+            }
+            other => {
+                custom_sections.insert(other.to_string(), items);
+            }
+        }
+    }
+    for (name, items) in custom_sections {
+        write_section(&name, items);
+    }
+
+    if output.is_empty() {
+        None
+    } else if include_header {
+        Some(format!("# Memory\n\n{}", output.trim()))
+    } else {
+        Some(output.trim().to_string())
+    }
+}
 
 pub fn normalize_search_text(text: &str) -> String {
     let lowered = text.trim().to_lowercase();
