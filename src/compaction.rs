@@ -26,13 +26,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
-use jcode_compaction_core::build_compaction_prompt;
 pub use jcode_compaction_core::{
     CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
     EMERGENCY_TOOL_RESULT_MAX_CHARS, MANUAL_COMPACT_MIN_THRESHOLD, MIN_TURNS_TO_KEEP,
     RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS,
-    Summary, TOKEN_HISTORY_WINDOW, compacted_summary_text_block, mean_embedding,
+    Summary, TOKEN_HISTORY_WINDOW, build_compaction_prompt, compacted_summary_text_block,
+    content_char_count, estimate_compaction_tokens, mean_embedding, message_char_count,
+    safe_compaction_cutoff, semantic_cache_key, semantic_goal_text, semantic_message_text,
+    summary_payload_char_count,
 };
 
 /// Result from background compaction task
@@ -194,7 +196,7 @@ impl CompactionManager {
         self.suppress_compaction_until_new_message = false;
         self.active_message_chars = self
             .active_message_chars
-            .saturating_add(Self::content_char_count(content));
+            .saturating_add(content_char_count(content));
         self.active_message_chars_dirty = false;
     }
 
@@ -223,7 +225,7 @@ impl CompactionManager {
     pub fn seed_restored_messages_with(&mut self, all_messages: &[Message]) {
         self.total_turns = all_messages.len();
         self.suppress_compaction_until_new_message = !all_messages.is_empty();
-        self.active_message_chars = all_messages.iter().map(Self::message_char_count).sum();
+        self.active_message_chars = all_messages.iter().map(message_char_count).sum();
         self.active_message_chars_dirty = false;
     }
 
@@ -235,7 +237,7 @@ impl CompactionManager {
         self.suppress_compaction_until_new_message = !all_messages.is_empty();
         self.active_message_chars = all_messages
             .iter()
-            .map(|message| Self::content_char_count(&message.content))
+            .map(|message| content_char_count(&message.content))
             .sum();
         self.active_message_chars_dirty = false;
     }
@@ -280,7 +282,7 @@ impl CompactionManager {
         self.active_message_chars = self
             .active_messages(all_messages)
             .iter()
-            .map(Self::message_char_count)
+            .map(message_char_count)
             .sum();
         self.active_message_chars_dirty = false;
     }
@@ -294,7 +296,7 @@ impl CompactionManager {
         let start = self.compacted_count.min(all_messages.len());
         self.active_message_chars = all_messages[start..]
             .iter()
-            .map(|message| Self::content_char_count(&message.content))
+            .map(|message| content_char_count(&message.content))
             .sum();
         self.active_message_chars_dirty = false;
     }
@@ -544,7 +546,7 @@ impl CompactionManager {
 
         // Build goal text from recent turns.
         let goal_turns = goal_window_turns.min(active.len());
-        let goal_text = Self::semantic_goal_text(&active[active.len() - goal_turns..]);
+        let goal_text = semantic_goal_text(&active[active.len() - goal_turns..]);
 
         if goal_text.is_empty() {
             return standard_cutoff;
@@ -560,7 +562,7 @@ impl CompactionManager {
         let mut earliest_high_relevance = standard_cutoff;
 
         for (idx, msg) in active[..standard_cutoff].iter().enumerate() {
-            let text = Self::semantic_message_text(msg);
+            let text = semantic_message_text(msg);
 
             if text.is_empty() {
                 continue;
@@ -615,7 +617,7 @@ impl CompactionManager {
         {
             self.active_messages(all_messages)
                 .iter()
-                .map(Self::message_char_count)
+                .map(message_char_count)
                 .sum()
         } else {
             self.active_message_chars
@@ -624,47 +626,16 @@ impl CompactionManager {
 
     /// Get current token estimate using the caller's message list
     pub fn token_estimate_with(&self, all_messages: &[Message]) -> usize {
-        let mut total_chars = 0;
-
-        if let Some(ref summary) = self.active_summary {
-            total_chars += summary
-                .openai_encrypted_content
-                .as_ref()
-                .map(|s| s.len())
-                .unwrap_or_else(|| summary.text.len());
-        }
-
-        total_chars += self.active_message_chars_with(all_messages);
-
-        let msg_tokens = total_chars / CHARS_PER_TOKEN;
-        // Add overhead for system prompt + tool definitions, which are not in the message list
-        // but do count toward the context limit. Scale the overhead to the budget so
-        // tests with tiny budgets aren't affected.
-        let overhead = if self.token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
-            SYSTEM_OVERHEAD_TOKENS
-        } else {
-            0
-        };
-        msg_tokens + overhead
+        estimate_compaction_tokens(
+            self.active_summary.as_ref(),
+            self.active_message_chars_with(all_messages),
+            self.token_budget,
+        )
     }
 
     /// Get current token estimate (backward compat — uses 0 messages, only summary + observed)
     pub fn token_estimate(&self) -> usize {
-        let mut total_chars = 0;
-        if let Some(ref summary) = self.active_summary {
-            total_chars += summary
-                .openai_encrypted_content
-                .as_ref()
-                .map(|s| s.len())
-                .unwrap_or_else(|| summary.text.len());
-        }
-        let msg_tokens = total_chars / CHARS_PER_TOKEN;
-        let overhead = if self.token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
-            SYSTEM_OVERHEAD_TOKENS
-        } else {
-            0
-        };
-        msg_tokens + overhead
+        estimate_compaction_tokens(self.active_summary.as_ref(), 0, self.token_budget)
     }
 
     /// Store provider-reported input token usage for compaction decisions.
@@ -747,7 +718,7 @@ impl CompactionManager {
         }
 
         // Adjust cutoff to not split tool call/result pairs
-        cutoff = Self::safe_cutoff_static(active, cutoff);
+        cutoff = safe_compaction_cutoff(active, cutoff);
         if cutoff == 0 {
             return;
         }
@@ -883,7 +854,7 @@ impl CompactionManager {
             return Err("No messages available to compact after keeping recent turns".to_string());
         }
 
-        cutoff = Self::safe_cutoff_static(active, cutoff);
+        cutoff = safe_compaction_cutoff(active, cutoff);
         if cutoff == 0 {
             return Err("Cannot compact - would split tool call/result pairs".to_string());
         }
@@ -927,63 +898,6 @@ impl CompactionManager {
         )
     }
 
-    /// Find a safe cutoff point that doesn't split tool call/result pairs.
-    /// Static version that works on a message slice.
-    fn safe_cutoff_static(messages: &[Message], initial_cutoff: usize) -> usize {
-        let mut cutoff = initial_cutoff;
-
-        // Track tool call/result ids in the kept portion.
-        let mut available_tool_ids = std::collections::HashSet::new();
-        let mut missing_tool_ids = std::collections::HashSet::new();
-
-        for msg in &messages[cutoff..] {
-            for block in &msg.content {
-                match block {
-                    ContentBlock::ToolUse { id, .. } => {
-                        available_tool_ids.insert(id.clone());
-                        missing_tool_ids.remove(id);
-                    }
-                    ContentBlock::ToolResult { tool_use_id, .. } => {
-                        if !available_tool_ids.contains(tool_use_id) {
-                            missing_tool_ids.insert(tool_use_id.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if missing_tool_ids.is_empty() {
-            return cutoff;
-        }
-
-        // Walk backward once, progressively growing the kept suffix until every
-        // kept tool result has its matching tool use in the same suffix.
-        for (idx, msg) in messages[..cutoff].iter().enumerate().rev() {
-            for block in &msg.content {
-                match block {
-                    ContentBlock::ToolUse { id, .. } => {
-                        available_tool_ids.insert(id.clone());
-                        missing_tool_ids.remove(id);
-                    }
-                    ContentBlock::ToolResult { tool_use_id, .. } => {
-                        if !available_tool_ids.contains(tool_use_id) {
-                            missing_tool_ids.insert(tool_use_id.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if missing_tool_ids.is_empty() {
-                cutoff = idx;
-                return cutoff;
-            }
-        }
-
-        // If we couldn't find every matching tool call, don't compact at all.
-        0
-    }
-
     /// Check if background compaction is done and apply it, updating rolling
     /// token-estimate state from the provided full message list.
     pub fn check_and_apply_compaction_with(&mut self, all_messages: &[Message]) {
@@ -1007,7 +921,7 @@ impl CompactionManager {
                     .active_messages(all_messages)
                     .iter()
                     .take(self.pending_cutoff)
-                    .map(Self::message_char_count)
+                    .map(message_char_count)
                     .sum();
                 let summary = Summary {
                     text: result.summary_text,
@@ -1191,12 +1105,7 @@ impl CompactionManager {
     pub fn summary_chars(&self) -> usize {
         self.active_summary
             .as_ref()
-            .map(|s| {
-                s.openai_encrypted_content
-                    .as_ref()
-                    .map(|value| value.len())
-                    .unwrap_or_else(|| s.text.len())
-            })
+            .map(summary_payload_char_count)
             .unwrap_or(0)
     }
 
@@ -1234,75 +1143,8 @@ impl CompactionManager {
         }
     }
 
-    fn message_char_count(msg: &Message) -> usize {
-        Self::content_char_count(&msg.content)
-    }
-
-    fn content_char_count(content: &[ContentBlock]) -> usize {
-        content
-            .iter()
-            .map(|block| match block {
-                ContentBlock::Text { text, .. } => text.len(),
-                ContentBlock::Reasoning { text } => text.len(),
-                ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
-                ContentBlock::ToolResult { content, .. } => content.len() + 20,
-                ContentBlock::Image { data, .. } => data.len(),
-                ContentBlock::OpenAICompaction { encrypted_content } => encrypted_content.len(),
-            })
-            .sum()
-    }
-
-    fn semantic_goal_text(messages: &[Message]) -> String {
-        let mut text = String::new();
-        for msg in messages {
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text {
-                        text: block_text, ..
-                    } => Self::push_semantic_excerpt(&mut text, block_text, 200),
-                    ContentBlock::ToolResult { content, .. } => {
-                        Self::push_semantic_excerpt(&mut text, content, 100)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        text
-    }
-
-    fn semantic_message_text(msg: &Message) -> String {
-        let mut text = String::new();
-        for block in &msg.content {
-            if let ContentBlock::Text {
-                text: block_text, ..
-            } = block
-            {
-                Self::push_semantic_excerpt(&mut text, block_text, EMBED_MAX_CHARS_PER_MSG);
-            }
-        }
-        text
-    }
-
-    fn push_semantic_excerpt(target: &mut String, source: &str, max_chars: usize) {
-        if source.is_empty() {
-            return;
-        }
-        if !target.is_empty() {
-            target.push(' ');
-        }
-        target.extend(source.chars().take(max_chars));
-    }
-
-    fn hash_text(text: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        hasher.finish()
-    }
-
     fn cached_semantic_embedding(&mut self, text: &str) -> Option<Vec<f32>> {
-        let key = Self::hash_text(text);
+        let key = semantic_cache_key(text);
 
         if let Some((cached, recency)) = self.semantic_embed_cache.get_mut(&key) {
             let counter = self.semantic_embed_cache_counter;
@@ -1365,7 +1207,7 @@ impl CompactionManager {
         }
 
         let pre_tokens = self.effective_token_count_with(all_messages) as u64;
-        let active_char_counts: Vec<usize> = active.iter().map(Self::message_char_count).collect();
+        let active_char_counts: Vec<usize> = active.iter().map(message_char_count).collect();
         let mut remaining_suffix_chars = vec![0usize; active_char_counts.len() + 1];
         for idx in (0..active_char_counts.len()).rev() {
             remaining_suffix_chars[idx] =
@@ -1376,7 +1218,7 @@ impl CompactionManager {
         let mut cutoff;
         loop {
             cutoff = active.len().saturating_sub(turns_to_keep);
-            cutoff = Self::safe_cutoff_static(active, cutoff);
+            cutoff = safe_compaction_cutoff(active, cutoff);
 
             if cutoff > 0 {
                 let remaining_tokens = remaining_suffix_chars[cutoff] / CHARS_PER_TOKEN;
@@ -1387,7 +1229,7 @@ impl CompactionManager {
 
             if turns_to_keep <= MIN_TURNS_TO_KEEP {
                 cutoff = active.len().saturating_sub(MIN_TURNS_TO_KEEP);
-                cutoff = Self::safe_cutoff_static(active, cutoff);
+                cutoff = safe_compaction_cutoff(active, cutoff);
                 break;
             }
             turns_to_keep = (turns_to_keep / 2).max(MIN_TURNS_TO_KEEP);
