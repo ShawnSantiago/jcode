@@ -1052,38 +1052,89 @@ pub fn download_and_install_blocking_with_progress(
 
     verify_asset_checksum_if_available(&client, release, asset, &bytes)?;
 
+    let mut installed_version_dir: Option<PathBuf> = None;
     if asset.name.ends_with(".tar.gz") {
         let cursor = std::io::Cursor::new(&bytes);
         let gz = flate2::read::GzDecoder::new(cursor);
         let mut archive = tar::Archive::new(gz);
-        let mut extracted = false;
+        let extract_dir = temp_path.with_extension("extract");
+        if extract_dir.exists() {
+            let _ = fs::remove_dir_all(&extract_dir);
+        }
+        fs::create_dir_all(&extract_dir).context("Failed to create archive extraction dir")?;
+        let mut extracted_binary: Option<PathBuf> = None;
         for entry in archive.entries()? {
             let mut entry = entry?;
             let entry_path = entry.path()?.into_owned();
+            if entry_path.components().count() != 1 {
+                continue;
+            }
             let file_name = entry_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if file_name.starts_with("jcode") && !file_name.ends_with(".tar.gz") {
-                entry.unpack(&temp_path)?;
-                extracted = true;
-                break;
+            if file_name.is_empty() || file_name.ends_with(".tar.gz") {
+                continue;
+            }
+            let dest = extract_dir.join(&file_name);
+            entry.unpack(&dest)?;
+            if file_name.starts_with("jcode") && !file_name.ends_with(".bin") {
+                extracted_binary = Some(dest);
             }
         }
-        if !extracted {
+        let Some(extracted_binary) = extracted_binary else {
             anyhow::bail!("Could not find jcode binary inside tar.gz archive");
+        };
+        crate::platform::set_permissions_executable(&extracted_binary)?;
+
+        let version = release.tag_name.trim_start_matches('v');
+        let dest_dir = build::builds_dir()?.join("versions").join(version);
+        fs::create_dir_all(&dest_dir).context("Failed to create version install dir")?;
+        for entry in fs::read_dir(&extract_dir).context("Failed to read extracted archive")? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_string = name.to_string_lossy();
+            let dest_name = if name_string == get_asset_name()
+                || name_string == format!("{}.exe", get_asset_name())
+            {
+                build::binary_name().to_string()
+            } else {
+                name_string.to_string()
+            };
+            let dest = dest_dir.join(dest_name);
+            if dest.exists() {
+                fs::remove_file(&dest)?;
+            }
+            fs::copy(entry.path(), &dest)
+                .with_context(|| format!("Failed to install {}", dest.display()))?;
+            if dest
+                .file_name()
+                .is_some_and(|name| name == build::binary_name())
+                || dest.extension().is_some_and(|ext| ext == "bin")
+            {
+                crate::platform::set_permissions_executable(&dest)?;
+            }
         }
+        let _ = fs::remove_dir_all(&extract_dir);
+        installed_version_dir = Some(dest_dir.join(build::binary_name()));
     } else {
         fs::write(&temp_path, &bytes).context("Failed to write temp file")?;
     }
 
-    crate::platform::set_permissions_executable(&temp_path)?;
-
     let version = release.tag_name.trim_start_matches('v');
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
 
-    let versioned_path = build::install_binary_at_version(&temp_path, version)?;
-    let _ = fs::remove_file(&temp_path);
+    let versioned_path = if let Some(versioned_path) = installed_version_dir {
+        versioned_path
+    } else {
+        crate::platform::set_permissions_executable(&temp_path)?;
+        let versioned_path = build::install_binary_at_version(&temp_path, version)?;
+        let _ = fs::remove_file(&temp_path);
+        versioned_path
+    };
     build::update_stable_symlink(version)?;
     build::update_current_symlink(version)?;
     build::update_launcher_symlink_to_current()?;

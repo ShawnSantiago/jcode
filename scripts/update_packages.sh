@@ -71,7 +71,12 @@ class Jcode < Formula
       sha256 "$LINUX_SHA"
 
       def install
-        bin.install "jcode-linux-x86_64" => "jcode"
+        libexec.install "jcode-linux-x86_64", "jcode-linux-x86_64.bin"
+        libexec.install Dir["libssl.so*"], Dir["libcrypto.so*"]
+        (bin/"jcode").write <<~SH
+          #!/bin/sh
+          exec "#{libexec}/jcode-linux-x86_64" "$@"
+        SH
       end
     end
 
@@ -115,7 +120,12 @@ source=("$LINUX_URL")
 sha256sums=('$LINUX_SHA')
 
 package() {
-    install -Dm755 "\${srcdir}/jcode-linux-x86_64" "\${pkgdir}/usr/bin/jcode"
+    install -Dm755 "\${srcdir}/jcode-linux-x86_64" "\${pkgdir}/usr/lib/jcode/jcode-linux-x86_64"
+    install -Dm755 "\${srcdir}/jcode-linux-x86_64.bin" "\${pkgdir}/usr/lib/jcode/jcode-linux-x86_64.bin"
+    install -Dm644 "\${srcdir}"/libssl.so* "\${pkgdir}/usr/lib/jcode/"
+    install -Dm644 "\${srcdir}"/libcrypto.so* "\${pkgdir}/usr/lib/jcode/"
+    mkdir -p "\${pkgdir}/usr/bin"
+    ln -s /usr/lib/jcode/jcode-linux-x86_64 "\${pkgdir}/usr/bin/jcode"
 }
 EOF
 
