@@ -48,8 +48,8 @@ pub use jcode_provider_core::{
     RouteCostSource, shared_http_client,
 };
 pub use route_builders::{
-    build_anthropic_oauth_route, build_copilot_route, build_openai_oauth_route,
-    build_openrouter_auto_route, build_openrouter_endpoint_route,
+    build_anthropic_oauth_route, build_copilot_route, build_openai_api_key_route,
+    build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
     build_openrouter_fallback_provider_route, is_listable_model_name,
     listable_model_names_from_routes, openrouter_catalog_model_id,
 };
@@ -1356,6 +1356,9 @@ impl Provider for MultiProvider {
         }
 
         // OpenAI models
+        let openai_auth = crate::auth::AuthStatus::check_fast();
+        let use_openai_api_key_method =
+            openai_auth.openai_has_api_key && !openai_auth.openai_has_oauth;
         for model in openai_models {
             let availability = model_availability_for_account(&model);
             let (available, detail) = if self.openai_provider().is_none() {
@@ -1375,7 +1378,11 @@ impl Provider for MultiProvider {
                     }
                 }
             };
-            routes.push(build_openai_oauth_route(&model, available, detail));
+            if use_openai_api_key_method {
+                routes.push(build_openai_api_key_route(&model, available, detail));
+            } else {
+                routes.push(build_openai_oauth_route(&model, available, detail));
+            }
         }
 
         let mut added_direct_openai_compatible_routes = false;

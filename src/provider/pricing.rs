@@ -316,6 +316,9 @@ pub(crate) fn cheapness_for_route(
     match api_method {
         "claude-oauth" => Some(anthropic_oauth_pricing(model)),
         "api-key" if provider == "Anthropic" => anthropic_api_pricing(model),
+        "openai-api-key" => {
+            Some(openai_api_pricing(model).unwrap_or_else(|| openai_oauth_pricing(model)))
+        }
         "openai-oauth" => {
             if openai_effective_auth_mode() == "api-key" {
                 Some(openai_api_pricing(model).unwrap_or_else(|| openai_oauth_pricing(model)))

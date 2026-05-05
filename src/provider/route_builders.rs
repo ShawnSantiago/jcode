@@ -55,13 +55,30 @@ pub fn build_openai_oauth_route(
     available: bool,
     detail: impl Into<String>,
 ) -> ModelRoute {
+    build_openai_route(model, "openai-oauth", available, detail)
+}
+
+pub fn build_openai_api_key_route(
+    model: &str,
+    available: bool,
+    detail: impl Into<String>,
+) -> ModelRoute {
+    build_openai_route(model, "openai-api-key", available, detail)
+}
+
+fn build_openai_route(
+    model: &str,
+    api_method: &str,
+    available: bool,
+    detail: impl Into<String>,
+) -> ModelRoute {
     ModelRoute {
         model: model.to_string(),
         provider: "OpenAI".to_string(),
-        api_method: "openai-oauth".to_string(),
+        api_method: api_method.to_string(),
         available,
         detail: detail.into(),
-        cheapness: cheapness_for_route(model, "OpenAI", "openai-oauth"),
+        cheapness: cheapness_for_route(model, "OpenAI", api_method),
     }
 }
 

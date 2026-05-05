@@ -52,12 +52,26 @@ fn pad_center_display(text: &str, width: usize) -> String {
 }
 
 fn api_method_display(raw: &str) -> &str {
-    raw.split_once(':').map(|(method, _)| method).unwrap_or(raw)
+    match raw {
+        "claude-oauth" | "openai-oauth" | "code-assist-oauth" => "oauth",
+        "api-key" | "openai-api-key" => "api key",
+        method if method.starts_with("openai-compatible") => "api key",
+        method => method
+            .split_once(':')
+            .map(|(method, _)| method)
+            .unwrap_or(method),
+    }
 }
 
 fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
     let default_marker = if entry.is_default { " ⚙" } else { "" };
-    let suffix = if entry.recommended && !entry.is_current {
+    let is_new = entry
+        .options
+        .iter()
+        .any(|option| option.detail.contains("recently added"));
+    let suffix = if is_new && !entry.is_current {
+        format!(" new{}", default_marker)
+    } else if entry.recommended {
         format!(" ★{}", default_marker)
     } else if entry.old && !entry.is_current {
         if let Some(ref date) = entry.created_date {
@@ -175,6 +189,13 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         return marker_width + title_width + state_width;
     }
 
+    // Model names, provider names, and method labels are often long. Prefer using
+    // the available terminal width instead of shrinking the picker to its minimum
+    // content width, which makes both the left and right columns feel clipped.
+    if picker.kind == crate::tui::PickerKind::Model {
+        return max_width;
+    }
+
     let mut max_model_len = display_width(picker.primary_label());
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
     let mut max_via_len = display_width(picker.tertiary_label());
@@ -288,8 +309,8 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 
     let show_account_provider_badge =
         is_account_picker && account_picker_shows_provider_badge(picker);
-    let mut max_provider_len = 0usize;
-    let mut max_via_len = 0usize;
+    let mut max_provider_len = display_width(picker.secondary_label(is_preview));
+    let mut max_via_len = display_width(picker.tertiary_label());
     let mut max_account_title_len = display_width("ACCOUNT");
     let mut max_account_state_len = display_width("STATE");
     for &fi in picker.filtered.iter().take(WIDTH_SCAN_LIMIT) {
@@ -337,9 +358,9 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     let height = inner.height as usize;
     let width = inner.width as usize;
 
-    let provider_cap = if is_preview { 16 } else { 20 };
+    let provider_cap = if is_preview { 24 } else { 32 };
     let provider_width = (max_provider_len + 1).max(8).min(provider_cap);
-    let via_width = (max_via_len + 1).clamp(4, 12);
+    let via_width = (max_via_len + 1).clamp(6, 16);
     let account_state_width = (max_account_state_len + 1).clamp(7, 10);
     let account_title_width = width.saturating_sub(marker_width + account_state_width);
     let model_width = width.saturating_sub(marker_width + provider_width + via_width);
@@ -849,8 +870,7 @@ mod tests {
     fn picker_render_width_uses_intrinsic_content_width() {
         let picker = sample_picker();
         let width = picker_render_width(&picker, 120);
-        assert!(width < 120, "picker should not expand to full width");
-        assert!(width >= 20, "picker should remain wide enough for content");
+        assert_eq!(width, 120, "model picker should use available width");
     }
 
     #[test]
@@ -866,8 +886,38 @@ mod tests {
             height: area.height,
         };
 
-        assert!(render_area.x > area.x, "centered picker should shift right");
+        assert_eq!(
+            render_area.x, area.x,
+            "full-width model picker should not waste horizontal space"
+        );
         assert_eq!(render_area.width, width);
+    }
+
+    #[test]
+    fn model_picker_method_display_uses_user_friendly_labels() {
+        assert_eq!(api_method_display("openai-oauth"), "oauth");
+        assert_eq!(api_method_display("openai-api-key"), "api key");
+        assert_eq!(api_method_display("openai-compatible:comtegra"), "api key");
+    }
+
+    #[test]
+    fn picker_entry_display_name_labels_recently_added_models_as_new() {
+        let mut picker = sample_picker();
+        let entry = &mut picker.entries[0];
+        entry.is_current = false;
+        entry.options[0].detail = "recently added · https://llm.comtegra.cloud/v1".to_string();
+
+        assert!(picker_entry_display_name(entry).contains(" new"));
+    }
+
+    #[test]
+    fn picker_entry_display_name_labels_recommended_even_when_current() {
+        let mut picker = sample_picker();
+        let entry = &mut picker.entries[0];
+        entry.is_current = true;
+        entry.recommended = true;
+
+        assert!(picker_entry_display_name(entry).contains("★"));
     }
 
     #[test]

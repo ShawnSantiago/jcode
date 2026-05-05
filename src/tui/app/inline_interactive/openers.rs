@@ -121,6 +121,15 @@ impl App {
         let configured = load_agent_model_override(target);
         let inherit_summary = agent_model_default_summary(target, self);
         self.open_model_picker();
+        let load_started = std::time::Instant::now();
+        while self.pending_model_picker_load.is_some()
+            && load_started.elapsed() < std::time::Duration::from_secs(2)
+        {
+            if self.poll_model_picker_load() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         if let Some(ref mut picker) = self.inline_interactive_state {
             if target == AgentModelTarget::Memory {

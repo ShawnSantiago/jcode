@@ -618,7 +618,7 @@ impl PickerKind {
                 primary_label: "ITEM",
                 secondary_label: "PROVIDER",
                 secondary_preview_label: "PROVIDER",
-                tertiary_label: "ACTION",
+                tertiary_label: "METHOD",
                 preview_submit_hint: "  ↵ open",
                 active_submit_hint: "  ↑↓ ←→ ↵ Esc",
                 shows_default_shortcut_hint: true,

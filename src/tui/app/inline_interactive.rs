@@ -151,7 +151,11 @@ impl App {
                     ),
                     Some("openai") => (
                         "OpenAI".to_string(),
-                        "openai-oauth".to_string(),
+                        if auth.openai_has_api_key && !auth.openai_has_oauth {
+                            "openai-api-key".to_string()
+                        } else {
+                            "openai-oauth".to_string()
+                        },
                         auth.openai != crate::auth::AuthState::NotConfigured,
                         String::new(),
                     ),
@@ -404,7 +408,9 @@ impl App {
                     result.routes_ms,
                     true,
                 );
-                self.set_status_notice("Model list updated");
+                if self.inline_interactive_state.is_some() {
+                    self.set_status_notice("Model list updated");
+                }
                 true
             }
             Err(error) => {
@@ -504,11 +510,11 @@ impl App {
         fn route_sort_key(r: &PickerOption) -> (u8, u8, u64, String) {
             let avail = if r.available { 0 } else { 1 };
             let method = match r.api_method.as_str() {
-                "claude-oauth" | "openai-oauth" => 0,
-                "copilot" => 1,
+                "claude-oauth" | "openai-oauth" | "openai-api-key" => 0,
+                "api-key" => 1,
+                method if method.starts_with("openai-compatible") => 1,
                 "cursor" => 2,
-                "api-key" => 3,
-                method if method.starts_with("openai-compatible") => 3,
+                "copilot" => 3,
                 "openrouter" => 4,
                 _ => 5,
             };
@@ -653,6 +659,7 @@ impl App {
                                 || entry_routes.iter().any(|r| {
                                     (r.api_method == "claude-oauth"
                                         || r.api_method == "openai-oauth"
+                                        || r.api_method == "openai-api-key"
                                         || r.api_method == "copilot")
                                         && r.available
                                 })),
@@ -675,6 +682,7 @@ impl App {
                         || entry_routes.iter().any(|r| {
                             (r.api_method == "claude-oauth"
                                 || r.api_method == "openai-oauth"
+                                || r.api_method == "openai-api-key"
                                 || r.api_method == "copilot")
                                 && r.available
                         }));
@@ -1681,7 +1689,7 @@ impl App {
                             {
                                 Some("claude")
                             }
-                            "openai-oauth" => Some("openai"),
+                            "openai-oauth" | "openai-api-key" => Some("openai"),
                             "copilot" => Some("copilot"),
                             "cursor" => Some("cursor"),
                             "cli" if r.provider == "Antigravity" => Some("antigravity"),
