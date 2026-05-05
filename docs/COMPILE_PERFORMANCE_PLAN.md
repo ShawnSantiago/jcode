@@ -390,6 +390,11 @@ Start with the highest-leverage cache boundaries:
   integration details.
 - Validation: `cargo check -p jcode-message-types --quiet`, focused root message helper tests, and
   `cargo check -p jcode --quiet` pass.
+- 2026-05-05: moved the provider split-system dynamic-context insertion helper and its tests into
+  `jcode-message-types`. This removes another pure message transformation from `src/provider/mod.rs`
+  and keeps preparing the provider trait for an eventual runtime crate split.
+- Validation: `cargo test -p jcode-message-types dynamic_context --quiet`,
+  `cargo check -p jcode-message-types --quiet`, and `cargo check -p jcode --quiet` pass.
 
 - 2026-03-30: moved the workspace-map subsystem into the new `crates/jcode-tui-workspace` crate.
 - Boundary decision: move **workspace map data/model + widget rendering** first, while keeping the surrounding

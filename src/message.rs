@@ -8,7 +8,8 @@ use std::sync::OnceLock;
 pub use jcode_message_types::{
     CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, StreamEvent,
     TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, ends_with_fresh_user_turn,
-    extend_stable_hash, sanitize_tool_id, stable_message_hash,
+    extend_stable_hash, messages_with_dynamic_system_context, sanitize_tool_id,
+    stable_message_hash,
 };
 
 mod notifications;
