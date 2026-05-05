@@ -567,7 +567,7 @@ fn test_save_and_restore_reload_state_preserves_queued_messages() {
 }
 
 #[test]
-fn test_new_for_remote_restored_queued_messages_triggers_dispatch_state() {
+fn test_new_for_remote_restored_queued_messages_stay_queued_until_remote_idle() {
     let mut app = create_test_app();
     let session_id = format!("test-remote-queued-restore-{}", std::process::id());
 
@@ -583,9 +583,9 @@ fn test_new_for_remote_restored_queued_messages_triggers_dispatch_state() {
         restored.hidden_queued_system_messages,
         vec!["continue silently"]
     );
-    assert!(restored.pending_queued_dispatch);
-    assert!(restored.is_processing);
-    assert!(matches!(restored.status, ProcessingStatus::Sending));
+    assert!(!restored.pending_queued_dispatch);
+    assert!(!restored.is_processing);
+    assert!(matches!(restored.status, ProcessingStatus::Idle));
 }
 
 #[test]

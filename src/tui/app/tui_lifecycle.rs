@@ -53,14 +53,19 @@ impl App {
 
         self.queued_messages = queued_messages;
         if self.has_queued_followups() {
-            self.is_processing = true;
-            self.status = ProcessingStatus::Sending;
-            if self.processing_started.is_none() {
-                self.processing_started = Some(Instant::now());
-            }
             if self.is_remote {
-                self.pending_queued_dispatch = true;
+                // Do not synthesize a processing turn for restored remote follow-ups.
+                // After a reload, the server may still be running the previous turn;
+                // the queue must remain a wait-until-turn-end queue until the history
+                // bootstrap/Done event proves the remote turn is idle. The remote
+                // post-connect/history/tick paths will dispatch once it is safe.
+                self.set_status_notice("Restored queued follow-up after reload");
             } else {
+                self.is_processing = true;
+                self.status = ProcessingStatus::Sending;
+                if self.processing_started.is_none() {
+                    self.processing_started = Some(Instant::now());
+                }
                 self.pending_turn = true;
             }
         }
@@ -940,12 +945,6 @@ impl App {
             }
             if let Some(restored) = Self::restore_input_for_reload(session_id) {
                 app.apply_restored_reload_input(restored);
-                if app.has_queued_followups() {
-                    app.pending_queued_dispatch = true;
-                    if app.processing_started.is_none() {
-                        app.processing_started = Some(Instant::now());
-                    }
-                }
             }
         }
 
