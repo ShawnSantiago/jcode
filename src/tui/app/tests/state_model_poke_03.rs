@@ -467,7 +467,7 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
     let text = render_model_picker_text(&mut app, 90, 12);
 
     assert!(
-        text.contains("ITEM") && text.contains("PROVIDER") && text.contains("METHOD"),
+        text.contains("MODEL") && text.contains("PROVIDER") && text.contains("METHOD"),
         "rendered /model view should include picker columns, got:
 {}",
         text
@@ -504,7 +504,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let text = render_model_picker_text(&mut app, 110, 18);
 
     assert!(
-        text.contains("ITEM") && text.contains("PROVIDER") && text.contains("METHOD"),
+        text.contains("MODEL") && text.contains("PROVIDER") && text.contains("METHOD"),
         "rendered /model view should include user-visible picker columns, got:\n{}",
         text
     );
@@ -514,6 +514,16 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
             && text.contains("oauth")
             && text.contains("api key"),
         "OpenAI OAuth and API-key routes should be separately visible, got:\n{}",
+        text
+    );
+    let glm_row = text
+        .lines()
+        .find(|line| line.contains("glm-51-nvfp4"))
+        .unwrap_or("");
+    assert!(
+        glm_row.contains("Comtegra GPU Cloud") && glm_row.contains("api key") && !glm_row.contains("copilot"),
+        "Comtegra GLM row should show its provider and API-key method, got row `{}` in:\n{}",
+        glm_row,
         text
     );
     assert!(

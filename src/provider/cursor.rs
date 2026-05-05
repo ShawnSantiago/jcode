@@ -269,6 +269,20 @@ impl Provider for CursorCliProvider {
         merge_cursor_models(&dynamic, &self.model())
     }
 
+    fn model_routes(&self) -> Vec<super::ModelRoute> {
+        self.available_models_display()
+            .into_iter()
+            .map(|model| super::ModelRoute {
+                model,
+                provider: "Cursor".to_string(),
+                api_method: "cursor".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            })
+            .collect()
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         let Some(api_key) = runtime_cursor_api_key() else {
             return Ok(());
@@ -558,8 +572,12 @@ async fn drain_native_frames(
                         .and_then(|error| error.get("message"))
                         .and_then(Value::as_str)
                     {
+                        if message.eq_ignore_ascii_case("error") {
+                            anyhow::bail!("Cursor native API stream error: {}", json);
+                        }
                         anyhow::bail!("Cursor native API stream error: {}", message);
                     }
+                    anyhow::bail!("Cursor native API stream error: {}", json);
                 }
             }
             _ => {}

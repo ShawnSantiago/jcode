@@ -615,7 +615,7 @@ impl PickerKind {
         match self {
             Self::Model => InlineInteractiveSchema {
                 layout: InlineInteractiveLayout::ThreeColumn,
-                primary_label: "ITEM",
+                primary_label: "MODEL",
                 secondary_label: "PROVIDER",
                 secondary_preview_label: "PROVIDER",
                 tertiary_label: "METHOD",

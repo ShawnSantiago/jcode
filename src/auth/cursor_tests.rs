@@ -161,6 +161,7 @@ fn load_access_token_from_auth_file_does_not_change_external_permissions() {
     let tokens = load_access_token_from_env_or_file().expect("load auth file token");
     assert_eq!(tokens.access_token, "at-test");
     assert_eq!(tokens.refresh_token.as_deref(), Some("rt-test"));
+    assert!(has_cursor_auth_file_token());
 
     let dir_mode = std::fs::metadata(path.parent().unwrap())
         .unwrap()

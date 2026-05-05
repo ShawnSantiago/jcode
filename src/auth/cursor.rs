@@ -95,6 +95,25 @@ pub fn has_cursor_native_auth() -> bool {
     load_access_token_from_env_or_file().is_ok() || has_cursor_vscdb_token() || has_cursor_api_key()
 }
 
+/// Check whether a trusted Cursor auth.json contains a usable direct access token.
+pub fn has_cursor_auth_file_token() -> bool {
+    let Ok(file_path) = cursor_auth_file_path() else {
+        return false;
+    };
+    if !file_path.exists()
+        || !crate::config::Config::external_auth_source_allowed_for_path(
+            CURSOR_AUTH_FILE_SOURCE_ID,
+            &file_path,
+        )
+    {
+        return false;
+    }
+
+    load_access_token_from_env_or_file()
+        .map(|tokens| tokens.source == "cursor_auth_file")
+        .unwrap_or(false)
+}
+
 pub fn preferred_external_auth_source() -> Option<ExternalCursorAuthSource> {
     if cursor_auth_file_path()
         .map(|path| path.exists())
