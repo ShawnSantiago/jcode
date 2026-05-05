@@ -516,6 +516,10 @@ impl Provider for OpenRouterProvider {
             "stream": true,
         });
 
+        if let Some(max_tokens) = self.max_tokens {
+            request["max_tokens"] = serde_json::json!(max_tokens);
+        }
+
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
             request["tool_choice"] = serde_json::json!("auto");
@@ -898,6 +902,7 @@ impl Provider for OpenRouterProvider {
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
+            max_tokens: self.max_tokens,
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             send_openrouter_headers: self.send_openrouter_headers,

@@ -506,6 +506,7 @@ pub struct OpenRouterProvider {
     supports_provider_features: bool,
     supports_model_catalog: bool,
     profile_id: Option<String>,
+    max_tokens: Option<u32>,
     static_models: Vec<String>,
     static_context_limits: HashMap<String, usize>,
     send_openrouter_headers: bool,
@@ -522,6 +523,26 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    fn configured_max_tokens(profile_id: Option<&str>) -> Option<u32> {
+        if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MAX_TOKENS") {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+                return None;
+            }
+            match trimmed.parse::<u32>() {
+                Ok(0) => return None,
+                Ok(value) => return Some(value),
+                Err(_) => crate::logging::warn(&format!(
+                    "Ignoring invalid JCODE_OPENROUTER_MAX_TOKENS '{}'; expected a positive integer or auto",
+                    raw
+                )),
+            }
+        }
+
+        let _ = profile_id;
+        None
+    }
+
     pub(crate) fn supports_provider_routing_features(&self) -> bool {
         self.supports_provider_features
     }
@@ -610,6 +631,7 @@ impl OpenRouterProvider {
                     crate::config::NamedProviderType::OpenRouter
                 ),
             profile_id: Some(profile_name.to_string()),
+            max_tokens: Self::configured_max_tokens(Some(profile_name)),
             static_models,
             static_context_limits,
             send_openrouter_headers: false,
@@ -711,6 +733,7 @@ impl OpenRouterProvider {
         } else {
             ProviderRouting::default()
         };
+        let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
 
         Ok(Self {
             client: crate::provider::shared_http_client(),
@@ -720,6 +743,7 @@ impl OpenRouterProvider {
             supports_provider_features,
             supports_model_catalog,
             profile_id,
+            max_tokens,
             static_models,
             static_context_limits,
             send_openrouter_headers,
@@ -882,6 +906,7 @@ impl OpenRouterProvider {
                 supports_provider_features: true,
                 supports_model_catalog: true,
                 profile_id: None,
+                max_tokens: None,
                 static_models: Vec::new(),
                 static_context_limits: HashMap::new(),
                 send_openrouter_headers: true,

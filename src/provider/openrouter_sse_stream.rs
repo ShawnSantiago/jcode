@@ -355,8 +355,10 @@ impl OpenRouterStream {
                         None => continue,
                     };
 
-                    if let Some(reasoning_content) =
-                        delta.get("reasoning_content").and_then(|c| c.as_str())
+                    if let Some(reasoning_content) = delta
+                        .get("reasoning_content")
+                        .or_else(|| delta.get("reasoning"))
+                        .and_then(|c| c.as_str())
                         && !reasoning_content.is_empty()
                     {
                         self.pending
@@ -563,5 +565,21 @@ mod tests {
         assert!(event.is_none());
         assert!(stream.pending.is_empty());
         assert!(stream.current_tool_call.is_none());
+    }
+
+    #[test]
+    fn parse_next_event_accepts_reasoning_delta_alias() {
+        let provider_pin = Arc::new(std::sync::Mutex::new(None));
+        let mut stream = OpenRouterStream::new(
+            futures::stream::empty(),
+            "test-model".to_string(),
+            provider_pin,
+        );
+        stream.buffer =
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n\n".to_string();
+
+        let event = stream.parse_next_event();
+
+        assert!(matches!(event, Some(StreamEvent::ThinkingDelta(text)) if text == "thinking"));
     }
 }

@@ -138,6 +138,32 @@ fn named_openai_compatible_provider_exposes_static_models_as_routes() {
 }
 
 #[test]
+fn comtegra_profile_uses_endpoint_default_max_tokens() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _override = EnvVarGuard::remove("JCODE_OPENROUTER_MAX_TOKENS");
+
+    assert_eq!(
+        OpenRouterProvider::configured_max_tokens(Some("comtegra")),
+        None
+    );
+    assert_eq!(
+        OpenRouterProvider::configured_max_tokens(Some("deepseek")),
+        None
+    );
+}
+
+#[test]
+fn max_tokens_env_overrides_profile_default() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _override = EnvVarGuard::set("JCODE_OPENROUTER_MAX_TOKENS", "4096");
+
+    assert_eq!(
+        OpenRouterProvider::configured_max_tokens(Some("comtegra")),
+        Some(4096)
+    );
+}
+
+#[test]
 fn test_configured_api_base_accepts_https() {
     let _lock = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
@@ -363,6 +389,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
+        max_tokens: None,
         static_models: Vec::new(),
         static_context_limits: HashMap::new(),
         send_openrouter_headers: true,
@@ -387,6 +414,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        max_tokens: None,
         static_models: Vec::new(),
         static_context_limits: HashMap::new(),
         send_openrouter_headers: false,
