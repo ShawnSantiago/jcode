@@ -100,7 +100,7 @@ impl Provider for PanicOnForkProvider {
 
 #[test]
 fn ping_request_is_lightweight_control_request() {
-    assert!(is_lightweight_control_request(&Request::Ping { id: 1 }));
+    assert!((Request::Ping { id: 1 }).is_lightweight_control_request());
 }
 
 #[test]
