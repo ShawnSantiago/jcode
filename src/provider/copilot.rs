@@ -7,6 +7,7 @@ use crate::message::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
+pub use jcode_provider_core::PremiumMode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
@@ -60,18 +61,6 @@ struct PersistedCatalog {
 /// Copilot API provider - uses GitHub Copilot's OpenAI-compatible API.
 /// Authenticates via GitHub OAuth token, exchanges for Copilot bearer token,
 /// and sends requests to api.githubcopilot.com.
-/// Premium request conservation mode.
-/// 0 = normal (every user message is premium)
-/// 1 = one premium per session (first user message only, rest are agent)
-/// 2 = zero premium (all requests sent as agent)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum PremiumMode {
-    Normal = 0,
-    OnePerSession = 1,
-    Zero = 2,
-}
-
 pub struct CopilotApiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,

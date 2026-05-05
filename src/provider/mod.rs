@@ -43,7 +43,7 @@ use std::sync::{Arc, RwLock};
 pub use claude::{NativeToolResult, NativeToolResultSender};
 pub use jcode_provider_core::{
     CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
-    ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult, RouteBillingKind,
+    ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult, PremiumMode, RouteBillingKind,
     RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, shared_http_client,
     summarize_model_catalog_refresh,
 };
@@ -259,13 +259,13 @@ pub trait Provider: Send + Sync {
     }
 
     /// Set Copilot premium request conservation mode.
-    fn set_premium_mode(&self, _mode: copilot::PremiumMode) {
+    fn set_premium_mode(&self, _mode: PremiumMode) {
         // Default: no-op (non-Copilot providers ignore this)
     }
 
     /// Get the current Copilot premium mode.
-    fn premium_mode(&self) -> copilot::PremiumMode {
-        copilot::PremiumMode::Normal
+    fn premium_mode(&self) -> PremiumMode {
+        PremiumMode::Normal
     }
 
     /// Returns true if jcode should use its own compaction for this provider.
@@ -2011,17 +2011,17 @@ impl Provider for MultiProvider {
         }
     }
 
-    fn set_premium_mode(&self, mode: copilot::PremiumMode) {
+    fn set_premium_mode(&self, mode: PremiumMode) {
         if let Some(copilot) = self.copilot_provider() {
             copilot.set_premium_mode(mode);
         }
     }
 
-    fn premium_mode(&self) -> copilot::PremiumMode {
+    fn premium_mode(&self) -> PremiumMode {
         if let Some(copilot) = self.copilot_provider() {
             copilot.get_premium_mode()
         } else {
-            copilot::PremiumMode::Normal
+            PremiumMode::Normal
         }
     }
 

@@ -353,6 +353,10 @@ Start with the highest-leverage cache boundaries:
   surfaces toward an eventual `jcode-provider` runtime crate.
 - Validation: `cargo test -p jcode-provider-core --quiet`, focused root provider selection/failover
   tests, and `cargo check -p jcode --quiet` pass.
+- 2026-05-05: moved the Copilot `PremiumMode` provider-control enum into `jcode-provider-core`
+  and re-exported it from the root/Copilot facades. The `Provider` trait no longer needs to name
+  the root `copilot` module for this control surface.
+- Validation: `cargo check -p jcode-provider-core --quiet` and `cargo check -p jcode --quiet` pass.
 
 - 2026-05-05: moved the stable provider-facing `ToolDefinition` contract from `src/message.rs` into
   `jcode-message-types` and re-exported it from the root message facade. This is a prerequisite for
