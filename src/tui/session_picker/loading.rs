@@ -8,7 +8,9 @@ use serde::Deserialize;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+#[cfg(test)]
+use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -529,6 +531,7 @@ fn value_first_text(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
 fn message_value_is_internal_system_reminder(message: &serde_json::Value) -> bool {
     message
         .get("content")
@@ -540,6 +543,7 @@ fn content_value_starts_with_system_reminder(content: &serde_json::Value) -> boo
     value_first_text(content).is_some_and(|text| text.trim_start().starts_with("<system-reminder>"))
 }
 
+#[cfg(test)]
 fn message_value_is_visible_conversation(message: &serde_json::Value) -> bool {
     let has_display_role = message
         .get("display_role")
@@ -547,6 +551,7 @@ fn message_value_is_visible_conversation(message: &serde_json::Value) -> bool {
     !has_display_role && !message_value_is_internal_system_reminder(message)
 }
 
+#[cfg(test)]
 fn snapshot_has_visible_conversation(path: &Path) -> Option<bool> {
     let content = std::fs::read_to_string(path).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
@@ -554,6 +559,7 @@ fn snapshot_has_visible_conversation(path: &Path) -> Option<bool> {
     Some(messages.iter().any(message_value_is_visible_conversation))
 }
 
+#[cfg(test)]
 fn journal_has_visible_conversation(path: &Path) -> Option<bool> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -577,6 +583,7 @@ fn journal_has_visible_conversation(path: &Path) -> Option<bool> {
     saw_parseable_line.then_some(false)
 }
 
+#[cfg(test)]
 fn is_empty_session_file(path: &Path) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return true;
@@ -591,6 +598,7 @@ fn is_empty_session_file(path: &Path) -> bool {
         || head.windows(14).any(|w| w == b"\"messages\": []")
 }
 
+#[cfg(test)]
 fn session_has_history(sessions_dir: &Path, stem: &str) -> bool {
     let snapshot_path = sessions_dir.join(format!("{stem}.json"));
     let journal_path = sessions_dir.join(format!("{stem}.journal.jsonl"));
@@ -657,6 +665,7 @@ fn collect_recent_session_candidates(
     Ok(out.into_iter().map(|(_, _, stem)| stem).collect())
 }
 
+#[cfg(test)]
 pub(super) fn collect_recent_session_stems(
     sessions_dir: &Path,
     scan_limit: usize,
@@ -911,12 +920,19 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let mut sessions: Vec<SessionInfo> = Vec::new();
 
     let candidates = if sessions_dir.exists() {
-        collect_recent_session_stems(&sessions_dir, scan_limit)?
+        // Keep startup responsive by avoiding `session_has_history` here. That helper parses
+        // snapshots/journals, and `load_session_summary` below parses the same files again.
+        // Instead, gather a recency-ordered candidate window cheaply from metadata and let the
+        // single summary pass filter empty sessions while filling up to `scan_limit` entries.
+        collect_recent_session_candidates(&sessions_dir, session_candidate_window(scan_limit))?
     } else {
         Vec::new()
     };
 
     for stem in candidates {
+        if sessions.len() >= scan_limit {
+            break;
+        }
         if stem.starts_with("imported_cc_")
             || stem.starts_with("imported_codex_")
             || stem.starts_with("imported_pi_")
