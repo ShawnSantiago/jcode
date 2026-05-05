@@ -586,6 +586,34 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
 }
 
 #[test]
+fn test_model_picker_filter_text_includes_provider_and_method() {
+    let entry = crate::tui::PickerEntry {
+        name: "glm-51-nvfp4".to_string(),
+        options: vec![crate::tui::PickerOption {
+            provider: "Comtegra GPU Cloud".to_string(),
+            api_method: "openai-compatible:comtegra".to_string(),
+            available: true,
+            detail: "https://llm.comtegra.cloud/v1".to_string(),
+            estimated_reference_cost_micros: None,
+        }],
+        action: crate::tui::PickerAction::Model,
+        selected_option: 0,
+        is_current: false,
+        is_default: false,
+        recommended: false,
+        recommendation_rank: usize::MAX,
+        old: false,
+        created_date: None,
+        effort: None,
+    };
+
+    let filter_text = crate::tui::PickerKind::Model.filter_text(&entry);
+    assert!(filter_text.contains("glm-51-nvfp4"));
+    assert!(filter_text.contains("Comtegra GPU Cloud"));
+    assert!(filter_text.contains("openai-compatible:comtegra"));
+}
+
+#[test]
 fn test_login_picker_preview_stays_open_and_updates_filter() {
     let mut app = create_test_app();
 

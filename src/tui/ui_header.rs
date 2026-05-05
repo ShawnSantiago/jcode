@@ -231,15 +231,12 @@ fn header_provider_auth_tag(name: &str, auth: &AuthStatus) -> &'static str {
                 ""
             }
         }
-        "openai" => {
-            if auth.openai_has_oauth {
-                "oauth"
-            } else if auth.openai_has_api_key {
-                "api-key"
-            } else {
-                ""
-            }
-        }
+        "openai" => match (auth.openai_has_oauth, auth.openai_has_api_key) {
+            (true, true) => "oauth+key",
+            (true, false) => "oauth",
+            (false, true) => "api-key",
+            (false, false) => "",
+        },
         "copilot" => {
             if auth.copilot_has_api_token {
                 "oauth"
@@ -835,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn header_provider_auth_tag_prefers_openai_oauth_over_api_key() {
+    fn header_provider_auth_tag_reports_openai_oauth_and_api_key() {
         let auth = AuthStatus {
             openai: AuthState::Available,
             openai_has_oauth: true,
@@ -843,7 +840,7 @@ mod tests {
             ..AuthStatus::default()
         };
 
-        assert_eq!(header_provider_auth_tag("openai", &auth), "oauth");
+        assert_eq!(header_provider_auth_tag("openai", &auth), "oauth+key");
     }
 
     #[test]

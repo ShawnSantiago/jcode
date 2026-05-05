@@ -704,7 +704,13 @@ impl PickerKind {
                     .unwrap_or("");
                 format!("{} {} {} {}", entry.name, status, window, detail)
             }
-            Self::Model => entry.name.clone(),
+            Self::Model => {
+                let route = entry.active_option();
+                let provider = route.map(|option| option.provider.as_str()).unwrap_or("");
+                let method = route.map(|option| option.api_method.as_str()).unwrap_or("");
+                let detail = route.map(|option| option.detail.as_str()).unwrap_or("");
+                format!("{} {} {} {}", entry.name, provider, method, detail)
+            }
         }
     }
 }
