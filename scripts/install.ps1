@@ -370,12 +370,30 @@ function Install-JcodeHotkey([string]$JcodeExePath) {
     return $true
 }
 
-$Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-switch ($Arch) {
-    'X64'   { $Artifact = "jcode-windows-x86_64" }
-    'Arm64' { $Artifact = "jcode-windows-aarch64" }
-    default { Write-Err "Unsupported architecture: $Arch (supported: x86_64, ARM64)" }
+function Get-JcodeWindowsArtifact {
+    $candidates = @()
+
+    try {
+        $runtimeArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        if ($runtimeArch) { $candidates += [string]$runtimeArch }
+    } catch {}
+
+    foreach ($envArch in @($env:PROCESSOR_ARCHITECTURE, $env:PROCESSOR_ARCHITEW6432)) {
+        if ($envArch) { $candidates += [string]$envArch }
+    }
+
+    foreach ($arch in $candidates) {
+        switch -Regex ($arch.Trim()) {
+            '^(X64|AMD64|x86_64)$' { return "jcode-windows-x86_64" }
+            '^(Arm64|ARM64|AARCH64|aarch64)$' { return "jcode-windows-aarch64" }
+        }
+    }
+
+    $displayArch = if ($candidates.Count -gt 0) { $candidates -join ", " } else { "<unknown>" }
+    Write-Err "Unsupported architecture: $displayArch (supported: x86_64, ARM64)"
 }
+
+$Artifact = Get-JcodeWindowsArtifact
 
 $ResolvedArtifactExePath = Resolve-OptionalPath $ArtifactExePath
 $ResolvedArtifactTgzPath = Resolve-OptionalPath $ArtifactTgzPath
