@@ -421,7 +421,9 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    if !app.schedule_auto_poke_followup_if_needed() {
+    if !app.schedule_auto_poke_followup_if_needed()
+        && !app.schedule_overnight_poke_followup_if_needed()
+    {
         app.clear_visible_turn_started();
     }
     let _ = super::commands::maybe_begin_pending_local_transfer(app);

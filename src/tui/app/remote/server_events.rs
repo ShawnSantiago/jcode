@@ -247,7 +247,8 @@ pub(in crate::tui::app) fn handle_server_event(
             app.current_message_id = None;
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
-            let auto_poked = app.schedule_auto_poke_followup_if_needed();
+            let auto_poked = app.schedule_auto_poke_followup_if_needed()
+                || app.schedule_overnight_poke_followup_if_needed();
             if !auto_poked {
                 app.clear_visible_turn_started();
             }
@@ -299,7 +300,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
                 app.note_runtime_memory_event_force("turn_completed", "remote_turn_finished");
-                auto_poked = app.schedule_auto_poke_followup_if_needed();
+                auto_poked = app.schedule_auto_poke_followup_if_needed()
+                    || app.schedule_overnight_poke_followup_if_needed();
                 if !auto_poked {
                     app.clear_visible_turn_started();
                 }
@@ -392,10 +394,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(app, &message);
                 return false;
             }
+            if app.stop_overnight_auto_poke_for_non_retryable_error(&message) {
+                return false;
+            }
             if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
             {
                 app.clear_pending_remote_retry();
-                return app.schedule_auto_poke_followup_if_needed();
+                return app.schedule_auto_poke_followup_if_needed()
+                    || app.schedule_overnight_poke_followup_if_needed();
             }
             false
         }

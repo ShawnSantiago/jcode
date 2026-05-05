@@ -468,6 +468,34 @@ pub(super) struct CompactedHistoryLazyState {
     pub pending_request_visible: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OvernightAutoPokeFingerprint {
+    pub run_id: String,
+    pub status: String,
+    pub last_activity_at: String,
+    pub events_len: usize,
+    pub task_total: usize,
+    pub task_completed: usize,
+    pub task_active: usize,
+    pub task_blocked: usize,
+    pub task_validated: usize,
+    pub session_message_count: usize,
+    pub review_notes_mtime: Option<u64>,
+    pub validation_files: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct OvernightAutoPokeState {
+    pub run_id: String,
+    pub last_fingerprint: OvernightAutoPokeFingerprint,
+    pub stalled_turns: u8,
+    pub error_turns: u8,
+    pub total_pokes_sent: u16,
+    pub diagnostic_sent: bool,
+    pub morning_report_poked: bool,
+    pub final_wrap_poked: bool,
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
 pub struct App {
@@ -586,6 +614,8 @@ pub struct App {
     pending_turn: bool,
     // When armed by /poke, automatically continue prompting until todos are complete.
     auto_poke_incomplete_todos: bool,
+    // When armed by /overnight, automatically continue guarded follow-up turns until wake/wrap.
+    overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
     pending_provider_failover: Option<PendingProviderFailover>,
     // Local session file write to flush once the first "sending" frame is visible.

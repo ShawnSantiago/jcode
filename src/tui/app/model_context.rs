@@ -344,6 +344,7 @@ impl App {
             self.push_display_message(DisplayMessage::error(format!("Error: {}{}", error, hint)));
             if should_stop_auto_poke {
                 super::commands::stop_auto_poke_for_non_retryable_error(self, &error);
+                self.stop_overnight_auto_poke_for_non_retryable_error(&error);
             }
         } else {
             self.push_display_message(DisplayMessage::error(format!(
@@ -351,6 +352,7 @@ impl App {
                 error
             )));
             super::commands::stop_auto_poke_for_non_retryable_error(self, &error);
+            self.stop_overnight_auto_poke_for_non_retryable_error(&error);
         }
     }
 
