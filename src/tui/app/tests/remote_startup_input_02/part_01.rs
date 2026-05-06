@@ -108,6 +108,48 @@ fn test_model_picker_cursor_selection_prefixes_model() {
 }
 
 #[test]
+fn test_model_picker_bedrock_selection_prefixes_model() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_available_entries = vec!["amazon.nova-pro-v1:0".to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: "amazon.nova-pro-v1:0".to_string(),
+        provider: "AWS Bedrock".to_string(),
+        api_method: "bedrock".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    }];
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+    let model_idx = picker
+        .entries
+        .iter()
+        .position(|m| m.name == "amazon.nova-pro-v1:0")
+        .expect("Bedrock model should be in picker");
+    let filtered_pos = picker
+        .filtered
+        .iter()
+        .position(|&i| i == model_idx)
+        .expect("Bedrock model should be in filtered list");
+
+    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(
+        app.pending_model_switch.as_deref(),
+        Some("bedrock:amazon.nova-pro-v1:0")
+    );
+    assert!(app.inline_interactive_state.is_none());
+}
+
+#[test]
 fn test_handle_key_cursor_movement() {
     let mut app = create_test_app();
 

@@ -22,6 +22,15 @@ fn test_provider_for_model_gemini() {
 }
 
 #[test]
+fn test_provider_for_model_bedrock() {
+    assert_eq!(provider_for_model("amazon.nova-pro-v1:0"), Some("bedrock"));
+    assert_eq!(
+        provider_for_model("us.amazon.nova-micro-v1:0"),
+        Some("bedrock")
+    );
+}
+
+#[test]
 fn test_provider_for_model_openrouter() {
     // OpenRouter uses provider/model format
     assert_eq!(

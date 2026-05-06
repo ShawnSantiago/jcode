@@ -1107,6 +1107,8 @@ pub fn provider_for_model_with_hint(
         Some("openai")
     } else if model.starts_with("gemini-") {
         Some("gemini")
+    } else if crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model) {
+        Some("bedrock")
     } else if let Some(provider) = core_provider_for_model_with_hint(model, None) {
         Some(provider)
     } else if crate::provider::antigravity::is_known_model(model) {

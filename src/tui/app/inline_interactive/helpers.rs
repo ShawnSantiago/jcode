@@ -125,6 +125,8 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
         format!("copilot:{}", bare_name)
     } else if route.api_method == "cursor" {
         format!("cursor:{}", bare_name)
+    } else if route.api_method == "bedrock" {
+        format!("bedrock:{}", bare_name)
     } else if route.provider == "Antigravity" {
         format!("antigravity:{}", bare_name)
     } else if let Some(profile_id) = openai_compatible_profile_id_for_route(route) {
