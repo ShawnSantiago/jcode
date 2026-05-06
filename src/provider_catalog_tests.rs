@@ -160,6 +160,11 @@ fn matrix_tui_login_selection_supports_numbers_and_names() {
         resolve_login_selection("cgc", &providers).map(|provider| provider.id),
         Some("comtegra")
     );
+    assert_eq!(
+        resolve_login_selection("bedrock", &providers).map(|provider| provider.id),
+        Some("bedrock")
+    );
+    assert!(providers.iter().any(|provider| provider.id == "bedrock"));
     assert!(resolve_login_selection("google", &providers).is_none());
 }
 
@@ -193,6 +198,10 @@ fn matrix_cli_login_selection_preserves_existing_order() {
     assert_eq!(
         resolve_login_selection("18", &providers).map(|provider| provider.id),
         Some("google")
+    );
+    assert_eq!(
+        resolve_login_selection("bedrock", &providers).map(|provider| provider.id),
+        Some("bedrock")
     );
 }
 

@@ -210,16 +210,7 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
                 self.start_openrouter_login()
             }
-            crate::provider_catalog::LoginProviderTarget::Bedrock => {
-                crate::telemetry::record_auth_surface_blocked(
-                    provider.id,
-                    provider.auth_kind.label(),
-                );
-                self.push_display_message(DisplayMessage::error(
-                    "AWS Bedrock login is currently CLI-only. Run `jcode login --provider bedrock`."
-                        .to_string(),
-                ));
-            }
+            crate::provider_catalog::LoginProviderTarget::Bedrock => self.start_bedrock_login(),
             crate::provider_catalog::LoginProviderTarget::Azure => {
                 crate::telemetry::record_auth_surface_blocked(
                     provider.id,
@@ -815,6 +806,21 @@ impl App {
             "OPENROUTER_API_KEY",
             None,
             None,
+            false,
+            None,
+        );
+    }
+
+    fn start_bedrock_login(&mut self) {
+        self.start_api_key_login(
+            "AWS Bedrock",
+            "https://console.aws.amazon.com/bedrock/home#/api-keys",
+            crate::provider::bedrock::ENV_FILE,
+            crate::provider::bedrock::API_KEY_ENV,
+            Some("us.amazon.nova-micro-v1:0"),
+            Some(
+                "Region: us-east-2 (default for TUI onboarding; use CLI login for another region)",
+            ),
             false,
             None,
         );
@@ -1524,6 +1530,15 @@ impl App {
                             crate::env::set_var(&key_name, &key);
                             Ok(())
                         })()
+                    } else if key_name == crate::provider::bedrock::API_KEY_ENV {
+                        (|| {
+                            Self::save_named_api_key(&env_file, &key_name, &key)?;
+                            crate::provider_catalog::save_env_value_to_env_file(
+                                crate::provider::bedrock::REGION_ENV,
+                                &env_file,
+                                Some("us-east-2"),
+                            )
+                        })()
                     } else {
                         Self::save_named_api_key(&env_file, &key_name, &key)
                     };
@@ -1531,6 +1546,13 @@ impl App {
                 match save_result {
                     Ok(()) => {
                         crate::auth::AuthStatus::invalidate_cache();
+                        if key_name == crate::provider::bedrock::API_KEY_ENV {
+                            crate::cli::provider_init::lock_model_provider("bedrock");
+                            if let Some(default_model) = default_model.as_deref() {
+                                crate::env::set_var("JCODE_BEDROCK_MODEL", default_model);
+                            }
+                        }
+
                         if let Some(profile) = openai_compatible_profile {
                             crate::provider_catalog::apply_openai_compatible_profile_env(Some(
                                 profile,
@@ -1568,6 +1590,8 @@ impl App {
                                     endpoint.as_deref().unwrap_or(resolved.api_base.as_str()),
                                 )
                             }
+                        } else if key_name == crate::provider::bedrock::API_KEY_ENV {
+                            "You can now use `/model` to switch to Bedrock models. TUI onboarding saved region `us-east-2`; for a different region, run `jcode login --provider bedrock` from a terminal.".to_string()
                         } else if key_name == "OPENROUTER_API_KEY" {
                             "You can now use `/model` to switch to OpenRouter models. If the model list looks stale, run `/refresh-model-list`.".to_string()
                         } else {
