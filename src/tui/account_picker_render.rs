@@ -130,21 +130,7 @@ pub(super) fn account_count_summary(count: usize) -> String {
 }
 
 pub(super) fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
-    match command {
-        AccountPickerCommand::OpenAccountCenter { .. } => "overview",
-        AccountPickerCommand::OpenAddReplaceFlow { .. } => "account",
-        AccountPickerCommand::SubmitInput(input) if input.ends_with(" settings") => "overview",
-        AccountPickerCommand::SubmitInput(input) if input.contains(" remove ") => "danger",
-        AccountPickerCommand::SubmitInput(input) if input.contains(" login") => "login",
-        AccountPickerCommand::SubmitInput(input) if input.contains(" add") => "account",
-        AccountPickerCommand::SubmitInput(input) if input.contains(" switch ") => "account",
-        AccountPickerCommand::PromptValue { .. } => "setting",
-        AccountPickerCommand::Switch { .. } => "account",
-        AccountPickerCommand::Login { .. } => "login",
-        AccountPickerCommand::Remove { .. } => "danger",
-        AccountPickerCommand::PromptNew { .. } => "account",
-        AccountPickerCommand::SubmitInput(_) => "action",
-    }
+    jcode_tui_account_picker::action_kind_label(command)
 }
 
 pub(super) fn action_kind_badge(command: &AccountPickerCommand) -> (&'static str, Color) {

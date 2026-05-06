@@ -6,13 +6,16 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+pub use jcode_tui_account_picker::{
+    AccountPickerCommand, AccountPickerItem, AccountPickerSummary, AccountProviderKind,
+};
+
 #[path = "account_picker_render.rs"]
 mod render_support;
 use render_support::{
     ActionSection, account_count_summary, account_is_active, action_icon, action_kind_badge,
-    action_kind_help, action_kind_label, action_section, centered_rect, command_preview,
-    compact_item_title, hotkey, metric_span, provider_header_line, provider_style,
-    truncate_with_ellipsis,
+    action_kind_help, action_section, centered_rect, command_preview, compact_item_title, hotkey,
+    metric_span, provider_header_line, provider_style, truncate_with_ellipsis,
 };
 
 const PANEL_BG: Color = Color::Rgb(24, 28, 40);
@@ -24,100 +27,6 @@ const MUTED: Color = Color::Rgb(140, 146, 163);
 const MUTED_DARK: Color = Color::Rgb(100, 106, 122);
 const OVERLAY_PERCENT_X: u16 = 88;
 const OVERLAY_PERCENT_Y: u16 = 74;
-
-#[derive(Debug, Clone)]
-pub enum AccountProviderKind {
-    Anthropic,
-    OpenAi,
-}
-
-#[derive(Debug, Clone)]
-pub enum AccountPickerCommand {
-    SubmitInput(String),
-    OpenAccountCenter {
-        provider_filter: Option<String>,
-    },
-    OpenAddReplaceFlow {
-        provider_filter: Option<String>,
-    },
-    PromptValue {
-        prompt: String,
-        command_prefix: String,
-        empty_value: Option<String>,
-        status_notice: String,
-    },
-    Switch {
-        provider: AccountProviderKind,
-        label: String,
-    },
-    Login {
-        provider: AccountProviderKind,
-        label: String,
-    },
-    Remove {
-        provider: AccountProviderKind,
-        label: String,
-    },
-    PromptNew {
-        provider: AccountProviderKind,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct AccountPickerItem {
-    pub provider_id: String,
-    pub provider_label: String,
-    pub title: String,
-    pub subtitle: String,
-    pub command: AccountPickerCommand,
-}
-
-impl AccountPickerItem {
-    pub fn action(
-        provider_id: impl Into<String>,
-        provider_label: impl Into<String>,
-        title: impl Into<String>,
-        subtitle: impl Into<String>,
-        command: AccountPickerCommand,
-    ) -> Self {
-        Self {
-            provider_id: provider_id.into(),
-            provider_label: provider_label.into(),
-            title: title.into(),
-            subtitle: subtitle.into(),
-            command,
-        }
-    }
-
-    fn matches_filter(&self, filter: &str) -> bool {
-        if filter.is_empty() {
-            return true;
-        }
-        let haystack = format!(
-            "{} {} {} {} {}",
-            self.provider_id,
-            self.provider_label,
-            self.title,
-            self.subtitle,
-            action_kind_label(&self.command)
-        )
-        .to_lowercase();
-        filter
-            .split_whitespace()
-            .all(|needle| haystack.contains(&needle.to_lowercase()))
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AccountPickerSummary {
-    pub ready_count: usize,
-    pub attention_count: usize,
-    pub setup_count: usize,
-    pub provider_count: usize,
-    pub named_account_count: usize,
-    pub default_provider: Option<String>,
-    pub default_model: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 pub struct AccountPicker {
@@ -240,7 +149,9 @@ impl AccountPicker {
             .items
             .iter()
             .enumerate()
-            .filter_map(|(idx, item)| item.matches_filter(&self.filter).then_some(idx))
+            .filter_map(|(idx, item)| {
+                jcode_tui_account_picker::item_matches_filter(item, &self.filter).then_some(idx)
+            })
             .collect();
         let provider_order = self.provider_order();
         self.filtered.sort_by(|left, right| {
