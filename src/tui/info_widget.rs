@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 use git::{render_git_compact, render_git_widget};
-pub use graph::{GraphEdge, GraphNode, build_graph_topology};
+pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
 use memory_utils::{
     compact_memory_model_label, memory_active_summary, memory_last_trace_summary,
@@ -1210,8 +1210,8 @@ fn select_contextual_subgraph(
             edge_kind_priority(&info.graph_edges[*b_edge].kind)
                 .cmp(&edge_kind_priority(&info.graph_edges[*a_edge].kind))
                 .then_with(|| {
-                    graph::graph_node_score(&info.graph_nodes[*b_idx])
-                        .partial_cmp(&graph::graph_node_score(&info.graph_nodes[*a_idx]))
+                    graph_node_score(&info.graph_nodes[*b_idx])
+                        .partial_cmp(&graph_node_score(&info.graph_nodes[*a_idx]))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .then_with(|| a_idx.cmp(b_idx))
@@ -1232,8 +1232,8 @@ fn select_contextual_subgraph(
             .filter(|idx| !selected_set.contains(idx))
             .collect();
         remaining.sort_by(|a, b| {
-            graph::graph_node_score(&info.graph_nodes[*b])
-                .partial_cmp(&graph::graph_node_score(&info.graph_nodes[*a]))
+            graph_node_score(&info.graph_nodes[*b])
+                .partial_cmp(&graph_node_score(&info.graph_nodes[*a]))
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.cmp(b))
         });
@@ -1300,7 +1300,7 @@ fn pick_subgraph_center(info: &MemoryInfo) -> Option<usize> {
     let mut best_score: f32 = -1.0;
 
     for (idx, node) in info.graph_nodes.iter().enumerate() {
-        let mut score = graph::graph_node_score(node);
+        let mut score = graph_node_score(node);
         if node.kind == "tag" || node.kind == "cluster" {
             score -= 0.75;
         }

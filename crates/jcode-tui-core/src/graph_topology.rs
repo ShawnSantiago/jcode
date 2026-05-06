@@ -290,7 +290,7 @@ fn edge_kind_name(kind: &EdgeKind) -> &'static str {
     }
 }
 
-fn graph_node_score(node: &GraphNode) -> f32 {
+pub fn graph_node_score(node: &GraphNode) -> f32 {
     let memory_bias = if node.is_memory { 2.0 } else { 0.0 };
     let active_bias = if node.is_active { 1.0 } else { 0.0 };
     node.degree as f32 + memory_bias + active_bias + node.confidence * 2.0
