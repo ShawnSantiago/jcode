@@ -652,37 +652,40 @@ fn single_session_text_buffers_include_header_version_area() {
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
 
     assert_eq!(buffers.len(), 6);
-    assert_eq!(single_session_text_areas(&buffers, size).len(), 6);
+    assert_eq!(single_session_text_areas(&buffers, size).len(), 5);
 }
 
 #[test]
-fn fresh_welcome_hero_is_centered_from_shaped_glyph_width() {
-    let app = SingleSessionApp::new(None);
+fn fresh_welcome_hero_is_drawn_as_handwritten_strokes() {
     let size = PhysicalSize::new(1000, 720);
-    let mut font_system = FontSystem::new();
-    let buffers = single_session_text_buffers(&app, size, &mut font_system);
-    let text_areas = single_session_text_areas(&buffers, size);
-    let hero_width = single_session_buffer_visual_width(&buffers[5]);
-    let expected_left = (size.width as f32 - hero_width) * 0.5;
+    let mut hidden = Vec::new();
+    let mut half = Vec::new();
+    let mut full = Vec::new();
 
-    assert!(hero_width > size.width as f32 * 0.45);
-    assert!((text_areas[5].left - expected_left).abs() < 1.0);
+    push_handwritten_welcome_hero(&mut hidden, size, 0.0);
+    push_handwritten_welcome_hero(&mut half, size, 0.5);
+    push_handwritten_welcome_hero(&mut full, size, 1.0);
+
+    assert!(hidden.is_empty());
+    assert!(half.len() > hidden.len());
+    assert!(full.len() > half.len());
+    assert!(vertices_have_color(&full, WELCOME_HANDWRITING_COLOR));
 }
 
 #[test]
-fn fresh_welcome_hero_reveal_clips_from_centered_final_position() {
-    let app = SingleSessionApp::new(None);
+fn fresh_welcome_hero_strokes_are_centered() {
     let size = PhysicalSize::new(1000, 720);
-    let mut font_system = FontSystem::new();
-    let buffers = single_session_text_buffers(&app, size, &mut font_system);
-    let hidden = single_session_text_areas_with_welcome_reveal(&buffers, size, 0.0);
-    let half = single_session_text_areas_with_welcome_reveal(&buffers, size, 0.5);
-    let full = single_session_text_areas_with_welcome_reveal(&buffers, size, 1.0);
+    let mut vertices = Vec::new();
+    push_handwritten_welcome_hero(&mut vertices, size, 1.0);
+    let points = vertices
+        .iter()
+        .filter(|vertex| vertex.color == WELCOME_HANDWRITING_COLOR)
+        .map(|vertex| vertex.position[0])
+        .collect::<Vec<_>>();
+    let min_x = points.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_x = points.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
-    assert_eq!(hidden[5].left, full[5].left);
-    assert_eq!(half[5].left, full[5].left);
-    assert!(hidden[5].bounds.right < half[5].bounds.right);
-    assert!(half[5].bounds.right < full[5].bounds.right);
+    assert!(((min_x + max_x) * 0.5).abs() < 0.03);
 }
 
 #[test]

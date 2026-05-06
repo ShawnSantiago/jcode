@@ -127,6 +127,8 @@ const WELCOME_AURORA_BLUE: [f32; 4] = [0.250, 0.520, 1.000, 0.145];
 const WELCOME_AURORA_VIOLET: [f32; 4] = [0.720, 0.360, 0.980, 0.125];
 const WELCOME_AURORA_MINT: [f32; 4] = [0.220, 0.840, 0.660, 0.115];
 const WELCOME_AURORA_WARM: [f32; 4] = [1.000, 0.620, 0.360, 0.075];
+const WELCOME_HANDWRITING_COLOR: [f32; 4] = [0.012, 0.080, 0.250, 0.94];
+const WELCOME_HANDWRITING_HIGHLIGHT_COLOR: [f32; 4] = [0.200, 0.520, 1.000, 0.42];
 const COMPOSER_LINE_COLOR: [f32; 4] = [0.060, 0.085, 0.145, 0.34];
 #[cfg(test)]
 const COMPOSER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.990, 0.995, 1.000, 0.52];
@@ -1639,18 +1641,6 @@ impl<'window> Canvas<'window> {
                 text_buffers.get(2),
             );
         }
-        let welcome_reveal_progress = match app {
-            DesktopApp::SingleSession(single_session) => single_session.welcome_reveal_progress(),
-            DesktopApp::Workspace(_) => 1.0,
-        };
-        if let DesktopApp::SingleSession(_) = app {
-            push_single_session_welcome_reveal_edge(
-                &mut vertices,
-                self.size,
-                text_buffers.get(5),
-                welcome_reveal_progress,
-            );
-        }
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1658,11 +1648,7 @@ impl<'window> Canvas<'window> {
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        let text_areas = single_session_text_areas_with_welcome_reveal(
-            &text_buffers,
-            self.size,
-            welcome_reveal_progress,
-        );
+        let text_areas = single_session_text_areas(&text_buffers, self.size);
         if !text_areas.is_empty() {
             if let Err(error) = self.text_renderer.prepare(
                 &self.device,

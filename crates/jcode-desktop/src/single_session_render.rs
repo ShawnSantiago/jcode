@@ -56,6 +56,7 @@ pub(crate) fn build_single_session_vertices(
 
     if app.is_empty_fresh_session() {
         push_fresh_welcome_ambient(&mut vertices, size, spinner_tick);
+        push_handwritten_welcome_hero(&mut vertices, size, app.welcome_reveal_progress());
     }
 
     push_single_session_composer_card(&mut vertices, size);
@@ -102,6 +103,402 @@ fn push_fresh_welcome_ambient(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32
         WELCOME_AURORA_WARM,
         WELCOME_AURORA_MINT,
     );
+}
+
+pub(crate) fn push_handwritten_welcome_hero(
+    vertices: &mut Vec<Vertex>,
+    size: PhysicalSize<u32>,
+    reveal_progress: f32,
+) {
+    let paths = handwritten_welcome_paths();
+    let total_length = stroke_paths_length(&paths);
+    if total_length <= 0.0 {
+        return;
+    }
+
+    let draft_top = single_session_draft_top(size);
+    let target_width = size.width as f32 * 0.52;
+    let (source_min, source_max) = stroke_paths_bounds(&paths);
+    let source_width = (source_max[0] - source_min[0]).max(1.0);
+    let scale = target_width / source_width;
+    let source_left = source_min[0];
+    let source_top = source_min[1];
+    let left = (size.width as f32 - target_width) * 0.5;
+    let top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.31;
+    let origin = [left - source_left * scale, top - source_top * scale];
+    let thickness = (scale * 0.075).clamp(3.6, 8.5);
+    let mut remaining = total_length * reveal_progress.clamp(0.0, 1.0);
+    let mut lead = None;
+
+    for path in &paths {
+        for pair in path.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let segment_length = distance(a, b);
+            if segment_length <= 0.001 {
+                continue;
+            }
+            if remaining <= 0.0 {
+                break;
+            }
+            let draw_fraction = (remaining / segment_length).clamp(0.0, 1.0);
+            let end = lerp_point(a, b, draw_fraction);
+            let pa = transform_handwriting_point(a, origin, scale);
+            let pb = transform_handwriting_point(end, origin, scale);
+            push_stroke_segment(vertices, pa, pb, thickness, WELCOME_HANDWRITING_COLOR, size);
+            lead = Some(pb);
+            remaining -= segment_length;
+            if draw_fraction < 1.0 {
+                break;
+            }
+        }
+    }
+
+    if let Some(point) = lead
+        && (0.01..0.995).contains(&reveal_progress)
+    {
+        push_stroke_dot(
+            vertices,
+            point,
+            thickness * 1.65,
+            WELCOME_HANDWRITING_HIGHLIGHT_COLOR,
+            size,
+        );
+    }
+}
+
+fn handwritten_welcome_paths() -> Vec<Vec<[f32; 2]>> {
+    let mut paths = Vec::new();
+    let mut word = Vec::new();
+    append_hello_path(&mut word, 0.0);
+    paths.push(word);
+
+    let mut there = Vec::new();
+    append_there_path(&mut there, 5.55);
+    paths.push(there);
+
+    paths.push(vec![[5.80, 0.42], [6.50, 0.35]]);
+    paths
+}
+
+fn append_hello_path(path: &mut Vec<[f32; 2]>, x: f32) {
+    path.push([x + 0.05, 1.05]);
+    append_cubic(
+        path,
+        [x + 0.05, 1.05],
+        [x + 0.12, 0.64],
+        [x + 0.10, 0.15],
+        [x + 0.34, -0.08],
+        10,
+    );
+    append_cubic(
+        path,
+        [x + 0.34, -0.08],
+        [x + 0.66, 0.14],
+        [x + 0.20, 0.88],
+        [x + 0.26, 1.06],
+        14,
+    );
+    append_cubic(
+        path,
+        [x + 0.26, 1.06],
+        [x + 0.38, 0.58],
+        [x + 0.82, 0.52],
+        [x + 1.02, 1.02],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 1.02, 1.02],
+        [x + 1.20, 0.58],
+        [x + 1.72, 0.45],
+        [x + 1.58, 0.86],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 1.58, 0.86],
+        [x + 1.42, 1.18],
+        [x + 2.02, 1.18],
+        [x + 2.22, 0.92],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 2.22, 0.92],
+        [x + 2.62, 0.45],
+        [x + 2.78, -0.10],
+        [x + 2.96, -0.06],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 2.96, -0.06],
+        [x + 3.22, 0.02],
+        [x + 2.76, 0.78],
+        [x + 3.07, 1.02],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 3.07, 1.02],
+        [x + 3.48, 0.56],
+        [x + 3.60, -0.08],
+        [x + 3.82, -0.04],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 3.82, -0.04],
+        [x + 4.04, 0.04],
+        [x + 3.66, 0.72],
+        [x + 3.90, 1.00],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 3.90, 1.00],
+        [x + 4.22, 0.38],
+        [x + 5.00, 0.44],
+        [x + 4.88, 0.86],
+        16,
+    );
+    append_cubic(
+        path,
+        [x + 4.88, 0.86],
+        [x + 4.74, 1.28],
+        [x + 4.02, 1.15],
+        [x + 4.15, 0.72],
+        16,
+    );
+    append_cubic(
+        path,
+        [x + 4.15, 0.72],
+        [x + 4.38, 0.28],
+        [x + 4.96, 0.92],
+        [x + 5.20, 0.82],
+        12,
+    );
+}
+
+fn append_there_path(path: &mut Vec<[f32; 2]>, x: f32) {
+    path.push([x + 0.38, 0.08]);
+    append_cubic(
+        path,
+        [x + 0.38, 0.08],
+        [x + 0.24, 0.52],
+        [x + 0.22, 0.92],
+        [x + 0.40, 1.06],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 0.40, 1.06],
+        [x + 0.66, 1.22],
+        [x + 0.98, 0.92],
+        [x + 1.05, 0.82],
+        10,
+    );
+    append_cubic(
+        path,
+        [x + 1.05, 0.82],
+        [x + 1.12, 0.44],
+        [x + 1.14, 0.04],
+        [x + 1.36, -0.05],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 1.36, -0.05],
+        [x + 1.72, 0.16],
+        [x + 1.26, 0.78],
+        [x + 1.38, 1.04],
+        14,
+    );
+    append_cubic(
+        path,
+        [x + 1.38, 1.04],
+        [x + 1.58, 0.62],
+        [x + 2.00, 0.50],
+        [x + 2.18, 1.02],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 2.18, 1.02],
+        [x + 2.38, 0.56],
+        [x + 2.90, 0.45],
+        [x + 2.76, 0.86],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 2.76, 0.86],
+        [x + 2.60, 1.18],
+        [x + 3.20, 1.18],
+        [x + 3.40, 0.92],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 3.40, 0.92],
+        [x + 3.54, 0.54],
+        [x + 3.86, 0.54],
+        [x + 4.00, 0.80],
+        10,
+    );
+    append_cubic(
+        path,
+        [x + 4.00, 0.80],
+        [x + 4.10, 0.52],
+        [x + 4.24, 0.48],
+        [x + 4.40, 0.62],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 4.40, 0.62],
+        [x + 4.22, 0.80],
+        [x + 4.14, 1.14],
+        [x + 4.50, 1.04],
+        10,
+    );
+    append_cubic(
+        path,
+        [x + 4.50, 1.04],
+        [x + 4.82, 0.56],
+        [x + 5.34, 0.45],
+        [x + 5.20, 0.86],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 5.20, 0.86],
+        [x + 5.04, 1.18],
+        [x + 5.66, 1.16],
+        [x + 5.92, 0.88],
+        12,
+    );
+}
+
+fn append_cubic(
+    path: &mut Vec<[f32; 2]>,
+    p0: [f32; 2],
+    p1: [f32; 2],
+    p2: [f32; 2],
+    p3: [f32; 2],
+    steps: usize,
+) {
+    for step in 1..=steps {
+        let t = step as f32 / steps as f32;
+        let mt = 1.0 - t;
+        path.push([
+            mt.powi(3) * p0[0]
+                + 3.0 * mt.powi(2) * t * p1[0]
+                + 3.0 * mt * t.powi(2) * p2[0]
+                + t.powi(3) * p3[0],
+            mt.powi(3) * p0[1]
+                + 3.0 * mt.powi(2) * t * p1[1]
+                + 3.0 * mt * t.powi(2) * p2[1]
+                + t.powi(3) * p3[1],
+        ]);
+    }
+}
+
+fn stroke_paths_length(paths: &[Vec<[f32; 2]>]) -> f32 {
+    paths
+        .iter()
+        .flat_map(|path| path.windows(2).map(|pair| distance(pair[0], pair[1])))
+        .sum()
+}
+
+fn stroke_paths_bounds(paths: &[Vec<[f32; 2]>]) -> ([f32; 2], [f32; 2]) {
+    let mut min = [f32::INFINITY, f32::INFINITY];
+    let mut max = [f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for point in paths.iter().flatten() {
+        min[0] = min[0].min(point[0]);
+        min[1] = min[1].min(point[1]);
+        max[0] = max[0].max(point[0]);
+        max[1] = max[1].max(point[1]);
+    }
+    if !min[0].is_finite() || !max[0].is_finite() {
+        ([0.0, 0.0], [1.0, 1.0])
+    } else {
+        (min, max)
+    }
+}
+
+fn distance(a: [f32; 2], b: [f32; 2]) -> f32 {
+    ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
+}
+
+fn lerp_point(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
+fn transform_handwriting_point(point: [f32; 2], origin: [f32; 2], scale: f32) -> [f32; 2] {
+    [origin[0] + point[0] * scale, origin[1] + point[1] * scale]
+}
+
+fn push_stroke_segment(
+    vertices: &mut Vec<Vertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    thickness: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let length = distance(a, b);
+    if length <= 0.01 {
+        return;
+    }
+    let nx = -(b[1] - a[1]) / length * thickness * 0.5;
+    let ny = (b[0] - a[0]) / length * thickness * 0.5;
+    push_pixel_triangle(
+        vertices,
+        [a[0] + nx, a[1] + ny],
+        [a[0] - nx, a[1] - ny],
+        [b[0] - nx, b[1] - ny],
+        color,
+        size,
+    );
+    push_pixel_triangle(
+        vertices,
+        [a[0] + nx, a[1] + ny],
+        [b[0] - nx, b[1] - ny],
+        [b[0] + nx, b[1] + ny],
+        color,
+        size,
+    );
+    push_stroke_dot(vertices, b, thickness * 0.52, color, size);
+}
+
+fn push_stroke_dot(
+    vertices: &mut Vec<Vertex>,
+    center: [f32; 2],
+    radius: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let segments = 14;
+    for segment in 0..segments {
+        let start = segment as f32 / segments as f32 * std::f32::consts::TAU;
+        let end = (segment + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+        push_pixel_triangle(
+            vertices,
+            center,
+            [
+                center[0] + radius * start.cos(),
+                center[1] + radius * start.sin(),
+            ],
+            [
+                center[0] + radius * end.cos(),
+                center[1] + radius * end.sin(),
+            ],
+            color,
+            size,
+        );
+    }
 }
 
 fn push_aurora_ribbon(
@@ -1081,20 +1478,11 @@ fn single_session_line_rgba(style: SingleSessionLineStyle) -> [f32; 4] {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn single_session_text_areas(
     buffers: &[Buffer],
     size: PhysicalSize<u32>,
 ) -> Vec<TextArea<'_>> {
-    single_session_text_areas_with_welcome_reveal(buffers, size, 1.0)
-}
-
-pub(crate) fn single_session_text_areas_with_welcome_reveal(
-    buffers: &[Buffer],
-    size: PhysicalSize<u32>,
-    welcome_reveal_progress: f32,
-) -> Vec<TextArea<'_>> {
-    if buffers.len() < 6 {
+    if buffers.len() < 5 {
         return Vec::new();
     }
 
@@ -1103,13 +1491,6 @@ pub(crate) fn single_session_text_areas_with_welcome_reveal(
     let bottom = size.height.saturating_sub(PANEL_TITLE_TOP_PADDING as u32) as i32;
     let draft_top = single_session_draft_top(size);
     let version_left = (size.width as f32 * 0.42).max(left + 220.0);
-    let welcome_width = single_session_buffer_visual_width(&buffers[5]).max(1.0);
-    let welcome_left = ((size.width as f32 - welcome_width) * 0.5).max(left);
-    let welcome_reveal_right =
-        welcome_reveal_right(welcome_left, welcome_width, welcome_reveal_progress)
-            .min(size.width as f32)
-            .max(welcome_left);
-    let welcome_top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.30;
 
     vec![
         TextArea {
@@ -1177,83 +1558,7 @@ pub(crate) fn single_session_text_areas_with_welcome_reveal(
             },
             default_color: text_color(PANEL_SECTION_COLOR),
         },
-        TextArea {
-            buffer: &buffers[5],
-            left: welcome_left,
-            top: welcome_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: welcome_reveal_right.round() as i32,
-                bottom: draft_top as i32,
-            },
-            default_color: text_color(ASSISTANT_HEADING_TEXT_COLOR),
-        },
     ]
-}
-
-fn welcome_reveal_right(left: f32, width: f32, progress: f32) -> f32 {
-    if progress >= 0.995 {
-        left + width + 8.0
-    } else {
-        left + width * progress.clamp(0.0, 1.0) + 10.0
-    }
-}
-
-pub(crate) fn single_session_buffer_visual_width(buffer: &Buffer) -> f32 {
-    let mut min_x: Option<f32> = None;
-    let mut max_x: Option<f32> = None;
-    for run in buffer.layout_runs() {
-        for glyph in run.glyphs {
-            min_x = Some(min_x.map_or(glyph.x, |x| x.min(glyph.x)));
-            max_x = Some(max_x.map_or(glyph.x + glyph.w, |x| x.max(glyph.x + glyph.w)));
-        }
-    }
-    match (min_x, max_x) {
-        (Some(min_x), Some(max_x)) => (max_x - min_x).max(0.0),
-        _ => 0.0,
-    }
-}
-
-pub(crate) fn push_single_session_welcome_reveal_edge(
-    vertices: &mut Vec<Vertex>,
-    size: PhysicalSize<u32>,
-    hero_buffer: Option<&Buffer>,
-    reveal_progress: f32,
-) {
-    if !(0.01..0.995).contains(&reveal_progress) {
-        return;
-    }
-    let Some(hero_buffer) = hero_buffer else {
-        return;
-    };
-    let hero_width = single_session_buffer_visual_width(hero_buffer);
-    if hero_width <= 1.0 {
-        return;
-    }
-    let draft_top = single_session_draft_top(size);
-    let left = ((size.width as f32 - hero_width) * 0.5).max(PANEL_TITLE_LEFT_PADDING);
-    let font_size = welcome_hero_font_size("Hello there", size);
-    let top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.30;
-    let x = left + hero_width * reveal_progress;
-    let height = font_size * 1.16;
-    let width = (font_size * 0.20).clamp(12.0, 26.0);
-
-    push_gradient_rect(
-        vertices,
-        Rect {
-            x: x - width * 0.55,
-            y: top - font_size * 0.05,
-            width,
-            height,
-        },
-        transparent(WELCOME_AURORA_BLUE),
-        transparent(WELCOME_AURORA_MINT),
-        [0.980, 0.995, 1.000, 0.46],
-        [0.980, 0.995, 1.000, 0.42],
-        size,
-    );
 }
 
 fn visualize_composer_whitespace(text: &str) -> String {
