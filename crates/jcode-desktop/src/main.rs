@@ -1183,6 +1183,12 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Named(NamedKey::ArrowDown) if modifiers.alt_key() => KeyInput::JumpPrompt(1),
         Key::Named(NamedKey::ArrowUp) => KeyInput::ModelPickerMove(-1),
         Key::Named(NamedKey::ArrowDown) => KeyInput::ModelPickerMove(1),
+        Key::Named(NamedKey::ArrowLeft) if modifiers.control_key() || modifiers.alt_key() => {
+            KeyInput::MoveCursorWordLeft
+        }
+        Key::Named(NamedKey::ArrowRight) if modifiers.control_key() || modifiers.alt_key() => {
+            KeyInput::MoveCursorWordRight
+        }
         Key::Named(NamedKey::ArrowLeft) => KeyInput::MoveCursorLeft,
         Key::Named(NamedKey::ArrowRight) => KeyInput::MoveCursorRight,
         Key::Named(NamedKey::Home) => KeyInput::MoveToLineStart,

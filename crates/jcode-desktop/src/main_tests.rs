@@ -518,6 +518,26 @@ fn desktop_space_key_inserts_visible_prompt_space() {
 }
 
 #[test]
+fn desktop_arrow_word_navigation_maps_common_modifiers() {
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowLeft), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordLeft
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordRight
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowLeft), ModifiersState::ALT),
+        KeyInput::MoveCursorWordLeft
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::ALT),
+        KeyInput::MoveCursorWordRight
+    );
+}
+
+#[test]
 fn single_session_header_exposes_desktop_binary_and_version() {
     let app = SingleSessionApp::new(None);
     let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
