@@ -201,24 +201,19 @@ fn transparent(mut color: [f32; 4]) -> [f32; 4] {
 
 fn push_single_session_composer_card(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32>) {
     let draft_top = single_session_draft_top(size);
-    let x = PANEL_TITLE_LEFT_PADDING - 8.0;
-    let y = draft_top - SINGLE_SESSION_STATUS_GAP - 8.0;
-    let width = (size.width as f32 - x * 2.0).max(1.0);
-    let height = (size.height as f32 - y - PANEL_TITLE_TOP_PADDING).max(1.0);
-    let rect = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    push_rounded_rect(
+    let typography = single_session_typography();
+    let line_y = draft_top + typography.code_size * typography.code_line_height + 7.0;
+    push_rect(
         vertices,
-        rect,
-        PANEL_RADIUS,
-        COMPOSER_CARD_BACKGROUND_COLOR,
+        Rect {
+            x: PANEL_TITLE_LEFT_PADDING,
+            y: line_y,
+            width: (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0),
+            height: 1.5,
+        },
+        COMPOSER_LINE_COLOR,
         size,
     );
-    push_panel_outline(vertices, rect, 1.0, COMPOSER_CARD_BORDER_COLOR, size);
 }
 
 pub(crate) fn push_native_activity_spinner(

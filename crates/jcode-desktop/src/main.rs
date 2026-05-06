@@ -127,8 +127,9 @@ const WELCOME_AURORA_BLUE: [f32; 4] = [0.250, 0.520, 1.000, 0.145];
 const WELCOME_AURORA_VIOLET: [f32; 4] = [0.720, 0.360, 0.980, 0.125];
 const WELCOME_AURORA_MINT: [f32; 4] = [0.220, 0.840, 0.660, 0.115];
 const WELCOME_AURORA_WARM: [f32; 4] = [1.000, 0.620, 0.360, 0.075];
+const COMPOSER_LINE_COLOR: [f32; 4] = [0.060, 0.085, 0.145, 0.34];
+#[cfg(test)]
 const COMPOSER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.990, 0.995, 1.000, 0.52];
-const COMPOSER_CARD_BORDER_COLOR: [f32; 4] = [0.085, 0.110, 0.160, 0.24];
 const NATIVE_SPINNER_TRACK_COLOR: [f32; 4] = [0.105, 0.135, 0.190, 0.16];
 const NATIVE_SPINNER_HEAD_COLOR: [f32; 4] = [0.045, 0.185, 0.470, 0.96];
 const CODE_BLOCK_BACKGROUND_COLOR: [f32; 4] = [0.075, 0.095, 0.135, 0.075];
@@ -1602,7 +1603,9 @@ impl<'window> Canvas<'window> {
             self.single_session_text_buffers.clear();
         }
         let text_buffers = &self.single_session_text_buffers;
-        if let DesktopApp::SingleSession(single_session) = app {
+        if let DesktopApp::SingleSession(single_session) = app
+            && spinner_tick % 6 < 3
+        {
             push_single_session_caret(
                 &mut vertices,
                 single_session,

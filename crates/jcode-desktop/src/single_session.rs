@@ -14,9 +14,9 @@ pub(crate) const SINGLE_SESSION_FONT_FALLBACKS: &[&str] = &[
 ];
 pub(crate) const SINGLE_SESSION_DEFAULT_FONT_SIZE: f32 = 22.0;
 pub(crate) const SINGLE_SESSION_TITLE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
-pub(crate) const SINGLE_SESSION_BODY_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
+pub(crate) const SINGLE_SESSION_BODY_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0;
 pub(crate) const SINGLE_SESSION_META_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
-pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
+pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0;
 pub(crate) const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
 pub(crate) const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
 pub(crate) const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
@@ -574,7 +574,7 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn has_frame_animation(&self) -> bool {
-        self.is_empty_fresh_session()
+        true
     }
 
     fn current_session_id(&self) -> Option<&str> {

@@ -168,7 +168,7 @@ fn single_session_typography_targets_jetbrains_mono_light_nerd() {
     );
     assert_eq!(
         SINGLE_SESSION_BODY_FONT_SIZE,
-        SINGLE_SESSION_DEFAULT_FONT_SIZE
+        SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0
     );
     assert_eq!(
         SINGLE_SESSION_META_FONT_SIZE,
@@ -176,7 +176,7 @@ fn single_session_typography_targets_jetbrains_mono_light_nerd() {
     );
     assert_eq!(
         SINGLE_SESSION_CODE_FONT_SIZE,
-        SINGLE_SESSION_DEFAULT_FONT_SIZE
+        SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0
     );
     assert!(SINGLE_SESSION_BODY_LINE_HEIGHT > SINGLE_SESSION_CODE_LINE_HEIGHT);
     assert!(SINGLE_SESSION_CODE_LINE_HEIGHT > SINGLE_SESSION_META_LINE_HEIGHT);
@@ -201,15 +201,15 @@ fn single_session_vertices_include_a_draft_caret() {
 }
 
 #[test]
-fn single_session_vertices_include_composer_card() {
+fn single_session_vertices_include_composer_line() {
     let app = SingleSessionApp::new(None);
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
 
-    assert!(vertices_have_color(
+    assert!(vertices_have_color(&vertices, COMPOSER_LINE_COLOR));
+    assert!(!vertices_have_color(
         &vertices,
         COMPOSER_CARD_BACKGROUND_COLOR
     ));
-    assert!(vertices_have_color(&vertices, COMPOSER_CARD_BORDER_COLOR));
 }
 
 #[test]
