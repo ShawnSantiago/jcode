@@ -825,12 +825,14 @@ fn positions_for_color(vertices: &[Vertex], color: [f32; 4]) -> Vec<[u32; 2]> {
 }
 
 fn assert_visual_text_contains(key: &SingleSessionTextKey, expected: &str) {
-    let body = key
+    let body_lines = key
         .body
         .iter()
         .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+        .chain(std::iter::once(key.welcome_hero.as_str()))
+        .chain(key.welcome_hint.iter().map(|line| line.text.as_str()))
+        .collect::<Vec<_>>();
+    let body = body_lines.join("\n");
     assert!(
         body.contains(expected),
         "expected visual body to contain {expected:?}, got:\n{body}"
@@ -1576,19 +1578,15 @@ fn fresh_single_session_shows_animated_welcome_screen() {
     let first = single_session_text_key_for_tick(&app, PhysicalSize::new(900, 700), 0);
     let later = single_session_text_key_for_tick(&app, PhysicalSize::new(900, 700), 42);
 
-    let body = first
-        .body
-        .iter()
-        .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(
-        body.contains("Hello there") || body.contains("Welcome, "),
-        "expected generic or named welcome, got:\n{body}"
+        first.welcome_hero.contains("Hello there") || first.welcome_hero.contains("Welcome, "),
+        "expected generic or named welcome, got: {:?}",
+        first.welcome_hero
     );
+    assert!(first.body.is_empty());
     assert_visual_text_contains(&first, "Start with a prompt");
     assert_visual_text_contains(&first, "Ctrl+P opens recent sessions");
-    assert_ne!(first.body, later.body);
+    assert_ne!(first.welcome_hint, later.welcome_hint);
 }
 
 #[test]

@@ -5,6 +5,8 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) size: (u32, u32),
     pub(crate) title: String,
     pub(crate) version: String,
+    pub(crate) welcome_hero: String,
+    pub(crate) welcome_hint: Vec<SingleSessionStyledLine>,
     pub(crate) activity_active: bool,
     pub(crate) body: Vec<SingleSessionStyledLine>,
     pub(crate) draft: String,
@@ -628,6 +630,12 @@ pub(crate) fn single_session_text_key_for_tick(
     tick: u64,
 ) -> SingleSessionTextKey {
     let hide_startup_chrome = app.is_empty_fresh_session();
+    let body = single_session_visible_styled_body_for_tick(app, size, tick);
+    let (welcome_hero, welcome_hint, body) = if hide_startup_chrome {
+        split_welcome_hero_lines(body)
+    } else {
+        (String::new(), Vec::new(), body)
+    };
     SingleSessionTextKey {
         size: (size.width, size.height),
         title: if hide_startup_chrome {
@@ -640,11 +648,29 @@ pub(crate) fn single_session_text_key_for_tick(
         } else {
             desktop_header_version_label()
         },
+        welcome_hero,
+        welcome_hint,
         activity_active: app.has_activity_indicator(),
-        body: single_session_visible_styled_body_for_tick(app, size, tick),
+        body,
         draft: visualize_composer_whitespace(&app.composer_text()),
         status: app.composer_status_line_for_tick(tick),
     }
+}
+
+fn split_welcome_hero_lines(
+    lines: Vec<SingleSessionStyledLine>,
+) -> (
+    String,
+    Vec<SingleSessionStyledLine>,
+    Vec<SingleSessionStyledLine>,
+) {
+    let mut iter = lines.into_iter();
+    let hero = iter
+        .find(|line| !line.text.trim().is_empty())
+        .map(|line| line.text)
+        .unwrap_or_default();
+    let hint = iter.collect();
+    (hero, hint, Vec::new())
 }
 
 pub(crate) fn single_session_text_buffers_from_key(
@@ -658,6 +684,8 @@ pub(crate) fn single_session_text_buffers_from_key(
     let prompt_height =
         (size.height as f32 - single_session_draft_top(size) - SINGLE_SESSION_STATUS_GAP - 18.0)
             .max(typography.code_size * typography.code_line_height * 2.0);
+    let hero_font_size = welcome_hero_font_size(&key.welcome_hero, size);
+    let hero_width = welcome_hero_width(&key.welcome_hero, hero_font_size, size);
 
     vec![
         single_session_text_buffer(
@@ -700,7 +728,36 @@ pub(crate) fn single_session_text_buffers_from_key(
             content_width,
             24.0,
         ),
+        single_session_text_buffer(
+            font_system,
+            key.welcome_hero.trim(),
+            hero_font_size,
+            hero_font_size * 1.08,
+            hero_width,
+            hero_font_size * 1.20,
+        ),
+        single_session_styled_text_buffer(
+            font_system,
+            &key.welcome_hint,
+            typography.body_size,
+            typography.body_size * typography.body_line_height,
+            content_width,
+            96.0,
+        ),
     ]
+}
+
+fn welcome_hero_font_size(hero: &str, size: PhysicalSize<u32>) -> f32 {
+    let width = size.width as f32;
+    let height = size.height as f32;
+    let chars = hero.trim().chars().count().max(1) as f32;
+    let target_width = width * 0.50;
+    (target_width / (chars * 0.56)).clamp(42.0, height * 0.18)
+}
+
+fn welcome_hero_width(hero: &str, font_size: f32, size: PhysicalSize<u32>) -> f32 {
+    let estimated = hero.trim().chars().count().max(1) as f32 * font_size * 0.56;
+    estimated.min(size.width as f32 * 0.74).max(1.0)
 }
 
 pub(crate) fn single_session_visible_body(
@@ -947,7 +1004,7 @@ pub(crate) fn single_session_text_areas(
     buffers: &[Buffer],
     size: PhysicalSize<u32>,
 ) -> Vec<TextArea<'_>> {
-    if buffers.len() < 5 {
+    if buffers.len() < 7 {
         return Vec::new();
     }
 
@@ -956,6 +1013,11 @@ pub(crate) fn single_session_text_areas(
     let bottom = size.height.saturating_sub(PANEL_TITLE_TOP_PADDING as u32) as i32;
     let draft_top = single_session_draft_top(size);
     let version_left = (size.width as f32 * 0.42).max(left + 220.0);
+    let welcome_width = size.width as f32 * 0.50;
+    let welcome_left = ((size.width as f32 - welcome_width) * 0.5).max(left);
+    let welcome_font_size = welcome_hero_font_size("Hello there", size);
+    let welcome_top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.30;
+    let welcome_hint_top = welcome_top + welcome_font_size * 1.36;
 
     vec![
         TextArea {
@@ -1022,6 +1084,32 @@ pub(crate) fn single_session_text_areas(
                 bottom,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
+        },
+        TextArea {
+            buffer: &buffers[5],
+            left: welcome_left,
+            top: welcome_top,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right,
+                bottom: draft_top as i32,
+            },
+            default_color: text_color(ASSISTANT_HEADING_TEXT_COLOR),
+        },
+        TextArea {
+            buffer: &buffers[6],
+            left,
+            top: welcome_hint_top,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right,
+                bottom: draft_top as i32,
+            },
+            default_color: text_color(STATUS_TEXT_ACCENT_COLOR),
         },
     ]
 }
