@@ -482,7 +482,7 @@ fn single_session_header_only_uses_previous_message_title_for_static_preview() {
         .push(SingleSessionMessage::assistant("live answer"));
 
     assert!(!app.should_show_session_title_header());
-    assert_eq!(single_session_text_key(&app, size).title, "conversation");
+    assert_eq!(single_session_text_key(&app, size).title, "");
 }
 
 #[test]
@@ -554,6 +554,63 @@ fn desktop_arrow_word_navigation_maps_common_modifiers() {
         to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::ALT),
         KeyInput::MoveCursorWordRight
     );
+}
+
+#[test]
+fn desktop_maps_terminal_editing_shortcuts_from_tui() {
+    assert_eq!(
+        to_key_input(&Key::Character("b".into()), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordLeft
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("f".into()), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordRight
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("w".into()), ModifiersState::CONTROL),
+        KeyInput::DeletePreviousWord
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("x".into()), ModifiersState::CONTROL),
+        KeyInput::CutInputLine
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::Backspace), ModifiersState::ALT),
+        KeyInput::DeletePreviousWord
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowUp), ModifiersState::CONTROL),
+        KeyInput::RetrieveQueuedDraft
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("v".into()), ModifiersState::ALT),
+        KeyInput::AttachClipboardImage
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("d".into()), ModifiersState::CONTROL),
+        KeyInput::CancelGeneration
+    );
+}
+
+#[test]
+fn single_session_cut_and_retrieve_queued_draft_match_tui_shortcuts() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("cut me".to_string()));
+    assert_eq!(
+        app.handle_key(KeyInput::CutInputLine),
+        KeyOutcome::CutDraftToClipboard("cut me".to_string())
+    );
+    assert_eq!(app.composer_text(), "1› ");
+
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("queued".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+    assert_eq!(app.composer_text(), "1› ");
+    assert_eq!(
+        app.handle_key(KeyInput::RetrieveQueuedDraft),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(app.composer_text(), "1› queued");
 }
 
 #[test]
@@ -631,7 +688,7 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
     ));
 
     let markdown_key = single_session_text_key(&markdown_app, size);
-    assert_eq!(markdown_key.title, "active conversation");
+    assert_eq!(markdown_key.title, "");
     assert!(markdown_key.status.starts_with("receiving"));
     assert_visual_text_contains(&markdown_key, "# Heading");
     assert_visual_text_contains(&markdown_key, "▌ quoted");
@@ -655,7 +712,7 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
         KeyOutcome::LoadSessionSwitcher
     );
     let switcher_key = single_session_text_key(&switcher_app, size);
-    assert_eq!(switcher_key.title, "fresh session");
+    assert_eq!(switcher_key.title, "");
     assert!(switcher_key.status.starts_with("loading recent sessions"));
     assert_visual_text_contains(&switcher_key, "desktop session switcher");
     assert_visual_text_contains(

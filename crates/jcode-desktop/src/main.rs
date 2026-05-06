@@ -293,7 +293,7 @@ async fn run() -> Result<()> {
                             selecting_body = false;
                             let selected = app.selected_single_session_text(window.inner_size());
                             if let Some(text) = selected {
-                                copy_text_to_clipboard(&text, &mut app);
+                                copy_text_to_clipboard(&text, "copied selection", &mut app);
                             }
                             window.set_title(&app.status_title());
                             window.request_redraw();
@@ -429,7 +429,12 @@ async fn run() -> Result<()> {
                             window.request_redraw();
                         }
                         KeyOutcome::CopyLatestResponse(text) => {
-                            copy_text_to_clipboard(&text, &mut app);
+                            copy_text_to_clipboard(&text, "copied latest response", &mut app);
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        }
+                        KeyOutcome::CutDraftToClipboard(text) => {
+                            copy_text_to_clipboard(&text, "cut input line", &mut app);
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
@@ -1179,11 +1184,14 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Named(NamedKey::Enter) if modifiers.control_key() => KeyInput::QueueDraft,
         Key::Named(NamedKey::Enter) if modifiers.shift_key() => KeyInput::Enter,
         Key::Named(NamedKey::Enter) => KeyInput::SubmitDraft,
-        Key::Named(NamedKey::Backspace) if modifiers.control_key() => KeyInput::DeletePreviousWord,
+        Key::Named(NamedKey::Backspace) if modifiers.control_key() || modifiers.alt_key() => {
+            KeyInput::DeletePreviousWord
+        }
         Key::Named(NamedKey::Backspace) => KeyInput::Backspace,
         Key::Named(NamedKey::Delete) => KeyInput::DeleteNextChar,
         Key::Named(NamedKey::PageUp) => KeyInput::ScrollBodyPages(1),
         Key::Named(NamedKey::PageDown) => KeyInput::ScrollBodyPages(-1),
+        Key::Named(NamedKey::ArrowUp) if modifiers.control_key() => KeyInput::RetrieveQueuedDraft,
         Key::Named(NamedKey::ArrowUp) if modifiers.alt_key() => KeyInput::JumpPrompt(-1),
         Key::Named(NamedKey::ArrowDown) if modifiers.alt_key() => KeyInput::JumpPrompt(1),
         Key::Named(NamedKey::ArrowUp) => KeyInput::ModelPickerMove(-1),
@@ -1204,11 +1212,23 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("e") => {
             KeyInput::MoveToLineEnd
         }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("b") => {
+            KeyInput::MoveCursorWordLeft
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("f") => {
+            KeyInput::MoveCursorWordRight
+        }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("u") => {
             KeyInput::DeleteToLineStart
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("k") => {
             KeyInput::DeleteToLineEnd
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("w") => {
+            KeyInput::DeletePreviousWord
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("x") => {
+            KeyInput::CutInputLine
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("z") => {
             KeyInput::UndoInput
@@ -1220,7 +1240,10 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         {
             KeyInput::CopyLatestResponse
         }
-        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("c") => {
+        Key::Character(text)
+            if modifiers.control_key()
+                && (text.eq_ignore_ascii_case("c") || text.eq_ignore_ascii_case("d")) =>
+        {
             KeyInput::CancelGeneration
         }
         Key::Character(text) if modifiers.alt_key() && text.eq_ignore_ascii_case("b") => {
@@ -1231,6 +1254,9 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         }
         Key::Character(text) if modifiers.alt_key() && text.eq_ignore_ascii_case("d") => {
             KeyInput::DeleteNextWord
+        }
+        Key::Character(text) if modifiers.alt_key() && text.eq_ignore_ascii_case("v") => {
+            KeyInput::AttachClipboardImage
         }
         Key::Character(text) if modifiers.control_key() && text == ";" => KeyInput::SpawnPanel,
         Key::Character(text) if modifiers.control_key() && (text == "?" || text == "/") => {
@@ -1311,10 +1337,10 @@ fn apply_single_session_error(app: &mut DesktopApp, error: anyhow::Error) {
     )));
 }
 
-fn copy_text_to_clipboard(text: &str, app: &mut DesktopApp) {
+fn copy_text_to_clipboard(text: &str, success_notice: &'static str, app: &mut DesktopApp) {
     match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string())) {
         Ok(()) => app.apply_session_event(session_launch::DesktopSessionEvent::Status(
-            "copied latest response".to_string(),
+            success_notice.to_string(),
         )),
         Err(error) => app.apply_session_event(session_launch::DesktopSessionEvent::Error(format!(
             "failed to copy latest response: {error}"
