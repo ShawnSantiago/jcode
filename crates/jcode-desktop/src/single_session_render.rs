@@ -1,4 +1,12 @@
 use super::*;
+use lyon::{
+    math::point,
+    path::Path,
+    tessellation::{
+        BuffersBuilder, LineCap, LineJoin, StrokeOptions, StrokeTessellator, StrokeVertex,
+        VertexBuffers,
+    },
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SingleSessionTextKey {
@@ -126,31 +134,25 @@ pub(crate) fn push_handwritten_welcome_hero(
         bounds_min[1] - source_min[1] * scale,
     ];
     let thickness = (scale * 0.075).clamp(3.6, 8.5);
-    let mut remaining = total_length * reveal_progress.clamp(0.0, 1.0);
-    let mut lead = None;
+    let reveal_length = total_length * reveal_progress.clamp(0.0, 1.0);
+    let (visible_paths, lead) = revealed_handwriting_paths(&paths, reveal_length, origin, scale);
 
-    for path in &paths {
-        for pair in path.windows(2) {
-            let a = pair[0];
-            let b = pair[1];
-            let segment_length = distance(a, b);
-            if segment_length <= 0.001 {
-                continue;
-            }
-            if remaining <= 0.0 {
-                break;
-            }
-            let draw_fraction = (remaining / segment_length).clamp(0.0, 1.0);
-            let end = lerp_point(a, b, draw_fraction);
-            let pa = transform_handwriting_point(a, origin, scale);
-            let pb = transform_handwriting_point(end, origin, scale);
-            push_stroke_segment(vertices, pa, pb, thickness, WELCOME_HANDWRITING_COLOR, size);
-            lead = Some(pb);
-            remaining -= segment_length;
-            if draw_fraction < 1.0 {
-                break;
-            }
-        }
+    for path in &visible_paths {
+        push_lyon_stroked_path(
+            vertices,
+            path,
+            thickness + 3.0,
+            alpha_scaled(WELCOME_HANDWRITING_COLOR, 0.16),
+            size,
+        );
+        push_lyon_stroked_path(
+            vertices,
+            path,
+            thickness + 1.4,
+            alpha_scaled(WELCOME_HANDWRITING_COLOR, 0.28),
+            size,
+        );
+        push_lyon_stroked_path(vertices, path, thickness, WELCOME_HANDWRITING_COLOR, size);
     }
 
     if let Some(point) = lead
@@ -166,7 +168,53 @@ pub(crate) fn push_handwritten_welcome_hero(
     }
 }
 
-fn handwritten_welcome_bounds(size: PhysicalSize<u32>) -> ([f32; 2], [f32; 2]) {
+fn revealed_handwriting_paths(
+    paths: &[Vec<[f32; 2]>],
+    reveal_length: f32,
+    origin: [f32; 2],
+    scale: f32,
+) -> (Vec<Vec<[f32; 2]>>, Option<[f32; 2]>) {
+    let mut visible_paths = Vec::new();
+    let mut remaining = reveal_length;
+    let mut lead = None;
+
+    for path in paths {
+        if remaining <= 0.0 {
+            break;
+        }
+        let Some(first) = path.first().copied() else {
+            continue;
+        };
+        let mut visible = vec![transform_handwriting_point(first, origin, scale)];
+        for pair in path.windows(2) {
+            if remaining <= 0.0 {
+                break;
+            }
+            let a = pair[0];
+            let b = pair[1];
+            let segment_length = distance(a, b);
+            if segment_length <= 0.001 {
+                continue;
+            }
+            let draw_fraction = (remaining / segment_length).clamp(0.0, 1.0);
+            let end = lerp_point(a, b, draw_fraction);
+            let transformed = transform_handwriting_point(end, origin, scale);
+            visible.push(transformed);
+            lead = Some(transformed);
+            remaining -= segment_length;
+            if draw_fraction < 1.0 {
+                break;
+            }
+        }
+        if visible.len() >= 2 {
+            visible_paths.push(visible);
+        }
+    }
+
+    (visible_paths, lead)
+}
+
+pub(crate) fn handwritten_welcome_bounds(size: PhysicalSize<u32>) -> ([f32; 2], [f32; 2]) {
     let paths = handwritten_welcome_paths();
     let (source_min, source_max) = stroke_paths_bounds(&paths);
     let source_width = (source_max[0] - source_min[0]).max(1.0);
@@ -456,56 +504,56 @@ fn transform_handwriting_point(point: [f32; 2], origin: [f32; 2], scale: f32) ->
     [origin[0] + point[0] * scale, origin[1] + point[1] * scale]
 }
 
-fn push_stroke_segment(
+fn push_lyon_stroked_path(
     vertices: &mut Vec<Vertex>,
-    a: [f32; 2],
-    b: [f32; 2],
-    thickness: f32,
+    points: &[[f32; 2]],
+    line_width: f32,
     color: [f32; 4],
     size: PhysicalSize<u32>,
 ) {
-    let soft_color = alpha_scaled(color, 0.16);
-    push_stroke_segment_quad(vertices, a, b, thickness + 3.0, soft_color, size);
-    push_stroke_dot(vertices, b, thickness * 0.78, soft_color, size);
-
-    let feather_color = alpha_scaled(color, 0.28);
-    push_stroke_segment_quad(vertices, a, b, thickness + 1.4, feather_color, size);
-    push_stroke_dot(vertices, b, thickness * 0.64, feather_color, size);
-
-    push_stroke_segment_quad(vertices, a, b, thickness, color, size);
-    push_stroke_dot(vertices, b, thickness * 0.52, color, size);
-}
-
-fn push_stroke_segment_quad(
-    vertices: &mut Vec<Vertex>,
-    a: [f32; 2],
-    b: [f32; 2],
-    thickness: f32,
-    color: [f32; 4],
-    size: PhysicalSize<u32>,
-) {
-    let length = distance(a, b);
-    if length <= 0.01 {
+    if points.len() < 2 || line_width <= 0.0 || color[3] <= 0.0 {
         return;
     }
-    let nx = -(b[1] - a[1]) / length * thickness * 0.5;
-    let ny = (b[0] - a[0]) / length * thickness * 0.5;
-    push_pixel_triangle(
-        vertices,
-        [a[0] + nx, a[1] + ny],
-        [a[0] - nx, a[1] - ny],
-        [b[0] - nx, b[1] - ny],
-        color,
-        size,
-    );
-    push_pixel_triangle(
-        vertices,
-        [a[0] + nx, a[1] + ny],
-        [b[0] - nx, b[1] - ny],
-        [b[0] + nx, b[1] + ny],
-        color,
-        size,
-    );
+
+    let mut builder = Path::builder();
+    builder.begin(point(points[0][0], points[0][1]));
+    for path_point in points.iter().skip(1) {
+        builder.line_to(point(path_point[0], path_point[1]));
+    }
+    builder.end(false);
+    let path = builder.build();
+
+    let options = StrokeOptions::default()
+        .with_line_width(line_width)
+        .with_start_cap(LineCap::Round)
+        .with_end_cap(LineCap::Round)
+        .with_line_join(LineJoin::Round)
+        .with_tolerance(0.04);
+    let mut buffers: VertexBuffers<[f32; 2], u16> = VertexBuffers::new();
+    if StrokeTessellator::new()
+        .tessellate_path(
+            &path,
+            &options,
+            &mut BuffersBuilder::new(&mut buffers, |vertex: StrokeVertex| {
+                let position = vertex.position();
+                [position.x, position.y]
+            }),
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    for triangle in buffers.indices.chunks_exact(3) {
+        push_pixel_triangle(
+            vertices,
+            buffers.vertices[triangle[0] as usize],
+            buffers.vertices[triangle[1] as usize],
+            buffers.vertices[triangle[2] as usize],
+            color,
+            size,
+        );
+    }
 }
 
 fn push_stroke_dot(
@@ -1140,13 +1188,11 @@ pub(crate) fn single_session_draft_top_for_fresh_state(
 pub(crate) fn fresh_welcome_draft_top(size: PhysicalSize<u32>) -> f32 {
     let hero_bottom = handwritten_welcome_bounds(size).1[1];
     let typography = single_session_typography();
-    let min_gap = typography.code_size * 0.80;
-    let line_height = typography.code_size * typography.code_line_height;
-    let target_line_y = hero_bottom + min_gap + line_height;
-    let draft_top = target_line_y - line_height - 7.0;
+    let clearance = (typography.code_size * 1.85).max(46.0);
+    let draft_top = hero_bottom + clearance;
     draft_top
         .min(single_session_draft_top(size))
-        .max(hero_bottom + 10.0)
+        .max(hero_bottom + clearance)
 }
 
 #[cfg(test)]

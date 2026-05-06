@@ -12,6 +12,7 @@ bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
+lyon = "1"
 pollster = "0.3"
 pulldown-cmark = "0.12"
 serde_json = "1"

@@ -1685,8 +1685,10 @@ fn fresh_welcome_input_line_sits_under_hero_while_drafting() {
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
     let areas = single_session_text_areas_for_app(&app, &buffers, size);
     let draft_top = fresh_welcome_draft_top(size);
+    let hero_bottom = handwritten_welcome_bounds(size).1[1];
 
     assert!(draft_top < single_session_draft_top(size) - 120.0);
+    assert!(draft_top - hero_bottom >= 46.0);
     assert_eq!(areas.last().expect("draft text area").top, draft_top);
 
     app.handle_key(KeyInput::Character("hello".to_string()));
