@@ -140,26 +140,33 @@ fn push_soft_disc(
     color: [f32; 4],
     size: PhysicalSize<u32>,
 ) {
-    for layer in (1..=5).rev() {
-        let scale = layer as f32 / 5.0;
-        let mut layer_color = color;
-        layer_color[3] *= (1.0 - scale * 0.82).max(0.035);
-        push_disc(vertices, center, radius * scale, layer_color, 56, size);
-    }
+    let mut core = color;
+    core[3] *= 0.58;
+    push_radial_gradient_disc(vertices, center, radius * 0.54, core, color, 72, size);
+    push_radial_gradient_disc(
+        vertices,
+        center,
+        radius,
+        color,
+        transparent(color),
+        96,
+        size,
+    );
 }
 
-fn push_disc(
+fn push_radial_gradient_disc(
     vertices: &mut Vec<Vertex>,
     center: [f32; 2],
     radius: f32,
-    color: [f32; 4],
+    center_color: [f32; 4],
+    edge_color: [f32; 4],
     segments: usize,
     size: PhysicalSize<u32>,
 ) {
     for segment in 0..segments {
         let start = segment as f32 / segments as f32 * std::f32::consts::TAU;
         let end = (segment + 1) as f32 / segments as f32 * std::f32::consts::TAU;
-        push_pixel_triangle(
+        push_gradient_triangle(
             vertices,
             center,
             [
@@ -170,10 +177,43 @@ fn push_disc(
                 center[0] + radius * end.cos(),
                 center[1] + radius * end.sin(),
             ],
-            color,
+            center_color,
+            edge_color,
+            edge_color,
             size,
         );
     }
+}
+
+fn push_gradient_triangle(
+    vertices: &mut Vec<Vertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+    a_color: [f32; 4],
+    b_color: [f32; 4],
+    c_color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    vertices.extend_from_slice(&[
+        Vertex {
+            position: pixel_to_ndc(a, size),
+            color: a_color,
+        },
+        Vertex {
+            position: pixel_to_ndc(b, size),
+            color: b_color,
+        },
+        Vertex {
+            position: pixel_to_ndc(c, size),
+            color: c_color,
+        },
+    ]);
+}
+
+fn transparent(mut color: [f32; 4]) -> [f32; 4] {
+    color[3] = 0.0;
+    color
 }
 
 fn push_orbit_ring(
