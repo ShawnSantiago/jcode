@@ -70,6 +70,7 @@ pub(crate) struct SingleSessionApp {
     pub(crate) session_switcher: SessionSwitcherState,
     pub(crate) stdin_response: Option<StdinResponseState>,
     welcome_name: Option<String>,
+    welcome_started_at: std::time::Instant,
     queued_drafts: Vec<(String, Vec<(String, String)>)>,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
@@ -488,6 +489,7 @@ impl SingleSessionApp {
             session_switcher: SessionSwitcherState::default(),
             stdin_response: None,
             welcome_name: desktop_welcome_name(),
+            welcome_started_at: std::time::Instant::now(),
             queued_drafts: Vec::new(),
             selection_anchor: None,
             selection_focus: None,
@@ -522,6 +524,7 @@ impl SingleSessionApp {
         self.session_switcher = SessionSwitcherState::default();
         self.stdin_response = None;
         self.welcome_name = desktop_welcome_name();
+        self.welcome_started_at = std::time::Instant::now();
         self.queued_drafts.clear();
         self.clear_selection();
         self.input_undo_stack.clear();
@@ -569,6 +572,15 @@ impl SingleSessionApp {
 
     pub(crate) fn has_frame_animation(&self) -> bool {
         true
+    }
+
+    pub(crate) fn welcome_reveal_progress(&self) -> f32 {
+        if !self.is_empty_fresh_session() {
+            return 1.0;
+        }
+        let elapsed = self.welcome_started_at.elapsed().as_secs_f32();
+        let linear = ((elapsed - 0.18) / 1.65).clamp(0.0, 1.0);
+        linear * linear * (3.0 - 2.0 * linear)
     }
 
     fn current_session_id(&self) -> Option<&str> {

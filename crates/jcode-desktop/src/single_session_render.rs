@@ -1081,9 +1081,18 @@ fn single_session_line_rgba(style: SingleSessionLineStyle) -> [f32; 4] {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn single_session_text_areas(
     buffers: &[Buffer],
     size: PhysicalSize<u32>,
+) -> Vec<TextArea<'_>> {
+    single_session_text_areas_with_welcome_reveal(buffers, size, 1.0)
+}
+
+pub(crate) fn single_session_text_areas_with_welcome_reveal(
+    buffers: &[Buffer],
+    size: PhysicalSize<u32>,
+    welcome_reveal_progress: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 6 {
         return Vec::new();
@@ -1096,6 +1105,10 @@ pub(crate) fn single_session_text_areas(
     let version_left = (size.width as f32 * 0.42).max(left + 220.0);
     let welcome_width = single_session_buffer_visual_width(&buffers[5]).max(1.0);
     let welcome_left = ((size.width as f32 - welcome_width) * 0.5).max(left);
+    let welcome_reveal_right =
+        welcome_reveal_right(welcome_left, welcome_width, welcome_reveal_progress)
+            .min(size.width as f32)
+            .max(welcome_left);
     let welcome_top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.30;
 
     vec![
@@ -1172,12 +1185,20 @@ pub(crate) fn single_session_text_areas(
             bounds: TextBounds {
                 left: 0,
                 top: 0,
-                right,
+                right: welcome_reveal_right.round() as i32,
                 bottom: draft_top as i32,
             },
             default_color: text_color(ASSISTANT_HEADING_TEXT_COLOR),
         },
     ]
+}
+
+fn welcome_reveal_right(left: f32, width: f32, progress: f32) -> f32 {
+    if progress >= 0.995 {
+        left + width + 8.0
+    } else {
+        left + width * progress.clamp(0.0, 1.0) + 10.0
+    }
 }
 
 pub(crate) fn single_session_buffer_visual_width(buffer: &Buffer) -> f32 {
@@ -1193,6 +1214,46 @@ pub(crate) fn single_session_buffer_visual_width(buffer: &Buffer) -> f32 {
         (Some(min_x), Some(max_x)) => (max_x - min_x).max(0.0),
         _ => 0.0,
     }
+}
+
+pub(crate) fn push_single_session_welcome_reveal_edge(
+    vertices: &mut Vec<Vertex>,
+    size: PhysicalSize<u32>,
+    hero_buffer: Option<&Buffer>,
+    reveal_progress: f32,
+) {
+    if !(0.01..0.995).contains(&reveal_progress) {
+        return;
+    }
+    let Some(hero_buffer) = hero_buffer else {
+        return;
+    };
+    let hero_width = single_session_buffer_visual_width(hero_buffer);
+    if hero_width <= 1.0 {
+        return;
+    }
+    let draft_top = single_session_draft_top(size);
+    let left = ((size.width as f32 - hero_width) * 0.5).max(PANEL_TITLE_LEFT_PADDING);
+    let font_size = welcome_hero_font_size("Hello there", size);
+    let top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.30;
+    let x = left + hero_width * reveal_progress;
+    let height = font_size * 1.16;
+    let width = (font_size * 0.20).clamp(12.0, 26.0);
+
+    push_gradient_rect(
+        vertices,
+        Rect {
+            x: x - width * 0.55,
+            y: top - font_size * 0.05,
+            width,
+            height,
+        },
+        transparent(WELCOME_AURORA_BLUE),
+        transparent(WELCOME_AURORA_MINT),
+        [0.980, 0.995, 1.000, 0.46],
+        [0.980, 0.995, 1.000, 0.42],
+        size,
+    );
 }
 
 fn visualize_composer_whitespace(text: &str) -> String {

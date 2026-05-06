@@ -1639,6 +1639,18 @@ impl<'window> Canvas<'window> {
                 text_buffers.get(2),
             );
         }
+        let welcome_reveal_progress = match app {
+            DesktopApp::SingleSession(single_session) => single_session.welcome_reveal_progress(),
+            DesktopApp::Workspace(_) => 1.0,
+        };
+        if let DesktopApp::SingleSession(_) = app {
+            push_single_session_welcome_reveal_edge(
+                &mut vertices,
+                self.size,
+                text_buffers.get(5),
+                welcome_reveal_progress,
+            );
+        }
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1646,7 +1658,11 @@ impl<'window> Canvas<'window> {
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        let text_areas = single_session_text_areas(&text_buffers, self.size);
+        let text_areas = single_session_text_areas_with_welcome_reveal(
+            &text_buffers,
+            self.size,
+            welcome_reveal_progress,
+        );
         if !text_areas.is_empty() {
             if let Err(error) = self.text_renderer.prepare(
                 &self.device,

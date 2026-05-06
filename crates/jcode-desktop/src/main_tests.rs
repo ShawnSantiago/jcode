@@ -670,6 +670,22 @@ fn fresh_welcome_hero_is_centered_from_shaped_glyph_width() {
 }
 
 #[test]
+fn fresh_welcome_hero_reveal_clips_from_centered_final_position() {
+    let app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(1000, 720);
+    let mut font_system = FontSystem::new();
+    let buffers = single_session_text_buffers(&app, size, &mut font_system);
+    let hidden = single_session_text_areas_with_welcome_reveal(&buffers, size, 0.0);
+    let half = single_session_text_areas_with_welcome_reveal(&buffers, size, 0.5);
+    let full = single_session_text_areas_with_welcome_reveal(&buffers, size, 1.0);
+
+    assert_eq!(hidden[5].left, full[5].left);
+    assert_eq!(half[5].left, full[5].left);
+    assert!(hidden[5].bounds.right < half[5].bounds.right);
+    assert!(half[5].bounds.right < full[5].bounds.right);
+}
+
+#[test]
 fn single_session_status_text_stays_clean_while_native_spinner_animates() {
     let mut app = SingleSessionApp::new(None);
     app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
