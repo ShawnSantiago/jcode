@@ -1241,6 +1241,49 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/rename" || trimmed.starts_with("/rename ") {
+        let title = trimmed.strip_prefix("/rename").unwrap_or_default().trim();
+        if title.is_empty() {
+            app.push_display_message(DisplayMessage::error(
+                "Usage: `/rename <session name>` or `/rename --clear`".to_string(),
+            ));
+            return true;
+        }
+
+        if title == "--clear" {
+            app.session.rename_title(None);
+            if let Err(e) = app.session.save() {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to clear session name: {}",
+                    e
+                )));
+                return true;
+            }
+            let name = app.session.display_name().to_string();
+            app.push_display_message(DisplayMessage::system(format!(
+                "Cleared custom name for session **{}**.",
+                name,
+            )));
+            app.set_status_notice("Session name cleared");
+            return true;
+        }
+
+        app.session.rename_title(Some(title.to_string()));
+        if let Err(e) = app.session.save() {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to rename session: {}",
+                e
+            )));
+            return true;
+        }
+        app.push_display_message(DisplayMessage::system(format!(
+            "Renamed session to **{}**.",
+            title,
+        )));
+        app.set_status_notice("Session renamed");
+        return true;
+    }
+
     if trimmed == "/memory status" {
         let default_enabled = crate::config::config().features.memory;
         app.push_display_message(DisplayMessage::system(format!(

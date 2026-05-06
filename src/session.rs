@@ -753,6 +753,18 @@ impl Session {
         self.save_label = None;
     }
 
+    /// Set or clear the human-readable session title.
+    ///
+    /// This intentionally does not change the immutable session id, memorable
+    /// short name, provider session id, or saved/bookmark label.
+    pub fn rename_title(&mut self, title: Option<String>) {
+        self.title = title.and_then(|title| {
+            let title = title.trim();
+            (!title.is_empty()).then(|| title.to_string())
+        });
+        self.updated_at = Utc::now();
+    }
+
     /// Record an environment snapshot for post-mortem debugging
     pub fn record_env_snapshot(&mut self, snapshot: EnvSnapshot) {
         self.memory_profile_cache.env_snapshots_count += 1;
