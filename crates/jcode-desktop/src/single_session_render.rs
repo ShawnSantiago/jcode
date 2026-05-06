@@ -641,6 +641,10 @@ fn push_single_session_composer_card(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
 ) {
+    if app.is_fresh_welcome_visible() {
+        return;
+    }
+
     let draft_top = single_session_draft_top_for_app(app, size);
     let typography = single_session_typography();
     let line_y = draft_top + typography.code_size * typography.code_line_height + 7.0;
@@ -1186,7 +1190,7 @@ pub(crate) fn single_session_text_key_for_tick(
             app.header_title()
         },
         version: if hide_startup_chrome {
-            String::new()
+            fresh_welcome_version_label()
         } else {
             desktop_header_version_label()
         },
@@ -1195,7 +1199,11 @@ pub(crate) fn single_session_text_key_for_tick(
         activity_active: app.has_activity_indicator(),
         body,
         draft: visualize_composer_whitespace(&app.composer_text()),
-        status: app.composer_status_line_for_tick(tick),
+        status: if hide_startup_chrome {
+            String::new()
+        } else {
+            app.composer_status_line_for_tick(tick)
+        },
     }
 }
 
@@ -1226,6 +1234,11 @@ pub(crate) fn single_session_text_buffers_from_key(
     let prompt_height = (size.height as f32 - draft_top - SINGLE_SESSION_STATUS_GAP - 18.0)
         .max(typography.code_size * typography.code_line_height * 2.0);
     let hero_font_size = welcome_hero_font_size(&key.welcome_hero, size);
+    let version_font_size = if key.fresh_welcome_visible {
+        fresh_welcome_version_font_size()
+    } else {
+        typography.meta_size
+    };
 
     vec![
         single_session_text_buffer(
@@ -1263,8 +1276,8 @@ pub(crate) fn single_session_text_buffers_from_key(
         single_session_text_buffer(
             font_system,
             &key.version,
-            typography.meta_size,
-            typography.meta_size * typography.meta_line_height,
+            version_font_size,
+            version_font_size * typography.meta_line_height,
             content_width,
             24.0,
         ),
@@ -1579,9 +1592,30 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
     let right = size.width.saturating_sub(PANEL_TITLE_LEFT_PADDING as u32) as i32;
     let bottom = size.height.saturating_sub(PANEL_TITLE_TOP_PADDING as u32) as i32;
     let draft_top = single_session_draft_top_for_fresh_state(size, fresh_welcome_visible);
-    let version_left = (size.width as f32 * 0.42).max(left + 220.0);
+    let version_label = fresh_welcome_version_label();
+    let version_font_size = fresh_welcome_version_font_size();
+    let version_left = if fresh_welcome_visible {
+        fresh_welcome_version_left(&version_label, size, version_font_size)
+    } else {
+        (size.width as f32 * 0.42).max(left + 220.0)
+    };
+    let version_top = if fresh_welcome_visible {
+        fresh_welcome_version_top(size)
+    } else {
+        PANEL_TITLE_TOP_PADDING + 3.0
+    };
+    let version_bounds_top = if fresh_welcome_visible {
+        version_top as i32
+    } else {
+        0
+    };
+    let version_bounds_bottom = if fresh_welcome_visible {
+        (version_top + version_font_size * 1.4) as i32
+    } else {
+        64
+    };
 
-    vec![
+    let mut areas = vec![
         TextArea {
             buffer: &buffers[0],
             left,
@@ -1598,13 +1632,13 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
         TextArea {
             buffer: &buffers[4],
             left: version_left,
-            top: PANEL_TITLE_TOP_PADDING + 3.0,
+            top: version_top,
             scale: 1.0,
             bounds: TextBounds {
                 left: 0,
-                top: 0,
+                top: version_bounds_top,
                 right,
-                bottom: 64,
+                bottom: version_bounds_bottom,
             },
             default_color: text_color(META_TEXT_COLOR),
         },
@@ -1621,7 +1655,10 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
             },
             default_color: text_color(ASSISTANT_TEXT_COLOR),
         },
-        TextArea {
+    ];
+
+    if !fresh_welcome_visible {
+        areas.push(TextArea {
             buffer: &buffers[3],
             left,
             top: draft_top - SINGLE_SESSION_STATUS_GAP,
@@ -1633,21 +1670,24 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
                 bottom: draft_top as i32,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
+        });
+    }
+
+    areas.push(TextArea {
+        buffer: &buffers[2],
+        left,
+        top: draft_top,
+        scale: 1.0,
+        bounds: TextBounds {
+            left: 0,
+            top: draft_top as i32,
+            right,
+            bottom,
         },
-        TextArea {
-            buffer: &buffers[2],
-            left,
-            top: draft_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: draft_top as i32,
-                right,
-                bottom,
-            },
-            default_color: text_color(PANEL_SECTION_COLOR),
-        },
-    ]
+        default_color: text_color(PANEL_SECTION_COLOR),
+    });
+
+    areas
 }
 
 fn visualize_composer_whitespace(text: &str) -> String {
@@ -1661,6 +1701,26 @@ pub(crate) fn desktop_header_version_label() -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "unknown binary".to_string());
     format!("{binary} · {version}")
+}
+
+pub(crate) fn fresh_welcome_version_label() -> String {
+    let version = option_env!("JCODE_PRODUCT_VERSION")
+        .or(option_env!("JCODE_DESKTOP_VERSION"))
+        .unwrap_or(env!("CARGO_PKG_VERSION"));
+    format!("jcode {version}")
+}
+
+fn fresh_welcome_version_font_size() -> f32 {
+    (single_session_typography().meta_size * 0.58).clamp(11.0, 14.0)
+}
+
+fn fresh_welcome_version_top(size: PhysicalSize<u32>) -> f32 {
+    handwritten_welcome_bounds(size).1[1] + 12.0
+}
+
+fn fresh_welcome_version_left(label: &str, size: PhysicalSize<u32>, font_size: f32) -> f32 {
+    let estimated_width = label.chars().count() as f32 * font_size * 0.58;
+    ((size.width as f32 - estimated_width) * 0.5).max(PANEL_TITLE_LEFT_PADDING)
 }
 
 pub(crate) fn text_color(color: [f32; 4]) -> TextColor {

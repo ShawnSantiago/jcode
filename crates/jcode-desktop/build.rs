@@ -5,6 +5,9 @@ fn main() {
     let git_hash = git_output(["rev-parse", "--short", "HEAD"])
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
+    let product_version = git_output(["describe", "--tags", "--always"])
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("v{pkg_version}"));
     let dirty = git_output([
         "status",
         "--porcelain",
@@ -22,6 +25,7 @@ fn main() {
     };
 
     println!("cargo:rustc-env=JCODE_DESKTOP_VERSION={version}");
+    println!("cargo:rustc-env=JCODE_PRODUCT_VERSION={product_version}");
     println!("cargo:rustc-env=JCODE_DESKTOP_GIT_HASH={git_hash}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");

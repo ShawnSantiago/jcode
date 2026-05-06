@@ -202,10 +202,17 @@ fn single_session_vertices_include_a_draft_caret() {
 
 #[test]
 fn single_session_vertices_include_composer_line() {
-    let app = SingleSessionApp::new(None);
+    let fresh_app = SingleSessionApp::new(None);
+    let fresh_vertices =
+        build_single_session_vertices(&fresh_app, PhysicalSize::new(900, 700), 0.0, 0);
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+        session_id: "composer_line".to_string(),
+    });
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
 
     assert!(vertices_have_color(&vertices, COMPOSER_LINE_COLOR));
+    assert!(!vertices_have_color(&fresh_vertices, COMPOSER_LINE_COLOR));
     assert!(!vertices_have_color(
         &vertices,
         COMPOSER_CARD_BACKGROUND_COLOR
@@ -636,7 +643,7 @@ fn fresh_single_session_startup_hides_top_left_chrome() {
     let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
 
     assert_eq!(key.title, "");
-    assert_eq!(key.version, "");
+    assert!(key.version.starts_with("jcode "));
     assert_visual_text_contains(&key, "Hello there");
     assert!(key.welcome_hint.is_empty());
 }
@@ -1690,6 +1697,11 @@ fn fresh_welcome_input_line_sits_under_hero_while_drafting() {
     assert!(draft_top < single_session_draft_top(size) - 120.0);
     assert!(draft_top - hero_bottom >= 46.0);
     assert_eq!(areas.last().expect("draft text area").top, draft_top);
+    assert_eq!(
+        areas.len(),
+        4,
+        "fresh welcome should omit status/helper text area"
+    );
 
     app.handle_key(KeyInput::Character("hello".to_string()));
     let key = single_session_text_key(&app, size);
