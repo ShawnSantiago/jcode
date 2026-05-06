@@ -1684,6 +1684,136 @@ fn mouse_scroll_delta_maps_to_body_scroll_lines() {
 }
 
 #[test]
+fn pixel_scroll_deltas_accumulate_fractional_lines() {
+    let mut accumulator = ScrollLineAccumulator::default();
+    let now = Instant::now();
+    let half_line = body_scroll_line_pixels() as f64 * 0.5;
+
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, half_line)),
+            now,
+        ),
+        None
+    );
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, half_line)),
+            now + Duration::from_millis(16),
+        ),
+        Some(1)
+    );
+}
+
+#[test]
+fn pixel_scroll_reversal_and_idle_reset_drop_stale_fraction() {
+    let mut accumulator = ScrollLineAccumulator::default();
+    let now = Instant::now();
+    let three_quarters = body_scroll_line_pixels() as f64 * 0.75;
+    let half_line = body_scroll_line_pixels() as f64 * 0.5;
+
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, three_quarters)),
+            now,
+        ),
+        None
+    );
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, -half_line)),
+            now + Duration::from_millis(16),
+        ),
+        None
+    );
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, -half_line)),
+            now + Duration::from_millis(32),
+        ),
+        Some(-1)
+    );
+
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, three_quarters)),
+            now + Duration::from_millis(48),
+        ),
+        None
+    );
+    assert_eq!(
+        accumulator.scroll_lines(
+            MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, three_quarters)),
+            now + SCROLL_GESTURE_IDLE_RESET + Duration::from_millis(80),
+        ),
+        None
+    );
+}
+
+#[test]
+fn mouse_scroll_clamps_to_available_single_session_history() {
+    let mut app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(900, 360);
+    for index in 0..48 {
+        app.messages
+            .push(SingleSessionMessage::assistant(format!("message {index}")));
+    }
+    let mut desktop = DesktopApp::SingleSession(app);
+
+    assert!(desktop.scroll_single_session_body(10_000, size));
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    let max_scroll = single_session_body_scroll_metrics(app, size, 0)
+        .expect("scroll metrics")
+        .max_scroll_lines;
+    assert_eq!(app.body_scroll_lines, max_scroll);
+
+    assert!(desktop.scroll_single_session_body(-1, size));
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    assert_eq!(app.body_scroll_lines, max_scroll - 1);
+}
+
+#[test]
+fn smooth_scroll_viewport_keeps_fractional_line_offset() {
+    let mut app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(900, 360);
+    for index in 0..48 {
+        app.messages
+            .push(SingleSessionMessage::assistant(format!("message {index}")));
+    }
+
+    let normal = single_session_body_viewport_for_tick(&app, size, 0, 0.0);
+    let smooth = single_session_body_viewport_for_tick(&app, size, 0, 0.5);
+
+    assert!(smooth.top_offset_pixels < 0.0);
+    assert_eq!(smooth.lines.len(), normal.lines.len() + 1);
+    assert_eq!(&smooth.lines[1..], normal.lines.as_slice());
+}
+
+#[test]
+fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
+    let mut app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(900, 360);
+    for index in 0..48 {
+        app.messages
+            .push(SingleSessionMessage::assistant(format!("message {index}")));
+    }
+    let mut font_system = FontSystem::new();
+    let key = single_session_text_key_for_tick_with_scroll(&app, size, 0, 0.5);
+    let buffers = single_session_text_buffers_from_key(&key, size, &mut font_system);
+    let normal_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.0);
+    let smooth_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.5);
+
+    assert_eq!(normal_areas[0].top, PANEL_TITLE_TOP_PADDING);
+    assert_eq!(smooth_areas[0].top, PANEL_TITLE_TOP_PADDING);
+    assert_eq!(normal_areas[2].top, PANEL_BODY_TOP_PADDING);
+    assert!(smooth_areas[2].top < normal_areas[2].top);
+}
+
+#[test]
 fn long_single_session_transcript_exposes_scrollbar_metrics() {
     let mut app = SingleSessionApp::new(None);
     let size = PhysicalSize::new(900, 360);

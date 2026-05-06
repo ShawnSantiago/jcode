@@ -25,7 +25,7 @@ use single_session_render::*;
 use wgpu::util::DeviceExt;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
@@ -74,6 +74,10 @@ const SESSION_SPAWN_REFRESH_DELAY: Duration = Duration::from_millis(350);
 const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const HEADLESS_CHAT_SMOKE_TIMEOUT: Duration = Duration::from_secs(90);
 const DESKTOP_SPINNER_FRAME_MS: u128 = 180;
+const MOUSE_WHEEL_LINES_PER_DETENT: f32 = 3.0;
+const MAX_MOUSE_SCROLL_LINES_PER_EVENT: f32 = 24.0;
+const SCROLL_GESTURE_IDLE_RESET: Duration = Duration::from_millis(180);
+const SCROLL_FRACTIONAL_EPSILON: f32 = 0.000_1;
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -226,6 +230,7 @@ async fn run() -> Result<()> {
     let mut modifiers = ModifiersState::empty();
     let mut cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
     let mut selecting_body = false;
+    let mut scroll_accumulator = ScrollLineAccumulator::default();
     let mut hot_reloader = DesktopHotReloader::new();
     let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
     let (session_event_tx, session_event_rx) = mpsc::channel();
@@ -255,9 +260,24 @@ async fn run() -> Result<()> {
                 WindowEvent::ModifiersChanged(new_modifiers) => {
                     modifiers = new_modifiers.state();
                 }
-                WindowEvent::MouseWheel { delta, .. } => {
-                    if let Some(lines) = mouse_scroll_lines(delta) {
-                        app.scroll_single_session_body(lines);
+                WindowEvent::MouseWheel { delta, phase, .. } => {
+                    let size = window.inner_size();
+                    let previous_smooth_scroll =
+                        app.single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    let mut should_redraw = false;
+                    if !app.is_single_session() {
+                        scroll_accumulator.reset();
+                    } else if let Some(lines) = scroll_accumulator.scroll_lines(delta, Instant::now()) {
+                        should_redraw |= app.scroll_single_session_body(lines, size);
+                    }
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        scroll_accumulator.reset();
+                    }
+                    let next_smooth_scroll =
+                        app.single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    should_redraw |= (next_smooth_scroll - previous_smooth_scroll).abs()
+                        >= SCROLL_FRACTIONAL_EPSILON;
+                    if should_redraw {
                         window.request_redraw();
                     }
                 }
@@ -308,6 +328,15 @@ async fn run() -> Result<()> {
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
+                    let size = window.inner_size();
+                    let had_smooth_scroll = app
+                        .single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size)
+                        .abs()
+                        >= SCROLL_FRACTIONAL_EPSILON;
+                    scroll_accumulator.reset();
+                    if had_smooth_scroll {
+                        window.request_redraw();
+                    }
                     let key_input = to_key_input(&event.logical_key, modifiers);
                     if key_input == KeyInput::RefreshSessions && app.is_workspace() {
                         if let DesktopApp::Workspace(workspace) = &mut app {
@@ -546,9 +575,14 @@ async fn run() -> Result<()> {
                         KeyOutcome::None => {}
                     }
                 }
-                WindowEvent::RedrawRequested => match canvas
-                    .render(&app, window.current_monitor().map(|monitor| monitor.size()))
-                {
+                WindowEvent::RedrawRequested => match canvas.render(
+                    &app,
+                    window.current_monitor().map(|monitor| monitor.size()),
+                    app.single_session_smooth_scroll_lines(
+                        scroll_accumulator.pending_lines(),
+                        window.inner_size(),
+                    ),
+                ) {
                     Ok(animation_active) => {
                         if animation_active {
                             window.request_redraw();
@@ -1182,10 +1216,33 @@ impl DesktopApp {
         None
     }
 
-    fn scroll_single_session_body(&mut self, lines: i32) {
+    fn scroll_single_session_body(&mut self, lines: i32, size: PhysicalSize<u32>) -> bool {
         if let Self::SingleSession(app) = self {
+            let previous_scroll_lines = app.body_scroll_lines;
             app.scroll_body_lines(lines);
+            if let Some(metrics) = single_session_body_scroll_metrics(app, size, 0) {
+                app.body_scroll_lines = app.body_scroll_lines.min(metrics.max_scroll_lines);
+            } else {
+                app.body_scroll_lines = 0;
+            }
+            return app.body_scroll_lines != previous_scroll_lines;
         }
+        false
+    }
+
+    fn single_session_smooth_scroll_lines(
+        &self,
+        pending_lines: f32,
+        size: PhysicalSize<u32>,
+    ) -> f32 {
+        let Self::SingleSession(app) = self else {
+            return 0.0;
+        };
+        let Some(metrics) = single_session_body_scroll_metrics(app, size, 0) else {
+            return 0.0;
+        };
+        let base_scroll = app.body_scroll_lines.min(metrics.max_scroll_lines) as f32;
+        (base_scroll + pending_lines).clamp(0.0, metrics.max_scroll_lines as f32) - base_scroll
     }
 
     fn single_session_live_id(&self) -> Option<String> {
@@ -1437,12 +1494,77 @@ fn clipboard_text() -> Result<String> {
         .context("clipboard does not contain text")
 }
 
+#[derive(Clone, Debug, Default)]
+struct ScrollLineAccumulator {
+    pending_lines: f32,
+    last_event_at: Option<Instant>,
+}
+
+impl ScrollLineAccumulator {
+    fn scroll_lines(&mut self, delta: MouseScrollDelta, now: Instant) -> Option<i32> {
+        if self
+            .last_event_at
+            .is_some_and(|last| now.saturating_duration_since(last) > SCROLL_GESTURE_IDLE_RESET)
+        {
+            self.pending_lines = 0.0;
+        }
+        self.last_event_at = Some(now);
+        self.accumulate(mouse_scroll_delta_lines(delta))
+    }
+
+    fn reset(&mut self) {
+        self.pending_lines = 0.0;
+        self.last_event_at = None;
+    }
+
+    fn pending_lines(&self) -> f32 {
+        self.pending_lines
+    }
+
+    fn accumulate(&mut self, lines: f32) -> Option<i32> {
+        if !lines.is_finite() || lines.abs() < SCROLL_FRACTIONAL_EPSILON {
+            return None;
+        }
+
+        let lines = lines.clamp(
+            -MAX_MOUSE_SCROLL_LINES_PER_EVENT,
+            MAX_MOUSE_SCROLL_LINES_PER_EVENT,
+        );
+        if self.pending_lines.abs() >= SCROLL_FRACTIONAL_EPSILON
+            && self.pending_lines.signum() != lines.signum()
+        {
+            self.pending_lines = 0.0;
+        }
+
+        self.pending_lines += lines;
+        if self.pending_lines.abs() < 1.0 {
+            return None;
+        }
+
+        let whole_lines = self.pending_lines.trunc() as i32;
+        self.pending_lines -= whole_lines as f32;
+        if self.pending_lines.abs() < SCROLL_FRACTIONAL_EPSILON {
+            self.pending_lines = 0.0;
+        }
+        (whole_lines != 0).then_some(whole_lines)
+    }
+}
+
+#[cfg(test)]
 fn mouse_scroll_lines(delta: MouseScrollDelta) -> Option<i32> {
-    let lines = match delta {
-        MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
-        MouseScrollDelta::PixelDelta(position) => (position.y / 40.0).round() as i32,
-    };
-    (lines != 0).then_some(lines)
+    ScrollLineAccumulator::default().scroll_lines(delta, Instant::now())
+}
+
+fn mouse_scroll_delta_lines(delta: MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => y * MOUSE_WHEEL_LINES_PER_DETENT,
+        MouseScrollDelta::PixelDelta(position) => position.y as f32 / body_scroll_line_pixels(),
+    }
+}
+
+fn body_scroll_line_pixels() -> f32 {
+    let typography = single_session_typography();
+    typography.body_size * typography.body_line_height
 }
 
 fn desktop_spinner_tick(_now: Instant) -> u64 {
@@ -1611,8 +1733,18 @@ impl<'window> Canvas<'window> {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn refresh_cached_single_session_text_buffers(&mut self, app: &SingleSessionApp, now: Instant) {
-        let key = single_session_text_key_for_tick(app, self.size, desktop_spinner_tick(now));
+    fn refresh_cached_single_session_text_buffers(
+        &mut self,
+        app: &SingleSessionApp,
+        now: Instant,
+        smooth_scroll_lines: f32,
+    ) {
+        let key = single_session_text_key_for_tick_with_scroll(
+            app,
+            self.size,
+            desktop_spinner_tick(now),
+            smooth_scroll_lines,
+        );
         if self.single_session_text_key.as_ref() != Some(&key) {
             self.single_session_text_buffers =
                 single_session_text_buffers_from_key(&key, self.size, &mut self.font_system);
@@ -1624,6 +1756,7 @@ impl<'window> Canvas<'window> {
         &mut self,
         app: &DesktopApp,
         monitor_size: Option<PhysicalSize<u32>>,
+        smooth_scroll_lines: f32,
     ) -> std::result::Result<bool, SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -1642,11 +1775,12 @@ impl<'window> Canvas<'window> {
                 let animation_active =
                     self.focus_pulse.is_animating() || single_session.has_background_work();
                 (
-                    build_single_session_vertices(
+                    build_single_session_vertices_with_scroll(
                         single_session,
                         self.size,
                         focus_pulse,
                         spinner_tick,
+                        smooth_scroll_lines,
                     ),
                     animation_active,
                 )
@@ -1664,7 +1798,11 @@ impl<'window> Canvas<'window> {
             }
         };
         if let DesktopApp::SingleSession(single_session) = app {
-            self.refresh_cached_single_session_text_buffers(single_session, now);
+            self.refresh_cached_single_session_text_buffers(
+                single_session,
+                now,
+                smooth_scroll_lines,
+            );
         } else {
             self.single_session_text_key = None;
             self.single_session_text_buffers.clear();
@@ -1688,7 +1826,13 @@ impl<'window> Canvas<'window> {
                 usage: wgpu::BufferUsages::VERTEX,
             });
         let text_areas = if let DesktopApp::SingleSession(single_session) = app {
-            single_session_text_areas_for_app(single_session, text_buffers, self.size)
+            single_session_text_areas_for_app_with_scroll(
+                single_session,
+                text_buffers,
+                self.size,
+                spinner_tick,
+                smooth_scroll_lines,
+            )
         } else {
             single_session_text_areas(text_buffers, self.size)
         };

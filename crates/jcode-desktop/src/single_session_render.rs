@@ -15,11 +15,22 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) status: String,
 }
 
+#[cfg(test)]
 pub(crate) fn build_single_session_vertices(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     focus_pulse: f32,
     spinner_tick: u64,
+) -> Vec<Vertex> {
+    build_single_session_vertices_with_scroll(app, size, focus_pulse, spinner_tick, 0.0)
+}
+
+pub(crate) fn build_single_session_vertices_with_scroll(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    focus_pulse: f32,
+    spinner_tick: u64,
+    smooth_scroll_lines: f32,
 ) -> Vec<Vertex> {
     let width = size.width as f32;
     let height = size.height as f32;
@@ -67,10 +78,22 @@ pub(crate) fn build_single_session_vertices(
     if app.has_activity_indicator() {
         push_native_activity_spinner(&mut vertices, size, spinner_tick);
     }
-    push_single_session_transcript_cards(&mut vertices, app, size);
-    push_single_session_streaming_shimmer(&mut vertices, app, size, spinner_tick);
+    push_single_session_transcript_cards(
+        &mut vertices,
+        app,
+        size,
+        spinner_tick,
+        smooth_scroll_lines,
+    );
+    push_single_session_streaming_shimmer(
+        &mut vertices,
+        app,
+        size,
+        spinner_tick,
+        smooth_scroll_lines,
+    );
     push_single_session_selection(&mut vertices, app, size);
-    push_single_session_scrollbar(&mut vertices, app, size, spinner_tick);
+    push_single_session_scrollbar(&mut vertices, app, size, spinner_tick, smooth_scroll_lines);
 
     vertices
 }
@@ -751,29 +774,30 @@ fn push_single_session_transcript_cards(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
+    tick: u64,
+    smooth_scroll_lines: f32,
 ) {
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
-    let visible_lines = single_session_visible_styled_body(app, size);
+    let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
     let width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0 + 12.0).max(1.0);
     let body_top = single_session_body_top_for_app(app, size);
+    let body_bottom = single_session_body_bottom_for_app(app, size);
 
-    for run in single_session_transcript_card_runs(&visible_lines) {
+    for run in single_session_transcript_card_runs(&viewport.lines) {
         let Some(color) = single_session_line_card_color(run.style) else {
             continue;
         };
-        push_rounded_rect(
-            vertices,
-            Rect {
-                x: PANEL_TITLE_LEFT_PADDING - 6.0,
-                y: body_top + run.line as f32 * line_height + 3.0,
-                width,
-                height: (run.line_count as f32 * line_height - 6.0).max(1.0),
-            },
-            7.0,
-            color,
-            size,
-        );
+        let rect = Rect {
+            x: PANEL_TITLE_LEFT_PADDING - 6.0,
+            y: body_top + viewport.top_offset_pixels + run.line as f32 * line_height + 3.0,
+            width,
+            height: (run.line_count as f32 * line_height - 6.0).max(1.0),
+        };
+        let Some(rect) = clip_rect_to_vertical_bounds(rect, body_top, body_bottom) else {
+            continue;
+        };
+        push_rounded_rect(vertices, rect, 7.0, color, size);
     }
 }
 
@@ -782,8 +806,11 @@ pub(crate) fn push_single_session_streaming_shimmer(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     tick: u64,
+    smooth_scroll_lines: f32,
 ) {
-    let Some(shimmer) = single_session_streaming_shimmer(app, size, tick) else {
+    let Some(shimmer) =
+        single_session_streaming_shimmer_with_scroll(app, size, tick, smooth_scroll_lines)
+    else {
         return;
     };
 
@@ -807,22 +834,32 @@ pub(crate) struct SingleSessionStreamingShimmer {
     pub(crate) core_rect: Rect,
 }
 
+#[cfg(test)]
 pub(crate) fn single_session_streaming_shimmer(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Option<SingleSessionStreamingShimmer> {
+    single_session_streaming_shimmer_with_scroll(app, size, tick, 0.0)
+}
+
+fn single_session_streaming_shimmer_with_scroll(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    smooth_scroll_lines: f32,
+) -> Option<SingleSessionStreamingShimmer> {
     if app.streaming_response.trim().is_empty() {
         return None;
     }
 
-    let visible_lines = single_session_visible_styled_body(app, size);
-    let line_index = visible_lines.iter().rposition(is_shimmer_anchor_line)?;
+    let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
+    let line_index = viewport.lines.iter().rposition(is_shimmer_anchor_line)?;
 
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
-    let text_columns = visible_lines[line_index].text.chars().count().max(8) as f32;
+    let text_columns = viewport.lines[line_index].text.chars().count().max(8) as f32;
     let text_width = (text_columns * single_session_body_char_width())
         .min((size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0));
     let lane_width = (text_width + 56.0).max(120.0);
@@ -830,7 +867,10 @@ pub(crate) fn single_session_streaming_shimmer(
     let phase = (tick % 48) as f32 / 48.0;
     let travel = lane_width + shimmer_width;
     let head_x = PANEL_TITLE_LEFT_PADDING - shimmer_width + phase * travel;
-    let y = body_top + line_index as f32 * line_height + line_height * 0.12;
+    let y = body_top
+        + viewport.top_offset_pixels
+        + line_index as f32 * line_height
+        + line_height * 0.12;
     let height = line_height * 0.76;
 
     let soft_rect = Rect {
@@ -856,6 +896,7 @@ fn push_single_session_scrollbar(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     tick: u64,
+    smooth_scroll_lines: f32,
 ) {
     let Some(metrics) = single_session_body_scroll_metrics(app, size, tick) else {
         return;
@@ -867,7 +908,9 @@ fn push_single_session_scrollbar(
     let thumb_height = (metrics.visible_lines as f32 / metrics.total_lines as f32 * track_height)
         .clamp(28.0, track_height);
     let travel = (track_height - thumb_height).max(0.0);
-    let scroll_fraction = metrics.scroll_lines as f32 / metrics.max_scroll_lines.max(1) as f32;
+    let smooth_scroll_lines = (metrics.scroll_lines as f32 + smooth_scroll_lines)
+        .clamp(0.0, metrics.max_scroll_lines as f32);
+    let scroll_fraction = smooth_scroll_lines / metrics.max_scroll_lines.max(1) as f32;
     let thumb_y = track_top + (1.0 - scroll_fraction.clamp(0.0, 1.0)) * travel;
 
     push_rounded_rect(
@@ -1198,10 +1241,20 @@ pub(crate) fn single_session_text_key(
     single_session_text_key_for_tick(app, size, 0)
 }
 
+#[cfg(test)]
 pub(crate) fn single_session_text_key_for_tick(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     tick: u64,
+) -> SingleSessionTextKey {
+    single_session_text_key_for_tick_with_scroll(app, size, tick, 0.0)
+}
+
+pub(crate) fn single_session_text_key_for_tick_with_scroll(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    smooth_scroll_lines: f32,
 ) -> SingleSessionTextKey {
     let fresh_welcome_visible = app.is_fresh_welcome_visible();
     let welcome_handoff_visible = app.is_welcome_handoff_visible();
@@ -1209,7 +1262,7 @@ pub(crate) fn single_session_text_key_for_tick(
     let welcome_input_visible = !welcome_chrome_visible
         || !app.draft.is_empty()
         || app.welcome_input_reveal_progress() >= 0.5;
-    let body = single_session_visible_styled_body_for_tick(app, size, tick);
+    let body = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines).lines;
     let (welcome_hero, welcome_hint, body) = if fresh_welcome_visible {
         split_welcome_hero_lines(body)
     } else {
@@ -1365,18 +1418,25 @@ pub(crate) fn single_session_visible_styled_body_for_tick(
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Vec<SingleSessionStyledLine> {
+    single_session_body_viewport_for_tick(app, size, tick, 0.0).lines
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SingleSessionBodyViewport {
+    pub(crate) lines: Vec<SingleSessionStyledLine>,
+    pub(crate) top_offset_pixels: f32,
+}
+
+pub(crate) fn single_session_body_viewport_for_tick(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    smooth_scroll_lines: f32,
+) -> SingleSessionBodyViewport {
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
-    let body_top = if app.is_welcome_handoff_visible() {
-        fresh_welcome_draft_top(size)
-    } else {
-        PANEL_BODY_TOP_PADDING
-    };
-    let body_bottom = if app.is_welcome_handoff_visible() {
-        size.height as f32 - PANEL_TITLE_TOP_PADDING
-    } else {
-        single_session_body_bottom(size)
-    };
+    let body_top = single_session_body_top_for_app(app, size);
+    let body_bottom = single_session_body_bottom_for_app(app, size);
     let available_height = (body_bottom - body_top).max(line_height);
     let visible_lines = ((available_height / line_height).floor() as usize).max(1);
     let mut lines = app.body_styled_lines_for_tick(tick);
@@ -1384,14 +1444,23 @@ pub(crate) fn single_session_visible_styled_body_for_tick(
         lines = center_fresh_startup_lines(lines, size, visible_lines);
     }
     if lines.len() <= visible_lines {
-        return lines;
+        return SingleSessionBodyViewport {
+            lines,
+            top_offset_pixels: 0.0,
+        };
     }
 
     let max_scroll = lines.len().saturating_sub(visible_lines);
-    let scroll = app.body_scroll_lines.min(max_scroll);
-    let end = lines.len().saturating_sub(scroll);
-    let start = end.saturating_sub(visible_lines);
-    lines[start..end].to_vec()
+    let scroll = (app.body_scroll_lines as f32 + smooth_scroll_lines).clamp(0.0, max_scroll as f32);
+    let bottom_line = lines.len() as f32 - scroll;
+    let top_line = bottom_line - visible_lines as f32;
+    let start = top_line.floor().max(0.0) as usize;
+    let end = bottom_line.ceil().min(lines.len() as f32) as usize;
+    let top_offset_pixels = (start as f32 - top_line) * line_height;
+    SingleSessionBodyViewport {
+        lines: lines[start..end.max(start)].to_vec(),
+        top_offset_pixels,
+    }
 }
 
 fn center_fresh_startup_lines(
@@ -1469,8 +1538,26 @@ fn single_session_body_top_for_app(app: &SingleSessionApp, size: PhysicalSize<u3
     }
 }
 
+fn single_session_body_bottom_for_app(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
+    if app.is_welcome_handoff_visible() {
+        size.height as f32 - PANEL_TITLE_TOP_PADDING
+    } else {
+        single_session_body_bottom(size)
+    }
+}
+
 pub(crate) fn single_session_body_bottom(size: PhysicalSize<u32>) -> f32 {
     single_session_draft_top(size) - SINGLE_SESSION_STATUS_GAP - 12.0
+}
+
+fn clip_rect_to_vertical_bounds(rect: Rect, top: f32, bottom: f32) -> Option<Rect> {
+    let clipped_y = rect.y.max(top);
+    let clipped_bottom = (rect.y + rect.height).min(bottom);
+    (clipped_bottom > clipped_y).then_some(Rect {
+        y: clipped_y,
+        height: clipped_bottom - clipped_y,
+        ..rect
+    })
 }
 
 fn single_session_text_buffer(
@@ -1631,16 +1718,31 @@ pub(crate) fn single_session_text_areas(
     single_session_text_areas_for_fresh_state(buffers, size, false)
 }
 
+#[cfg(test)]
 pub(crate) fn single_session_text_areas_for_app<'a>(
     app: &SingleSessionApp,
     buffers: &'a [Buffer],
     size: PhysicalSize<u32>,
 ) -> Vec<TextArea<'a>> {
+    single_session_text_areas_for_app_with_scroll(app, buffers, size, 0, 0.0)
+}
+
+pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
+    app: &SingleSessionApp,
+    buffers: &'a [Buffer],
+    size: PhysicalSize<u32>,
+    tick: u64,
+    smooth_scroll_lines: f32,
+) -> Vec<TextArea<'a>> {
+    let body_top_offset_pixels =
+        single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines)
+            .top_offset_pixels;
     single_session_text_areas_for_state(
         buffers,
         size,
         app.is_welcome_chrome_visible(),
         app.is_welcome_handoff_visible(),
+        body_top_offset_pixels,
     )
 }
 
@@ -1649,7 +1751,7 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
     size: PhysicalSize<u32>,
     fresh_welcome_visible: bool,
 ) -> Vec<TextArea<'_>> {
-    single_session_text_areas_for_state(buffers, size, fresh_welcome_visible, false)
+    single_session_text_areas_for_state(buffers, size, fresh_welcome_visible, false, 0.0)
 }
 
 pub(crate) fn single_session_text_areas_for_state(
@@ -1657,6 +1759,7 @@ pub(crate) fn single_session_text_areas_for_state(
     size: PhysicalSize<u32>,
     welcome_chrome_visible: bool,
     welcome_handoff_visible: bool,
+    body_top_offset_pixels: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
         return Vec::new();
@@ -1729,7 +1832,7 @@ pub(crate) fn single_session_text_areas_for_state(
         TextArea {
             buffer: &buffers[1],
             left,
-            top: body_top,
+            top: body_top + body_top_offset_pixels,
             scale: 1.0,
             bounds: TextBounds {
                 left: 0,
