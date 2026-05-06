@@ -685,7 +685,6 @@ pub(crate) fn single_session_text_buffers_from_key(
         (size.height as f32 - single_session_draft_top(size) - SINGLE_SESSION_STATUS_GAP - 18.0)
             .max(typography.code_size * typography.code_line_height * 2.0);
     let hero_font_size = welcome_hero_font_size(&key.welcome_hero, size);
-    let hero_width = welcome_hero_width(&key.welcome_hero, hero_font_size, size);
 
     vec![
         single_session_text_buffer(
@@ -728,13 +727,13 @@ pub(crate) fn single_session_text_buffers_from_key(
             content_width,
             24.0,
         ),
-        single_session_text_buffer(
+        single_session_nowrap_text_buffer(
             font_system,
             key.welcome_hero.trim(),
             hero_font_size,
             hero_font_size * 1.08,
-            hero_width,
-            hero_font_size * 1.20,
+            size.width as f32 * 0.86,
+            hero_font_size * 1.25,
         ),
         single_session_styled_text_buffer(
             font_system,
@@ -753,11 +752,6 @@ fn welcome_hero_font_size(hero: &str, size: PhysicalSize<u32>) -> f32 {
     let chars = hero.trim().chars().count().max(1) as f32;
     let target_width = width * 0.50;
     (target_width / (chars * 0.56)).clamp(42.0, height * 0.18)
-}
-
-fn welcome_hero_width(hero: &str, font_size: f32, size: PhysicalSize<u32>) -> f32 {
-    let estimated = hero.trim().chars().count().max(1) as f32 * font_size * 0.56;
-    estimated.min(size.width as f32 * 0.74).max(1.0)
 }
 
 pub(crate) fn single_session_visible_body(
@@ -891,6 +885,27 @@ fn single_session_text_buffer(
     buffer
 }
 
+fn single_session_nowrap_text_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size: f32,
+    line_height: f32,
+    width: f32,
+    height: f32,
+) -> Buffer {
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    buffer.set_size(font_system, width, height);
+    buffer.set_wrap(font_system, Wrap::None);
+    buffer.set_text(
+        font_system,
+        text,
+        Attrs::new().family(Family::Name(SINGLE_SESSION_FONT_FAMILY)),
+        Shaping::Basic,
+    );
+    buffer.shape_until_scroll(font_system);
+    buffer
+}
+
 fn single_session_styled_text_buffer(
     font_system: &mut FontSystem,
     lines: &[SingleSessionStyledLine],
@@ -1013,7 +1028,7 @@ pub(crate) fn single_session_text_areas(
     let bottom = size.height.saturating_sub(PANEL_TITLE_TOP_PADDING as u32) as i32;
     let draft_top = single_session_draft_top(size);
     let version_left = (size.width as f32 * 0.42).max(left + 220.0);
-    let welcome_width = size.width as f32 * 0.50;
+    let welcome_width = size.width as f32 * 0.86;
     let welcome_left = ((size.width as f32 - welcome_width) * 0.5).max(left);
     let welcome_font_size = welcome_hero_font_size("Hello there", size);
     let welcome_top = PANEL_BODY_TOP_PADDING + (draft_top - PANEL_BODY_TOP_PADDING) * 0.30;
