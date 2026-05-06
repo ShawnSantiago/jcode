@@ -349,7 +349,7 @@ fn single_session_composer_uses_next_prompt_number_and_status_footer() {
 
     assert_eq!(app.next_prompt_number(), 2);
     assert_eq!(app.composer_text(), "2› ");
-    assert!(app.composer_status_line().contains("Ctrl+C interrupt"));
+    assert!(app.composer_status_line().contains("Esc interrupt"));
 }
 
 #[test]
@@ -917,7 +917,20 @@ fn single_session_hotkey_help_toggles_discoverable_shortcuts() {
 
     assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
     assert!(!app.show_help);
+    assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::None);
     assert!(app.body_lines().join("\n").contains("1  question"));
+}
+
+#[test]
+fn single_session_escape_soft_interrupts_running_generation() {
+    let mut app = SingleSessionApp::new(None);
+    assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::None);
+
+    app.is_processing = true;
+    assert_eq!(
+        app.handle_key(KeyInput::Escape),
+        KeyOutcome::CancelGeneration
+    );
 }
 
 fn help_has_shortcut(lines: &[String], shortcut: &str, description: &str) -> bool {

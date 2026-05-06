@@ -531,7 +531,7 @@ impl SingleSessionApp {
     pub(crate) fn status_title(&self) -> String {
         let title = self.title();
         format!(
-            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+; spawn · Esc quit · --workspace for Niri layout"
+            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+; spawn · Esc interrupt · --workspace for Niri layout"
         )
     }
 
@@ -613,7 +613,7 @@ impl SingleSessionApp {
         let _ = tick;
         let status = self.status.as_deref().unwrap_or("ready");
         let mode = if self.is_processing {
-            "Ctrl+C interrupt"
+            "Esc interrupt"
         } else {
             "Enter send · Shift+Enter newline · Ctrl+Enter queue/send"
         };
@@ -731,7 +731,13 @@ impl SingleSessionApp {
                 self.show_help = false;
                 KeyOutcome::Redraw
             }
-            KeyInput::Escape => KeyOutcome::Exit,
+            KeyInput::Escape => {
+                if self.is_processing {
+                    KeyOutcome::CancelGeneration
+                } else {
+                    KeyOutcome::None
+                }
+            }
             KeyInput::Enter => {
                 self.insert_draft_text("\n");
                 KeyOutcome::Redraw
