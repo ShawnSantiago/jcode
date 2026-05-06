@@ -1206,8 +1206,9 @@ pub(crate) fn single_session_text_key_for_tick(
     let fresh_welcome_visible = app.is_fresh_welcome_visible();
     let welcome_handoff_visible = app.is_welcome_handoff_visible();
     let welcome_chrome_visible = fresh_welcome_visible || welcome_handoff_visible;
-    let welcome_input_visible =
-        !welcome_chrome_visible || app.welcome_input_reveal_progress() >= 0.5;
+    let welcome_input_visible = !welcome_chrome_visible
+        || !app.draft.is_empty()
+        || app.welcome_input_reveal_progress() >= 0.5;
     let body = single_session_visible_styled_body_for_tick(app, size, tick);
     let (welcome_hero, welcome_hint, body) = if fresh_welcome_visible {
         split_welcome_hero_lines(body)
