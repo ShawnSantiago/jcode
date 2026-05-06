@@ -65,6 +65,7 @@ pub(crate) fn build_single_session_vertices(
     push_single_session_transcript_cards(&mut vertices, app, size);
     push_single_session_streaming_shimmer(&mut vertices, app, size, spinner_tick);
     push_single_session_selection(&mut vertices, app, size);
+    push_single_session_scrollbar(&mut vertices, app, size, spinner_tick);
 
     vertices
 }
@@ -392,6 +393,82 @@ pub(crate) fn single_session_streaming_shimmer(
     Some(SingleSessionStreamingShimmer {
         soft_rect,
         core_rect,
+    })
+}
+
+fn push_single_session_scrollbar(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+) {
+    let Some(metrics) = single_session_body_scroll_metrics(app, size, tick) else {
+        return;
+    };
+    let track_top = PANEL_BODY_TOP_PADDING + 4.0;
+    let track_bottom = single_session_body_bottom(size) - 4.0;
+    let track_height = (track_bottom - track_top).max(1.0);
+    let x = size.width as f32 - PANEL_TITLE_LEFT_PADDING - 4.0;
+    let thumb_height = (metrics.visible_lines as f32 / metrics.total_lines as f32 * track_height)
+        .clamp(28.0, track_height);
+    let travel = (track_height - thumb_height).max(0.0);
+    let scroll_fraction = metrics.scroll_lines as f32 / metrics.max_scroll_lines.max(1) as f32;
+    let thumb_y = track_top + (1.0 - scroll_fraction.clamp(0.0, 1.0)) * travel;
+
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x,
+            y: track_top,
+            width: 3.0,
+            height: track_height,
+        },
+        2.0,
+        [0.040, 0.055, 0.090, 0.075],
+        size,
+    );
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x: x - 0.5,
+            y: thumb_y,
+            width: 4.0,
+            height: thumb_height,
+        },
+        2.0,
+        [0.035, 0.065, 0.145, 0.34],
+        size,
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SingleSessionBodyScrollMetrics {
+    pub(crate) total_lines: usize,
+    pub(crate) visible_lines: usize,
+    pub(crate) scroll_lines: usize,
+    pub(crate) max_scroll_lines: usize,
+}
+
+pub(crate) fn single_session_body_scroll_metrics(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+) -> Option<SingleSessionBodyScrollMetrics> {
+    if app.is_empty_fresh_session() {
+        return None;
+    }
+    let typography = single_session_typography();
+    let line_height = typography.body_size * typography.body_line_height;
+    let available_height =
+        (single_session_body_bottom(size) - PANEL_BODY_TOP_PADDING).max(line_height);
+    let visible_lines = ((available_height / line_height).floor() as usize).max(1);
+    let total_lines = app.body_styled_lines_for_tick(tick).len();
+    let max_scroll_lines = total_lines.saturating_sub(visible_lines);
+    (max_scroll_lines > 0).then_some(SingleSessionBodyScrollMetrics {
+        total_lines,
+        visible_lines,
+        scroll_lines: app.body_scroll_lines.min(max_scroll_lines),
+        max_scroll_lines,
     })
 }
 
@@ -779,7 +856,7 @@ pub(crate) fn single_session_visible_styled_body_for_tick(
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
     let available_height =
-        (single_session_draft_top(size) - PANEL_BODY_TOP_PADDING - 12.0).max(line_height);
+        (single_session_body_bottom(size) - PANEL_BODY_TOP_PADDING).max(line_height);
     let visible_lines = ((available_height / line_height).floor() as usize).max(1);
     let mut lines = app.body_styled_lines_for_tick(tick);
     if app.is_empty_fresh_session() {
@@ -829,8 +906,7 @@ fn fresh_startup_indent(size: PhysicalSize<u32>) -> String {
 pub(crate) fn single_session_body_line_at_y(size: PhysicalSize<u32>, y: f32) -> Option<usize> {
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
-    let draft_top = single_session_draft_top(size);
-    if y < PANEL_BODY_TOP_PADDING || y >= draft_top - 12.0 {
+    if y < PANEL_BODY_TOP_PADDING || y >= single_session_body_bottom(size) {
         return None;
     }
     Some(((y - PANEL_BODY_TOP_PADDING) / line_height).floor() as usize)
@@ -862,6 +938,10 @@ pub(crate) fn single_session_body_column_at_x(x: f32, line: &str) -> usize {
 pub(crate) fn single_session_body_char_width() -> f32 {
     let typography = single_session_typography();
     typography.body_size * 0.58
+}
+
+pub(crate) fn single_session_body_bottom(size: PhysicalSize<u32>) -> f32 {
+    single_session_draft_top(size) - SINGLE_SESSION_STATUS_GAP - 12.0
 }
 
 fn single_session_text_buffer(
@@ -1070,7 +1150,7 @@ pub(crate) fn single_session_text_areas(
                 left: 0,
                 top: 0,
                 right,
-                bottom: draft_top as i32 - 12,
+                bottom: single_session_body_bottom(size) as i32,
             },
             default_color: text_color(ASSISTANT_TEXT_COLOR),
         },

@@ -1538,6 +1538,27 @@ fn mouse_scroll_delta_maps_to_body_scroll_lines() {
 }
 
 #[test]
+fn long_single_session_transcript_exposes_scrollbar_metrics() {
+    let mut app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(900, 360);
+    for index in 0..48 {
+        app.messages
+            .push(SingleSessionMessage::assistant(format!("message {index}")));
+    }
+
+    let metrics = single_session_body_scroll_metrics(&app, size, 0).expect("scroll metrics");
+    assert!(metrics.total_lines > metrics.visible_lines);
+    assert!(metrics.max_scroll_lines > 0);
+
+    let vertices = build_single_session_vertices(&app, size, 0.0, 0);
+    assert!(
+        vertices
+            .iter()
+            .any(|vertex| vertex.color == [0.035, 0.065, 0.145, 0.34])
+    );
+}
+
+#[test]
 fn glyphon_caret_position_uses_shaped_draft_buffer() {
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("hello".to_string()));
