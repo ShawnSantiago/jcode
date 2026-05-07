@@ -192,6 +192,70 @@ fn test_model_picker_bedrock_arn_selection_prefixes_model() {
 }
 
 #[test]
+fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let model =
+        "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0";
+    app.remote_available_entries = vec![model.to_string()];
+    app.remote_model_options.clear();
+
+    let routes = app.build_remote_model_routes_fallback();
+
+    assert!(routes.iter().any(|route| {
+        route.model == model && route.api_method == "bedrock" && route.provider == "AWS Bedrock"
+    }));
+    assert!(!routes
+        .iter()
+        .any(|route| route.model == model && route.api_method == "openrouter"));
+}
+
+#[test]
+fn test_model_picker_ctrl_d_bedrock_selection_saves_bedrock_default() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["amazon.nova-pro-v1:0".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "amazon.nova-pro-v1:0".to_string(),
+            provider: "AWS Bedrock".to_string(),
+            api_method: "bedrock".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
+        let model_idx = picker
+            .entries
+            .iter()
+            .position(|m| m.name == "amazon.nova-pro-v1:0")
+            .expect("Bedrock model should be in picker");
+        let filtered_pos = picker
+            .filtered
+            .iter()
+            .position(|&i| i == model_idx)
+            .expect("Bedrock model should be in filtered list");
+        app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+
+        app.handle_key(KeyCode::Char('d'), KeyModifiers::CONTROL)
+            .unwrap();
+
+        let cfg = crate::config::Config::load();
+        assert_eq!(
+            cfg.provider.default_model.as_deref(),
+            Some("bedrock:amazon.nova-pro-v1:0")
+        );
+        assert_eq!(cfg.provider.default_provider.as_deref(), Some("bedrock"));
+    });
+}
+
+#[test]
 fn test_handle_key_cursor_movement() {
     let mut app = create_test_app();
 

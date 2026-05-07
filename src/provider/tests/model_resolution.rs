@@ -68,6 +68,12 @@ fn test_openrouter_catalog_model_id_normalizes_bare_openai_and_claude_models() {
         openrouter_catalog_model_id("anthropic/claude-sonnet-4").as_deref(),
         Some("anthropic/claude-sonnet-4")
     );
+    assert_eq!(
+        openrouter_catalog_model_id(
+            "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0"
+        ),
+        None
+    );
     assert_eq!(openrouter_catalog_model_id("composer-2-fast"), None);
 }
 

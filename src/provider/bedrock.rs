@@ -51,6 +51,8 @@ struct PersistedCatalog {
     profile_required_models: Vec<String>,
     #[serde(default)]
     inference_profile_routes: HashMap<String, String>,
+    #[serde(default)]
+    legacy_models: Vec<String>,
     region: Option<String>,
     fetched_at_rfc3339: String,
 }
@@ -61,6 +63,7 @@ pub struct BedrockProvider {
     fetched_inference_profiles: Arc<RwLock<Vec<String>>>,
     profile_required_models: Arc<RwLock<HashSet<String>>>,
     inference_profile_routes: Arc<RwLock<HashMap<String, String>>>,
+    legacy_models: Arc<RwLock<HashSet<String>>>,
 }
 
 impl BedrockProvider {
@@ -73,6 +76,7 @@ impl BedrockProvider {
             fetched_inference_profiles: Arc::new(RwLock::new(Vec::new())),
             profile_required_models: Arc::new(RwLock::new(HashSet::new())),
             inference_profile_routes: Arc::new(RwLock::new(HashMap::new())),
+            legacy_models: Arc::new(RwLock::new(HashSet::new())),
         };
         provider.seed_cached_catalog();
         provider
@@ -231,6 +235,7 @@ impl BedrockProvider {
         inference_profiles: &[String],
         profile_required_models: &HashSet<String>,
         inference_profile_routes: &HashMap<String, String>,
+        legacy_models: &HashSet<String>,
     ) {
         let Ok(path) = Self::persisted_catalog_path() else {
             return;
@@ -240,6 +245,7 @@ impl BedrockProvider {
             inference_profiles: inference_profiles.to_vec(),
             profile_required_models: profile_required_models.iter().cloned().collect(),
             inference_profile_routes: inference_profile_routes.clone(),
+            legacy_models: legacy_models.iter().cloned().collect(),
             region: Self::configured_region(),
             fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
         };
@@ -259,6 +265,7 @@ impl BedrockProvider {
                 inference_profiles,
                 profile_required_models,
                 inference_profile_routes,
+                legacy_models,
                 ..
             } = catalog;
             let mut inference_profile_routes = inference_profile_routes;
@@ -278,12 +285,17 @@ impl BedrockProvider {
             if let Ok(mut routes) = self.inference_profile_routes.write() {
                 *routes = inference_profile_routes;
             }
+            if let Ok(mut legacy) = self.legacy_models.write() {
+                *legacy = legacy_models.into_iter().collect();
+            }
         }
     }
 
     fn classify_error_message(raw: &str) -> String {
         let lower = raw.to_ascii_lowercase();
-        let hint = if lower.contains("no credentials")
+        let hint = if lower.contains("legacy") || lower.contains("last 30 days") {
+            "This Bedrock model is marked as legacy for this account. Choose an active Bedrock model or an active inference profile instead."
+        } else if lower.contains("no credentials")
             || lower.contains("could not load credentials")
             || lower.contains("credentials") && lower.contains("not loaded")
         {
@@ -842,6 +854,7 @@ impl BedrockProvider {
         let client = Self::control_client().await;
         let mut models = Vec::new();
         let mut profile_required_models = HashSet::new();
+        let mut legacy_models = HashSet::new();
         let model_resp = client
             .list_foundation_models()
             .send()
@@ -862,6 +875,13 @@ impl BedrockProvider {
                     .any(|kind| kind.as_str() == "INFERENCE_PROFILE");
                 if supports_inference_profile && !supports_on_demand {
                     profile_required_models.insert(model_id.to_string());
+                }
+                if summary
+                    .model_lifecycle()
+                    .map(|lifecycle| lifecycle.status().as_str() == "LEGACY")
+                    .unwrap_or(false)
+                {
+                    legacy_models.insert(model_id.to_string());
                 }
             }
         }
@@ -923,11 +943,15 @@ impl BedrockProvider {
         if let Ok(mut guard) = self.inference_profile_routes.write() {
             *guard = inference_profile_routes.clone();
         }
+        if let Ok(mut guard) = self.legacy_models.write() {
+            *guard = legacy_models.clone();
+        }
         Self::persist_catalog(
             &models,
             &profiles,
             &profile_required_models,
             &inference_profile_routes,
+            &legacy_models,
         );
         Ok((models, profiles))
     }
@@ -1105,10 +1129,16 @@ impl Provider for BedrockProvider {
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
+        let legacy_models = self
+            .legacy_models
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
         self.all_display_models()
             .into_iter()
             .map(|model| {
                 let info = Self::model_info(&model);
+                let is_legacy = legacy_models.contains(&model);
                 let mut features = Vec::new();
                 if info.supports_tools {
                     features.push("tools");
@@ -1123,17 +1153,22 @@ impl Provider for BedrockProvider {
                     model: model.clone(),
                     provider: "AWS Bedrock".to_string(),
                     api_method: "bedrock".to_string(),
-                    available: true,
-                    detail: format!(
-                        "ConverseStream · context ~{} tokens · max output ~{} · {}",
-                        info.context_tokens,
-                        info.max_output_tokens,
-                        if features.is_empty() {
-                            "text".to_string()
-                        } else {
-                            features.join(", ")
-                        }
-                    ),
+                    available: !is_legacy,
+                    detail: if is_legacy {
+                        "legacy Bedrock model; choose an active model or inference profile"
+                            .to_string()
+                    } else {
+                        format!(
+                            "ConverseStream · context ~{} tokens · max output ~{} · {}",
+                            info.context_tokens,
+                            info.max_output_tokens,
+                            if features.is_empty() {
+                                "text".to_string()
+                            } else {
+                                features.join(", ")
+                            }
+                        )
+                    },
                     cheapness: Self::route_pricing(&model),
                 }
             })
@@ -1177,6 +1212,7 @@ impl Provider for BedrockProvider {
             fetched_inference_profiles: self.fetched_inference_profiles.clone(),
             profile_required_models: self.profile_required_models.clone(),
             inference_profile_routes: self.inference_profile_routes.clone(),
+            legacy_models: self.legacy_models.clone(),
         })
     }
 }
@@ -1413,6 +1449,39 @@ mod tests {
         );
         assert!(message.contains("model"));
         assert!(message.contains("region"));
+    }
+
+    #[test]
+    fn error_classification_mentions_legacy_models() {
+        let message = BedrockProvider::classify_error_message(
+            "Access denied. This Model is marked by provider as Legacy and you have not been actively using the model in the last 30 days",
+        );
+        assert!(message.contains("legacy"));
+        assert!(message.contains("active"));
+        assert!(!message.starts_with("AWS IAM denied"));
+    }
+
+    #[test]
+    fn legacy_model_route_is_unavailable_with_reason() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let p = BedrockProvider::new();
+        *p.fetched_models.write().unwrap() =
+            vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];
+        p.legacy_models
+            .write()
+            .unwrap()
+            .insert("anthropic.claude-3-haiku-20240307-v1:0".to_string());
+
+        let route = p
+            .model_routes()
+            .into_iter()
+            .find(|route| route.model == "anthropic.claude-3-haiku-20240307-v1:0")
+            .expect("legacy route should be listed");
+
+        assert!(!route.available);
+        assert!(route.detail.contains("legacy"));
     }
 
     #[tokio::test]

@@ -354,8 +354,9 @@ impl App {
         if model.is_empty() {
             return Vec::new();
         }
-        let openrouter_model = crate::provider::openrouter_catalog_model_id(model)
-            .unwrap_or_else(|| model.to_string());
+        let Some(openrouter_model) = crate::provider::openrouter_catalog_model_id(model) else {
+            return Vec::new();
+        };
 
         let mut seen = std::collections::HashSet::new();
         let mut suggestions = Vec::new();

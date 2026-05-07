@@ -888,6 +888,24 @@ impl App {
                 .as_deref()
                 .and_then(crate::provider::openrouter::load_endpoints_disk_cache_public);
 
+            if crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model) {
+                let available = auth.bedrock != crate::auth::AuthState::NotConfigured
+                    || crate::provider::bedrock::BedrockProvider::has_credentials();
+                routes.push(crate::provider::ModelRoute {
+                    model: model.clone(),
+                    provider: "AWS Bedrock".to_string(),
+                    api_method: "bedrock".to_string(),
+                    available,
+                    detail: if available {
+                        String::new()
+                    } else {
+                        "no Bedrock credentials or region; run /login bedrock".to_string()
+                    },
+                    cheapness: None,
+                });
+                continue;
+            }
+
             if model.contains('/') {
                 let cached = openrouter_cached;
                 let auto_detail = cached
@@ -1018,24 +1036,6 @@ impl App {
                     api_method: "code-assist-oauth".to_string(),
                     available: auth.gemini == crate::auth::AuthState::Available,
                     detail: String::new(),
-                    cheapness: None,
-                });
-                added_any = true;
-            }
-
-            if crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model) {
-                let available = auth.bedrock != crate::auth::AuthState::NotConfigured
-                    || crate::provider::bedrock::BedrockProvider::has_credentials();
-                routes.push(crate::provider::ModelRoute {
-                    model: model.clone(),
-                    provider: "AWS Bedrock".to_string(),
-                    api_method: "bedrock".to_string(),
-                    available,
-                    detail: if available {
-                        String::new()
-                    } else {
-                        "no Bedrock credentials or region; run /login bedrock".to_string()
-                    },
                     cheapness: None,
                 });
                 added_any = true;
@@ -1777,6 +1777,8 @@ impl App {
                             format!("copilot:{}", bare_name)
                         } else if r.api_method == "cursor" {
                             format!("cursor:{}", bare_name)
+                        } else if r.api_method == "bedrock" {
+                            format!("bedrock:{}", bare_name)
                         } else if r.provider == "Antigravity" {
                             format!("antigravity:{}", bare_name)
                         } else if openai_compatible_profile_id_for_route(r).is_some() {
@@ -1800,6 +1802,7 @@ impl App {
                             "openai-oauth" | "openai-api-key" => Some("openai"),
                             "copilot" => Some("copilot"),
                             "cursor" => Some("cursor"),
+                            "bedrock" => Some("bedrock"),
                             "cli" if r.provider == "Antigravity" => Some("antigravity"),
                             "openrouter" => Some("openrouter"),
                             method if method.starts_with("openai-compatible") => {

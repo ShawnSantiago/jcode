@@ -32,22 +32,16 @@ impl App {
         };
         app.remote_provider_model = Some(effective_model.clone());
         // Infer provider name from model string
-        let provider_name = if effective_model.contains("claude")
-            || effective_model.contains("opus")
-            || effective_model.contains("sonnet")
-            || effective_model.contains("haiku")
-        {
-            "anthropic"
-        } else if effective_model.contains("gpt")
-            || effective_model.contains("o1")
-            || effective_model.contains("o3")
-            || effective_model.contains("o4")
-        {
-            "openai"
-        } else if effective_model.contains('/') {
-            "openrouter"
-        } else {
-            "claude"
+        let provider_name = match crate::provider::provider_for_model(&effective_model) {
+            Some("claude") => "anthropic",
+            Some("openai") => "openai",
+            Some("openrouter") => "openrouter",
+            Some("bedrock") => "bedrock",
+            Some("gemini") => "gemini",
+            Some("cursor") => "cursor",
+            Some("antigravity") => "antigravity",
+            Some(other) => other,
+            None => "claude",
         };
         app.remote_provider_name = Some(provider_name.to_string());
 

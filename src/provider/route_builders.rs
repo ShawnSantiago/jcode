@@ -12,9 +12,6 @@ pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.contains('/') {
-        return Some(trimmed.to_string());
-    }
 
     match provider_for_model(trimmed) {
         Some("claude") => Some(format!("anthropic/{}", trimmed)),
