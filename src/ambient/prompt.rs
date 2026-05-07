@@ -214,7 +214,7 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
                 recent.push(RecentSessionInfo {
                     id: session.id.clone(),
                     status: session.status.display().to_string(),
-                    topic: session.title.clone(),
+                    topic: session.display_title().map(ToOwned::to_owned),
                     duration_secs: duration,
                     extraction_status: extraction.to_string(),
                 });

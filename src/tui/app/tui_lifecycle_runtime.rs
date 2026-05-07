@@ -1,5 +1,5 @@
 use super::*;
-use crate::tui::{connection_type_icon, ui};
+use crate::tui::connection_type_icon;
 
 impl App {
     /// Create an App instance for replay mode (playing back a saved session)
@@ -76,6 +76,10 @@ impl App {
             .map(|s| s.to_string())
             .unwrap_or_else(|| session_id.to_string());
         let session_icon = crate::id::session_icon(&session_name);
+        let session_label = crate::process_title::terminal_session_label(
+            &session_name,
+            self.session.display_title(),
+        );
         let is_canary = if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
@@ -102,10 +106,7 @@ impl App {
             std::io::stdout(),
             crossterm::terminal::SetTitle(format!(
                 "{} {} {}{}",
-                icon,
-                server_label,
-                ui::capitalize(&session_name),
-                suffix
+                icon, server_label, session_label, suffix
             ))
         );
     }

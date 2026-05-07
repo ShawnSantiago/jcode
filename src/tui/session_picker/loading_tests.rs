@@ -232,6 +232,43 @@ fn load_codex_preview_preserves_blank_line_between_tool_transcript_and_followup_
 }
 
 #[test]
+fn load_sessions_prefers_custom_title_over_generated_title() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut session = Session::create_with_id(
+        "session_customtitle_1770000000000".to_string(),
+        None,
+        Some("Generated first prompt".to_string()),
+    );
+    session.rename_title(Some("Custom release planning".to_string()));
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "msg1".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "please plan the release".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save session");
+    invalidate_session_list_cache();
+
+    let sessions = load_sessions().expect("load sessions");
+    let loaded = sessions
+        .iter()
+        .find(|session| session.id == "session_customtitle_1770000000000")
+        .expect("custom title session present");
+    assert_eq!(loaded.title, "Custom release planning");
+    assert!(loaded.search_index.contains("custom release planning"));
+    assert!(!loaded.search_index.contains("generated first prompt"));
+}
+
+#[test]
 fn session_matches_query_searches_jcode_transcript_contents() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");

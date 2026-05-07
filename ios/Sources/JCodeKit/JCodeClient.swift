@@ -205,6 +205,9 @@ public actor JCodeClient {
         case .sessionId(let sid):
             serverInfo.sessionId = sid
 
+        case .sessionRenamed:
+            break
+
         case .history(let payload):
             serverInfo.sessionId = payload.sessionId
             serverInfo.serverName = payload.serverName

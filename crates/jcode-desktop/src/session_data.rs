@@ -89,7 +89,8 @@ fn load_session_card(path: &Path) -> Result<Option<SessionCard>> {
         .get("messages")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let title = string_field(&value, "title")
+    let title = string_field(&value, "custom_title")
+        .or_else(|| string_field(&value, "title"))
         .or_else(|| latest_user_preview(&value))
         .unwrap_or_else(|| short_name.clone());
 

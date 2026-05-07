@@ -70,6 +70,7 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
         let new_id = format!("session_recovery_{}", crate::id::new_id("rec"));
         let mut new_session =
             Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
+        new_session.custom_title = old.custom_title.clone();
         new_session.working_dir = old.working_dir.clone();
         new_session.provider_key = old.provider_key.clone();
         new_session.model = old.model.clone();

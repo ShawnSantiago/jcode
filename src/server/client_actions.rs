@@ -585,6 +585,48 @@ pub(super) async fn handle_set_feature(
     }
 }
 
+pub(super) async fn handle_rename_session(
+    id: u64,
+    title: Option<String>,
+    agent: &Arc<Mutex<Agent>>,
+    client_session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let normalized_title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(ToOwned::to_owned);
+
+    let display_title = {
+        let mut agent_guard = agent.lock().await;
+        match agent_guard.rename_session_title(normalized_title.clone()) {
+            Ok(display_title) => display_title,
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: crate::util::format_error_chain(&error),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        }
+    };
+
+    crate::tui::session_picker::invalidate_session_list_cache();
+    let event = ServerEvent::SessionRenamed {
+        session_id: client_session_id.to_string(),
+        title: normalized_title,
+        display_title,
+    };
+    let delivered = fanout_session_event(swarm_members, client_session_id, event.clone()).await;
+    if delivered == 0 {
+        let _ = client_event_tx.send(event);
+    }
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 pub(super) async fn handle_trigger_memory_extraction(
     id: u64,
     agent: &Arc<Mutex<Agent>>,

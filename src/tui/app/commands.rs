@@ -1259,9 +1259,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                 )));
                 return true;
             }
-            let name = app.session.display_name().to_string();
+            crate::tui::session_picker::invalidate_session_list_cache();
+            app.update_terminal_title();
+            let name = app.session.display_title_or_name().to_string();
             app.push_display_message(DisplayMessage::system(format!(
-                "Cleared custom name for session **{}**.",
+                "Cleared custom name. Session title is now **{}**.",
                 name,
             )));
             app.set_status_notice("Session name cleared");
@@ -1276,6 +1278,8 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             )));
             return true;
         }
+        crate::tui::session_picker::invalidate_session_list_cache();
+        app.update_terminal_title();
         app.push_display_message(DisplayMessage::system(format!(
             "Renamed session to **{}**.",
             title,

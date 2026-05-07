@@ -66,6 +66,16 @@ do {
     assertEqual(json4["type"] as? String, "soft_interrupt")
     assertEqual(json4["content"] as? String, "stop")
     assertEqual(json4["urgent"] as? Bool, true)
+
+    let json5 = try encodeRequest(.renameSession(id: 12, title: "Release planning"))
+    assertEqual(json5["type"] as? String, "rename_session")
+    assertEqual(json5["id"] as? UInt64, 12)
+    assertEqual(json5["title"] as? String, "Release planning")
+
+    let json6 = try encodeRequest(.renameSession(id: 13))
+    assertEqual(json6["type"] as? String, "rename_session")
+    assertEqual(json6["id"] as? UInt64, 13)
+    assertNil(json6["title"] as? String)
 }
 
 // MARK: - ServerEvent Decoding
@@ -125,6 +135,20 @@ do {
     let e12 = try decodeEvent(#"{"type":"future_event","data":"stuff"}"#)
     if case .unknown(let type, _) = e12 { assertEqual(type, "future_event") }
     else { check(false, "Expected unknown") }
+
+    let e13 = try decodeEvent(#"{"type":"session_renamed","session_id":"fox_abc123","title":"Release planning","display_title":"Release planning"}"#)
+    if case .sessionRenamed(let sid, let title, let displayTitle) = e13 {
+        assertEqual(sid, "fox_abc123")
+        assertEqual(title, "Release planning")
+        assertEqual(displayTitle, "Release planning")
+    } else { check(false, "Expected sessionRenamed") }
+
+    let e14 = try decodeEvent(#"{"type":"session_renamed","session_id":"fox_abc123","display_title":"Generated title"}"#)
+    if case .sessionRenamed(let sid, let title, let displayTitle) = e14 {
+        assertEqual(sid, "fox_abc123")
+        assertNil(title)
+        assertEqual(displayTitle, "Generated title")
+    } else { check(false, "Expected sessionRenamed clear") }
 }
 
 // MARK: - History
@@ -215,7 +239,8 @@ do {
     let requests: [Request] = [
         .ping(id: 1), .cancel(id: 2), .clear(id: 3), .getHistory(id: 4),
         .getState(id: 5), .setModel(id: 6, model: "claude-sonnet-4-20250514"),
-        .compact(id: 7), .split(id: 8), .backgroundTool(id: 9),
+        .compact(id: 7), .renameSession(id: 12, title: "Release planning"),
+        .split(id: 8), .backgroundTool(id: 9),
         .resumeSession(id: 10, sessionId: "fox"),
         .cycleModel(id: 11, direction: -1),
     ]

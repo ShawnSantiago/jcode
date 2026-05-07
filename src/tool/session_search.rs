@@ -1038,7 +1038,7 @@ fn append_session_results(
             source: "jcode".to_string(),
             session_id: session.id.clone(),
             short_name: session.short_name.clone(),
-            title: session.title.clone(),
+            title: session.display_title().map(ToOwned::to_owned),
             working_dir: session.working_dir.clone(),
             provider_key: session.provider_key.clone(),
             model: session.model.clone(),
@@ -1092,7 +1092,7 @@ fn append_session_results(
             source: "jcode".to_string(),
             session_id: session.id.clone(),
             short_name: session.short_name.clone(),
-            title: session.title.clone(),
+            title: session.display_title().map(ToOwned::to_owned),
             working_dir: session.working_dir.clone(),
             provider_key: session.provider_key.clone(),
             model: session.model.clone(),
@@ -1121,8 +1121,14 @@ fn metadata_text(session: &Session) -> String {
     if let Some(short_name) = &session.short_name {
         fields.push(format!("Short name: {short_name}"));
     }
-    if let Some(title) = &session.title {
+    if let Some(title) = session.display_title() {
         fields.push(format!("Title: {title}"));
+    }
+    if let Some(generated_title) = &session.title
+        && session.custom_title.is_some()
+        && Some(generated_title.as_str()) != session.display_title()
+    {
+        fields.push(format!("Generated title: {generated_title}"));
     }
     if let Some(working_dir) = &session.working_dir {
         fields.push(format!("Working directory: {working_dir}"));

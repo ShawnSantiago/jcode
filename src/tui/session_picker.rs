@@ -34,7 +34,9 @@ mod render;
 #[cfg(test)]
 use loading::collect_recent_session_stems;
 use loading::{build_messages_preview, build_search_index, crashed_sessions_from_all_sessions};
-pub use loading::{load_servers, load_sessions, load_sessions_grouped};
+pub use loading::{
+    invalidate_session_list_cache, load_servers, load_sessions, load_sessions_grouped,
+};
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
 const DEFAULT_SESSION_SCAN_LIMIT: usize = 100;

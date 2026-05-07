@@ -65,6 +65,8 @@ pub struct Session {
     pub id: String,
     pub parent_id: Option<String>,
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
@@ -159,6 +161,8 @@ struct SessionStartupStub {
     parent_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -263,6 +267,7 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 impl Session {
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
+        session.custom_title = stub.custom_title;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
@@ -295,6 +300,7 @@ impl Session {
 
     fn session_from_remote_startup_snapshot(snapshot: RemoteStartupSessionSnapshot) -> Self {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
+        session.custom_title = snapshot.custom_title;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
@@ -433,6 +439,7 @@ impl Session {
         SessionJournalMeta {
             parent_id: self.parent_id.clone(),
             title: self.title.clone(),
+            custom_title: self.custom_title.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             provider_session_id: self.provider_session_id.clone(),
@@ -616,6 +623,7 @@ impl Session {
     fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
         self.parent_id = meta.parent_id;
         self.title = meta.title;
+        self.custom_title = meta.custom_title;
         self.updated_at = meta.updated_at;
         self.compaction = meta.compaction;
         self.provider_session_id = meta.provider_session_id;
@@ -652,6 +660,7 @@ impl Session {
             id: session_id,
             parent_id,
             title,
+            custom_title: None,
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
@@ -697,6 +706,7 @@ impl Session {
             id,
             parent_id,
             title,
+            custom_title: None,
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
@@ -753,16 +763,33 @@ impl Session {
         self.save_label = None;
     }
 
-    /// Set or clear the human-readable session title.
+    /// Set or clear the user-provided display title.
     ///
     /// This intentionally does not change the immutable session id, memorable
-    /// short name, provider session id, or saved/bookmark label.
+    /// short name, generated title, provider session id, or saved/bookmark label.
     pub fn rename_title(&mut self, title: Option<String>) {
-        self.title = title.and_then(|title| {
+        self.custom_title = title.and_then(|title| {
             let title = title.trim();
             (!title.is_empty()).then(|| title.to_string())
         });
         self.updated_at = Utc::now();
+    }
+
+    /// Get the title users should see for this session: custom rename first,
+    /// then the generated/imported title, if one exists.
+    pub fn display_title(&self) -> Option<&str> {
+        fn non_empty_trimmed(title: Option<&str>) -> Option<&str> {
+            title.map(str::trim).filter(|title| !title.is_empty())
+        }
+
+        non_empty_trimmed(self.custom_title.as_deref())
+            .or_else(|| non_empty_trimmed(self.title.as_deref()))
+    }
+
+    /// Get a visible label for title-oriented surfaces, falling back to the
+    /// memorable session name when there is no generated or custom title.
+    pub fn display_title_or_name(&self) -> &str {
+        self.display_title().unwrap_or_else(|| self.display_name())
     }
 
     /// Record an environment snapshot for post-mortem debugging
@@ -963,6 +990,12 @@ impl Session {
 
     pub fn redacted_for_export(&self) -> Self {
         let mut redacted = self.clone();
+        if let Some(title) = redacted.title.as_mut() {
+            *title = crate::message::redact_secrets(title);
+        }
+        if let Some(title) = redacted.custom_title.as_mut() {
+            *title = crate::message::redact_secrets(title);
+        }
         if let Some(compaction) = redacted.compaction.as_mut() {
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
@@ -1335,6 +1368,8 @@ struct RemoteStartupSessionSnapshot {
     parent_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]

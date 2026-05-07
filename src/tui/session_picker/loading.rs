@@ -54,6 +54,12 @@ fn session_list_cache() -> &'static Mutex<Option<SessionListCacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+pub fn invalidate_session_list_cache() {
+    if let Ok(mut cache) = session_list_cache().lock() {
+        *cache = None;
+    }
+}
+
 fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
     if *budget == 0 || src.is_empty() {
         return;
@@ -701,6 +707,8 @@ struct SessionSummary {
     parent_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
@@ -786,6 +794,8 @@ struct SessionJournalSummaryMeta {
     parent_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
     updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     working_dir: Option<String>,
@@ -836,6 +846,7 @@ fn load_session_summary(path: &Path) -> Result<SessionSummary> {
                 Ok(entry) => {
                     summary.parent_id = entry.meta.parent_id;
                     summary.title = entry.meta.title;
+                    summary.custom_title = entry.meta.custom_title;
                     summary.updated_at = entry.meta.updated_at;
                     summary.last_active_at = entry.meta.last_active_at;
                     summary.working_dir = entry.meta.working_dir;
@@ -1004,7 +1015,10 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 session.model.as_deref(),
             );
 
-            let title = session.title.unwrap_or_else(|| "Untitled".to_string());
+            let title = session
+                .custom_title
+                .or(session.title)
+                .unwrap_or_else(|| short_name.clone());
             let messages_preview: Vec<PreviewMessage> = Vec::new();
             let search_index = build_search_index_from_summary(
                 &stem,

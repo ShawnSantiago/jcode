@@ -571,7 +571,10 @@ impl SelfDevTool {
 
     fn load_session_labels(session_id: &str) -> (Option<String>, Option<String>) {
         session::Session::load(session_id)
-            .map(|session| (session.short_name, session.title))
+            .map(|session| {
+                let title = session.display_title().map(ToOwned::to_owned);
+                (session.short_name, title)
+            })
             .unwrap_or((None, None))
     }
 

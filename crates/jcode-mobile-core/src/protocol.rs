@@ -60,6 +60,11 @@ pub enum MobileRequest {
     Compact {
         id: u64,
     },
+    RenameSession {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
     SoftInterrupt {
         id: u64,
         content: String,
@@ -96,6 +101,7 @@ impl MobileRequest {
             | Self::CycleModel { id, .. }
             | Self::SetModel { id, .. }
             | Self::Compact { id }
+            | Self::RenameSession { id, .. }
             | Self::SoftInterrupt { id, .. }
             | Self::CancelSoftInterrupts { id }
             | Self::BackgroundTool { id }
@@ -299,6 +305,12 @@ pub enum MobileServerEvent {
     },
     SessionId {
         session_id: String,
+    },
+    SessionRenamed {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        display_title: String,
     },
     History(HistoryPayload),
     Reloading {
@@ -516,6 +528,45 @@ mod tests {
             event,
             MobileServerEvent::TextReplace {
                 text: "replacement".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn mobile_rename_session_request_matches_gateway_json_shape() {
+        let request = MobileRequest::RenameSession {
+            id: 12,
+            title: Some("Release planning".to_string()),
+        };
+        let value = serde_json::to_value(request);
+        assert!(value.is_ok(), "request should serialize");
+        let Ok(value) = value else {
+            return;
+        };
+        assert_eq!(
+            value,
+            json!({"type":"rename_session","id":12,"title":"Release planning"})
+        );
+    }
+
+    #[test]
+    fn mobile_session_renamed_event_decodes() {
+        let event: Result<MobileServerEvent, _> = serde_json::from_value(json!({
+            "type":"session_renamed",
+            "session_id":"sess_123",
+            "title":"Release planning",
+            "display_title":"Release planning"
+        }));
+        assert!(event.is_ok(), "session_renamed event should decode");
+        let Ok(event) = event else {
+            return;
+        };
+        assert_eq!(
+            event,
+            MobileServerEvent::SessionRenamed {
+                session_id: "sess_123".to_string(),
+                title: Some("Release planning".to_string()),
+                display_title: "Release planning".to_string(),
             }
         );
     }

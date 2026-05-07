@@ -719,6 +719,7 @@ impl App {
         let mut new_session =
             Session::create_with_id(new_session_id, Some(old_session.id.clone()), None);
         new_session.title = old_session.title.clone();
+        new_session.custom_title = old_session.custom_title.clone();
         new_session.provider_session_id = old_session.provider_session_id.clone();
         new_session.model = old_session.model.clone();
         new_session.is_canary = old_session.is_canary;

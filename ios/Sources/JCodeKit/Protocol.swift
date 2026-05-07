@@ -14,6 +14,7 @@ public enum Request: Encodable, Sendable {
     case cycleModel(id: UInt64, direction: Int8 = 1)
     case setModel(id: UInt64, model: String)
     case compact(id: UInt64)
+    case renameSession(id: UInt64, title: String? = nil)
     case softInterrupt(id: UInt64, content: String, urgent: Bool = false)
     case cancelSoftInterrupts(id: UInt64)
     case backgroundTool(id: UInt64)
@@ -79,6 +80,13 @@ public enum Request: Encodable, Sendable {
             try container.encode("compact", forKey: .key("type"))
             try container.encode(id, forKey: .key("id"))
 
+        case let .renameSession(id, title):
+            try container.encode("rename_session", forKey: .key("type"))
+            try container.encode(id, forKey: .key("id"))
+            if let title {
+                try container.encode(title, forKey: .key("title"))
+            }
+
         case let .softInterrupt(id, content, urgent):
             try container.encode("soft_interrupt", forKey: .key("type"))
             try container.encode(id, forKey: .key("id"))
@@ -125,6 +133,7 @@ public enum ServerEvent: Decodable, Sendable {
     case pong(id: UInt64)
     case state(id: UInt64, sessionId: String, messageCount: Int, isProcessing: Bool)
     case sessionId(sessionId: String)
+    case sessionRenamed(sessionId: String, title: String?, displayTitle: String)
     case history(HistoryPayload)
     case reloading(newSocket: String?)
     case reloadProgress(step: String, message: String, success: Bool?, output: String?)
@@ -216,6 +225,12 @@ public enum ServerEvent: Decodable, Sendable {
         case "session":
             let sessionId = try container.decode(String.self, forKey: .key("session_id"))
             self = .sessionId(sessionId: sessionId)
+
+        case "session_renamed":
+            let sessionId = try container.decode(String.self, forKey: .key("session_id"))
+            let title = try container.decodeIfPresent(String.self, forKey: .key("title"))
+            let displayTitle = try container.decode(String.self, forKey: .key("display_title"))
+            self = .sessionRenamed(sessionId: sessionId, title: title, displayTitle: displayTitle)
 
         case "history":
             let payload = try HistoryPayload(from: decoder)
