@@ -928,11 +928,13 @@ impl SingleSessionApp {
                 KeyOutcome::Redraw
             }
             KeyInput::CycleModel(direction) => KeyOutcome::CycleModel(direction),
-            KeyInput::SubmitDraft => self
-                .model_picker
-                .selected_model()
-                .map(KeyOutcome::SetModel)
-                .unwrap_or(KeyOutcome::None),
+            KeyInput::SubmitDraft => {
+                let Some(model) = self.model_picker.selected_model() else {
+                    return KeyOutcome::None;
+                };
+                self.model_picker.close();
+                KeyOutcome::SetModel(model)
+            }
             KeyInput::Backspace => {
                 self.model_picker.pop_filter_char();
                 KeyOutcome::Redraw
@@ -1100,8 +1102,17 @@ impl SingleSessionApp {
             );
         }
         if self.model_picker.open {
-            return model_picker_styled_lines(&self.model_picker);
+            let mut lines = self.body_styled_lines_without_inline_widgets();
+            if !lines.is_empty() {
+                lines.push(blank_styled_line());
+            }
+            lines.extend(model_picker_inline_styled_lines(&self.model_picker));
+            return lines;
         }
+        self.body_styled_lines_without_inline_widgets()
+    }
+
+    fn body_styled_lines_without_inline_widgets(&self) -> Vec<SingleSessionStyledLine> {
         if self.show_help {
             return single_session_help_styled_lines();
         }
@@ -2592,50 +2603,43 @@ fn session_card_search_text(session: &workspace::SessionCard) -> String {
     text.to_lowercase()
 }
 
-fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyledLine> {
+fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyledLine> {
+    let filter = if picker.filter.is_empty() {
+        "<type to filter>"
+    } else {
+        picker.filter.as_str()
+    };
     let mut lines = vec![
         styled_line(
-            "desktop model/account picker",
-            SingleSessionLineStyle::OverlayTitle,
-        ),
-        styled_line(
             format!(
-                "current: {}",
+                "╭─ model picker · current {}",
                 model_picker_current_label(
                     picker.provider_name.as_deref(),
                     picker.current_model.as_deref(),
                 )
             ),
-            SingleSessionLineStyle::Meta,
+            SingleSessionLineStyle::OverlayTitle,
         ),
         styled_line(
-            "↑/↓ select · type filter · Backspace edit filter · Enter switch · Ctrl+R reload · Esc close",
+            format!("│ /model {filter}"),
             SingleSessionLineStyle::Overlay,
         ),
         styled_line(
-            format!(
-                "filter: {}",
-                if picker.filter.is_empty() {
-                    "<none>"
-                } else {
-                    picker.filter.as_str()
-                }
-            ),
+            "│ ↑/↓ select · type filter · Enter switch · Ctrl+R reload · Esc close",
             SingleSessionLineStyle::Meta,
         ),
-        blank_styled_line(),
     ];
 
     if picker.loading {
         lines.push(styled_line(
-            "loading models from shared server...",
+            "│ loading models from shared server...",
             SingleSessionLineStyle::Status,
         ));
     }
 
     if let Some(error) = &picker.error {
         lines.push(styled_line(
-            format!("error: {error}"),
+            format!("│ error: {error}"),
             SingleSessionLineStyle::Error,
         ));
     }
@@ -2643,18 +2647,18 @@ fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyl
     let visible = picker.filtered_indices();
     if visible.is_empty() && !picker.loading {
         lines.push(styled_line(
-            "no matching models",
+            "│ no matching models",
             SingleSessionLineStyle::Status,
         ));
         lines.push(styled_line(
-            "try clearing the filter or pressing Ctrl+R to reload the catalog",
+            "╰─ clear the filter or press Ctrl+R to reload",
             SingleSessionLineStyle::Overlay,
         ));
         return lines;
     }
 
     let current = picker.current_model.as_deref();
-    let limit = 28;
+    let limit = 8;
     for (position, index) in visible.iter().take(limit).enumerate() {
         let Some(choice) = picker.choices.get(*index) else {
             continue;
@@ -2671,7 +2675,7 @@ fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyl
         };
         lines.push(styled_line(
             format!(
-                "{selector} {current_marker} {}",
+                "│ {selector} {current_marker} {}",
                 model_choice_display_line(choice)
             ),
             if position == picker.selected {
@@ -2683,10 +2687,11 @@ fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyl
     }
     if visible.len() > limit {
         lines.push(styled_line(
-            format!("… {} more models", visible.len() - limit),
+            format!("│ … {} more models", visible.len() - limit),
             SingleSessionLineStyle::Overlay,
         ));
     }
+    lines.push(styled_line("╰─", SingleSessionLineStyle::Overlay));
 
     lines
 }

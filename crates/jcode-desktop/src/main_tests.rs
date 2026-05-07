@@ -1407,6 +1407,9 @@ fn single_session_model_cycle_updates_status_and_transcript() {
 #[test]
 fn single_session_model_picker_loads_filters_and_selects_model() {
     let mut app = SingleSessionApp::new(None);
+    app.messages.push(SingleSessionMessage::assistant(
+        "existing transcript stays visible",
+    ));
 
     assert_eq!(
         app.handle_key(KeyInput::OpenModelPicker),
@@ -1436,8 +1439,9 @@ fn single_session_model_picker_loads_filters_and_selects_model() {
     });
 
     let picker = app.body_lines().join("\n");
-    assert!(picker.contains("desktop model/account picker"));
-    assert!(picker.contains("current: Claude · claude-sonnet-4-5"));
+    assert!(picker.contains("existing transcript stays visible"));
+    assert!(picker.contains("╭─ model picker · current Claude · claude-sonnet-4-5"));
+    assert!(picker.contains("│ /model <type to filter>"));
     assert!(picker.contains("✓ claude-sonnet-4-5"));
     assert!(picker.contains("provider claude"));
 
@@ -1446,13 +1450,14 @@ fn single_session_model_picker_loads_filters_and_selects_model() {
         KeyOutcome::Redraw
     );
     let filtered = app.body_lines().join("\n");
-    assert!(filtered.contains("filter: opus"));
+    assert!(filtered.contains("│ /model opus"));
     assert!(filtered.contains("claude-opus-4-5"));
 
     assert_eq!(
         app.handle_key(KeyInput::SubmitDraft),
         KeyOutcome::SetModel("claude-opus-4-5".to_string())
     );
+    assert!(!app.model_picker.open);
 }
 
 #[test]
@@ -1545,7 +1550,7 @@ fn single_session_model_picker_updates_current_model_after_switch() {
     assert!(
         app.body_lines()
             .join("\n")
-            .contains("current: OpenAI · gpt-5.4")
+            .contains("╭─ model picker · current OpenAI · gpt-5.4")
     );
     assert!(app.composer_status_line().contains("model OpenAI/gpt-5.4"));
 }
