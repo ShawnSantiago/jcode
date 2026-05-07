@@ -76,6 +76,10 @@ const SINGLE_SESSION_CARET_WIDTH: f32 = 2.0;
 const SINGLE_SESSION_CARET_COLOR: [f32; 4] = [0.130, 0.150, 0.190, 0.92];
 const SESSION_SPAWN_REFRESH_DELAY: Duration = Duration::from_millis(350);
 const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(33);
+const BACKEND_REDRAW_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const BACKEND_EVENT_FORWARD_INTERVAL: Duration = Duration::from_millis(16);
+const BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS: usize = 512;
+const BACKEND_EVENT_FORWARD_MAX_PAYLOAD_BYTES: usize = 8 * 1024;
 const HEADLESS_CHAT_SMOKE_TIMEOUT: Duration = Duration::from_secs(90);
 const DESKTOP_SPINNER_FRAME_MS: u128 = 180;
 const MOUSE_WHEEL_LINES_PER_DETENT: f32 = 3.0;
@@ -89,6 +93,8 @@ const SCROLL_MOMENTUM_STOP_VELOCITY: f32 = 0.08;
 const SCROLL_FRAME_MAX_DT_SECONDS: f32 = 0.050;
 const SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 48;
 const SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES: usize = 96;
+const SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 2;
+const SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_AFTER_LINES: usize = 4;
 const DESKTOP_120FPS_FRAME_BUDGET: Duration = Duration::from_micros(8_333);
 const DESKTOP_PRESENT_STALL_BUDGET: Duration = Duration::from_millis(33);
 const DESKTOP_INPUT_LATENCY_BUDGET: Duration = Duration::from_millis(25);
@@ -253,14 +259,28 @@ async fn run() -> Result<()> {
     let mut recovery_scan_pending = app.is_single_session();
     let mut first_frame_presented = false;
     let mut interaction_latency = DesktopInteractionLatencyProfiler::new();
+    let mut last_backend_redraw_request: Option<Instant> = None;
+    let mut pending_backend_redraw_since: Option<Instant> = None;
 
     event_loop.run(move |event, target| {
+        let event_loop_now = Instant::now();
         let has_background_work = app.has_background_work();
         power_inhibitor.set_active(has_background_work);
-        if has_background_work || app.has_frame_animation() {
-            target.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + BACKGROUND_POLL_INTERVAL,
-            ));
+        let default_wake = if has_background_work || app.has_frame_animation() {
+            Some(event_loop_now + BACKGROUND_POLL_INTERVAL)
+        } else {
+            None
+        };
+        let backend_wake = pending_backend_redraw_since
+            .and_then(|_| last_backend_redraw_request)
+            .map(|last| last + BACKEND_REDRAW_FRAME_INTERVAL);
+        let wake = match (default_wake, backend_wake) {
+            (Some(default_wake), Some(backend_wake)) => Some(default_wake.min(backend_wake)),
+            (Some(wake), None) | (None, Some(wake)) => Some(wake),
+            (None, None) => None,
+        };
+        if let Some(wake) = wake {
+            target.set_control_flow(ControlFlow::WaitUntil(wake));
         } else {
             target.set_control_flow(ControlFlow::Wait);
         }
@@ -714,9 +734,18 @@ async fn run() -> Result<()> {
                     window.request_redraw();
                 }
             }
-            Event::UserEvent(DesktopUserEvent::SessionEvents(events)) => {
-                if apply_desktop_session_event_batch(&mut app, events) {
-                    interaction_latency.mark("backend_events", Instant::now());
+            Event::UserEvent(DesktopUserEvent::SessionEvents(batch)) => {
+                let ui_received_at = Instant::now();
+                let accumulated_for = batch.accumulated_for();
+                let raw_event_count = batch.raw_event_count;
+                let raw_payload_bytes = batch.raw_payload_bytes;
+                let forwarded_at = batch.forwarded_at;
+                let apply_stats = apply_desktop_session_event_batch_with_stats(&mut app, batch.events);
+                let ui_queue_delay = ui_received_at.saturating_duration_since(forwarded_at);
+                let mut redraw_requested = false;
+                let mut redraw_deferred = false;
+                if apply_stats.visible_changed {
+                    let now = Instant::now();
                     if let Some(session_id) = app.single_session_live_id() {
                         attach_single_session_by_id(&mut app, &session_id);
                     }
@@ -741,8 +770,29 @@ async fn run() -> Result<()> {
                         }
                     }
                     window.set_title(&app.status_title());
-                    window.request_redraw();
+                    let redraw_due = last_backend_redraw_request.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
+                    });
+                    if redraw_due {
+                        let first_pending = pending_backend_redraw_since.take().unwrap_or(now);
+                        interaction_latency.mark("backend_events", first_pending);
+                        last_backend_redraw_request = Some(now);
+                        window.request_redraw();
+                        redraw_requested = true;
+                    } else {
+                        pending_backend_redraw_since.get_or_insert(now);
+                        redraw_deferred = true;
+                    }
                 }
+                log_desktop_session_event_batch_profile(
+                    raw_event_count,
+                    raw_payload_bytes,
+                    accumulated_for,
+                    ui_queue_delay,
+                    &apply_stats,
+                    redraw_requested,
+                    redraw_deferred,
+                );
             }
             Event::AboutToWait => {
                 if app.is_single_session() {
@@ -774,6 +824,17 @@ async fn run() -> Result<()> {
                 } else if scroll_accumulator.is_active() {
                     scroll_accumulator.reset();
                     scroll_metrics_cache.clear();
+                }
+                if let Some(first_pending_backend_redraw) = pending_backend_redraw_since {
+                    let now = Instant::now();
+                    if last_backend_redraw_request.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
+                    }) {
+                        pending_backend_redraw_since = None;
+                        interaction_latency.mark("backend_events", first_pending_backend_redraw);
+                        last_backend_redraw_request = Some(now);
+                        window.request_redraw();
+                    }
                 }
                 if let Some(relaunch) = hot_reloader.poll() {
                     if let Err(error) = relaunch.spawn() {
@@ -929,8 +990,24 @@ impl DesktopStartupTrace {
 
 #[derive(Debug)]
 enum DesktopUserEvent {
-    SessionEvents(Vec<session_launch::DesktopSessionEvent>),
+    SessionEvents(DesktopSessionEventBatch),
     RecoveryCount(usize),
+}
+
+#[derive(Debug)]
+struct DesktopSessionEventBatch {
+    events: Vec<session_launch::DesktopSessionEvent>,
+    raw_event_count: usize,
+    raw_payload_bytes: usize,
+    first_received_at: Instant,
+    forwarded_at: Instant,
+}
+
+impl DesktopSessionEventBatch {
+    fn accumulated_for(&self) -> Duration {
+        self.forwarded_at
+            .saturating_duration_since(self.first_received_at)
+    }
 }
 
 fn spawn_session_event_forwarder(
@@ -940,17 +1017,19 @@ fn spawn_session_event_forwarder(
     if let Err(error) = std::thread::Builder::new()
         .name("jcode-desktop-session-event-forwarder".to_string())
         .spawn(move || {
+            let mut next_forward_at = Instant::now();
             while let Ok(first_event) = session_event_rx.recv() {
-                let mut events = vec![first_event];
-                while let Ok(event) = session_event_rx.try_recv() {
-                    events.push(event);
+                let now = Instant::now();
+                if now < next_forward_at {
+                    std::thread::sleep(next_forward_at.saturating_duration_since(now));
                 }
-                let events = coalesce_desktop_session_events(events);
-                if events.is_empty() {
+                let batch = collect_desktop_session_event_batch(first_event, &session_event_rx);
+                if batch.events.is_empty() {
                     continue;
                 }
+                next_forward_at = Instant::now() + BACKEND_EVENT_FORWARD_INTERVAL;
                 if event_loop_proxy
-                    .send_event(DesktopUserEvent::SessionEvents(events))
+                    .send_event(DesktopUserEvent::SessionEvents(batch))
                     .is_err()
                 {
                     break;
@@ -959,6 +1038,177 @@ fn spawn_session_event_forwarder(
         })
     {
         eprintln!("jcode-desktop: failed to start session event forwarder: {error:#}");
+    }
+}
+
+fn collect_desktop_session_event_batch(
+    first_event: session_launch::DesktopSessionEvent,
+    session_event_rx: &mpsc::Receiver<session_launch::DesktopSessionEvent>,
+) -> DesktopSessionEventBatch {
+    let first_received_at = Instant::now();
+    let mut events = vec![first_event];
+    let mut raw_event_count = 1usize;
+    let mut raw_payload_bytes = desktop_session_event_payload_bytes(&events[0]);
+
+    'accumulate: loop {
+        while let Ok(event) = session_event_rx.try_recv() {
+            raw_event_count += 1;
+            raw_payload_bytes += desktop_session_event_payload_bytes(&event);
+            events.push(event);
+            if should_flush_session_event_batch(
+                &events,
+                raw_event_count,
+                raw_payload_bytes,
+                first_received_at.elapsed(),
+            ) {
+                break 'accumulate;
+            }
+        }
+        let elapsed = first_received_at.elapsed();
+        if should_flush_session_event_batch(&events, raw_event_count, raw_payload_bytes, elapsed) {
+            break;
+        }
+        let remaining = BACKEND_EVENT_FORWARD_INTERVAL.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            break;
+        }
+        match session_event_rx.recv_timeout(remaining) {
+            Ok(event) => {
+                raw_event_count += 1;
+                raw_payload_bytes += desktop_session_event_payload_bytes(&event);
+                events.push(event);
+                if should_flush_session_event_batch(
+                    &events,
+                    raw_event_count,
+                    raw_payload_bytes,
+                    first_received_at.elapsed(),
+                ) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let events = coalesce_desktop_session_events(events);
+    let forwarded_at = Instant::now();
+    DesktopSessionEventBatch {
+        events,
+        raw_event_count,
+        raw_payload_bytes,
+        first_received_at,
+        forwarded_at,
+    }
+}
+
+fn should_flush_session_event_batch(
+    events: &[session_launch::DesktopSessionEvent],
+    raw_event_count: usize,
+    raw_payload_bytes: usize,
+    elapsed: Duration,
+) -> bool {
+    raw_event_count >= BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS
+        || raw_payload_bytes >= BACKEND_EVENT_FORWARD_MAX_PAYLOAD_BYTES
+        || elapsed >= BACKEND_EVENT_FORWARD_INTERVAL
+        || events
+            .iter()
+            .any(|event| !desktop_session_event_can_wait_for_frame_tick(event))
+}
+
+fn desktop_session_event_can_wait_for_frame_tick(
+    event: &session_launch::DesktopSessionEvent,
+) -> bool {
+    matches!(
+        event,
+        session_launch::DesktopSessionEvent::TextDelta(_)
+            | session_launch::DesktopSessionEvent::ToolInput { .. }
+            | session_launch::DesktopSessionEvent::ToolExecuting { .. }
+            | session_launch::DesktopSessionEvent::Status(_)
+    )
+}
+
+fn desktop_session_event_payload_bytes(event: &session_launch::DesktopSessionEvent) -> usize {
+    match event {
+        session_launch::DesktopSessionEvent::Status(text)
+        | session_launch::DesktopSessionEvent::TextDelta(text)
+        | session_launch::DesktopSessionEvent::TextReplace(text)
+        | session_launch::DesktopSessionEvent::Error(text) => text.len(),
+        session_launch::DesktopSessionEvent::ToolInput { delta } => delta.len(),
+        session_launch::DesktopSessionEvent::ToolStarted { name }
+        | session_launch::DesktopSessionEvent::ToolExecuting { name } => name.len(),
+        session_launch::DesktopSessionEvent::ToolFinished { name, summary, .. } => {
+            name.len() + summary.len()
+        }
+        session_launch::DesktopSessionEvent::SessionStarted { session_id } => session_id.len(),
+        session_launch::DesktopSessionEvent::ModelChanged {
+            model,
+            provider_name,
+            error,
+        } => {
+            model.len()
+                + provider_name.as_deref().unwrap_or_default().len()
+                + error.as_deref().unwrap_or_default().len()
+        }
+        session_launch::DesktopSessionEvent::ModelCatalog {
+            current_model,
+            provider_name,
+            models,
+        } => {
+            current_model.as_deref().unwrap_or_default().len()
+                + provider_name.as_deref().unwrap_or_default().len()
+                + models
+                    .iter()
+                    .map(|model| {
+                        model.model.len()
+                            + model.provider.as_deref().unwrap_or_default().len()
+                            + model.detail.as_deref().unwrap_or_default().len()
+                    })
+                    .sum::<usize>()
+        }
+        session_launch::DesktopSessionEvent::ModelCatalogError { error } => error.len(),
+        session_launch::DesktopSessionEvent::StdinRequest {
+            request_id,
+            prompt,
+            tool_call_id,
+            ..
+        } => request_id.len() + prompt.len() + tool_call_id.len(),
+        session_launch::DesktopSessionEvent::Reloading { new_socket } => {
+            new_socket.as_deref().unwrap_or_default().len()
+        }
+        session_launch::DesktopSessionEvent::Done => 0,
+    }
+}
+
+#[cfg(test)]
+mod desktop_event_forwarder_tests {
+    use super::*;
+
+    #[test]
+    fn streaming_flood_is_split_before_try_recv_can_starve_ui() {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..(BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS * 3) {
+            tx.send(session_launch::DesktopSessionEvent::TextDelta(
+                "x".to_string(),
+            ))
+            .unwrap();
+        }
+
+        let batch = collect_desktop_session_event_batch(
+            session_launch::DesktopSessionEvent::TextDelta("x".to_string()),
+            &rx,
+        );
+
+        assert!(batch.raw_event_count <= BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS);
+        assert!(batch.accumulated_for() < Duration::from_millis(100));
+        assert_eq!(batch.events.len(), 1);
+        let session_launch::DesktopSessionEvent::TextDelta(text) = &batch.events[0] else {
+            panic!("streaming flood should coalesce to one text delta");
+        };
+        assert_eq!(text.len(), batch.raw_event_count);
+        assert!(
+            rx.try_recv().is_ok(),
+            "bounded batch collection should leave later stream chunks queued for the next UI wake"
+        );
     }
 }
 
@@ -1796,17 +2046,19 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             .start_line
             .saturating_add(viewport.lines.len())
             .min(streaming_base_len);
-        let body_window_contains = visible_static_start >= visible_static_end
-            || (streaming_window_start <= visible_static_start
-                && visible_static_end <= streaming_window_end);
+        let desired_streaming_window_start = visible_static_start
+            .saturating_sub(SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_BEFORE_LINES);
+        let desired_streaming_window_end = visible_static_end
+            .saturating_add(SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_AFTER_LINES)
+            .min(streaming_base_len)
+            .max(desired_streaming_window_start);
+        let body_window_contains = streaming_window_start == desired_streaming_window_start
+            && streaming_window_end == desired_streaming_window_end;
         let previous_key = streaming_previous_key.take();
         let mut old_buffers = std::mem::take(&mut streaming_buffers);
         if old_buffers.len() > 1 && !body_window_contains {
-            streaming_window_start =
-                visible_static_start.saturating_sub(SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES);
-            streaming_window_end = visible_static_end
-                .saturating_add(SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES)
-                .min(streaming_base_len);
+            streaming_window_start = desired_streaming_window_start;
+            streaming_window_end = desired_streaming_window_end;
             old_buffers[1] = single_session_body_text_buffer_from_lines(
                 &mut streaming_font_system,
                 &streaming_body_lines[streaming_window_start..streaming_window_end],
@@ -1919,6 +2171,28 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         apply_desktop_session_event_batch(&mut event_batch_app, coalesced);
         original_events ^ coalesced_events
     });
+
+    let (event_forwarder_flood_ms, event_forwarder_flood_checksum) =
+        benchmark_phase(frames, |frame| {
+            let (tx, rx) = mpsc::channel();
+            for offset in 0..(BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS * 3) {
+                tx.send(session_launch::DesktopSessionEvent::TextDelta(
+                    benchmark_typing_char(frame + offset).to_string(),
+                ))
+                .unwrap();
+            }
+            let batch = collect_desktop_session_event_batch(
+                session_launch::DesktopSessionEvent::TextDelta(
+                    benchmark_typing_char(frame).to_string(),
+                ),
+                &rx,
+            );
+            let remaining_is_queued = rx.try_recv().is_ok();
+            batch.raw_event_count
+                ^ batch.raw_payload_bytes
+                ^ batch.events.len()
+                ^ usize::from(remaining_is_queued)
+        });
 
     let mut hero_app = desktop_scroll_benchmark_app_with_turns(24);
     let hero_body_lines = single_session_rendered_body_lines_for_tick(&hero_app, size, 0);
@@ -2239,6 +2513,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         fresh_typing_ms / frames as f64,
         streaming_delta_ms / frames as f64,
         event_batch_ms / frames as f64,
+        event_forwarder_flood_ms / frames as f64,
         hero_boundary_scroll_ms / frames as f64,
         action_input_ms / frames as f64,
         action_visible_ms / frames as f64,
@@ -2323,6 +2598,12 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                     event_batch_ms,
                     frames,
                     event_batch_checksum,
+                ),
+                benchmark_phase_json(
+                    "background_event_forwarder_flood_collect",
+                    event_forwarder_flood_ms,
+                    frames,
+                    event_forwarder_flood_checksum,
                 ),
                 benchmark_phase_json(
                     "hero_boundary_scroll_redraw",
@@ -3140,8 +3421,28 @@ fn apply_desktop_session_event_batch(
     app: &mut DesktopApp,
     events: Vec<session_launch::DesktopSessionEvent>,
 ) -> bool {
+    apply_desktop_session_event_batch_with_stats(app, events).visible_changed
+}
+
+#[derive(Debug, Clone)]
+struct DesktopSessionApplyStats {
+    visible_changed: bool,
+    event_count: usize,
+    text_delta_bytes: usize,
+    elapsed: Duration,
+}
+
+fn apply_desktop_session_event_batch_with_stats(
+    app: &mut DesktopApp,
+    events: Vec<session_launch::DesktopSessionEvent>,
+) -> DesktopSessionApplyStats {
     if events.is_empty() {
-        return false;
+        return DesktopSessionApplyStats {
+            visible_changed: false,
+            event_count: 0,
+            text_delta_bytes: 0,
+            elapsed: Duration::ZERO,
+        };
     }
     let started = Instant::now();
     let event_count = events.len();
@@ -3154,15 +3455,55 @@ fn apply_desktop_session_event_batch(
         visible_changed |= desktop_session_event_affects_visible_state(&event);
         app.apply_session_event(event);
     }
+    let elapsed = started.elapsed();
     log_desktop_slow_interaction(
         "session_event_apply",
-        started.elapsed(),
+        elapsed,
         serde_json::json!({
             "events": event_count,
             "text_delta_bytes": text_delta_bytes,
         }),
     );
-    visible_changed
+    DesktopSessionApplyStats {
+        visible_changed,
+        event_count,
+        text_delta_bytes,
+        elapsed,
+    }
+}
+
+fn log_desktop_session_event_batch_profile(
+    raw_event_count: usize,
+    raw_payload_bytes: usize,
+    accumulated_for: Duration,
+    ui_queue_delay: Duration,
+    apply_stats: &DesktopSessionApplyStats,
+    redraw_requested: bool,
+    redraw_deferred: bool,
+) {
+    if raw_event_count < 128
+        && raw_payload_bytes < 8 * 1024
+        && accumulated_for < Duration::from_millis(40)
+        && ui_queue_delay < DESKTOP_INPUT_LATENCY_BUDGET
+        && apply_stats.elapsed < DESKTOP_120FPS_FRAME_BUDGET
+    {
+        return;
+    }
+    eprintln!(
+        "jcode-desktop-session-event-profile {}",
+        serde_json::json!({
+            "raw_events": raw_event_count,
+            "coalesced_events": apply_stats.event_count,
+            "raw_payload_bytes": raw_payload_bytes,
+            "text_delta_bytes": apply_stats.text_delta_bytes,
+            "forwarder_accumulated_ms": accumulated_for.as_secs_f64() * 1000.0,
+            "ui_queue_delay_ms": ui_queue_delay.as_secs_f64() * 1000.0,
+            "apply_ms": apply_stats.elapsed.as_secs_f64() * 1000.0,
+            "visible_changed": apply_stats.visible_changed,
+            "redraw_requested": redraw_requested,
+            "redraw_deferred": redraw_deferred,
+        })
+    );
 }
 
 fn desktop_session_event_affects_visible_state(
@@ -4174,8 +4515,19 @@ impl<'window> Canvas<'window> {
         if app.streaming_response.is_empty() || self.single_session_streaming_base_len == 0 {
             return (window_start, window_end);
         }
-        let end = window_end.min(self.single_session_streaming_base_len);
-        let start = window_start.min(end);
+        let visible_static_start = viewport
+            .start_line
+            .min(self.single_session_streaming_base_len);
+        let visible_static_end = viewport
+            .start_line
+            .saturating_add(viewport.lines.len())
+            .min(self.single_session_streaming_base_len);
+        let start = visible_static_start
+            .saturating_sub(SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_BEFORE_LINES);
+        let end = visible_static_end
+            .saturating_add(SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_AFTER_LINES)
+            .min(self.single_session_streaming_base_len)
+            .max(start);
         (start, end)
     }
 
@@ -4189,15 +4541,9 @@ impl<'window> Canvas<'window> {
         if app.streaming_response.is_empty() || self.single_session_streaming_base_len == 0 {
             return single_session_body_text_window_contains(window_start, window_end, viewport);
         }
-        let visible_static_start = viewport
-            .start_line
-            .min(self.single_session_streaming_base_len);
-        let visible_static_end = viewport
-            .start_line
-            .saturating_add(viewport.lines.len())
-            .min(self.single_session_streaming_base_len);
-        visible_static_start >= visible_static_end
-            || (window_start <= visible_static_start && visible_static_end <= window_end)
+        let (desired_start, desired_end) =
+            self.single_session_body_buffer_window_bounds(app, viewport);
+        window_start == desired_start && window_end == desired_end
     }
 
     fn sync_single_session_streaming_text_buffer(
