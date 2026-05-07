@@ -1656,11 +1656,30 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_enabled = app.diagram_pane_enabled();
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = app.side_panel().focused_page().is_some();
+    let diff_mode = app.diff_mode();
+    let pin_images = app.pin_images();
+    let collect_diffs = diff_mode.is_pinned();
+    let has_pinned_content = if collect_diffs || pin_images {
+        collect_pinned_content_cached(
+            app.display_messages(),
+            &app.side_pane_images(),
+            collect_diffs,
+            pin_images,
+            app.display_messages_version(),
+        )
+    } else {
+        false
+    };
+    let has_file_diff_edits = diff_mode.is_file() && app.has_display_edit_tool_messages();
+    let has_right_side_pane_content =
+        has_side_panel_content || has_pinned_content || has_file_diff_edits;
     // The side panel is itself a single right-hand auxiliary surface and can render
-    // visual content such as Mermaid diagrams inline. Do not also open the global
-    // pinned diagram pane while it is visible, otherwise a side-panel Mermaid can
-    // produce chat + side panel + diagram triple-split layouts.
-    let suppress_side_diagram = has_side_panel_content;
+    // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
+    // also uses that same right-hand surface. Do not also open the global pinned
+    // diagram pane while any right-hand side pane is visible, otherwise combinations
+    // like pinned images + Mermaid can produce chat + side pane + diagram triple-split
+    // layouts.
+    let suppress_side_diagram = has_right_side_pane_content;
     let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned
         && pane_enabled
         && !suppress_side_diagram
@@ -1757,23 +1776,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (area, None)
     };
 
-    let diff_mode = app.diff_mode();
-    let pin_images = app.pin_images();
-    let collect_diffs = diff_mode.is_pinned();
-    let has_pinned_content = if collect_diffs || pin_images {
-        collect_pinned_content_cached(
-            app.display_messages(),
-            &app.side_pane_images(),
-            collect_diffs,
-            pin_images,
-            app.display_messages_version(),
-        )
-    } else {
-        false
-    };
-    let has_file_diff_edits = diff_mode.is_file() && app.has_display_edit_tool_messages();
-
-    let needs_side_pane = has_side_panel_content || has_pinned_content || has_file_diff_edits;
+    let needs_side_pane = has_right_side_pane_content;
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
