@@ -13,6 +13,14 @@ fn test_openai_reasoning_effort_defaults_to_low() {
 }
 
 #[test]
+fn test_openai_fast_mode_defaults_to_priority() {
+    assert_eq!(
+        ProviderConfig::default().openai_service_tier.as_deref(),
+        Some("priority")
+    );
+}
+
+#[test]
 fn test_generated_default_config_uses_low_openai_reasoning_effort() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -25,6 +33,10 @@ fn test_generated_default_config_uses_low_openai_reasoning_effort() {
     assert!(
         content.contains("openai_reasoning_effort = \"low\""),
         "generated default config should use low OpenAI reasoning effort"
+    );
+    assert!(
+        content.contains("openai_service_tier = \"priority\""),
+        "generated default config should enable OpenAI fast mode"
     );
 
     if let Some(prev) = prev_home {
