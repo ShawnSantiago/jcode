@@ -95,6 +95,7 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
             &mut vertices,
             &app.welcome_hero_text(),
             size,
+            app.text_scale(),
             welcome_hero_reveal_progress,
             welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
         );
@@ -279,6 +280,7 @@ fn push_handwritten_welcome_hero_with_offset(
     vertices: &mut Vec<Vertex>,
     phrase: &str,
     size: PhysicalSize<u32>,
+    ui_scale: f32,
     reveal_progress: f32,
     y_offset: f32,
 ) {
@@ -288,7 +290,8 @@ fn push_handwritten_welcome_hero_with_offset(
         return;
     }
 
-    let (bounds_min, bounds_max) = handwritten_welcome_bounds_for_phrase(size, phrase);
+    let (bounds_min, bounds_max) =
+        handwritten_welcome_bounds_for_phrase_with_scale(size, phrase, ui_scale);
     let bounds_min = [bounds_min[0], bounds_min[1] + y_offset];
     let bounds_max = [bounds_max[0], bounds_max[1] + y_offset];
     let (source_min, source_max) = stroke_paths_bounds(&paths);
@@ -374,12 +377,20 @@ fn handwritten_welcome_bounds_for_phrase(
     size: PhysicalSize<u32>,
     phrase: &str,
 ) -> ([f32; 2], [f32; 2]) {
+    handwritten_welcome_bounds_for_phrase_with_scale(size, phrase, 1.0)
+}
+
+fn handwritten_welcome_bounds_for_phrase_with_scale(
+    size: PhysicalSize<u32>,
+    phrase: &str,
+    ui_scale: f32,
+) -> ([f32; 2], [f32; 2]) {
     let paths = handwritten_welcome_paths_for_phrase(phrase);
     let (source_min, source_max) = stroke_paths_bounds(&paths);
     let source_width = (source_max[0] - source_min[0]).max(1.0);
     let source_height = (source_max[1] - source_min[1]).max(1.0);
     let normal_draft_top = single_session_draft_top(size);
-    let target_width = size.width as f32 * 0.52;
+    let target_width = size.width as f32 * 0.52 * ui_scale;
     let scale = target_width / source_width;
     let left = (size.width as f32 - target_width) * 0.5;
     let top = PANEL_BODY_TOP_PADDING + (normal_draft_top - PANEL_BODY_TOP_PADDING) * 0.31;
@@ -1511,7 +1522,7 @@ pub(crate) fn single_session_draft_top_for_app(
         if app.has_welcome_timeline_transcript() {
             return welcome_timeline_draft_top(app, size);
         }
-        return fresh_welcome_draft_top(size);
+        return fresh_welcome_draft_top_for_scale(size, app.text_scale());
     }
 
     single_session_draft_top(size)
@@ -1567,10 +1578,19 @@ pub(crate) fn single_session_draft_top_for_fresh_state(
 }
 
 pub(crate) fn fresh_welcome_draft_top(size: PhysicalSize<u32>) -> f32 {
-    let hero_bottom = handwritten_welcome_bounds(size).1[1];
-    let typography = single_session_typography();
+    fresh_welcome_draft_top_for_scale(size, 1.0)
+}
+
+fn fresh_welcome_draft_top_for_scale(size: PhysicalSize<u32>, ui_scale: f32) -> f32 {
+    let hero_bottom = handwritten_welcome_bounds_for_phrase_with_scale(
+        size,
+        handwritten_welcome_phrase(0),
+        ui_scale,
+    )
+    .1[1];
+    let typography = single_session_typography_for_scale(ui_scale);
     let version_clearance = fresh_welcome_version_gap()
-        + fresh_welcome_version_font_size() * 1.4
+        + fresh_welcome_version_font_size() * ui_scale * 1.4
         + (typography.body_size * 0.38).max(8.0);
     let clearance = (typography.code_size * 1.85)
         .max(version_clearance)
@@ -1665,14 +1685,18 @@ pub(crate) fn single_session_text_buffers_from_key(
     size: PhysicalSize<u32>,
     font_system: &mut FontSystem,
 ) -> Vec<Buffer> {
-    let typography = single_session_typography();
-    let body_typography = single_session_typography_for_scale(f32::from_bits(key.text_scale_bits));
+    let text_scale = f32::from_bits(key.text_scale_bits);
+    let typography = single_session_typography_for_scale(text_scale);
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
 
-    let draft_top = single_session_draft_top_for_fresh_state(size, key.fresh_welcome_visible);
+    let draft_top = if key.fresh_welcome_visible {
+        fresh_welcome_draft_top_for_scale(size, text_scale)
+    } else {
+        single_session_draft_top_for_fresh_state(size, false)
+    };
     let prompt_height = (size.height as f32 - draft_top - SINGLE_SESSION_STATUS_GAP - 18.0)
         .max(typography.code_size * typography.code_line_height * 2.0);
-    let hero_font_size = welcome_hero_font_size(&key.welcome_hero, size);
+    let hero_font_size = welcome_hero_font_size(&key.welcome_hero, size) * text_scale;
     let version_font_size = if key.fresh_welcome_visible {
         fresh_welcome_version_font_size()
     } else {
@@ -1691,8 +1715,8 @@ pub(crate) fn single_session_text_buffers_from_key(
         single_session_styled_text_buffer(
             font_system,
             &key.body,
-            body_typography.body_size,
-            body_typography.body_size * body_typography.body_line_height,
+            typography.body_size,
+            typography.body_size * typography.body_line_height,
             content_width,
             (size.height as f32 - 150.0).max(1.0),
         ),
@@ -2177,6 +2201,7 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
         single_session_draft_top_for_app(app, size),
         welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
         welcome_status_lane_visible(app),
+        app.text_scale(),
     )
 }
 
@@ -2196,6 +2221,7 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
         single_session_draft_top_for_fresh_state(size, fresh_welcome_visible),
         0.0,
         false,
+        1.0,
     )
 }
 
@@ -2217,6 +2243,7 @@ pub(crate) fn single_session_text_areas_for_state(
     draft_top: f32,
     welcome_chrome_offset_pixels: f32,
     status_lane_visible: bool,
+    ui_scale: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
         return Vec::new();
@@ -2236,7 +2263,7 @@ pub(crate) fn single_session_text_areas_for_state(
         body_bottom
     };
     let version_label = fresh_welcome_version_label();
-    let version_font_size = fresh_welcome_version_font_size();
+    let version_font_size = fresh_welcome_version_font_size() * ui_scale;
     let version_left = if welcome_chrome_visible {
         fresh_welcome_version_left(&version_label, size, version_font_size)
     } else {
