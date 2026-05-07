@@ -139,6 +139,117 @@ fn assistant_message_copy_targets(
     crate::tui::markdown::extract_copy_targets_from_rendered_lines(rendered_lines)
 }
 
+#[derive(Clone, Copy, Default)]
+struct StreamingInkDryState {
+    hash: u64,
+    len: usize,
+    previous_len: usize,
+    changed_at: Option<Instant>,
+}
+
+#[cfg(not(test))]
+static STREAMING_INK_DRY_STATE: OnceLock<Mutex<StreamingInkDryState>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn streaming_ink_dry_state() -> &'static Mutex<StreamingInkDryState> {
+    STREAMING_INK_DRY_STATE.get_or_init(|| Mutex::new(StreamingInkDryState::default()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_STREAMING_INK_DRY_STATE: RefCell<StreamingInkDryState> = RefCell::new(StreamingInkDryState::default());
+}
+
+fn streaming_ink_dry_snapshot(streaming: &str) -> (usize, Duration) {
+    let hash = hash_text_for_cache(streaming);
+    let len = streaming.len();
+    let now = Instant::now();
+
+    #[cfg(test)]
+    {
+        return TEST_STREAMING_INK_DRY_STATE.with(|cell| {
+            let mut state = cell.borrow_mut();
+            update_streaming_ink_dry_state(&mut state, hash, len, now)
+        });
+    }
+
+    #[cfg(not(test))]
+    {
+        let mut state = match streaming_ink_dry_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        update_streaming_ink_dry_state(&mut state, hash, len, now)
+    }
+}
+
+fn update_streaming_ink_dry_state(
+    state: &mut StreamingInkDryState,
+    hash: u64,
+    len: usize,
+    now: Instant,
+) -> (usize, Duration) {
+    if state.hash != hash || state.len != len {
+        state.previous_len = if len >= state.len { state.len } else { 0 };
+        state.hash = hash;
+        state.len = len;
+        state.changed_at = Some(now);
+    }
+
+    let age = state
+        .changed_at
+        .map(|changed_at| now.saturating_duration_since(changed_at))
+        .unwrap_or_default();
+    (state.previous_len, age)
+}
+
+fn apply_streaming_ink_dry_effect(lines: &mut [Line<'static>], streaming: &str) {
+    const INK_DRY_MS: u128 = 180;
+    const MAX_ANIMATED_CHARS: usize = 160;
+
+    if lines.is_empty() || streaming.is_empty() {
+        return;
+    }
+
+    let (previous_len, age) = streaming_ink_dry_snapshot(streaming);
+    if age.as_millis() >= INK_DRY_MS {
+        return;
+    }
+
+    let new_chars = streaming[previous_len.min(streaming.len())..]
+        .chars()
+        .count();
+    let animated_chars = new_chars.clamp(1, MAX_ANIMATED_CHARS);
+    let dry_t = (age.as_millis() as f32 / INK_DRY_MS as f32).clamp(0.0, 1.0);
+    let dry_t = 1.0 - (1.0 - dry_t) * (1.0 - dry_t);
+    tint_line_tail(lines, animated_chars, dry_t);
+}
+
+fn tint_line_tail(lines: &mut [Line<'static>], mut remaining_chars: usize, dry_t: f32) {
+    for line in lines.iter_mut().rev() {
+        for span in line.spans.iter_mut().rev() {
+            if remaining_chars == 0 {
+                return;
+            }
+            let span_chars = span.content.chars().count();
+            if span_chars == 0 {
+                continue;
+            }
+            tint_span_as_drying_ink(span, dry_t);
+            if remaining_chars <= span_chars {
+                return;
+            }
+            remaining_chars = remaining_chars.saturating_sub(span_chars);
+        }
+    }
+}
+
+fn tint_span_as_drying_ink(span: &mut Span<'static>, dry_t: f32) {
+    let target = span.style.fg.unwrap_or_else(ai_text);
+    let fresh_ink = blend_color(target, dim_color(), 0.38);
+    span.style.fg = Some(blend_color(fresh_ink, target, dry_t));
+}
+
 fn tool_message_copy_target(
     msg: &DisplayMessage,
     rendered_line_count: usize,
@@ -960,6 +1071,7 @@ fn prepare_streaming_cached(
         display_width
     };
     let mut md_lines = app.render_streaming_markdown(content_width);
+    apply_streaming_ink_dry_effect(&mut md_lines, streaming);
     if centered {
         markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
     }
@@ -1327,6 +1439,7 @@ pub(super) fn prepare_body(
             display_width
         };
         let mut md_lines = app.render_streaming_markdown(content_width);
+        apply_streaming_ink_dry_effect(&mut md_lines, app.streaming_text());
         if centered {
             markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
         }
