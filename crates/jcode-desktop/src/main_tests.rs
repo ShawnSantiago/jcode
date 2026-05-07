@@ -725,9 +725,9 @@ fn fresh_single_session_startup_puts_greeting_in_welcome_hero() {
     let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
 
     assert_eq!(key.title, "");
-    assert_visual_text_contains(&key, "Hello there");
+    assert_is_handwritten_welcome_phrase(&key.welcome_hero);
+    assert_visual_text_contains(&key, &key.welcome_hero);
     assert!(key.body.is_empty());
-    assert_eq!(key.welcome_hero, "Hello there");
     assert!(key.welcome_hint.is_empty());
 }
 
@@ -751,10 +751,22 @@ fn fresh_welcome_greeting_uses_handwritten_hero_chrome() {
     let key = single_session_text_key(&app, PhysicalSize::new(1000, 720));
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(1000, 720), 0.0, 0);
 
-    assert_visual_text_contains(&key, "Hello there");
-    assert_eq!(key.welcome_hero, "Hello there");
+    assert_is_handwritten_welcome_phrase(&key.welcome_hero);
+    assert_visual_text_contains(&key, &key.welcome_hero);
     assert!(key.welcome_hint.is_empty());
     assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
+}
+
+#[test]
+fn handwritten_welcome_phrase_set_has_stable_curated_variants() {
+    assert_eq!(HANDWRITTEN_WELCOME_PHRASES.len(), 3);
+    assert_eq!(handwritten_welcome_phrase(0), "Hello there");
+    assert_eq!(handwritten_welcome_phrase(1), "Hi there");
+    assert_eq!(handwritten_welcome_phrase(2), "Hey there");
+    assert_eq!(
+        handwritten_welcome_phrase(HANDWRITTEN_WELCOME_PHRASES.len()),
+        handwritten_welcome_phrase(0)
+    );
 }
 
 #[test]
@@ -1000,6 +1012,13 @@ fn assert_visual_text_contains(key: &SingleSessionTextKey, expected: &str) {
     assert!(
         body.contains(expected),
         "expected visual body to contain {expected:?}, got:\n{body}"
+    );
+}
+
+fn assert_is_handwritten_welcome_phrase(phrase: &str) {
+    assert!(
+        HANDWRITTEN_WELCOME_PHRASES.contains(&phrase),
+        "unexpected handwritten welcome phrase: {phrase:?}"
     );
 }
 
@@ -1771,6 +1790,28 @@ fn pixel_scroll_deltas_accumulate_fractional_lines() {
 }
 
 #[test]
+fn scroll_accumulator_keeps_fractional_momentum_after_wheel_input() {
+    let mut accumulator = ScrollLineAccumulator::default();
+    let now = Instant::now();
+
+    assert_eq!(
+        accumulator.scroll_lines(MouseScrollDelta::LineDelta(0.0, 1.0), now),
+        Some(3)
+    );
+    assert!(accumulator.is_active());
+
+    let frame = accumulator.frame(now + Duration::from_millis(16));
+    assert!(
+        frame.active,
+        "momentum should continue after the input event"
+    );
+    assert!(
+        accumulator.pending_lines().abs() >= SCROLL_FRACTIONAL_EPSILON,
+        "momentum should leave a fractional smooth-scroll offset"
+    );
+}
+
+#[test]
 fn pixel_scroll_reversal_and_idle_reset_drop_stale_fraction() {
     let mut accumulator = ScrollLineAccumulator::default();
     let now = Instant::now();
@@ -1883,6 +1924,33 @@ fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
 }
 
 #[test]
+fn welcome_timeline_body_reserves_composer_lane_clearance() {
+    let size = PhysicalSize::new(900, 640);
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello desktop".to_string()));
+    assert!(matches!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::StartFreshSession { .. }
+    ));
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "assistant response".to_string(),
+    ));
+
+    let mut font_system = FontSystem::new();
+    let buffers = single_session_text_buffers(&app, size, &mut font_system);
+    let areas = single_session_text_areas_for_app(&app, &buffers, size);
+    let typography = single_session_typography();
+    let line_height = typography.body_size * typography.body_line_height;
+    let body_bottom = areas[2].bounds.bottom as f32;
+    let composer_top = areas[3].top;
+
+    assert!(
+        composer_top - body_bottom >= line_height - 1.0,
+        "body text should reserve at least one transcript line before composer/status lane: body_bottom={body_bottom}, composer_top={composer_top}, line_height={line_height}"
+    );
+}
+
+#[test]
 fn single_session_visible_body_wraps_long_assistant_lines() {
     let mut app = SingleSessionApp::new(Some(test_session_card("session_wrap", "wrap", "active")));
     app.messages.push(SingleSessionMessage::assistant(
@@ -1955,8 +2023,8 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
     app.handle_key(KeyInput::Character("hello".to_string()));
     let key = single_session_text_key(&app, size);
     assert!(app.is_fresh_welcome_visible());
-    assert_visual_text_contains(&key, "Hello there");
-    assert_eq!(key.welcome_hero, "Hello there");
+    assert_is_handwritten_welcome_phrase(&key.welcome_hero);
+    assert_visual_text_contains(&key, &key.welcome_hero);
     assert_eq!(
         single_session_draft_top_for_app(&app, size),
         fresh_welcome_draft_top(size)
@@ -1981,10 +2049,10 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     push_single_session_caret(&mut vertices, &app, size, buffers.get(2));
 
     assert_eq!(key.title, "");
-    assert_eq!(key.welcome_hero, "Hello there");
+    assert_is_handwritten_welcome_phrase(&key.welcome_hero);
     assert!(key.status.contains("sending"));
     assert!(key.status.contains("Esc interrupt"));
-    assert_visual_text_contains(&key, "Hello there");
+    assert_visual_text_contains(&key, &key.welcome_hero);
     assert!(vertices_have_color(&vertices, WELCOME_AURORA_BLUE));
     assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
     assert!(vertices_have_color(&vertices, NATIVE_SPINNER_HEAD_COLOR));
@@ -1994,9 +2062,9 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
             .any(|line| line.text.contains("hello desktop"))
     );
     assert!(
-        key.body
+        key.body.iter().all(|line| !HANDWRITTEN_WELCOME_PHRASES
             .iter()
-            .all(|line| !line.text.contains("Hello there")),
+            .any(|phrase| line.text.contains(phrase))),
         "welcome hero must stay visual-only, not become a transcript line"
     );
     assert_eq!(
@@ -2041,7 +2109,7 @@ fn session_attach_does_not_move_submitted_fresh_layout() {
     let after_buffers = single_session_text_buffers_from_key(&after_key, size, &mut font_system);
     let after_areas = single_session_text_areas_for_app(&app, &after_buffers, size);
 
-    assert_visual_text_contains(&after_key, "Hello there");
+    assert_visual_text_contains(&after_key, &after_key.welcome_hero);
     assert_visual_text_contains(&after_key, "hello desktop");
     assert_eq!(before_areas[2].top, after_areas[2].top);
     assert_eq!(before_areas[3].top, after_areas[3].top);
@@ -2057,7 +2125,11 @@ fn long_transcript_keeps_welcome_visual_only() {
     }
 
     let bottom = single_session_visible_body(&app, size).join("\n");
-    assert!(!bottom.contains("Hello there"));
+    assert!(
+        !HANDWRITTEN_WELCOME_PHRASES
+            .iter()
+            .any(|phrase| bottom.contains(phrase))
+    );
     assert!(bottom.contains("message 47"));
 
     let metrics = single_session_body_scroll_metrics(&app, size, 0).expect("scroll metrics");
@@ -2066,9 +2138,13 @@ fn long_transcript_keeps_welcome_visual_only() {
     let key = single_session_text_key(&app, size);
     let vertices = build_single_session_vertices(&app, size, 0.0, 0);
 
-    assert!(!top.contains("Hello there"));
+    assert!(
+        !HANDWRITTEN_WELCOME_PHRASES
+            .iter()
+            .any(|phrase| top.contains(phrase))
+    );
     assert!(!top.contains("message 47"));
-    assert_eq!(key.welcome_hero, "Hello there");
+    assert_is_handwritten_welcome_phrase(&key.welcome_hero);
     assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
 }
 
@@ -2106,7 +2182,7 @@ fn fresh_single_session_keeps_welcome_model_and_hero_available() {
         model_lines
     );
     assert_eq!(first.welcome_hero, later.welcome_hero);
-    assert_eq!(first.welcome_hero, "Hello there");
+    assert_is_handwritten_welcome_phrase(&first.welcome_hero);
     assert!(first.body.is_empty());
     assert!(first.welcome_hint.is_empty());
 }

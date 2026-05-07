@@ -20,6 +20,7 @@ pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FON
 pub(crate) const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
 pub(crate) const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
 pub(crate) const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
+pub(crate) const HANDWRITTEN_WELCOME_PHRASES: &[&str] = &["Hello there", "Hi there", "Hey there"];
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +81,7 @@ pub(crate) struct SingleSessionApp {
     // The hero must stay out of `body_styled_lines()` so it never becomes part
     // of the persisted/rendered transcript text.
     welcome_timeline: bool,
+    welcome_hero_phrase_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -476,6 +478,8 @@ impl SingleSessionMessage {
 impl SingleSessionApp {
     pub(crate) fn new(session: Option<workspace::SessionCard>) -> Self {
         let welcome_timeline = session.is_none();
+        let welcome_name = desktop_welcome_name();
+        let welcome_hero_phrase_index = welcome_phrase_index(&welcome_name);
         Self {
             session,
             draft: String::new(),
@@ -493,7 +497,7 @@ impl SingleSessionApp {
             model_picker: ModelPickerState::default(),
             session_switcher: SessionSwitcherState::default(),
             stdin_response: None,
-            welcome_name: desktop_welcome_name(),
+            welcome_name,
             recovery_session_count: 0,
             queued_drafts: Vec::new(),
             selection_anchor: None,
@@ -501,6 +505,7 @@ impl SingleSessionApp {
             input_undo_stack: Vec::new(),
             session_handle: None,
             welcome_timeline,
+            welcome_hero_phrase_index,
         }
     }
 
@@ -544,6 +549,7 @@ impl SingleSessionApp {
         self.session_switcher = SessionSwitcherState::default();
         self.stdin_response = None;
         self.welcome_name = desktop_welcome_name();
+        self.welcome_hero_phrase_index = welcome_phrase_index(&self.welcome_name);
         self.recovery_session_count = 0;
         self.queued_drafts.clear();
         self.clear_selection();
@@ -1096,7 +1102,7 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn welcome_hero_text(&self) -> String {
-        welcome_greeting_text(&self.welcome_name)
+        handwritten_welcome_phrase(self.welcome_hero_phrase_index).to_string()
     }
 
     pub(crate) fn is_welcome_timeline_visible(&self) -> bool {
@@ -1740,7 +1746,7 @@ pub(crate) fn welcome_styled_lines(
     tick: u64,
     recovery_session_count: usize,
 ) -> Vec<SingleSessionStyledLine> {
-    let greeting = welcome_greeting_text(name);
+    let greeting = welcome_greeting_text(name, 0);
     let prompts = [
         "Start with a prompt",
         "Ask anything",
@@ -1787,10 +1793,29 @@ fn welcome_recovery_styled_lines(recovery_session_count: usize) -> Vec<SingleSes
     )]
 }
 
-fn welcome_greeting_text(name: &Option<String>) -> String {
+fn welcome_greeting_text(name: &Option<String>, phrase_index: usize) -> String {
     name.as_deref()
         .map(|name| format!("Welcome, {name}"))
-        .unwrap_or_else(|| "Hello there".to_string())
+        .unwrap_or_else(|| handwritten_welcome_phrase(phrase_index).to_string())
+}
+
+pub(crate) fn handwritten_welcome_phrase(index: usize) -> &'static str {
+    HANDWRITTEN_WELCOME_PHRASES[index % HANDWRITTEN_WELCOME_PHRASES.len()]
+}
+
+fn welcome_phrase_index(name: &Option<String>) -> usize {
+    let time_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as usize)
+        .unwrap_or(0);
+    let name_seed = name
+        .as_deref()
+        .unwrap_or_default()
+        .bytes()
+        .fold(0usize, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(byte as usize)
+        });
+    (time_seed ^ name_seed) % HANDWRITTEN_WELCOME_PHRASES.len()
 }
 
 #[cfg(any(target_os = "macos", windows))]

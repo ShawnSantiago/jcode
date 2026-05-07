@@ -19,7 +19,8 @@ use glyphon::{
 use render_helpers::*;
 use single_session::{
     SINGLE_SESSION_FONT_FAMILY, SelectionPoint, SingleSessionApp, SingleSessionLineStyle,
-    SingleSessionStyledLine, single_session_surface, single_session_typography,
+    SingleSessionStyledLine, handwritten_welcome_phrase, single_session_surface,
+    single_session_typography,
 };
 use single_session_render::*;
 use wgpu::util::DeviceExt;
@@ -78,6 +79,11 @@ const MOUSE_WHEEL_LINES_PER_DETENT: f32 = 3.0;
 const MAX_MOUSE_SCROLL_LINES_PER_EVENT: f32 = 24.0;
 const SCROLL_GESTURE_IDLE_RESET: Duration = Duration::from_millis(180);
 const SCROLL_FRACTIONAL_EPSILON: f32 = 0.000_1;
+const SCROLL_MOMENTUM_GAIN: f32 = 8.5;
+const SCROLL_MOMENTUM_DECAY_PER_SECOND: f32 = 7.0;
+const SCROLL_MOMENTUM_MAX_VELOCITY: f32 = 72.0;
+const SCROLL_MOMENTUM_STOP_VELOCITY: f32 = 0.08;
+const SCROLL_FRAME_MAX_DT_SECONDS: f32 = 0.050;
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -266,15 +272,16 @@ async fn run() -> Result<()> {
                 }
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     let size = window.inner_size();
+                    let now = Instant::now();
                     let previous_smooth_scroll =
                         app.single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
                     let mut should_redraw = false;
                     if !app.is_single_session() {
                         scroll_accumulator.reset();
-                    } else if let Some(lines) = scroll_accumulator.scroll_lines(delta, Instant::now()) {
+                    } else if let Some(lines) = scroll_accumulator.scroll_lines(delta, now) {
                         should_redraw |= app.scroll_single_session_body(lines, size);
                     }
-                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                    if matches!(phase, TouchPhase::Cancelled) {
                         scroll_accumulator.reset();
                     }
                     let next_smooth_scroll =
@@ -619,6 +626,28 @@ async fn run() -> Result<()> {
                 _ => {}
             },
             Event::AboutToWait => {
+                if app.is_single_session() {
+                    let size = window.inner_size();
+                    let previous_smooth_scroll = app
+                        .single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    let frame = scroll_accumulator.frame(Instant::now());
+                    if let Some(lines) = frame.whole_lines
+                        && !app.scroll_single_session_body(lines, size)
+                    {
+                        scroll_accumulator.stop();
+                    }
+                    let next_smooth_scroll = app
+                        .single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    if frame.active
+                        || (next_smooth_scroll - previous_smooth_scroll).abs()
+                            >= SCROLL_FRACTIONAL_EPSILON
+                    {
+                        window.request_redraw();
+                    }
+                } else if scroll_accumulator.is_active() {
+                    scroll_accumulator.reset();
+                }
+
                 if let Ok(recovery_count) = recovery_count_rx.try_recv() {
                     if let DesktopApp::SingleSession(single_session) = &mut app {
                         single_session.set_recovery_session_count(recovery_count);
@@ -1586,7 +1615,15 @@ fn clipboard_text() -> Result<String> {
 #[derive(Clone, Debug, Default)]
 struct ScrollLineAccumulator {
     pending_lines: f32,
+    velocity_lines_per_second: f32,
     last_event_at: Option<Instant>,
+    last_frame_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScrollAnimationFrame {
+    whole_lines: Option<i32>,
+    active: bool,
 }
 
 impl ScrollLineAccumulator {
@@ -1595,22 +1632,77 @@ impl ScrollLineAccumulator {
             .last_event_at
             .is_some_and(|last| now.saturating_duration_since(last) > SCROLL_GESTURE_IDLE_RESET)
         {
-            self.pending_lines = 0.0;
+            self.stop();
         }
         self.last_event_at = Some(now);
-        self.accumulate(mouse_scroll_delta_lines(delta))
+        self.last_frame_at = Some(now);
+        self.accumulate_input(mouse_scroll_delta_lines(delta))
+    }
+
+    fn frame(&mut self, now: Instant) -> ScrollAnimationFrame {
+        let Some(last_frame_at) = self.last_frame_at else {
+            self.last_frame_at = Some(now);
+            return ScrollAnimationFrame {
+                whole_lines: None,
+                active: self.is_active(),
+            };
+        };
+
+        let dt = now
+            .saturating_duration_since(last_frame_at)
+            .as_secs_f32()
+            .min(SCROLL_FRAME_MAX_DT_SECONDS);
+        self.last_frame_at = Some(now);
+
+        if dt <= 0.0 || !self.is_active() {
+            return ScrollAnimationFrame {
+                whole_lines: None,
+                active: self.is_active(),
+            };
+        }
+
+        let whole_lines = if self.velocity_lines_per_second.abs() >= SCROLL_MOMENTUM_STOP_VELOCITY {
+            let lines = self.velocity_lines_per_second * dt;
+            let whole_lines = self.accumulate(lines);
+            let decay = (-SCROLL_MOMENTUM_DECAY_PER_SECOND * dt).exp();
+            self.velocity_lines_per_second *= decay;
+            if self.velocity_lines_per_second.abs() < SCROLL_MOMENTUM_STOP_VELOCITY {
+                self.velocity_lines_per_second = 0.0;
+            }
+            whole_lines
+        } else {
+            self.velocity_lines_per_second = 0.0;
+            self.ease_residual_pending(dt);
+            None
+        };
+
+        ScrollAnimationFrame {
+            whole_lines,
+            active: self.is_active(),
+        }
     }
 
     fn reset(&mut self) {
-        self.pending_lines = 0.0;
+        self.stop();
         self.last_event_at = None;
+        self.last_frame_at = None;
+    }
+
+    fn stop(&mut self) {
+        self.pending_lines = 0.0;
+        self.velocity_lines_per_second = 0.0;
     }
 
     fn pending_lines(&self) -> f32 {
         self.pending_lines
     }
 
-    fn accumulate(&mut self, lines: f32) -> Option<i32> {
+    fn is_active(&self) -> bool {
+        self.pending_lines.abs() >= SCROLL_FRACTIONAL_EPSILON
+            || self.velocity_lines_per_second.abs() >= SCROLL_MOMENTUM_STOP_VELOCITY
+    }
+
+    fn accumulate_input(&mut self, lines: f32) -> Option<i32> {
         if !lines.is_finite() || lines.abs() < SCROLL_FRACTIONAL_EPSILON {
             return None;
         }
@@ -1619,10 +1711,23 @@ impl ScrollLineAccumulator {
             -MAX_MOUSE_SCROLL_LINES_PER_EVENT,
             MAX_MOUSE_SCROLL_LINES_PER_EVENT,
         );
-        if self.pending_lines.abs() >= SCROLL_FRACTIONAL_EPSILON
-            && self.pending_lines.signum() != lines.signum()
+        if (self.pending_lines.abs() >= SCROLL_FRACTIONAL_EPSILON
+            && self.pending_lines.signum() != lines.signum())
+            || (self.velocity_lines_per_second.abs() >= SCROLL_MOMENTUM_STOP_VELOCITY
+                && self.velocity_lines_per_second.signum() != lines.signum())
         {
-            self.pending_lines = 0.0;
+            self.stop();
+        }
+
+        self.velocity_lines_per_second = (self.velocity_lines_per_second
+            + lines * SCROLL_MOMENTUM_GAIN)
+            .clamp(-SCROLL_MOMENTUM_MAX_VELOCITY, SCROLL_MOMENTUM_MAX_VELOCITY);
+        self.accumulate(lines)
+    }
+
+    fn accumulate(&mut self, lines: f32) -> Option<i32> {
+        if !lines.is_finite() || lines.abs() < SCROLL_FRACTIONAL_EPSILON {
+            return None;
         }
 
         self.pending_lines += lines;
@@ -1636,6 +1741,18 @@ impl ScrollLineAccumulator {
             self.pending_lines = 0.0;
         }
         (whole_lines != 0).then_some(whole_lines)
+    }
+
+    fn ease_residual_pending(&mut self, dt: f32) {
+        if self.pending_lines.abs() < SCROLL_FRACTIONAL_EPSILON {
+            self.pending_lines = 0.0;
+            return;
+        }
+        let decay = (-(SCROLL_MOMENTUM_DECAY_PER_SECOND * 1.8) * dt).exp();
+        self.pending_lines *= decay;
+        if self.pending_lines.abs() < SCROLL_FRACTIONAL_EPSILON {
+            self.pending_lines = 0.0;
+        }
     }
 }
 

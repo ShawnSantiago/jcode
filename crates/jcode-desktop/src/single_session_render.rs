@@ -72,6 +72,7 @@ pub(crate) fn build_single_session_vertices_with_scroll(
     if app.is_welcome_timeline_visible() {
         push_handwritten_welcome_hero_with_offset(
             &mut vertices,
+            &app.welcome_hero_text(),
             size,
             1.0,
             welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
@@ -223,17 +224,18 @@ fn push_fresh_welcome_ambient(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32
 
 fn push_handwritten_welcome_hero_with_offset(
     vertices: &mut Vec<Vertex>,
+    phrase: &str,
     size: PhysicalSize<u32>,
     reveal_progress: f32,
     y_offset: f32,
 ) {
-    let paths = handwritten_welcome_paths();
+    let paths = handwritten_welcome_paths_for_phrase(phrase);
     let total_length = stroke_paths_length(&paths);
     if total_length <= 0.0 {
         return;
     }
 
-    let (bounds_min, bounds_max) = handwritten_welcome_bounds(size);
+    let (bounds_min, bounds_max) = handwritten_welcome_bounds_for_phrase(size, phrase);
     let bounds_min = [bounds_min[0], bounds_min[1] + y_offset];
     let bounds_max = [bounds_max[0], bounds_max[1] + y_offset];
     let (source_min, source_max) = stroke_paths_bounds(&paths);
@@ -312,7 +314,14 @@ fn welcome_timeline_visual_offset_pixels(
 }
 
 pub(crate) fn handwritten_welcome_bounds(size: PhysicalSize<u32>) -> ([f32; 2], [f32; 2]) {
-    let paths = handwritten_welcome_paths();
+    handwritten_welcome_bounds_for_phrase(size, handwritten_welcome_phrase(0))
+}
+
+fn handwritten_welcome_bounds_for_phrase(
+    size: PhysicalSize<u32>,
+    phrase: &str,
+) -> ([f32; 2], [f32; 2]) {
+    let paths = handwritten_welcome_paths_for_phrase(phrase);
     let (source_min, source_max) = stroke_paths_bounds(&paths);
     let source_width = (source_max[0] - source_min[0]).max(1.0);
     let source_height = (source_max[1] - source_min[1]).max(1.0);
@@ -327,7 +336,15 @@ pub(crate) fn handwritten_welcome_bounds(size: PhysicalSize<u32>) -> ([f32; 2], 
     )
 }
 
-fn handwritten_welcome_paths() -> Vec<Vec<[f32; 2]>> {
+fn handwritten_welcome_paths_for_phrase(phrase: &str) -> Vec<Vec<[f32; 2]>> {
+    match phrase.trim().to_ascii_lowercase().as_str() {
+        "hi there" => handwritten_hi_there_paths(),
+        "hey there" => handwritten_hey_there_paths(),
+        _ => handwritten_hello_there_paths(),
+    }
+}
+
+fn handwritten_hello_there_paths() -> Vec<Vec<[f32; 2]>> {
     let mut paths = Vec::new();
     let mut word = Vec::new();
     append_hello_path(&mut word, 0.0);
@@ -338,6 +355,34 @@ fn handwritten_welcome_paths() -> Vec<Vec<[f32; 2]>> {
     paths.push(there);
 
     paths.push(vec![[5.80, 0.42], [6.50, 0.35]]);
+    paths
+}
+
+fn handwritten_hi_there_paths() -> Vec<Vec<[f32; 2]>> {
+    let mut paths = Vec::new();
+    let mut hi = Vec::new();
+    append_hi_path(&mut hi, 0.0);
+    paths.push(hi);
+
+    let mut there = Vec::new();
+    append_there_path(&mut there, 2.10);
+    paths.push(there);
+
+    paths.push(vec![[4.35, 0.42], [5.05, 0.35]]);
+    paths
+}
+
+fn handwritten_hey_there_paths() -> Vec<Vec<[f32; 2]>> {
+    let mut paths = Vec::new();
+    let mut hey = Vec::new();
+    append_hey_path(&mut hey, 0.0);
+    paths.push(hey);
+
+    let mut there = Vec::new();
+    append_there_path(&mut there, 3.40);
+    paths.push(there);
+
+    paths.push(vec![[5.65, 0.42], [6.35, 0.35]]);
     paths
 }
 
@@ -438,6 +483,136 @@ fn append_hello_path(path: &mut Vec<[f32; 2]>, x: f32) {
         [x + 4.96, 0.92],
         [x + 5.20, 0.82],
         12,
+    );
+}
+
+fn append_hi_path(path: &mut Vec<[f32; 2]>, x: f32) {
+    path.push([x + 0.08, 1.10]);
+    append_cubic(
+        path,
+        [x + 0.08, 1.10],
+        [x + 0.14, 0.70],
+        [x + 0.12, 0.20],
+        [x + 0.36, -0.06],
+        10,
+    );
+    append_cubic(
+        path,
+        [x + 0.36, -0.06],
+        [x + 0.68, -0.34],
+        [x + 0.70, 0.74],
+        [x + 0.40, 0.70],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 0.40, 0.70],
+        [x + 0.18, 0.66],
+        [x + 0.28, 0.36],
+        [x + 0.55, 0.42],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 0.55, 0.42],
+        [x + 0.82, 0.52],
+        [x + 0.74, 0.78],
+        [x + 0.92, 0.78],
+        6,
+    );
+    append_cubic(
+        path,
+        [x + 0.92, 0.78],
+        [x + 1.08, 0.76],
+        [x + 0.93, 0.30],
+        [x + 1.12, 0.28],
+        8,
+    );
+    path.push([x + 0.99, 0.08]);
+    path.push([x + 1.00, 0.09]);
+}
+
+fn append_hey_path(path: &mut Vec<[f32; 2]>, x: f32) {
+    path.push([x + 0.08, 1.10]);
+    append_cubic(
+        path,
+        [x + 0.08, 1.10],
+        [x + 0.14, 0.68],
+        [x + 0.12, 0.18],
+        [x + 0.36, -0.06],
+        10,
+    );
+    append_cubic(
+        path,
+        [x + 0.36, -0.06],
+        [x + 0.70, -0.30],
+        [x + 0.70, 0.74],
+        [x + 0.42, 0.70],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 0.42, 0.70],
+        [x + 0.20, 0.66],
+        [x + 0.28, 0.36],
+        [x + 0.56, 0.42],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 0.56, 0.42],
+        [x + 0.88, 0.56],
+        [x + 0.98, 0.62],
+        [x + 1.18, 0.58],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 1.18, 0.58],
+        [x + 0.88, 0.80],
+        [x + 0.86, 0.24],
+        [x + 1.28, 0.30],
+        12,
+    );
+    append_cubic(
+        path,
+        [x + 1.28, 0.30],
+        [x + 1.54, 0.34],
+        [x + 1.64, 0.52],
+        [x + 1.78, 0.68],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 1.78, 0.68],
+        [x + 1.62, 0.38],
+        [x + 1.70, 0.10],
+        [x + 1.98, 0.10],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 1.98, 0.10],
+        [x + 2.30, 0.10],
+        [x + 2.24, 0.68],
+        [x + 2.08, 0.56],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 2.08, 0.56],
+        [x + 1.96, 0.44],
+        [x + 2.08, 0.18],
+        [x + 2.34, 0.20],
+        8,
+    );
+    append_cubic(
+        path,
+        [x + 2.34, 0.20],
+        [x + 2.58, 0.26],
+        [x + 2.54, 0.58],
+        [x + 2.70, 0.60],
+        8,
     );
 }
 
@@ -1301,7 +1476,10 @@ fn welcome_timeline_draft_top(app: &SingleSessionApp, size: PhysicalSize<u32>) -
 }
 
 fn welcome_timeline_body_draft_gap() -> f32 {
-    (single_session_typography().code_size * 0.72).max(10.0)
+    let typography = single_session_typography();
+    let body_line_height = typography.body_size * typography.body_line_height;
+    let composer_line_height = typography.code_size * typography.code_line_height;
+    body_line_height.max(composer_line_height * 0.86)
 }
 
 fn welcome_timeline_total_body_lines(app: &SingleSessionApp, size: PhysicalSize<u32>) -> usize {
