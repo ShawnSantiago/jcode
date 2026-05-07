@@ -2168,8 +2168,9 @@ fn mouse_scroll_clamps_to_available_single_session_history() {
             .push(SingleSessionMessage::assistant(format!("message {index}")));
     }
     let mut desktop = DesktopApp::SingleSession(app);
+    let mut metrics_cache = SingleSessionScrollMetricsCache::default();
 
-    assert!(desktop.scroll_single_session_body(10_000, size));
+    assert!(desktop.scroll_single_session_body(10_000, size, &mut metrics_cache));
     let DesktopApp::SingleSession(app) = &desktop else {
         unreachable!();
     };
@@ -2178,7 +2179,7 @@ fn mouse_scroll_clamps_to_available_single_session_history() {
         .max_scroll_lines;
     assert_eq!(app.body_scroll_lines, max_scroll);
 
-    assert!(desktop.scroll_single_session_body(-1, size));
+    assert!(desktop.scroll_single_session_body(-1, size, &mut metrics_cache));
     let DesktopApp::SingleSession(app) = &desktop else {
         unreachable!();
     };

@@ -19,8 +19,9 @@ use glyphon::{
 use render_helpers::*;
 use single_session::{
     SINGLE_SESSION_ASSISTANT_FONT_FAMILY, SINGLE_SESSION_FONT_FAMILY, SelectionPoint,
-    SingleSessionApp, SingleSessionLineStyle, SingleSessionStyledLine, handwritten_welcome_phrase,
-    single_session_surface, single_session_typography, single_session_typography_for_scale,
+    SingleSessionApp, SingleSessionLineStyle, SingleSessionMessage, SingleSessionStyledLine,
+    handwritten_welcome_phrase, single_session_surface, single_session_typography,
+    single_session_typography_for_scale,
 };
 use single_session_render::*;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
@@ -31,7 +32,9 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -83,6 +86,8 @@ const SCROLL_MOMENTUM_DECAY_PER_SECOND: f32 = 7.0;
 const SCROLL_MOMENTUM_MAX_VELOCITY: f32 = 72.0;
 const SCROLL_MOMENTUM_STOP_VELOCITY: f32 = 0.08;
 const SCROLL_FRAME_MAX_DT_SECONDS: f32 = 0.050;
+const SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 2;
+const SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES: usize = 8;
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -189,6 +194,9 @@ async fn run() -> Result<()> {
     if let Some(message) = headless_chat_smoke_message(&args) {
         return run_headless_chat_smoke(message);
     }
+    if let Some(frames) = scroll_render_benchmark_frames(&args) {
+        return run_scroll_render_benchmark(frames);
+    }
     let fullscreen = args.iter().any(|arg| arg == "--fullscreen");
     let desktop_mode = desktop_mode_from_args(args.iter().map(String::as_str));
     let event_loop = EventLoop::new().context("failed to create event loop")?;
@@ -230,6 +238,7 @@ async fn run() -> Result<()> {
     let mut selecting_body = false;
     let mut selecting_draft = false;
     let mut scroll_accumulator = ScrollLineAccumulator::default();
+    let mut scroll_metrics_cache = SingleSessionScrollMetricsCache::default();
     let mut hot_reloader = DesktopHotReloader::new();
     let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
     let (session_event_tx, session_event_rx) = mpsc::channel();
@@ -253,10 +262,12 @@ async fn run() -> Result<()> {
                 WindowEvent::CloseRequested => target.exit(),
                 WindowEvent::Resized(size) => {
                     canvas.resize(size);
+                    scroll_metrics_cache.clear();
                     window.request_redraw();
                 }
                 WindowEvent::ScaleFactorChanged { .. } => {
                     canvas.resize(window.inner_size());
+                    scroll_metrics_cache.clear();
                     window.request_redraw();
                 }
                 WindowEvent::ModifiersChanged(new_modifiers) => {
@@ -265,19 +276,27 @@ async fn run() -> Result<()> {
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     let size = window.inner_size();
                     let now = Instant::now();
-                    let previous_smooth_scroll =
-                        app.single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    let previous_smooth_scroll = app.single_session_smooth_scroll_lines(
+                        scroll_accumulator.pending_lines(),
+                        size,
+                        &mut scroll_metrics_cache,
+                    );
                     let mut should_redraw = false;
                     if !app.is_single_session() {
                         scroll_accumulator.reset();
+                        scroll_metrics_cache.clear();
                     } else if let Some(lines) = scroll_accumulator.scroll_lines(delta, now) {
-                        should_redraw |= app.scroll_single_session_body(lines, size);
+                        should_redraw |=
+                            app.scroll_single_session_body(lines, size, &mut scroll_metrics_cache);
                     }
                     if matches!(phase, TouchPhase::Cancelled) {
                         scroll_accumulator.reset();
                     }
-                    let next_smooth_scroll =
-                        app.single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    let next_smooth_scroll = app.single_session_smooth_scroll_lines(
+                        scroll_accumulator.pending_lines(),
+                        size,
+                        &mut scroll_metrics_cache,
+                    );
                     should_redraw |= (next_smooth_scroll - previous_smooth_scroll).abs()
                         >= SCROLL_FRACTIONAL_EPSILON;
                     if should_redraw {
@@ -367,7 +386,11 @@ async fn run() -> Result<()> {
                 {
                     let size = window.inner_size();
                     let had_smooth_scroll = app
-                        .single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size)
+                        .single_session_smooth_scroll_lines(
+                            scroll_accumulator.pending_lines(),
+                            size,
+                            &mut scroll_metrics_cache,
+                        )
                         .abs()
                         >= SCROLL_FRACTIONAL_EPSILON;
                     scroll_accumulator.reset();
@@ -612,14 +635,17 @@ async fn run() -> Result<()> {
                         KeyOutcome::None => {}
                     }
                 }
-                WindowEvent::RedrawRequested => match canvas.render(
-                    &app,
-                    window.current_monitor().map(|monitor| monitor.size()),
-                    app.single_session_smooth_scroll_lines(
+                WindowEvent::RedrawRequested => {
+                    let smooth_scroll_lines = app.single_session_smooth_scroll_lines(
                         scroll_accumulator.pending_lines(),
                         window.inner_size(),
-                    ),
-                ) {
+                        &mut scroll_metrics_cache,
+                    );
+                    match canvas.render(
+                        &app,
+                        window.current_monitor().map(|monitor| monitor.size()),
+                        smooth_scroll_lines,
+                    ) {
                     Ok(animation_active) => {
                         if !first_frame_presented {
                             first_frame_presented = true;
@@ -648,22 +674,29 @@ async fn run() -> Result<()> {
                     Err(SurfaceError::Timeout) => {
                         window.request_redraw();
                     }
-                },
+                    }
+                }
                 _ => {}
             },
             Event::AboutToWait => {
                 if app.is_single_session() {
                     let size = window.inner_size();
-                    let previous_smooth_scroll = app
-                        .single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    let previous_smooth_scroll = app.single_session_smooth_scroll_lines(
+                        scroll_accumulator.pending_lines(),
+                        size,
+                        &mut scroll_metrics_cache,
+                    );
                     let frame = scroll_accumulator.frame(Instant::now());
                     if let Some(lines) = frame.whole_lines
-                        && !app.scroll_single_session_body(lines, size)
+                        && !app.scroll_single_session_body(lines, size, &mut scroll_metrics_cache)
                     {
                         scroll_accumulator.stop();
                     }
-                    let next_smooth_scroll = app
-                        .single_session_smooth_scroll_lines(scroll_accumulator.pending_lines(), size);
+                    let next_smooth_scroll = app.single_session_smooth_scroll_lines(
+                        scroll_accumulator.pending_lines(),
+                        size,
+                        &mut scroll_metrics_cache,
+                    );
                     if frame.active
                         || (next_smooth_scroll - previous_smooth_scroll).abs()
                             >= SCROLL_FRACTIONAL_EPSILON
@@ -672,6 +705,7 @@ async fn run() -> Result<()> {
                     }
                 } else if scroll_accumulator.is_active() {
                     scroll_accumulator.reset();
+                    scroll_metrics_cache.clear();
                 }
 
                 if let Ok(recovery_count) = recovery_count_rx.try_recv() {
@@ -795,6 +829,7 @@ const DESKTOP_HELP_LINES: &[&str] = &[
     "  --workspace                  Open the workspace prototype instead of the single-session chat",
     "  --startup-log                Print launch timing milestones to stderr",
     "  --startup-benchmark          Print launch timings and exit after the first frame",
+    "  --scroll-render-benchmark[N]  Print CPU scroll/render benchmark JSON and exit",
     "  --headless-chat-smoke <MSG>  Run a hidden backend smoke test and print JSON events",
     "  --headless-chat-smoke=<MSG>  Same as above",
     "  -V, --version                Print version information",
@@ -813,6 +848,20 @@ fn startup_log_requested(args: &[String]) -> bool {
 
 fn startup_benchmark_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--startup-benchmark")
+}
+
+fn scroll_render_benchmark_frames(args: &[String]) -> Option<usize> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--scroll-render-benchmark=")
+            .and_then(|value| value.parse::<usize>().ok())
+            .or_else(|| {
+                (arg == "--scroll-render-benchmark").then(|| {
+                    args.get(index + 1)
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(600)
+                })
+            })
+    })
 }
 
 fn env_flag_enabled(value: OsString) -> bool {
@@ -1047,6 +1096,331 @@ fn run_headless_chat_smoke(message: String) -> Result<()> {
         response.chars().count(),
         last_status.as_deref().unwrap_or("unknown")
     )
+}
+
+fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
+    let frames = frames.max(1);
+    let size = PhysicalSize::new(1200, 760);
+    let mut app = desktop_scroll_benchmark_app();
+    if let Some(metrics) = single_session_body_scroll_metrics(&app, size, 0) {
+        app.body_scroll_lines = metrics.max_scroll_lines / 2;
+    }
+
+    let mut setup_font_system = benchmark_font_system();
+    let setup_started = Instant::now();
+    let setup_key = single_session_text_key_for_tick_with_scroll(&app, size, 0, 0.0);
+    let setup_buffers =
+        single_session_text_buffers_from_key(&setup_key, size, &mut setup_font_system);
+    let setup_areas =
+        single_session_text_areas_for_app_with_scroll(&app, &setup_buffers, size, 0, 0.0);
+    let setup_vertices =
+        build_single_session_vertices_with_scroll_and_reveal(&app, size, 0.0, 0, 0.0, 1.0);
+    let setup_elapsed = setup_started.elapsed();
+    let setup_checksum =
+        setup_key.body.len() ^ setup_buffers.len() ^ setup_areas.len() ^ setup_vertices.len();
+
+    let mut legacy_font_system = benchmark_font_system();
+    let (legacy_smooth_text_ms, legacy_smooth_text_checksum) = benchmark_phase(frames, |frame| {
+        let tick = frame as u64;
+        let smooth_scroll_lines = benchmark_smooth_scroll_lines(frame);
+        let key =
+            single_session_text_key_for_tick_with_scroll(&app, size, tick, smooth_scroll_lines);
+        let buffers = single_session_text_buffers_from_key(&key, size, &mut legacy_font_system);
+        let areas = single_session_text_areas_for_app_with_scroll(
+            &app,
+            &buffers,
+            size,
+            tick,
+            smooth_scroll_lines,
+        );
+        let vertices = build_single_session_vertices_with_scroll_and_reveal(
+            &app,
+            size,
+            0.0,
+            tick,
+            smooth_scroll_lines,
+            1.0,
+        );
+        key.body.len() ^ buffers.len() ^ areas.len() ^ vertices.len()
+    });
+
+    let mut optimized_font_system = benchmark_font_system();
+    let optimized_key = single_session_text_key_for_tick_with_scroll(&app, size, 0, 0.0);
+    let optimized_buffers =
+        single_session_text_buffers_from_key(&optimized_key, size, &mut optimized_font_system);
+    let optimized_areas =
+        single_session_text_areas_for_app_with_scroll(&app, &optimized_buffers, size, 0, 0.0);
+    let optimized_body_lines = single_session_rendered_body_lines_for_tick(&app, size, 0);
+    let (optimized_smooth_geometry_ms, optimized_smooth_geometry_checksum) =
+        benchmark_phase(frames, |frame| {
+            let tick = frame as u64;
+            let smooth_scroll_lines = benchmark_smooth_scroll_lines(frame);
+            let vertices = build_single_session_vertices_with_cached_body(
+                &app,
+                size,
+                0.0,
+                tick,
+                smooth_scroll_lines,
+                1.0,
+                &optimized_body_lines,
+            );
+            optimized_key.body.len()
+                ^ optimized_buffers.len()
+                ^ optimized_areas.len()
+                ^ vertices.len()
+        });
+
+    let mut whole_line_app = app.clone();
+    let mut whole_line_font_system = benchmark_font_system();
+    let whole_line_body_lines =
+        single_session_rendered_body_lines_for_tick(&whole_line_app, size, 0);
+    let (whole_line_text_ms, whole_line_text_checksum) = benchmark_phase(frames, |frame| {
+        whole_line_app.scroll_body_lines(if frame % 2 == 0 { 1 } else { -1 });
+        let tick = frame as u64;
+        let key = single_session_text_key_for_tick_with_rendered_body(
+            &whole_line_app,
+            size,
+            tick,
+            0.0,
+            &whole_line_body_lines,
+        );
+        let buffers = single_session_text_buffers_from_key(&key, size, &mut whole_line_font_system);
+        let areas = single_session_text_areas_for_app_with_cached_body(
+            &whole_line_app,
+            &buffers,
+            size,
+            0.0,
+            &whole_line_body_lines,
+        );
+        let vertices = build_single_session_vertices_with_cached_body(
+            &whole_line_app,
+            size,
+            0.0,
+            tick,
+            0.0,
+            1.0,
+            &whole_line_body_lines,
+        );
+        key.body.len() ^ buffers.len() ^ areas.len() ^ vertices.len()
+    });
+
+    let mut visible_whole_line_app = app.clone();
+    let mut visible_whole_line_font_system = benchmark_font_system();
+    let visible_whole_line_body_lines =
+        single_session_rendered_body_lines_for_tick(&visible_whole_line_app, size, 0);
+    let visible_whole_line_key = single_session_text_key_for_tick_with_rendered_body(
+        &visible_whole_line_app,
+        size,
+        0,
+        0.0,
+        &visible_whole_line_body_lines,
+    );
+    let mut visible_whole_line_buffers = single_session_text_buffers_from_key(
+        &visible_whole_line_key,
+        size,
+        &mut visible_whole_line_font_system,
+    );
+    let mut visible_whole_line_start = single_session_body_viewport_from_lines(
+        &visible_whole_line_app,
+        size,
+        0.0,
+        &visible_whole_line_body_lines,
+    )
+    .start_line;
+    let initial_visible_viewport = single_session_body_viewport_from_lines(
+        &visible_whole_line_app,
+        size,
+        0.0,
+        &visible_whole_line_body_lines,
+    );
+    let (mut visible_window_start, mut visible_window_end) =
+        single_session_body_text_window_bounds(&initial_visible_viewport);
+    if let Some(body_buffer) = visible_whole_line_buffers.get_mut(1) {
+        *body_buffer = single_session_body_text_buffer_from_lines(
+            &mut visible_whole_line_font_system,
+            &visible_whole_line_body_lines[visible_window_start..visible_window_end],
+            size,
+            visible_whole_line_app.text_scale(),
+        );
+        body_buffer.set_scroll(
+            initial_visible_viewport
+                .start_line
+                .saturating_sub(visible_window_start)
+                .min(i32::MAX as usize) as i32,
+        );
+    }
+    let (visible_whole_line_text_ms, visible_whole_line_text_checksum) =
+        benchmark_phase(frames, |frame| {
+            visible_whole_line_app.scroll_body_lines(if frame % 2 == 0 { 1 } else { -1 });
+            let tick = frame as u64;
+            let viewport = single_session_body_viewport_from_lines(
+                &visible_whole_line_app,
+                size,
+                0.0,
+                &visible_whole_line_body_lines,
+            );
+            if !single_session_body_text_window_contains(
+                visible_window_start,
+                visible_window_end,
+                &viewport,
+            ) {
+                (visible_window_start, visible_window_end) =
+                    single_session_body_text_window_bounds(&viewport);
+                if let Some(body_buffer) = visible_whole_line_buffers.get_mut(1) {
+                    *body_buffer = single_session_body_text_buffer_from_lines(
+                        &mut visible_whole_line_font_system,
+                        &visible_whole_line_body_lines[visible_window_start..visible_window_end],
+                        size,
+                        visible_whole_line_app.text_scale(),
+                    );
+                }
+                visible_whole_line_start = usize::MAX;
+            }
+            if viewport.start_line != visible_whole_line_start {
+                if let Some(body_buffer) = visible_whole_line_buffers.get_mut(1) {
+                    body_buffer.set_scroll(
+                        viewport
+                            .start_line
+                            .saturating_sub(visible_window_start)
+                            .min(i32::MAX as usize) as i32,
+                    );
+                }
+                visible_whole_line_start = viewport.start_line;
+            }
+            let glyph_checksum = visible_whole_line_buffers
+                .get(1)
+                .map(|body_buffer| {
+                    body_buffer
+                        .layout_runs()
+                        .map(|run| run.glyphs.len())
+                        .sum::<usize>()
+                })
+                .unwrap_or_default();
+            let areas = single_session_text_areas_for_app_with_cached_body_viewport(
+                &visible_whole_line_app,
+                &visible_whole_line_buffers,
+                size,
+                0.0,
+                viewport,
+            );
+            let vertices = build_single_session_vertices_with_cached_body(
+                &visible_whole_line_app,
+                size,
+                0.0,
+                tick,
+                0.0,
+                1.0,
+                &visible_whole_line_body_lines,
+            );
+            visible_whole_line_key.body.len()
+                ^ visible_whole_line_buffers.len()
+                ^ areas.len()
+                ^ vertices.len()
+                ^ glyph_checksum
+        });
+
+    let metrics = single_session_body_scroll_metrics(&app, size, 0);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "frames": frames,
+            "size": { "width": size.width, "height": size.height },
+            "messages": app.messages.len(),
+            "scroll_metrics": metrics.map(|metrics| serde_json::json!({
+                "total_lines": metrics.total_lines,
+                "visible_lines": metrics.visible_lines,
+                "max_scroll_lines": metrics.max_scroll_lines,
+                "start_scroll_lines": app.body_scroll_lines,
+            })),
+            "setup": benchmark_phase_json(
+                "setup_text_and_geometry",
+                setup_elapsed.as_secs_f64() * 1000.0,
+                1,
+                setup_checksum,
+            ),
+            "phases": [
+                benchmark_phase_json(
+                    "legacy_smooth_scroll_text_relayout",
+                    legacy_smooth_text_ms,
+                    frames,
+                    legacy_smooth_text_checksum,
+                ),
+                benchmark_phase_json(
+                    "optimized_smooth_scroll_geometry_only",
+                    optimized_smooth_geometry_ms,
+                    frames,
+                    optimized_smooth_geometry_checksum,
+                ),
+                benchmark_phase_json(
+                    "legacy_whole_line_scroll_text_relayout",
+                    whole_line_text_ms,
+                    frames,
+                    whole_line_text_checksum,
+                ),
+                benchmark_phase_json(
+                    "optimized_whole_line_scroll_visible_body_only",
+                    visible_whole_line_text_ms,
+                    frames,
+                    visible_whole_line_text_checksum,
+                ),
+            ],
+        }))?
+    );
+    Ok(())
+}
+
+fn benchmark_phase(mut frames: usize, mut run_frame: impl FnMut(usize) -> usize) -> (f64, usize) {
+    frames = frames.max(1);
+    let started = Instant::now();
+    let mut checksum = 0usize;
+    for frame in 0..frames {
+        checksum ^= std::hint::black_box(run_frame(frame));
+    }
+    (started.elapsed().as_secs_f64() * 1000.0, checksum)
+}
+
+fn benchmark_phase_json(
+    name: &str,
+    total_ms: f64,
+    frames: usize,
+    checksum: usize,
+) -> serde_json::Value {
+    let frames = frames.max(1);
+    serde_json::json!({
+        "name": name,
+        "total_ms": total_ms,
+        "mean_ms_per_frame": total_ms / frames as f64,
+        "mean_us_per_frame": total_ms * 1000.0 / frames as f64,
+        "checksum": checksum,
+    })
+}
+
+fn benchmark_smooth_scroll_lines(frame: usize) -> f32 {
+    ((frame % 16) as f32 / 16.0) - 0.5
+}
+
+fn benchmark_font_system() -> FontSystem {
+    let mut font_system = FontSystem::new();
+    font_system
+        .db_mut()
+        .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
+    font_system
+}
+
+fn desktop_scroll_benchmark_app() -> SingleSessionApp {
+    let mut app = SingleSessionApp::new(None);
+    app.draft = "summarize the latest changes and suggest the next optimization".to_string();
+    app.draft_cursor = app.draft.len();
+    for turn in 0..320 {
+        app.messages.push(SingleSessionMessage::user(format!(
+            "Prompt {turn}: inspect this desktop render path and explain where scroll jank may come from."
+        )));
+        app.messages.push(SingleSessionMessage::assistant(format!(
+            "Assistant response {turn}: The render path includes markdown wrapping, transcript card geometry, scrollbar geometry, text buffer preparation, and GPU primitive upload. This paragraph is intentionally long enough to wrap across several desktop body lines so the benchmark exercises visible-line virtualization and wrapping behavior.\n\n- Check cached text keys.\n- Check smooth scroll fractional offsets.\n- Check whether geometry can update without reshaping text.\n\n```rust\nfn sample_{turn}() {{ println!(\"benchmark\"); }}\n```"
+        )));
+    }
+    app.status = Some("benchmark fixture".to_string());
+    app
 }
 
 fn load_desktop_preferences() -> Option<workspace::DesktopPreferences> {
@@ -1397,11 +1771,16 @@ impl DesktopApp {
         None
     }
 
-    fn scroll_single_session_body(&mut self, lines: i32, size: PhysicalSize<u32>) -> bool {
+    fn scroll_single_session_body(
+        &mut self,
+        lines: i32,
+        size: PhysicalSize<u32>,
+        metrics_cache: &mut SingleSessionScrollMetricsCache,
+    ) -> bool {
         if let Self::SingleSession(app) = self {
             let previous_scroll_lines = app.body_scroll_lines;
             app.scroll_body_lines(lines);
-            if let Some(metrics) = single_session_body_scroll_metrics(app, size, 0) {
+            if let Some(metrics) = metrics_cache.metrics(app, size) {
                 app.body_scroll_lines = app.body_scroll_lines.min(metrics.max_scroll_lines);
             } else {
                 app.body_scroll_lines = 0;
@@ -1415,11 +1794,12 @@ impl DesktopApp {
         &self,
         pending_lines: f32,
         size: PhysicalSize<u32>,
+        metrics_cache: &mut SingleSessionScrollMetricsCache,
     ) -> f32 {
         let Self::SingleSession(app) = self else {
             return 0.0;
         };
-        let Some(metrics) = single_session_body_scroll_metrics(app, size, 0) else {
+        let Some(metrics) = metrics_cache.metrics(app, size) else {
             return 0.0;
         };
         let base_scroll = app.body_scroll_lines.min(metrics.max_scroll_lines) as f32;
@@ -1866,6 +2246,72 @@ fn desktop_spinner_tick(_now: Instant) -> u64 {
     (millis / DESKTOP_SPINNER_FRAME_MS) as u64
 }
 
+fn single_session_text_buffer_cache_key(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    rendered_body_key: u64,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    rendered_body_key.hash(&mut hasher);
+    (size.width, size.height).hash(&mut hasher);
+    app.is_welcome_timeline_visible().hash(&mut hasher);
+    app.has_activity_indicator().hash(&mut hasher);
+    app.text_scale().to_bits().hash(&mut hasher);
+    app.header_title().hash(&mut hasher);
+    app.welcome_hero_text().hash(&mut hasher);
+    app.composer_text().hash(&mut hasher);
+    app.composer_status_line_for_tick(tick).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn single_session_body_text_window_bounds(viewport: &SingleSessionBodyViewport) -> (usize, usize) {
+    let start = viewport
+        .start_line
+        .saturating_sub(SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES);
+    let end = viewport
+        .start_line
+        .saturating_add(viewport.lines.len())
+        .saturating_add(SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES)
+        .min(viewport.total_lines);
+    (start, end.max(start))
+}
+
+fn single_session_body_text_window_contains(
+    window_start: usize,
+    window_end: usize,
+    viewport: &SingleSessionBodyViewport,
+) -> bool {
+    let visible_end = viewport.start_line.saturating_add(viewport.lines.len());
+    window_start <= viewport.start_line && visible_end <= window_end
+}
+
+#[derive(Default)]
+struct SingleSessionScrollMetricsCache {
+    key: Option<u64>,
+    total_lines: usize,
+}
+
+impl SingleSessionScrollMetricsCache {
+    fn metrics(
+        &mut self,
+        app: &SingleSessionApp,
+        size: PhysicalSize<u32>,
+    ) -> Option<SingleSessionBodyScrollMetrics> {
+        let key = app.rendered_body_cache_key((size.width, size.height));
+        if self.key != Some(key) {
+            self.total_lines = single_session_rendered_body_lines_for_tick(app, size, 0).len();
+            self.key = Some(key);
+        }
+        single_session_body_scroll_metrics_for_total_lines(app, size, self.total_lines)
+    }
+
+    fn clear(&mut self) {
+        self.key = None;
+        self.total_lines = 0;
+    }
+}
+
 struct Canvas<'window> {
     surface: wgpu::Surface<'window>,
     device: wgpu::Device,
@@ -1884,8 +2330,13 @@ struct Canvas<'window> {
     primitive_vertex_capacity: usize,
     needs_initial_frame: bool,
     defer_initial_text_frame: bool,
-    single_session_text_key: Option<SingleSessionTextKey>,
+    single_session_text_cache_key: Option<u64>,
     single_session_text_buffers: Vec<Buffer>,
+    single_session_body_key: Option<u64>,
+    single_session_body_lines: Vec<SingleSessionStyledLine>,
+    single_session_body_text_scroll_start: Option<usize>,
+    single_session_body_text_window_start: Option<usize>,
+    single_session_body_text_window_end: Option<usize>,
     welcome_hero_reveal_key: Option<String>,
     welcome_hero_reveal_started_at: Option<Instant>,
 }
@@ -2014,8 +2465,13 @@ impl<'window> Canvas<'window> {
             primitive_vertex_capacity: 0,
             needs_initial_frame: true,
             defer_initial_text_frame: true,
-            single_session_text_key: None,
+            single_session_text_cache_key: None,
             single_session_text_buffers: Vec::new(),
+            single_session_body_key: None,
+            single_session_body_lines: Vec::new(),
+            single_session_body_text_scroll_start: None,
+            single_session_body_text_window_start: None,
+            single_session_body_text_window_end: None,
             welcome_hero_reveal_key: None,
             welcome_hero_reveal_started_at: None,
         })
@@ -2028,29 +2484,103 @@ impl<'window> Canvas<'window> {
         }
 
         self.size = size;
-        self.single_session_text_key = None;
+        self.single_session_text_cache_key = None;
+        self.single_session_body_key = None;
+        self.single_session_body_text_scroll_start = None;
+        self.single_session_body_text_window_start = None;
+        self.single_session_body_text_window_end = None;
         self.text_needs_prepare = true;
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn refresh_cached_single_session_text_buffers(&mut self, app: &SingleSessionApp, now: Instant) {
-        let Some(font_system) = self.font_system.as_mut() else {
-            self.single_session_text_key = None;
-            self.single_session_text_buffers.clear();
-            return;
-        };
-        let key = single_session_text_key_for_tick_with_scroll(
+    fn refresh_cached_single_session_text_buffers(
+        &mut self,
+        app: &SingleSessionApp,
+        now: Instant,
+        smooth_scroll_lines: f32,
+        rendered_body_key: u64,
+    ) {
+        let tick = desktop_spinner_tick(now);
+        let viewport = single_session_body_viewport_from_lines(
             app,
             self.size,
-            desktop_spinner_tick(now),
-            0.0,
+            smooth_scroll_lines,
+            &self.single_session_body_lines,
         );
-        if self.single_session_text_key.as_ref() != Some(&key) {
+        let text_cache_key =
+            single_session_text_buffer_cache_key(app, self.size, tick, rendered_body_key);
+        if self.single_session_text_cache_key != Some(text_cache_key) {
+            let Some(font_system) = self.font_system.as_mut() else {
+                self.single_session_text_cache_key = None;
+                self.single_session_text_buffers.clear();
+                self.single_session_body_text_scroll_start = None;
+                self.single_session_body_text_window_start = None;
+                self.single_session_body_text_window_end = None;
+                return;
+            };
+            let key = single_session_text_key_for_tick_with_rendered_body(
+                app,
+                self.size,
+                tick,
+                smooth_scroll_lines,
+                &self.single_session_body_lines,
+            );
             self.single_session_text_buffers =
                 single_session_text_buffers_from_key(&key, self.size, font_system);
-            self.single_session_text_key = Some(key);
+            self.single_session_text_cache_key = Some(text_cache_key);
+            self.single_session_body_text_scroll_start = None;
+            self.single_session_body_text_window_start = None;
+            self.single_session_body_text_window_end = None;
+            self.text_needs_prepare = true;
+        }
+        self.sync_single_session_body_text_window(app, &viewport);
+    }
+
+    fn sync_single_session_body_text_window(
+        &mut self,
+        app: &SingleSessionApp,
+        viewport: &SingleSessionBodyViewport,
+    ) {
+        if let (Some(window_start), Some(window_end)) = (
+            self.single_session_body_text_window_start,
+            self.single_session_body_text_window_end,
+        ) && single_session_body_text_window_contains(window_start, window_end, viewport)
+        {
+            self.sync_single_session_body_text_scroll(viewport.start_line, window_start);
+            return;
+        }
+
+        let (window_start, window_end) = single_session_body_text_window_bounds(viewport);
+        let window_lines = self.single_session_body_lines[window_start..window_end].to_vec();
+        if let Some(font_system) = self.font_system.as_mut()
+            && let Some(body_buffer) = self.single_session_text_buffers.get_mut(1)
+        {
+            *body_buffer = single_session_body_text_buffer_from_lines(
+                font_system,
+                &window_lines,
+                self.size,
+                app.text_scale(),
+            );
+            self.single_session_body_text_window_start = Some(window_start);
+            self.single_session_body_text_window_end = Some(window_end);
+            self.single_session_body_text_scroll_start = None;
+            self.sync_single_session_body_text_scroll(viewport.start_line, window_start);
+        }
+    }
+
+    fn sync_single_session_body_text_scroll(&mut self, start_line: usize, window_start: usize) {
+        if self.single_session_body_text_scroll_start == Some(start_line) {
+            return;
+        }
+        if let Some(body_buffer) = self.single_session_text_buffers.get_mut(1) {
+            body_buffer.set_scroll(
+                start_line
+                    .saturating_sub(window_start)
+                    .min(i32::MAX as usize) as i32,
+            );
+            self.single_session_body_text_scroll_start = Some(start_line);
             self.text_needs_prepare = true;
         }
     }
@@ -2103,6 +2633,16 @@ impl<'window> Canvas<'window> {
             self.queue
                 .write_buffer(vertex_buffer, 0, bytemuck::cast_slice(vertices));
         }
+    }
+
+    fn cached_single_session_body_lines(&mut self, app: &SingleSessionApp, tick: u64) -> u64 {
+        let key = app.rendered_body_cache_key((self.size.width, self.size.height));
+        if self.single_session_body_key != Some(key) {
+            self.single_session_body_lines =
+                single_session_rendered_body_lines_for_tick(app, self.size, tick);
+            self.single_session_body_key = Some(key);
+        }
+        key
     }
 
     fn welcome_hero_reveal_progress(
@@ -2160,14 +2700,27 @@ impl<'window> Canvas<'window> {
         let defer_text_this_frame = self.defer_initial_text_frame;
         if defer_text_this_frame {
             self.defer_initial_text_frame = false;
-            self.single_session_text_key = None;
+            self.single_session_text_cache_key = None;
             self.single_session_text_buffers.clear();
+            self.single_session_body_text_scroll_start = None;
+            self.single_session_body_text_window_start = None;
+            self.single_session_body_text_window_end = None;
         } else if let DesktopApp::SingleSession(single_session) = app {
+            let rendered_body_key =
+                self.cached_single_session_body_lines(single_session, spinner_tick);
             self.ensure_font_system();
-            self.refresh_cached_single_session_text_buffers(single_session, now);
+            self.refresh_cached_single_session_text_buffers(
+                single_session,
+                now,
+                smooth_scroll_lines,
+                rendered_body_key,
+            );
         } else {
-            self.single_session_text_key = None;
+            self.single_session_text_cache_key = None;
             self.single_session_text_buffers.clear();
+            self.single_session_body_text_scroll_start = None;
+            self.single_session_body_text_window_start = None;
+            self.single_session_body_text_window_end = None;
         }
         if !self.single_session_text_buffers.is_empty() {
             self.ensure_text_renderer();
@@ -2176,12 +2729,12 @@ impl<'window> Canvas<'window> {
         let has_text_buffers = !text_buffers.is_empty();
         if self.text_needs_prepare {
             let text_areas = if let DesktopApp::SingleSession(single_session) = app {
-                single_session_text_areas_for_app_with_scroll(
+                single_session_text_areas_for_app_with_cached_body(
                     single_session,
                     text_buffers,
                     self.size,
-                    spinner_tick,
-                    0.0,
+                    smooth_scroll_lines,
+                    &self.single_session_body_lines,
                 )
             } else {
                 single_session_text_areas(text_buffers, self.size)
@@ -2227,13 +2780,14 @@ impl<'window> Canvas<'window> {
                     || single_session.has_background_work()
                     || welcome_hero_reveal_active;
                 (
-                    build_single_session_vertices_with_scroll_and_reveal(
+                    build_single_session_vertices_with_cached_body(
                         single_session,
                         self.size,
                         focus_pulse,
                         spinner_tick,
                         smooth_scroll_lines,
                         welcome_hero_reveal_progress,
+                        &self.single_session_body_lines,
                     ),
                     animation_active,
                 )

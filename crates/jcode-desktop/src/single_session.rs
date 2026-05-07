@@ -3,6 +3,8 @@ use crate::{
     workspace,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use workspace::{KeyInput, KeyOutcome};
 
 pub(crate) const SINGLE_SESSION_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
@@ -163,7 +165,7 @@ impl SingleSessionStyledLine {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct StdinResponseState {
     pub(crate) request_id: String,
     pub(crate) prompt: String,
@@ -445,13 +447,13 @@ impl SessionSwitcherState {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SingleSessionMessage {
     role: SingleSessionRole,
     content: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum SingleSessionRole {
     User,
@@ -1154,6 +1156,42 @@ impl SingleSessionApp {
         self.body_styled_lines()
     }
 
+    pub(crate) fn rendered_body_cache_key(&self, size: (u32, u32)) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        size.hash(&mut hasher);
+        self.session
+            .as_ref()
+            .map(|session| {
+                (
+                    session.session_id.as_str(),
+                    session.title.as_str(),
+                    session.subtitle.as_str(),
+                    session.detail.as_str(),
+                    session.preview_lines.as_slice(),
+                    session.detail_lines.as_slice(),
+                )
+            })
+            .hash(&mut hasher);
+        self.messages.hash(&mut hasher);
+        self.streaming_response.hash(&mut hasher);
+        self.status.hash(&mut hasher);
+        self.error.hash(&mut hasher);
+        self.show_help.hash(&mut hasher);
+        self.model_picker.open.hash(&mut hasher);
+        self.model_picker.filter.hash(&mut hasher);
+        self.model_picker.selected.hash(&mut hasher);
+        self.session_switcher.open.hash(&mut hasher);
+        self.session_switcher.filter.hash(&mut hasher);
+        self.session_switcher.selected.hash(&mut hasher);
+        self.stdin_response.hash(&mut hasher);
+        self.welcome_name.hash(&mut hasher);
+        self.recovery_session_count.hash(&mut hasher);
+        self.welcome_timeline.hash(&mut hasher);
+        self.welcome_hero_phrase_index.hash(&mut hasher);
+        self.text_scale.to_bits().hash(&mut hasher);
+        hasher.finish()
+    }
+
     pub(crate) fn welcome_hero_text(&self) -> String {
         handwritten_welcome_phrase(self.welcome_hero_phrase_index).to_string()
     }
@@ -1845,6 +1883,14 @@ impl SingleSessionApp {
             }
         }
         segments
+    }
+
+    pub(crate) fn has_body_selection(&self) -> bool {
+        self.selection_anchor.is_some() && self.selection_focus.is_some()
+    }
+
+    pub(crate) fn has_draft_selection(&self) -> bool {
+        self.draft_selection_anchor.is_some() && self.draft_selection_focus.is_some()
     }
 
     pub(crate) fn selected_text_from_lines(&self, lines: &[String]) -> Option<String> {

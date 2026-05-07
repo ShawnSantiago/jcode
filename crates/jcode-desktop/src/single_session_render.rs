@@ -87,17 +87,20 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
         size,
     );
 
-    if app.is_welcome_timeline_visible() {
-        push_fresh_welcome_ambient(&mut vertices, size, spinner_tick);
-    }
-    if app.is_welcome_timeline_visible() {
+    let welcome_chrome_offset = if app.is_welcome_timeline_visible() {
+        welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines)
+    } else {
+        0.0
+    };
+    if welcome_timeline_chrome_visible(app, size, welcome_chrome_offset) {
+        push_fresh_welcome_ambient(&mut vertices, size, spinner_tick, welcome_chrome_offset);
         push_handwritten_welcome_hero_with_offset(
             &mut vertices,
             &app.welcome_hero_text(),
             size,
             app.text_scale(),
             welcome_hero_reveal_progress,
-            welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
+            welcome_chrome_offset,
         );
     }
 
@@ -120,6 +123,107 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
     );
     push_single_session_selection(&mut vertices, app, size);
     push_single_session_scrollbar(&mut vertices, app, size, spinner_tick, smooth_scroll_lines);
+
+    vertices
+}
+
+pub(crate) fn build_single_session_vertices_with_cached_body(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    focus_pulse: f32,
+    spinner_tick: u64,
+    smooth_scroll_lines: f32,
+    welcome_hero_reveal_progress: f32,
+    rendered_body_lines: &[SingleSessionStyledLine],
+) -> Vec<Vertex> {
+    let width = size.width as f32;
+    let height = size.height as f32;
+    let mut vertices = Vec::with_capacity(2048);
+
+    push_gradient_rect(
+        &mut vertices,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        },
+        BACKGROUND_TOP_LEFT,
+        BACKGROUND_BOTTOM_LEFT,
+        BACKGROUND_BOTTOM_RIGHT,
+        BACKGROUND_TOP_RIGHT,
+        size,
+    );
+
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: width.max(1.0),
+        height: height.max(1.0),
+    };
+    let surface = single_session_surface(app.session.as_ref());
+    push_single_session_surface_without_bottom_rule(
+        &mut vertices,
+        rect,
+        surface.color_index,
+        focus_pulse,
+        size,
+    );
+
+    let welcome_chrome_offset = if app.is_welcome_timeline_visible() {
+        welcome_timeline_visual_offset_pixels_for_total_lines(
+            app,
+            size,
+            smooth_scroll_lines,
+            rendered_body_lines.len(),
+        )
+    } else {
+        0.0
+    };
+    if welcome_timeline_chrome_visible(app, size, welcome_chrome_offset) {
+        push_fresh_welcome_ambient(&mut vertices, size, spinner_tick, welcome_chrome_offset);
+        push_handwritten_welcome_hero_with_offset(
+            &mut vertices,
+            &app.welcome_hero_text(),
+            size,
+            app.text_scale(),
+            welcome_hero_reveal_progress,
+            welcome_chrome_offset,
+        );
+    }
+
+    if app.has_activity_indicator() {
+        push_native_activity_spinner(&mut vertices, app, size, spinner_tick);
+    }
+
+    let viewport = single_session_body_viewport_from_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        rendered_body_lines,
+    );
+    push_single_session_transcript_cards_from_viewport(
+        &mut vertices,
+        app,
+        size,
+        &viewport,
+        rendered_body_lines.len(),
+    );
+    push_single_session_streaming_shimmer_from_viewport(
+        &mut vertices,
+        app,
+        size,
+        spinner_tick,
+        &viewport,
+    );
+    push_single_session_selection(&mut vertices, app, size);
+    push_single_session_scrollbar_for_total_lines(
+        &mut vertices,
+        app,
+        size,
+        smooth_scroll_lines,
+        rendered_body_lines.len(),
+    );
 
     vertices
 }
@@ -242,7 +346,12 @@ fn push_top_and_side_surface_outline(
     );
 }
 
-fn push_fresh_welcome_ambient(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32>, tick: u64) {
+fn push_fresh_welcome_ambient(
+    vertices: &mut Vec<Vertex>,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    y_offset: f32,
+) {
     let draft_top = single_session_draft_top(size);
     let usable_height = (draft_top - PANEL_BODY_TOP_PADDING).max(180.0);
     let t = tick as f32 * 0.055;
@@ -250,7 +359,7 @@ fn push_fresh_welcome_ambient(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32
     push_aurora_ribbon(
         vertices,
         size,
-        PANEL_BODY_TOP_PADDING + usable_height * 0.18 + (t * 0.60).sin() * 18.0,
+        PANEL_BODY_TOP_PADDING + usable_height * 0.18 + (t * 0.60).sin() * 18.0 + y_offset,
         usable_height * 0.30,
         t * 0.85,
         WELCOME_AURORA_BLUE,
@@ -259,7 +368,7 @@ fn push_fresh_welcome_ambient(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32
     push_aurora_ribbon(
         vertices,
         size,
-        PANEL_BODY_TOP_PADDING + usable_height * 0.39 + (t * 0.47).cos() * 24.0,
+        PANEL_BODY_TOP_PADDING + usable_height * 0.39 + (t * 0.47).cos() * 24.0 + y_offset,
         usable_height * 0.34,
         t * -0.72 + 1.8,
         WELCOME_AURORA_MINT,
@@ -268,7 +377,7 @@ fn push_fresh_welcome_ambient(vertices: &mut Vec<Vertex>, size: PhysicalSize<u32
     push_aurora_ribbon(
         vertices,
         size,
-        PANEL_BODY_TOP_PADDING + usable_height * 0.58 + (t * 0.52).sin() * 16.0,
+        PANEL_BODY_TOP_PADDING + usable_height * 0.58 + (t * 0.52).sin() * 16.0 + y_offset,
         usable_height * 0.24,
         t * 0.64 + 3.2,
         WELCOME_AURORA_WARM,
@@ -284,6 +393,10 @@ fn push_handwritten_welcome_hero_with_offset(
     reveal_progress: f32,
     y_offset: f32,
 ) {
+    if !welcome_hero_approx_bounds_visible(size, ui_scale, y_offset) {
+        return;
+    }
+
     let paths = handwritten_welcome_paths_for_phrase(phrase);
     let total_length = stroke_paths_length(&paths);
     if total_length <= 0.0 {
@@ -342,10 +455,46 @@ fn push_handwritten_welcome_hero_with_offset(
     }
 }
 
+fn welcome_timeline_chrome_visible(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    y_offset: f32,
+) -> bool {
+    app.is_welcome_timeline_visible()
+        && (!app.has_welcome_timeline_transcript()
+            || welcome_hero_approx_bounds_visible(size, app.text_scale(), y_offset))
+}
+
+fn welcome_hero_approx_bounds_visible(
+    size: PhysicalSize<u32>,
+    ui_scale: f32,
+    y_offset: f32,
+) -> bool {
+    let body_top = PANEL_BODY_TOP_PADDING;
+    let draft_top = single_session_draft_top(size);
+    let top = body_top + (draft_top - body_top) * 0.18 + y_offset;
+    let bottom = body_top + (draft_top - body_top) * 0.74 * ui_scale + y_offset;
+    bottom >= -64.0 && top <= size.height as f32 + 64.0
+}
+
 fn welcome_timeline_visual_offset_pixels(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     smooth_scroll_lines: f32,
+) -> f32 {
+    welcome_timeline_visual_offset_pixels_for_total_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        welcome_timeline_total_body_lines(app, size),
+    )
+}
+
+fn welcome_timeline_visual_offset_pixels_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    total_lines: usize,
 ) -> f32 {
     if !app.is_welcome_timeline_visible() || !app.has_welcome_timeline_transcript() {
         return 0.0;
@@ -358,7 +507,7 @@ fn welcome_timeline_visual_offset_pixels(
     let visible_lines = (((body_bottom - body_top).max(line_height)) / line_height)
         .floor()
         .max(1.0);
-    let total_lines = welcome_timeline_total_body_lines(app, size) as f32;
+    let total_lines = total_lines as f32;
     if total_lines <= visible_lines {
         return 0.0;
     }
@@ -1108,12 +1257,28 @@ fn push_single_session_transcript_cards(
     tick: u64,
     smooth_scroll_lines: f32,
 ) {
+    let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
+    push_single_session_transcript_cards_from_viewport(
+        vertices,
+        app,
+        size,
+        &viewport,
+        viewport.total_lines,
+    );
+}
+
+fn push_single_session_transcript_cards_from_viewport(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    viewport: &SingleSessionBodyViewport,
+    total_lines: usize,
+) {
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
-    let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
     let width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0 + 12.0).max(1.0);
     let body_top = single_session_body_top_for_app(app, size);
-    let body_bottom = single_session_body_bottom_for_app(app, size);
+    let body_bottom = single_session_body_bottom_for_total_lines(app, size, total_lines);
 
     for run in single_session_transcript_card_runs(&viewport.lines) {
         let Some(color) = single_session_line_card_color(run.style) else {
@@ -1159,6 +1324,32 @@ pub(crate) fn push_single_session_streaming_shimmer(
     );
 }
 
+fn push_single_session_streaming_shimmer_from_viewport(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    viewport: &SingleSessionBodyViewport,
+) {
+    let Some(shimmer) = single_session_streaming_shimmer_from_viewport(app, size, tick, viewport)
+    else {
+        return;
+    };
+
+    push_rect(
+        vertices,
+        shimmer.soft_rect,
+        STREAMING_SHIMMER_SOFT_COLOR,
+        size,
+    );
+    push_rect(
+        vertices,
+        shimmer.core_rect,
+        STREAMING_SHIMMER_CORE_COLOR,
+        size,
+    );
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SingleSessionStreamingShimmer {
     pub(crate) soft_rect: Rect,
@@ -1185,6 +1376,19 @@ fn single_session_streaming_shimmer_with_scroll(
     }
 
     let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
+    single_session_streaming_shimmer_from_viewport(app, size, tick, &viewport)
+}
+
+fn single_session_streaming_shimmer_from_viewport(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    viewport: &SingleSessionBodyViewport,
+) -> Option<SingleSessionStreamingShimmer> {
+    if app.streaming_response.trim().is_empty() {
+        return None;
+    }
+
     let line_index = viewport.lines.iter().rposition(is_shimmer_anchor_line)?;
 
     let typography = single_session_typography_for_scale(app.text_scale());
@@ -1232,6 +1436,29 @@ fn push_single_session_scrollbar(
     let Some(metrics) = single_session_body_scroll_metrics(app, size, tick) else {
         return;
     };
+    push_single_session_scrollbar_for_metrics(vertices, size, smooth_scroll_lines, metrics);
+}
+
+fn push_single_session_scrollbar_for_total_lines(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    total_lines: usize,
+) {
+    let Some(metrics) = single_session_body_scroll_metrics_for_total_lines(app, size, total_lines)
+    else {
+        return;
+    };
+    push_single_session_scrollbar_for_metrics(vertices, size, smooth_scroll_lines, metrics);
+}
+
+fn push_single_session_scrollbar_for_metrics(
+    vertices: &mut Vec<Vertex>,
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    metrics: SingleSessionBodyScrollMetrics,
+) {
     let track_top = PANEL_BODY_TOP_PADDING + 4.0;
     let track_bottom = single_session_body_bottom(size) - 4.0;
     let track_height = (track_bottom - track_top).max(1.0);
@@ -1283,14 +1510,22 @@ pub(crate) fn single_session_body_scroll_metrics(
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Option<SingleSessionBodyScrollMetrics> {
+    let _ = tick;
+    let total_lines = welcome_timeline_total_body_lines(app, size);
+    single_session_body_scroll_metrics_for_total_lines(app, size, total_lines)
+}
+
+pub(crate) fn single_session_body_scroll_metrics_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    total_lines: usize,
+) -> Option<SingleSessionBodyScrollMetrics> {
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
-    let body_bottom = single_session_body_bottom_for_app(app, size);
+    let body_bottom = single_session_body_bottom_for_total_lines(app, size, total_lines);
     let available_height = (body_bottom - body_top).max(line_height);
     let visible_lines = ((available_height / line_height).floor() as usize).max(1);
-    let _ = tick;
-    let total_lines = welcome_timeline_total_body_lines(app, size);
     let max_scroll_lines = total_lines.saturating_sub(visible_lines);
     (max_scroll_lines > 0).then_some(SingleSessionBodyScrollMetrics {
         total_lines,
@@ -1375,6 +1610,10 @@ fn push_single_session_selection(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
 ) {
+    if !app.has_body_selection() && !app.has_draft_selection() {
+        return;
+    }
+
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
     let char_width = single_session_body_char_width();
@@ -1590,10 +1829,22 @@ pub(crate) fn single_session_draft_top_for_app(
 }
 
 fn welcome_timeline_draft_top(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
+    welcome_timeline_draft_top_for_total_lines(
+        app,
+        size,
+        welcome_timeline_total_body_lines(app, size),
+    )
+}
+
+fn welcome_timeline_draft_top_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    total_lines: usize,
+) -> f32 {
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = PANEL_BODY_TOP_PADDING;
-    let timeline_lines = welcome_timeline_total_body_lines(app, size).max(1) as f32;
+    let timeline_lines = total_lines.max(1) as f32;
     let desired = body_top + timeline_lines * line_height + welcome_timeline_body_draft_gap();
     desired
         .min(single_session_draft_top(size))
@@ -1696,10 +1947,42 @@ pub(crate) fn single_session_text_key_for_tick_with_scroll(
     tick: u64,
     smooth_scroll_lines: f32,
 ) -> SingleSessionTextKey {
+    let rendered_body_lines = single_session_rendered_body_lines_for_tick(app, size, tick);
+    single_session_text_key_for_tick_with_rendered_body(
+        app,
+        size,
+        tick,
+        smooth_scroll_lines,
+        &rendered_body_lines,
+    )
+}
+
+pub(crate) fn single_session_text_key_for_tick_with_rendered_body(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    smooth_scroll_lines: f32,
+    rendered_body_lines: &[SingleSessionStyledLine],
+) -> SingleSessionTextKey {
+    let body = single_session_body_viewport_from_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        rendered_body_lines,
+    )
+    .lines;
+    single_session_text_key_for_body_lines(app, size, tick, body)
+}
+
+fn single_session_text_key_for_body_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+    body: Vec<SingleSessionStyledLine>,
+) -> SingleSessionTextKey {
     let welcome_handoff_visible = false;
     let welcome_chrome_visible = app.is_welcome_timeline_visible();
     let welcome_input_visible = true;
-    let body = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines).lines;
     let (welcome_hero, welcome_hint) = if welcome_chrome_visible {
         (app.welcome_hero_text(), Vec::new())
     } else {
@@ -1816,6 +2099,26 @@ pub(crate) fn single_session_text_buffers_from_key(
     ]
 }
 
+pub(crate) fn single_session_body_text_buffer_from_lines(
+    font_system: &mut FontSystem,
+    lines: &[SingleSessionStyledLine],
+    size: PhysicalSize<u32>,
+    text_scale: f32,
+) -> Buffer {
+    let typography = single_session_typography_for_scale(text_scale);
+    let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
+    let mut buffer = single_session_styled_text_buffer(
+        font_system,
+        lines,
+        typography.body_size,
+        typography.body_size * typography.body_line_height,
+        content_width,
+        (size.height as f32 - 150.0).max(1.0),
+    );
+    buffer.shape_until(font_system, i32::MAX);
+    buffer
+}
+
 fn welcome_hero_font_size(hero: &str, size: PhysicalSize<u32>) -> f32 {
     let width = size.width as f32;
     let height = size.height as f32;
@@ -1853,6 +2156,8 @@ pub(crate) fn single_session_visible_styled_body_for_tick(
 pub(crate) struct SingleSessionBodyViewport {
     pub(crate) lines: Vec<SingleSessionStyledLine>,
     pub(crate) top_offset_pixels: f32,
+    pub(crate) start_line: usize,
+    pub(crate) total_lines: usize,
 }
 
 pub(crate) fn single_session_body_viewport_for_tick(
@@ -1861,17 +2166,29 @@ pub(crate) fn single_session_body_viewport_for_tick(
     tick: u64,
     smooth_scroll_lines: f32,
 ) -> SingleSessionBodyViewport {
+    let lines = single_session_rendered_body_lines_for_tick(app, size, tick);
+    single_session_body_viewport_from_lines(app, size, smooth_scroll_lines, &lines)
+}
+
+pub(crate) fn single_session_body_viewport_from_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    lines: &[SingleSessionStyledLine],
+) -> SingleSessionBodyViewport {
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
-    let body_bottom = single_session_body_bottom_for_app(app, size);
+    let total_lines = lines.len();
+    let body_bottom = single_session_body_bottom_for_total_lines(app, size, total_lines);
     let available_height = (body_bottom - body_top).max(line_height);
     let visible_lines = ((available_height / line_height).floor() as usize).max(1);
-    let lines = single_session_rendered_body_lines_for_tick(app, size, tick);
     if lines.len() <= visible_lines {
         return SingleSessionBodyViewport {
-            lines,
+            lines: lines.to_vec(),
             top_offset_pixels: 0.0,
+            start_line: 0,
+            total_lines,
         };
     }
 
@@ -1885,10 +2202,12 @@ pub(crate) fn single_session_body_viewport_for_tick(
     SingleSessionBodyViewport {
         lines: lines[start..end.max(start)].to_vec(),
         top_offset_pixels,
+        start_line: start,
+        total_lines,
     }
 }
 
-fn single_session_rendered_body_lines_for_tick(
+pub(crate) fn single_session_rendered_body_lines_for_tick(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     tick: u64,
@@ -2035,6 +2354,20 @@ fn single_session_body_bottom_for_app(app: &SingleSessionApp, size: PhysicalSize
     single_session_body_bottom(size)
 }
 
+fn single_session_body_bottom_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    total_lines: usize,
+) -> f32 {
+    if app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript() {
+        return (welcome_timeline_draft_top_for_total_lines(app, size, total_lines)
+            - welcome_timeline_body_draft_gap())
+        .max(single_session_body_top_for_app(app, size));
+    }
+
+    single_session_body_bottom(size)
+}
+
 pub(crate) fn single_session_body_bottom(size: PhysicalSize<u32>) -> f32 {
     single_session_draft_top(size) - SINGLE_SESSION_STATUS_GAP - 12.0
 }
@@ -2064,7 +2397,7 @@ fn single_session_text_buffer(
         font_system,
         text,
         Attrs::new().family(Family::Name(SINGLE_SESSION_FONT_FAMILY)),
-        Shaping::Advanced,
+        desktop_text_shaping(text),
     );
     buffer.shape_until_scroll(font_system);
     buffer
@@ -2085,7 +2418,7 @@ fn single_session_nowrap_text_buffer(
         font_system,
         text,
         Attrs::new().family(Family::Name(SINGLE_SESSION_FONT_FAMILY)),
-        Shaping::Advanced,
+        desktop_text_shaping(text),
     );
     buffer.shape_until_scroll(font_system);
     buffer
@@ -2102,13 +2435,26 @@ fn single_session_styled_text_buffer(
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
     buffer.set_size(font_system, width, height);
     let segments = single_session_styled_text_segments(lines);
+    let shaping = if segments.iter().all(|(text, _)| text.is_ascii()) {
+        Shaping::Basic
+    } else {
+        Shaping::Advanced
+    };
     buffer.set_rich_text(
         font_system,
         segments.iter().map(|(text, attrs)| (text.as_str(), *attrs)),
-        Shaping::Advanced,
+        shaping,
     );
     buffer.shape_until_scroll(font_system);
     buffer
+}
+
+fn desktop_text_shaping(text: &str) -> Shaping {
+    if text.is_ascii() {
+        Shaping::Basic
+    } else {
+        Shaping::Advanced
+    }
 }
 
 pub(crate) fn single_session_styled_text_segments(
@@ -2206,6 +2552,7 @@ fn single_session_color_attrs(color: TextColor) -> Attrs<'static> {
         .color(color)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn user_prompt_number_color(turn: usize) -> TextColor {
     user_prompt_number_color_for_distance(turn.saturating_sub(1))
 }
@@ -2294,6 +2641,55 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
         single_session_body_bottom_for_app(app, size) as i32,
         single_session_draft_top_for_app(app, size),
         welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
+        welcome_status_lane_visible(app),
+        app.text_scale(),
+    )
+}
+
+pub(crate) fn single_session_text_areas_for_app_with_cached_body<'a>(
+    app: &SingleSessionApp,
+    buffers: &'a [Buffer],
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    rendered_body_lines: &[SingleSessionStyledLine],
+) -> Vec<TextArea<'a>> {
+    let viewport = single_session_body_viewport_from_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        rendered_body_lines,
+    );
+    single_session_text_areas_for_app_with_cached_body_viewport(
+        app,
+        buffers,
+        size,
+        smooth_scroll_lines,
+        viewport,
+    )
+}
+
+pub(crate) fn single_session_text_areas_for_app_with_cached_body_viewport<'a>(
+    app: &SingleSessionApp,
+    buffers: &'a [Buffer],
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    viewport: SingleSessionBodyViewport,
+) -> Vec<TextArea<'a>> {
+    single_session_text_areas_for_state(
+        buffers,
+        size,
+        app.is_welcome_timeline_visible(),
+        false,
+        viewport.top_offset_pixels,
+        single_session_body_top_for_app(app, size),
+        single_session_body_bottom_for_total_lines(app, size, viewport.total_lines) as i32,
+        single_session_draft_top_for_app(app, size),
+        welcome_timeline_visual_offset_pixels_for_total_lines(
+            app,
+            size,
+            smooth_scroll_lines,
+            viewport.total_lines,
+        ),
         welcome_status_lane_visible(app),
         app.text_scale(),
     )
