@@ -1953,9 +1953,11 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     assert_eq!(key.title, "");
     assert_eq!(key.welcome_hero, "Hello there");
     assert!(key.status.contains("sending"));
+    assert!(key.status.contains("Esc interrupt"));
     assert_visual_text_contains(&key, "Hello there");
     assert!(vertices_have_color(&vertices, WELCOME_AURORA_BLUE));
     assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
+    assert!(vertices_have_color(&vertices, NATIVE_SPINNER_HEAD_COLOR));
     assert!(
         key.body
             .iter()
@@ -1976,7 +1978,10 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     assert!(areas[3].top > areas[2].top);
     assert!(areas[3].top >= fresh_welcome_draft_top(size));
     assert!(!vertices_have_color(&vertices, [0.060, 0.085, 0.145, 0.34]));
-    assert!(vertices_have_color(&vertices, SINGLE_SESSION_CARET_COLOR));
+    assert!(
+        !vertices_have_color(&vertices, SINGLE_SESSION_CARET_COLOR),
+        "empty post-submit composer lane should become status, not a blank caret"
+    );
 }
 
 #[test]

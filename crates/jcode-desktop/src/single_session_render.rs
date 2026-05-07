@@ -79,7 +79,7 @@ pub(crate) fn build_single_session_vertices_with_scroll(
     }
 
     if app.has_activity_indicator() {
-        push_native_activity_spinner(&mut vertices, size, spinner_tick);
+        push_native_activity_spinner(&mut vertices, app, size, spinner_tick);
     }
     push_single_session_transcript_cards(
         &mut vertices,
@@ -783,14 +783,20 @@ fn alpha_scaled(mut color: [f32; 4], scale: f32) -> [f32; 4] {
 
 pub(crate) fn push_native_activity_spinner(
     vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     tick: u64,
 ) {
     let typography = single_session_typography();
-    let draft_top = single_session_draft_top(size);
+    let draft_top = single_session_draft_top_for_app(app, size);
+    let center_y = if welcome_status_lane_visible(app) {
+        draft_top + typography.meta_size * 0.58
+    } else {
+        draft_top - SINGLE_SESSION_STATUS_GAP + 7.0
+    };
     let center = [
         size.width as f32 - PANEL_TITLE_LEFT_PADDING - 12.0,
-        draft_top - SINGLE_SESSION_STATUS_GAP + 7.0,
+        center_y,
     ];
     let radius = (typography.meta_size * 0.54).clamp(5.0, 9.0);
     let thickness = 2.4;
@@ -1158,6 +1164,10 @@ pub(crate) fn push_single_session_caret(
     size: PhysicalSize<u32>,
     draft_buffer: Option<&Buffer>,
 ) {
+    if welcome_status_lane_visible(app) {
+        return;
+    }
+
     let caret = draft_buffer
         .and_then(|buffer| glyphon_draft_caret_position(app, buffer, size))
         .unwrap_or_else(|| approximate_draft_caret_position(app, size));
@@ -1892,6 +1902,7 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
         single_session_body_bottom_for_app(app, size) as i32,
         single_session_draft_top_for_app(app, size),
         welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
+        welcome_status_lane_visible(app),
     )
 }
 
@@ -1910,7 +1921,15 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
         single_session_body_bottom(size) as i32,
         single_session_draft_top_for_fresh_state(size, fresh_welcome_visible),
         0.0,
+        false,
     )
+}
+
+fn welcome_status_lane_visible(app: &SingleSessionApp) -> bool {
+    app.is_welcome_timeline_visible()
+        && app.has_welcome_timeline_transcript()
+        && app.draft.is_empty()
+        && app.has_activity_indicator()
 }
 
 pub(crate) fn single_session_text_areas_for_state(
@@ -1923,6 +1942,7 @@ pub(crate) fn single_session_text_areas_for_state(
     body_bottom: i32,
     draft_top: f32,
     welcome_chrome_offset_pixels: f32,
+    status_lane_visible: bool,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
         return Vec::new();
@@ -2006,7 +2026,7 @@ pub(crate) fn single_session_text_areas_for_state(
         },
     ];
 
-    if !welcome_chrome_visible {
+    if !welcome_chrome_visible && !status_lane_visible {
         areas.push(TextArea {
             buffer: &buffers[3],
             left,
@@ -2022,7 +2042,21 @@ pub(crate) fn single_session_text_areas_for_state(
         });
     }
 
-    if !welcome_handoff_visible {
+    if status_lane_visible {
+        areas.push(TextArea {
+            buffer: &buffers[3],
+            left,
+            top: draft_top,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: draft_top as i32,
+                right,
+                bottom,
+            },
+            default_color: text_color(STATUS_TEXT_ACCENT_COLOR),
+        });
+    } else if !welcome_handoff_visible {
         areas.push(TextArea {
             buffer: &buffers[2],
             left,
