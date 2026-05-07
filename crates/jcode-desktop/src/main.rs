@@ -34,12 +34,14 @@ use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
@@ -3588,8 +3590,8 @@ fn log_desktop_session_event_batch_profile(
     {
         return;
     }
-    eprintln!(
-        "jcode-desktop-session-event-profile {}",
+    emit_desktop_profile_event(
+        "jcode-desktop-session-event-profile",
         serde_json::json!({
             "raw_events": raw_event_count,
             "coalesced_events": apply_stats.event_count,
@@ -3601,7 +3603,7 @@ fn log_desktop_session_event_batch_profile(
             "visible_changed": apply_stats.visible_changed,
             "redraw_requested": redraw_requested,
             "redraw_deferred": redraw_deferred,
-        })
+        }),
     );
 }
 
@@ -4238,8 +4240,8 @@ impl DesktopFrameProfiler {
 
     fn report(&mut self, now: Instant) {
         if let Some(worst) = self.worst.as_ref() {
-            eprintln!(
-                "jcode-desktop-frame-profile {}",
+            emit_desktop_profile_event(
+                "jcode-desktop-frame-profile",
                 serde_json::json!({
                     "cpu_budget_ms": duration_ms(self.budget),
                     "present_stall_budget_ms": duration_ms(DESKTOP_PRESENT_STALL_BUDGET),
@@ -4265,7 +4267,7 @@ impl DesktopFrameProfiler {
                         "name": stage.name,
                         "ms": duration_ms(stage.duration),
                     })).collect::<Vec<_>>(),
-                })
+                }),
             );
         }
         self.frames = 0;
@@ -4438,8 +4440,8 @@ impl DesktopNoPaintWatchdog {
         });
         if report_due {
             self.last_reported_at = Some(now);
-            eprintln!(
-                "jcode-desktop-no-paint-profile {}",
+            emit_desktop_profile_event(
+                "jcode-desktop-no-paint-profile",
                 serde_json::json!({
                     "budget_ms": duration_ms(self.budget),
                     "gap_ms": duration_ms(gap),
@@ -4448,7 +4450,7 @@ impl DesktopNoPaintWatchdog {
                     "frame_animation_active": context.frame_animation_active,
                     "pending_backend_redraw": context.pending_backend_redraw,
                     "pending_interaction_kind": context.pending_interaction_kind,
-                })
+                }),
             );
         }
 
@@ -4520,6 +4522,69 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+static DESKTOP_PROFILE_LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+
+fn desktop_profile_log_path() -> Option<PathBuf> {
+    if std::env::var_os("JCODE_DESKTOP_PROFILE_LOG").is_some_and(|value| !env_flag_enabled(value)) {
+        return None;
+    }
+    if let Some(path) = std::env::var_os("JCODE_DESKTOP_PROFILE_LOG_PATH") {
+        if path.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(path));
+    }
+    let cache_root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(
+        cache_root
+            .join("jcode")
+            .join("desktop")
+            .join("performance.log"),
+    )
+}
+
+fn desktop_profile_log_file() -> Option<&'static Mutex<File>> {
+    DESKTOP_PROFILE_LOG_FILE
+        .get_or_init(|| {
+            let path = desktop_profile_log_path()?;
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+                .map(Mutex::new)
+        })
+        .as_ref()
+}
+
+fn emit_desktop_profile_event(event: &'static str, payload: serde_json::Value) {
+    eprintln!("{event} {payload}");
+    let Some(file) = desktop_profile_log_file() else {
+        return;
+    };
+    let Ok(mut file) = file.lock() else {
+        return;
+    };
+    let timestamp_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default();
+    let _ = writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp_unix_ms": timestamp_unix_ms,
+            "event": event,
+            "payload": payload,
+        })
+    );
+}
+
 fn log_desktop_slow_interaction(
     kind: &'static str,
     duration: Duration,
@@ -4534,14 +4599,14 @@ fn log_desktop_slow_interaction(
     if !enabled {
         return;
     }
-    eprintln!(
-        "jcode-desktop-interaction-profile {}",
+    emit_desktop_profile_event(
+        "jcode-desktop-interaction-profile",
         serde_json::json!({
             "kind": kind,
             "budget_ms": duration_ms(DESKTOP_120FPS_FRAME_BUDGET),
             "duration_ms": duration_ms(duration),
             "details": details,
-        })
+        }),
     );
 }
 
