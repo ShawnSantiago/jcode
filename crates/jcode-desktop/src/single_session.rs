@@ -26,6 +26,18 @@ pub(crate) const SINGLE_SESSION_MIN_TEXT_SCALE: f32 = 0.65;
 pub(crate) const SINGLE_SESSION_MAX_TEXT_SCALE: f32 = 1.35;
 pub(crate) const HANDWRITTEN_WELCOME_PHRASES: &[&str] = &["Hello there"];
 
+const DESKTOP_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "show desktop shortcuts and slash commands"),
+    ("/clear", "clear the visible desktop transcript"),
+    ("/new", "reset to a fresh desktop session"),
+    ("/sessions", "open the recent session switcher"),
+    ("/model [name]", "open model picker or switch to a model"),
+    ("/copy", "copy the latest assistant response"),
+    ("/stop", "interrupt the running generation"),
+    ("/status", "show current desktop session status"),
+    ("/quit", "exit the desktop app"),
+];
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SingleSessionTypography {
@@ -91,6 +103,8 @@ pub(crate) struct SingleSessionApp {
     queued_drafts: Vec<(String, Vec<(String, String)>)>,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
+    draft_selection_anchor: Option<SelectionPoint>,
+    draft_selection_focus: Option<SelectionPoint>,
     input_undo_stack: Vec<(String, usize)>,
     session_handle: Option<DesktopSessionHandle>,
     // True for the fresh-start chat that owns the welcome hero as visual UI.
@@ -519,6 +533,8 @@ impl SingleSessionApp {
             queued_drafts: Vec::new(),
             selection_anchor: None,
             selection_focus: None,
+            draft_selection_anchor: None,
+            draft_selection_focus: None,
             input_undo_stack: Vec::new(),
             session_handle: None,
             welcome_timeline,
@@ -571,6 +587,7 @@ impl SingleSessionApp {
         self.recovery_session_count = 0;
         self.queued_drafts.clear();
         self.clear_selection();
+        self.clear_draft_selection();
         self.input_undo_stack.clear();
         self.session_handle = None;
         self.welcome_timeline = true;
@@ -1408,19 +1425,15 @@ impl SingleSessionApp {
         }
     }
 
-    fn submit_draft(&mut self) -> KeyOutcome {
-        let message = self.draft.trim().to_string();
-        if message.is_empty() && self.pending_images.is_empty() {
-            return KeyOutcome::None;
-        }
-        let images = std::mem::take(&mut self.pending_images);
-        self.record_user_submit(&message);
-        let Some(session) = &self.session else {
-            return KeyOutcome::StartFreshSession { message, images };
-        };
-        let session_id = session.session_id.clone();
-        let title = session.title.clone();
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_draft_cursor_line_col(&mut self, target_line: usize, target_col: usize) {
+        self.draft_cursor = self.draft_byte_index_for_line_col(target_line, target_col);
+        self.clamp_draft_cursor();
+        self.clear_selection();
+        self.clear_draft_selection();
+    }
+
+    fn draft_byte_index_for_line_col(&self, target_line: usize, target_col: usize) -> usize {
         let mut line = 0usize;
         let mut line_start = 0usize;
         for (index, ch) in self.draft.char_indices() {
@@ -1434,28 +1447,139 @@ impl SingleSessionApp {
         }
 
         if line < target_line {
-            self.draft_cursor = self.draft.len();
-            return;
+            return self.draft.len();
         }
 
         let line_end = line_end(&self.draft, line_start);
-        let target = self.draft[line_start..line_end]
+        self.draft[line_start..line_end]
             .char_indices()
             .map(|(offset, _)| line_start + offset)
             .chain(std::iter::once(line_end))
             .nth(target_col)
-            .unwrap_or(line_end);
-        self.draft_cursor = target;
-        self.clamp_draft_cursor();
-        self.clear_selection();
+            .unwrap_or(line_end)
     }
 
+    fn submit_draft(&mut self) -> KeyOutcome {
+        let message = self.draft.trim().to_string();
+        if message.is_empty() && self.pending_images.is_empty() {
+            return KeyOutcome::None;
+        }
+        if self.pending_images.is_empty()
+            && let Some(outcome) = self.handle_slash_command(&message)
+        {
+            return outcome;
+        }
+        let images = std::mem::take(&mut self.pending_images);
+        self.record_user_submit(&message);
+        let Some(session) = &self.session else {
+            return KeyOutcome::StartFreshSession { message, images };
+        };
+        let session_id = session.session_id.clone();
+        let title = session.title.clone();
         KeyOutcome::SendDraft {
             session_id,
             title,
             message,
             images,
         }
+    }
+
+    fn handle_slash_command(&mut self, message: &str) -> Option<KeyOutcome> {
+        if !message.starts_with('/') {
+            return None;
+        }
+
+        let mut parts = message.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or_default();
+        let args = parts.next().unwrap_or_default().trim();
+
+        let outcome = match command {
+            "/help" | "/?" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                self.show_help = true;
+                self.status = Some("showing desktop slash commands".to_string());
+                self.scroll_body_to_bottom();
+                KeyOutcome::Redraw
+            }
+            "/clear" => {
+                self.messages.clear();
+                self.streaming_response.clear();
+                self.error = None;
+                self.is_processing = false;
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                self.status = Some("cleared visible transcript".to_string());
+                self.scroll_body_to_bottom();
+                KeyOutcome::Redraw
+            }
+            "/new" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                KeyOutcome::SpawnSession
+            }
+            "/sessions" | "/session" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                return Some(self.open_session_switcher());
+            }
+            "/model" | "/models" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                if args.is_empty() {
+                    return Some(self.open_model_picker());
+                }
+                KeyOutcome::SetModel(args.to_string())
+            }
+            "/copy" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                return Some(
+                    self.latest_assistant_response()
+                        .map(KeyOutcome::CopyLatestResponse)
+                        .unwrap_or_else(|| {
+                            self.status = Some("no assistant response to copy".to_string());
+                            KeyOutcome::Redraw
+                        }),
+                );
+            }
+            "/stop" | "/cancel" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                if self.is_processing {
+                    KeyOutcome::CancelGeneration
+                } else {
+                    self.status = Some("nothing is running".to_string());
+                    KeyOutcome::Redraw
+                }
+            }
+            "/status" => {
+                let status = self.composer_status_line_for_tick(0);
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                self.messages.push(SingleSessionMessage::meta(status));
+                self.status = Some("status shown".to_string());
+                self.scroll_body_to_bottom();
+                KeyOutcome::Redraw
+            }
+            "/quit" | "/exit" => KeyOutcome::Exit,
+            _ => {
+                self.status = Some(format!(
+                    "unknown desktop slash command: {command} · try /help"
+                ));
+                KeyOutcome::Redraw
+            }
+        };
+
+        Some(outcome)
     }
 
     pub(crate) fn attach_image(&mut self, media_type: String, base64_data: String) {
@@ -1564,6 +1688,122 @@ impl SingleSessionApp {
         self.selection_focus = None;
     }
 
+    pub(crate) fn begin_draft_selection(&mut self, point: SelectionPoint) {
+        self.clear_selection();
+        self.draft_selection_anchor = Some(point);
+        self.draft_selection_focus = Some(point);
+        self.draft_cursor = self.draft_byte_index_for_line_col(point.line, point.column);
+        self.clamp_draft_cursor();
+    }
+
+    pub(crate) fn update_draft_selection(&mut self, point: SelectionPoint) {
+        if self.draft_selection_anchor.is_some() {
+            self.draft_selection_focus = Some(point);
+            self.draft_cursor = self.draft_byte_index_for_line_col(point.line, point.column);
+            self.clamp_draft_cursor();
+        }
+    }
+
+    pub(crate) fn clear_draft_selection(&mut self) {
+        self.draft_selection_anchor = None;
+        self.draft_selection_focus = None;
+    }
+
+    pub(crate) fn draft_selection_points(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        let anchor = self.draft_selection_anchor?;
+        let focus = self.draft_selection_focus?;
+        if selection_point_cmp(anchor, focus).is_gt() {
+            Some((focus, anchor))
+        } else {
+            Some((anchor, focus))
+        }
+    }
+
+    pub(crate) fn draft_selection_segments(&self) -> Vec<SelectionLineSegment> {
+        let lines: Vec<String> = self.draft.split('\n').map(ToString::to_string).collect();
+        let Some((start, end)) = self.draft_selection_points() else {
+            return Vec::new();
+        };
+        if start == end || start.line >= lines.len() {
+            return Vec::new();
+        }
+        let end_line = end.line.min(lines.len().saturating_sub(1));
+        let mut segments = Vec::new();
+        for line_index in start.line..=end_line {
+            let line_len = lines[line_index].chars().count();
+            let prompt_columns = if line_index == 0 {
+                self.composer_prompt().chars().count()
+            } else {
+                0
+            };
+            let start_column = if line_index == start.line {
+                start.column.min(line_len)
+            } else {
+                0
+            };
+            let end_column = if line_index == end_line {
+                end.column.min(line_len)
+            } else {
+                line_len
+            };
+            if start_column != end_column || (start.line != end.line && line_len == 0) {
+                segments.push(SelectionLineSegment {
+                    line: line_index,
+                    start_column: start_column + prompt_columns,
+                    end_column: end_column + prompt_columns,
+                });
+            }
+        }
+        segments
+    }
+
+    pub(crate) fn selected_draft_text(&mut self) -> Option<String> {
+        let (start, end) = self.draft_selection_points()?;
+        if start == end {
+            self.clear_draft_selection();
+            return None;
+        }
+        let start_index = self.draft_byte_index_for_line_col(start.line, start.column);
+        let end_index = self.draft_byte_index_for_line_col(end.line, end.column);
+        let (start_index, end_index) = if start_index <= end_index {
+            (start_index, end_index)
+        } else {
+            (end_index, start_index)
+        };
+        let selected = self.draft.get(start_index..end_index).map(str::to_string);
+        self.clear_draft_selection();
+        selected.filter(|text| !text.is_empty())
+    }
+
+    fn draft_selection_range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.draft_selection_points()?;
+        if start == end {
+            return None;
+        }
+        let start_index = self.draft_byte_index_for_line_col(start.line, start.column);
+        let end_index = self.draft_byte_index_for_line_col(end.line, end.column);
+        if start_index <= end_index {
+            Some((start_index, end_index)).filter(|(start, end)| start != end)
+        } else {
+            Some((end_index, start_index)).filter(|(start, end)| start != end)
+        }
+    }
+
+    fn replace_draft_selection_with(&mut self, text: &str) -> bool {
+        let Some((start, end)) = self.draft_selection_range() else {
+            return false;
+        };
+        self.remember_input_undo_state();
+        self.draft.replace_range(start..end, text);
+        self.draft_cursor = start + text.len();
+        self.clear_draft_selection();
+        true
+    }
+
+    fn delete_draft_selection(&mut self) -> bool {
+        self.replace_draft_selection_with("")
+    }
+
     pub(crate) fn selection_points(&self) -> Option<(SelectionPoint, SelectionPoint)> {
         let anchor = self.selection_anchor?;
         let focus = self.selection_focus?;
@@ -1655,6 +1895,9 @@ impl SingleSessionApp {
     }
 
     fn insert_draft_text(&mut self, text: &str) {
+        if self.replace_draft_selection_with(text) {
+            return;
+        }
         if !text.is_empty() {
             self.remember_input_undo_state();
         }
@@ -1664,6 +1907,9 @@ impl SingleSessionApp {
     }
 
     fn delete_previous_char(&mut self) {
+        if self.delete_draft_selection() {
+            return;
+        }
         self.clamp_draft_cursor();
         if self.draft_cursor == 0 {
             return;
@@ -1675,6 +1921,9 @@ impl SingleSessionApp {
     }
 
     fn delete_next_char(&mut self) {
+        if self.delete_draft_selection() {
+            return;
+        }
         self.clamp_draft_cursor();
         if self.draft_cursor >= self.draft.len() {
             return;
@@ -1685,6 +1934,9 @@ impl SingleSessionApp {
     }
 
     fn delete_previous_word(&mut self) {
+        if self.delete_draft_selection() {
+            return;
+        }
         self.clamp_draft_cursor();
         let start = previous_word_start(&self.draft, self.draft_cursor);
         if start < self.draft_cursor {
@@ -1695,6 +1947,9 @@ impl SingleSessionApp {
     }
 
     fn delete_next_word(&mut self) {
+        if self.delete_draft_selection() {
+            return;
+        }
         self.clamp_draft_cursor();
         let end = next_word_end(&self.draft, self.draft_cursor);
         if end > self.draft_cursor {
@@ -1706,34 +1961,43 @@ impl SingleSessionApp {
     fn move_cursor_left(&mut self) {
         self.clamp_draft_cursor();
         self.draft_cursor = previous_char_boundary(&self.draft, self.draft_cursor);
+        self.clear_draft_selection();
     }
 
     fn move_cursor_right(&mut self) {
         self.clamp_draft_cursor();
         self.draft_cursor = next_char_boundary(&self.draft, self.draft_cursor);
+        self.clear_draft_selection();
     }
 
     fn move_cursor_word_left(&mut self) {
         self.clamp_draft_cursor();
         self.draft_cursor = previous_word_start(&self.draft, self.draft_cursor);
+        self.clear_draft_selection();
     }
 
     fn move_cursor_word_right(&mut self) {
         self.clamp_draft_cursor();
         self.draft_cursor = next_word_end(&self.draft, self.draft_cursor);
+        self.clear_draft_selection();
     }
 
     fn move_to_line_start(&mut self) {
         self.clamp_draft_cursor();
         self.draft_cursor = line_start(&self.draft, self.draft_cursor);
+        self.clear_draft_selection();
     }
 
     fn move_to_line_end(&mut self) {
         self.clamp_draft_cursor();
         self.draft_cursor = line_end(&self.draft, self.draft_cursor);
+        self.clear_draft_selection();
     }
 
     fn delete_to_line_start(&mut self) {
+        if self.delete_draft_selection() {
+            return;
+        }
         self.clamp_draft_cursor();
         let start = line_start(&self.draft, self.draft_cursor);
         if start < self.draft_cursor {
@@ -1744,6 +2008,9 @@ impl SingleSessionApp {
     }
 
     fn delete_to_line_end(&mut self) {
+        if self.delete_draft_selection() {
+            return;
+        }
         self.clamp_draft_cursor();
         let end = line_end(&self.draft, self.draft_cursor);
         if end > self.draft_cursor {
@@ -1773,6 +2040,7 @@ impl SingleSessionApp {
             self.draft = draft;
             self.draft_cursor = cursor.min(self.draft.len());
             self.clamp_draft_cursor();
+            self.clear_draft_selection();
         }
     }
 
@@ -2305,10 +2573,21 @@ fn single_session_help_styled_lines() -> Vec<SingleSessionStyledLine> {
         blank_styled_line(),
     ];
 
+    lines.push(styled_line(
+        "slash commands",
+        SingleSessionLineStyle::OverlayTitle,
+    ));
+    lines.extend(DESKTOP_SLASH_COMMANDS.iter().map(|(command, description)| {
+        let separator = if command.len() >= 16 { " " } else { "" };
+        styled_line(
+            format!("  {command:<16}{separator}{description}"),
+            SingleSessionLineStyle::Overlay,
+        )
+    }));
+
     for (section_index, section) in SINGLE_SESSION_HELP_SECTIONS.iter().enumerate() {
-        if section_index > 0 {
-            lines.push(blank_styled_line());
-        }
+        let _ = section_index;
+        lines.push(blank_styled_line());
         lines.push(styled_line(
             section.title,
             SingleSessionLineStyle::OverlayTitle,

@@ -1397,6 +1397,31 @@ fn push_single_session_selection(
             size,
         );
     }
+
+    if welcome_status_lane_visible(app) {
+        return;
+    }
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.code_size * typography.code_line_height;
+    let char_width = typography.code_size * 0.58;
+    let draft_top = single_session_draft_top_for_app(app, size);
+    for segment in app.draft_selection_segments() {
+        let selected_columns = segment
+            .end_column
+            .saturating_sub(segment.start_column)
+            .max(1);
+        push_rect(
+            vertices,
+            Rect {
+                x: PANEL_TITLE_LEFT_PADDING - 2.0 + segment.start_column as f32 * char_width,
+                y: draft_top + segment.line as f32 * line_height,
+                width: selected_columns as f32 * char_width + 4.0,
+                height: line_height,
+            },
+            SELECTION_HIGHLIGHT_COLOR,
+            size,
+        );
+    }
 }
 
 pub(crate) fn push_single_session_caret(

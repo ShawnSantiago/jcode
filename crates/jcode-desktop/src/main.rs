@@ -23,7 +23,6 @@ use single_session::{
     single_session_surface, single_session_typography, single_session_typography_for_scale,
 };
 use single_session_render::*;
-use wgpu::util::DeviceExt;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
@@ -237,6 +236,7 @@ async fn run() -> Result<()> {
     let mut modifiers = ModifiersState::empty();
     let mut cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
     let mut selecting_body = false;
+    let mut selecting_draft = false;
     let mut scroll_accumulator = ScrollLineAccumulator::default();
     let mut hot_reloader = DesktopHotReloader::new();
     let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
@@ -294,7 +294,15 @@ async fn run() -> Result<()> {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     cursor_position = position;
-                    if selecting_body
+                    if selecting_draft
+                        && app.update_single_session_draft_selection_at(
+                            cursor_position.x as f32,
+                            cursor_position.y as f32,
+                            window.inner_size(),
+                        )
+                    {
+                        window.request_redraw();
+                    } else if selecting_body
                         && app.update_single_session_selection_at(
                             cursor_position.x as f32,
                             cursor_position.y as f32,
@@ -310,17 +318,19 @@ async fn run() -> Result<()> {
                     ..
                 } => match state {
                     ElementState::Pressed => {
-                        if app.place_single_session_draft_cursor_at(
+                        if app.begin_single_session_draft_selection_at(
                             cursor_position.x as f32,
                             cursor_position.y as f32,
                             window.inner_size(),
                         ) {
                             selecting_body = false;
+                            selecting_draft = true;
                             window.set_title(&app.status_title());
                             window.request_redraw();
                             return;
                         }
 
+                        selecting_draft = false;
                         selecting_body = app.begin_single_session_selection_at(
                             cursor_position.x as f32,
                             cursor_position.y as f32,
@@ -331,7 +341,20 @@ async fn run() -> Result<()> {
                         }
                     }
                     ElementState::Released => {
-                        if selecting_body {
+                        if selecting_draft {
+                            app.update_single_session_draft_selection_at(
+                                cursor_position.x as f32,
+                                cursor_position.y as f32,
+                                window.inner_size(),
+                            );
+                            selecting_draft = false;
+                            let selected = app.selected_single_session_draft_text();
+                            if let Some(text) = selected {
+                                copy_text_to_clipboard(&text, "copied input selection", &mut app);
+                            }
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        } else if selecting_body {
                             app.update_single_session_selection_at(
                                 cursor_position.x as f32,
                                 cursor_position.y as f32,
@@ -1335,7 +1358,7 @@ impl DesktopApp {
         false
     }
 
-    fn place_single_session_draft_cursor_at(
+    fn begin_single_session_draft_selection_at(
         &mut self,
         x: f32,
         y: f32,
@@ -1344,10 +1367,32 @@ impl DesktopApp {
         if let Self::SingleSession(app) = self
             && let Some((line, column)) = single_session_draft_line_col_at_position(app, size, x, y)
         {
-            app.set_draft_cursor_line_col(line, column);
+            app.begin_draft_selection(SelectionPoint { line, column });
             return true;
         }
         false
+    }
+
+    fn update_single_session_draft_selection_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: PhysicalSize<u32>,
+    ) -> bool {
+        if let Self::SingleSession(app) = self
+            && let Some((line, column)) = single_session_draft_line_col_at_position(app, size, x, y)
+        {
+            app.update_draft_selection(SelectionPoint { line, column });
+            return true;
+        }
+        false
+    }
+
+    fn selected_single_session_draft_text(&mut self) -> Option<String> {
+        if let Self::SingleSession(app) = self {
+            return app.selected_draft_text();
+        }
+        None
     }
 
     fn selected_single_session_text(&mut self, size: PhysicalSize<u32>) -> Option<String> {
@@ -1843,6 +1888,8 @@ struct Canvas<'window> {
     size: PhysicalSize<u32>,
     viewport_animation: AnimatedViewport,
     focus_pulse: FocusPulse,
+    primitive_vertex_buffer: Option<wgpu::Buffer>,
+    primitive_vertex_capacity: usize,
     needs_initial_frame: bool,
     defer_initial_text_frame: bool,
     single_session_text_key: Option<SingleSessionTextKey>,
@@ -1971,6 +2018,8 @@ impl<'window> Canvas<'window> {
             size,
             viewport_animation: AnimatedViewport::default(),
             focus_pulse: FocusPulse::default(),
+            primitive_vertex_buffer: None,
+            primitive_vertex_capacity: 0,
             needs_initial_frame: true,
             defer_initial_text_frame: true,
             single_session_text_key: None,
@@ -2038,6 +2087,29 @@ impl<'window> Canvas<'window> {
         self.text_atlas = Some(text_atlas);
         self.text_renderer = Some(text_renderer);
         self.text_needs_prepare = true;
+    }
+
+    fn upload_primitive_vertices(&mut self, vertices: &[Vertex]) {
+        if vertices.is_empty() {
+            return;
+        }
+
+        if self.primitive_vertex_capacity < vertices.len() {
+            self.primitive_vertex_capacity = vertices.len().next_power_of_two();
+            let size = (self.primitive_vertex_capacity * std::mem::size_of::<Vertex>())
+                as wgpu::BufferAddress;
+            self.primitive_vertex_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("jcode-desktop-workspace-vertices"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+
+        if let Some(vertex_buffer) = self.primitive_vertex_buffer.as_ref() {
+            self.queue
+                .write_buffer(vertex_buffer, 0, bytemuck::cast_slice(vertices));
+        }
     }
 
     fn welcome_hero_reveal_progress(

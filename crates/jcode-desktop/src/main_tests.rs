@@ -407,6 +407,48 @@ fn single_session_composer_uses_next_prompt_number_and_status_footer() {
 }
 
 #[test]
+fn single_session_slash_help_opens_help_without_sending_prompt() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/help".to_string()));
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert!(app.show_help);
+    assert!(app.draft.is_empty());
+    assert!(app.messages.is_empty());
+    let help = app.body_lines().join("\n");
+    assert!(help.contains("slash commands"));
+    assert!(help.contains("/model [name]"));
+}
+
+#[test]
+fn single_session_slash_model_with_argument_requests_model_switch() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/model gpt-5.5".to_string()));
+
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::SetModel("gpt-5.5".to_string())
+    );
+    assert!(app.draft.is_empty());
+    assert!(app.messages.is_empty());
+}
+
+#[test]
+fn single_session_unknown_slash_command_stays_local() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/definitely-not-real".to_string()));
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert!(app.messages.is_empty());
+    assert_eq!(app.draft, "/definitely-not-real");
+    assert!(
+        app.status
+            .as_deref()
+            .is_some_and(|status| status.contains("unknown desktop slash command"))
+    );
+}
+
+#[test]
 fn single_session_transcript_roles_render_without_stringly_labels() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("question"));
@@ -695,6 +737,80 @@ fn desktop_maps_text_scale_shortcuts() {
         to_key_input(&Key::Character("0".into()), ModifiersState::CONTROL),
         KeyInput::ResetTextScale
     );
+}
+
+#[test]
+fn single_session_draft_selection_extracts_text_and_highlights_prompt_offset() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello\nworld".to_string()));
+
+    app.begin_draft_selection(SelectionPoint { line: 0, column: 2 });
+    app.update_draft_selection(SelectionPoint { line: 1, column: 3 });
+
+    assert_eq!(
+        app.draft_selection_segments(),
+        vec![
+            SelectionLineSegment {
+                line: 0,
+                start_column: app.composer_prompt().chars().count() + 2,
+                end_column: app.composer_prompt().chars().count() + 5,
+            },
+            SelectionLineSegment {
+                line: 1,
+                start_column: 0,
+                end_column: 3,
+            },
+        ]
+    );
+
+    let vertices = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
+    assert!(vertices_have_color(&vertices, SELECTION_HIGHLIGHT_COLOR));
+    assert_eq!(app.selected_draft_text(), Some("llo\nwor".to_string()));
+}
+
+#[test]
+fn single_session_paste_and_typing_replace_draft_selection() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello world".to_string()));
+    app.begin_draft_selection(SelectionPoint { line: 0, column: 6 });
+    app.update_draft_selection(SelectionPoint {
+        line: 0,
+        column: 11,
+    });
+
+    app.paste_text("there");
+
+    assert_eq!(app.composer_text(), "1› hello there");
+    assert_eq!(app.draft_cursor_line_col(), (0, 11));
+
+    app.begin_draft_selection(SelectionPoint { line: 0, column: 6 });
+    app.update_draft_selection(SelectionPoint {
+        line: 0,
+        column: 11,
+    });
+    assert_eq!(
+        app.handle_key(KeyInput::Character("friend".to_string())),
+        KeyOutcome::Redraw
+    );
+
+    assert_eq!(app.composer_text(), "1› hello friend");
+    assert_eq!(app.draft_cursor_line_col(), (0, 12));
+}
+
+#[test]
+fn single_session_delete_removes_draft_selection() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello world".to_string()));
+    app.begin_draft_selection(SelectionPoint { line: 0, column: 5 });
+    app.update_draft_selection(SelectionPoint {
+        line: 0,
+        column: 11,
+    });
+
+    assert_eq!(app.handle_key(KeyInput::Backspace), KeyOutcome::Redraw);
+
+    assert_eq!(app.composer_text(), "1› hello");
+    assert_eq!(app.draft_cursor_line_col(), (0, 5));
 }
 
 #[test]
@@ -1676,6 +1792,40 @@ fn single_session_body_point_at_position_maps_x_to_character_column() {
 }
 
 #[test]
+fn single_session_draft_point_at_position_maps_to_cursor_line_column() {
+    let size = PhysicalSize::new(900, 700);
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello\nworld".to_string()));
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let char_width = typography.code_size * 0.58;
+    let line_height = typography.code_size * typography.code_line_height;
+    let draft_top = single_session_draft_top_for_app(&app, size);
+    let prompt_columns = app.composer_prompt().chars().count() as f32;
+
+    assert_eq!(
+        single_session_draft_line_col_at_position(
+            &app,
+            size,
+            PANEL_TITLE_LEFT_PADDING + (prompt_columns + 2.0) * char_width,
+            draft_top + line_height * 0.5,
+        ),
+        Some((0, 2))
+    );
+    assert_eq!(
+        single_session_draft_line_col_at_position(
+            &app,
+            size,
+            PANEL_TITLE_LEFT_PADDING + 3.0 * char_width,
+            draft_top + line_height * 1.5,
+        ),
+        Some((1, 3))
+    );
+
+    app.set_draft_cursor_line_col(1, 3);
+    assert_eq!(app.draft_cursor, "hello\nwor".len());
+}
+
+#[test]
 fn single_session_prompt_jump_moves_between_user_turns() {
     let mut app = SingleSessionApp::new(None);
     for index in 0..4 {
@@ -1717,40 +1867,6 @@ fn single_session_copy_latest_response_prefers_streaming_text() {
 fn single_session_streaming_preserves_manual_scroll_but_submit_follows_bottom() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("older"));
-#[test]
-fn single_session_draft_point_at_position_maps_to_cursor_line_column() {
-    let size = PhysicalSize::new(900, 700);
-    let mut app = SingleSessionApp::new(None);
-    app.handle_key(KeyInput::Character("hello\nworld".to_string()));
-    let typography = single_session_typography_for_scale(app.text_scale());
-    let char_width = typography.code_size * 0.58;
-    let line_height = typography.code_size * typography.code_line_height;
-    let draft_top = single_session_draft_top_for_app(&app, size);
-    let prompt_columns = app.composer_prompt().chars().count() as f32;
-
-    assert_eq!(
-        single_session_draft_line_col_at_position(
-            &app,
-            size,
-            PANEL_TITLE_LEFT_PADDING + (prompt_columns + 2.0) * char_width,
-            draft_top + line_height * 0.5,
-        ),
-        Some((0, 2))
-    );
-    assert_eq!(
-        single_session_draft_line_col_at_position(
-            &app,
-            size,
-            PANEL_TITLE_LEFT_PADDING + 3.0 * char_width,
-            draft_top + line_height * 1.5,
-        ),
-        Some((1, 3))
-    );
-
-    app.set_draft_cursor_line_col(1, 3);
-    assert_eq!(app.draft_cursor, "hello\nwor".len());
-}
-
     app.messages
         .push(SingleSessionMessage::assistant("older answer"));
     app.scroll_body_lines(12);
