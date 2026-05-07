@@ -369,10 +369,12 @@ fn welcome_timeline_visual_offset_pixels(
     -top_line * line_height
 }
 
+#[cfg(test)]
 pub(crate) fn handwritten_welcome_bounds(size: PhysicalSize<u32>) -> ([f32; 2], [f32; 2]) {
     handwritten_welcome_bounds_for_phrase(size, handwritten_welcome_phrase(0))
 }
 
+#[cfg(test)]
 fn handwritten_welcome_bounds_for_phrase(
     size: PhysicalSize<u32>,
     phrase: &str,
@@ -1589,7 +1591,7 @@ fn fresh_welcome_draft_top_for_scale(size: PhysicalSize<u32>, ui_scale: f32) -> 
     )
     .1[1];
     let typography = single_session_typography_for_scale(ui_scale);
-    let version_clearance = fresh_welcome_version_gap()
+    let version_clearance = fresh_welcome_version_gap_for_scale(ui_scale)
         + fresh_welcome_version_font_size() * ui_scale * 1.4
         + (typography.body_size * 0.38).max(8.0);
     let clearance = (typography.code_size * 1.85)
@@ -2270,7 +2272,7 @@ pub(crate) fn single_session_text_areas_for_state(
         (size.width as f32 * 0.42).max(left + 220.0)
     };
     let version_top = if welcome_chrome_visible {
-        fresh_welcome_version_top(size) + welcome_chrome_offset_pixels
+        fresh_welcome_version_top_for_scale(size, ui_scale) + welcome_chrome_offset_pixels
     } else {
         PANEL_TITLE_TOP_PADDING + 3.0
     };
@@ -2404,11 +2406,17 @@ fn fresh_welcome_version_font_size() -> f32 {
 }
 
 fn fresh_welcome_version_top(size: PhysicalSize<u32>) -> f32 {
-    handwritten_welcome_bounds(size).1[1] + fresh_welcome_version_gap()
+    fresh_welcome_version_top_for_scale(size, 1.0)
 }
 
-fn fresh_welcome_version_gap() -> f32 {
-    (fresh_welcome_version_font_size() * 2.25).max(30.0)
+fn fresh_welcome_version_top_for_scale(size: PhysicalSize<u32>, ui_scale: f32) -> f32 {
+    handwritten_welcome_bounds_for_phrase_with_scale(size, handwritten_welcome_phrase(0), ui_scale)
+        .1[1]
+        + fresh_welcome_version_gap_for_scale(ui_scale)
+}
+
+fn fresh_welcome_version_gap_for_scale(ui_scale: f32) -> f32 {
+    (fresh_welcome_version_font_size() * ui_scale * 2.25).max(30.0 * ui_scale)
 }
 
 fn fresh_welcome_version_left(label: &str, size: PhysicalSize<u32>, font_size: f32) -> f32 {
