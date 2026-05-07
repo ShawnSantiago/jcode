@@ -1229,15 +1229,21 @@ impl SingleSessionApp {
                 self.current_session_id(),
             );
         }
-        if self.model_picker.open {
-            let mut lines = self.body_styled_lines_without_inline_widgets();
-            if !lines.is_empty() {
-                lines.push(blank_styled_line());
-            }
-            lines.extend(model_picker_inline_styled_lines(&self.model_picker));
-            return lines;
-        }
         self.body_styled_lines_without_inline_widgets()
+    }
+
+    pub(crate) fn inline_widget_styled_lines(&self) -> Vec<SingleSessionStyledLine> {
+        if self.model_picker.open {
+            return model_picker_inline_styled_lines(&self.model_picker);
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn inline_widget_line_count(&self) -> usize {
+        if self.model_picker.open {
+            return model_picker_inline_styled_lines(&self.model_picker).len();
+        }
+        0
     }
 
     fn body_styled_lines_without_inline_widgets(&self) -> Vec<SingleSessionStyledLine> {

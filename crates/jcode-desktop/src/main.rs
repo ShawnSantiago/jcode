@@ -3751,6 +3751,7 @@ fn single_session_text_buffer_cache_key(
     app.text_scale().to_bits().hash(&mut hasher);
     app.header_title().hash(&mut hasher);
     app.welcome_hero_text().hash(&mut hasher);
+    app.inline_widget_styled_lines().hash(&mut hasher);
     app.composer_text().hash(&mut hasher);
     app.composer_status_line_for_tick(tick).hash(&mut hasher);
     hasher.finish()

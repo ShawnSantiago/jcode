@@ -12,6 +12,7 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) welcome_handoff_visible: bool,
     pub(crate) text_scale_bits: u32,
     pub(crate) body: Vec<SingleSessionStyledLine>,
+    pub(crate) inline_widget: Vec<SingleSessionStyledLine>,
     pub(crate) draft: String,
     pub(crate) status: String,
 }
@@ -2032,6 +2033,7 @@ fn single_session_text_key_for_body_lines(
         welcome_handoff_visible,
         text_scale_bits: app.text_scale().to_bits(),
         body,
+        inline_widget: app.inline_widget_styled_lines(),
         draft: if welcome_input_visible {
             visualize_composer_whitespace(&app.composer_text())
         } else {
@@ -2147,6 +2149,22 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
         )
     });
 
+    let inline_widget_buffer = take_reusable(
+        &mut old_buffers,
+        5,
+        previous.is_some_and(|previous| previous.inline_widget == key.inline_widget),
+    )
+    .unwrap_or_else(|| {
+        single_session_styled_text_buffer(
+            font_system,
+            &key.inline_widget,
+            typography.body_size,
+            typography.body_size * typography.body_line_height,
+            content_width,
+            prompt_height,
+        )
+    });
+
     let draft_buffer = take_reusable(
         &mut old_buffers,
         2,
@@ -2201,6 +2219,7 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
         draft_buffer,
         status_buffer,
         version_buffer,
+        inline_widget_buffer,
     ]
 }
 
@@ -2498,7 +2517,7 @@ fn single_session_body_top_for_app(_app: &SingleSessionApp, _size: PhysicalSize<
     PANEL_BODY_TOP_PADDING
 }
 
-fn single_session_body_bottom_for_app(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
+fn single_session_body_bottom_base_for_app(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
     if app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript() {
         return (single_session_draft_top_for_app(app, size) - welcome_timeline_body_draft_gap())
             .max(single_session_body_top_for_app(app, size));
@@ -2507,7 +2526,12 @@ fn single_session_body_bottom_for_app(app: &SingleSessionApp, size: PhysicalSize
     single_session_body_bottom(size)
 }
 
-fn single_session_body_bottom_for_total_lines(
+fn single_session_body_bottom_for_app(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
+    (single_session_body_bottom_base_for_app(app, size) - inline_widget_reserved_height(app))
+        .max(single_session_body_top_for_app(app, size))
+}
+
+fn single_session_body_bottom_base_for_total_lines(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     total_lines: usize,
@@ -2519,6 +2543,33 @@ fn single_session_body_bottom_for_total_lines(
     }
 
     single_session_body_bottom(size)
+}
+
+fn single_session_body_bottom_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    total_lines: usize,
+) -> f32 {
+    (single_session_body_bottom_base_for_total_lines(app, size, total_lines)
+        - inline_widget_reserved_height(app))
+    .max(single_session_body_top_for_app(app, size))
+}
+
+fn inline_widget_text_height(app: &SingleSessionApp) -> f32 {
+    let lines = app.inline_widget_line_count();
+    if lines == 0 {
+        return 0.0;
+    }
+    let typography = single_session_typography_for_scale(app.text_scale());
+    lines as f32 * typography.body_size * typography.body_line_height
+}
+
+fn inline_widget_reserved_height(app: &SingleSessionApp) -> f32 {
+    if app.inline_widget_line_count() == 0 {
+        0.0
+    } else {
+        inline_widget_text_height(app) + 8.0
+    }
 }
 
 pub(crate) fn single_session_body_bottom(size: PhysicalSize<u32>) -> f32 {
@@ -2799,6 +2850,7 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
         body_top_offset_pixels,
         single_session_body_top_for_app(app, size),
         single_session_body_bottom_for_app(app, size) as i32,
+        app.inline_widget_line_count(),
         single_session_draft_top_for_app(app, size),
         welcome_chrome_offset_pixels,
         welcome_status_lane_visible(app),
@@ -2851,6 +2903,7 @@ pub(crate) fn single_session_text_areas_for_app_with_cached_body_viewport<'a>(
         viewport.top_offset_pixels,
         single_session_body_top_for_app(app, size),
         single_session_body_bottom_for_total_lines(app, size, viewport.total_lines) as i32,
+        app.inline_widget_line_count(),
         single_session_draft_top_for_total_lines(app, size, viewport.total_lines),
         welcome_chrome_offset_pixels,
         welcome_status_lane_visible(app),
@@ -2902,6 +2955,7 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
         0.0,
         PANEL_BODY_TOP_PADDING,
         single_session_body_bottom(size) as i32,
+        0,
         single_session_draft_top_for_fresh_state(size, fresh_welcome_visible),
         0.0,
         false,
@@ -2924,6 +2978,7 @@ pub(crate) fn single_session_text_areas_for_state(
     body_top_offset_pixels: f32,
     body_top: f32,
     body_bottom: i32,
+    inline_widget_line_count: usize,
     draft_top: f32,
     welcome_chrome_offset_pixels: f32,
     status_lane_visible: bool,
@@ -3059,6 +3114,28 @@ pub(crate) fn single_session_text_areas_for_state(
         },
         default_color: text_color(ASSISTANT_TEXT_COLOR),
     });
+
+    if inline_widget_line_count > 0
+        && let Some(buffer) = buffers.get(5)
+    {
+        let typography = single_session_typography_for_scale(ui_scale);
+        let line_height = typography.body_size * typography.body_line_height;
+        let inline_top = body_bottom as f32 + 8.0;
+        let inline_bottom = inline_top + inline_widget_line_count as f32 * line_height;
+        areas.push(TextArea {
+            buffer,
+            left,
+            top: inline_top,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: inline_top as i32,
+                right,
+                bottom: inline_bottom.min(draft_top) as i32,
+            },
+            default_color: text_color(ASSISTANT_TEXT_COLOR),
+        });
+    }
 
     areas
 }
