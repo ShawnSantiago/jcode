@@ -650,6 +650,7 @@ fn render_mermaid_sized_internal(
             rank_spacing: 80.0 * spacing_factor,
             node_padding_x: 40.0,
             node_padding_y: 20.0,
+            preferred_aspect_ratio: render_profile.preferred_aspect_ratio(),
             ..Default::default()
         };
 
