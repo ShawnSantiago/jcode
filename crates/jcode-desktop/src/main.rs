@@ -2098,12 +2098,13 @@ impl<'window> Canvas<'window> {
             self.primitive_vertex_capacity = vertices.len().next_power_of_two();
             let size = (self.primitive_vertex_capacity * std::mem::size_of::<Vertex>())
                 as wgpu::BufferAddress;
-            self.primitive_vertex_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("jcode-desktop-workspace-vertices"),
-                size,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            self.primitive_vertex_buffer =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("jcode-desktop-workspace-vertices"),
+                    size,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
         }
 
         if let Some(vertex_buffer) = self.primitive_vertex_buffer.as_ref() {
@@ -2180,45 +2181,50 @@ impl<'window> Canvas<'window> {
             self.ensure_text_renderer();
         }
         let text_buffers = &self.single_session_text_buffers;
-        let text_areas = if let DesktopApp::SingleSession(single_session) = app {
-            single_session_text_areas_for_app_with_scroll(
-                single_session,
-                text_buffers,
-                self.size,
-                spinner_tick,
-                0.0,
-            )
-        } else {
-            single_session_text_areas(text_buffers, self.size)
-        };
-        if self.text_needs_prepare && !text_areas.is_empty() {
-            let font_system = self
-                .font_system
-                .as_mut()
-                .expect("font system should be initialized before text prepare");
-            let text_atlas = self
-                .text_atlas
-                .as_mut()
-                .expect("text atlas should be initialized before text prepare");
-            let text_renderer = self
-                .text_renderer
-                .as_mut()
-                .expect("text renderer should be initialized before text prepare");
-            if let Err(error) = text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                font_system,
-                text_atlas,
-                Resolution {
-                    width: self.config.width,
-                    height: self.config.height,
-                },
-                text_areas,
-                &mut self.swash_cache,
-            ) {
-                eprintln!("jcode-desktop: failed to prepare text: {error:?}");
+        let has_text_buffers = !text_buffers.is_empty();
+        if self.text_needs_prepare {
+            let text_areas = if let DesktopApp::SingleSession(single_session) = app {
+                single_session_text_areas_for_app_with_scroll(
+                    single_session,
+                    text_buffers,
+                    self.size,
+                    spinner_tick,
+                    0.0,
+                )
             } else {
+                single_session_text_areas(text_buffers, self.size)
+            };
+            if text_areas.is_empty() {
                 self.text_needs_prepare = false;
+            } else {
+                let font_system = self
+                    .font_system
+                    .as_mut()
+                    .expect("font system should be initialized before text prepare");
+                let text_atlas = self
+                    .text_atlas
+                    .as_mut()
+                    .expect("text atlas should be initialized before text prepare");
+                let text_renderer = self
+                    .text_renderer
+                    .as_mut()
+                    .expect("text renderer should be initialized before text prepare");
+                if let Err(error) = text_renderer.prepare(
+                    &self.device,
+                    &self.queue,
+                    font_system,
+                    text_atlas,
+                    Resolution {
+                        width: self.config.width,
+                        height: self.config.height,
+                    },
+                    text_areas,
+                    &mut self.swash_cache,
+                ) {
+                    eprintln!("jcode-desktop: failed to prepare text: {error:?}");
+                } else {
+                    self.text_needs_prepare = false;
+                }
             }
         }
 
@@ -2262,13 +2268,7 @@ impl<'window> Canvas<'window> {
                 text_buffers.get(2),
             );
         }
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("jcode-desktop-workspace-vertices"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        self.upload_primitive_vertices(&vertices);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2286,9 +2286,11 @@ impl<'window> Canvas<'window> {
                 occlusion_query_set: None,
             });
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.draw(0..vertices.len() as u32, 0..1);
-            if !text_buffers.is_empty()
+            if let Some(vertex_buffer) = self.primitive_vertex_buffer.as_ref() {
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.draw(0..vertices.len() as u32, 0..1);
+            }
+            if has_text_buffers
                 && let (Some(text_renderer), Some(text_atlas)) =
                     (self.text_renderer.as_mut(), self.text_atlas.as_ref())
                 && let Err(error) = text_renderer.render(text_atlas, &mut render_pass)
