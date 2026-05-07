@@ -5,6 +5,9 @@ use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus, StoredDi
 use crate::storage;
 use anyhow::Result;
 use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde_json::value::RawValue;
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
@@ -281,8 +284,9 @@ fn session_sort_key(stem: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn path_modified_sort_key(path: &Path) -> u128 {
-    path.metadata()
+fn entry_modified_sort_key(entry: &std::fs::DirEntry) -> u128 {
+    entry
+        .metadata()
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
@@ -290,14 +294,38 @@ fn path_modified_sort_key(path: &Path) -> u128 {
         .unwrap_or(0)
 }
 
-fn session_candidate_sort_key(
-    sessions_dir: &Path,
-    snapshot_path: &Path,
-    stem: &str,
-) -> (u128, u64, String) {
-    let journal_path = sessions_dir.join(format!("{stem}.journal.jsonl"));
-    let modified = path_modified_sort_key(snapshot_path).max(path_modified_sort_key(&journal_path));
-    (modified, session_sort_key(stem), stem.to_string())
+#[derive(Debug, Clone)]
+struct SessionCandidateMeta {
+    modified: u128,
+    sort_key: u64,
+    has_snapshot: bool,
+}
+
+impl SessionCandidateMeta {
+    fn new(stem: &str) -> Self {
+        Self {
+            modified: 0,
+            sort_key: session_sort_key(stem),
+            has_snapshot: false,
+        }
+    }
+
+    fn update(&mut self, modified: u128, has_snapshot: bool) {
+        self.modified = self.modified.max(modified);
+        self.has_snapshot |= has_snapshot;
+    }
+}
+
+fn session_file_stem_for_candidate(file_name: &str) -> Option<(&str, bool)> {
+    if let Some(stem) = file_name.strip_suffix(".journal.jsonl") {
+        return Some((stem, false));
+    }
+
+    let stem = file_name.strip_suffix(".json")?;
+    if stem.ends_with(".journal") {
+        return None;
+    }
+    Some((stem, true))
 }
 
 fn classify_session_source(
@@ -528,6 +556,7 @@ fn parse_timestamp_value(
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+#[cfg(test)]
 fn value_first_text(value: &serde_json::Value) -> Option<&str> {
     match value {
         serde_json::Value::String(text) => Some(text.as_str()),
@@ -543,10 +572,6 @@ fn message_value_is_internal_system_reminder(message: &serde_json::Value) -> boo
         .get("content")
         .and_then(value_first_text)
         .is_some_and(|text| text.trim_start().starts_with("<system-reminder>"))
-}
-
-fn content_value_starts_with_system_reminder(content: &serde_json::Value) -> bool {
-    value_first_text(content).is_some_and(|text| text.trim_start().starts_with("<system-reminder>"))
 }
 
 #[cfg(test)]
@@ -631,22 +656,34 @@ fn collect_recent_session_candidates(
     sessions_dir: &Path,
     candidate_limit: usize,
 ) -> Result<Vec<String>> {
-    let mut candidates: BinaryHeap<Reverse<(u128, u64, String)>> = BinaryHeap::new();
+    let mut by_stem: HashMap<String, SessionCandidateMeta> = HashMap::new();
 
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
-        let path = entry.path();
-        if !path.extension().map(|e| e == "json").unwrap_or(false) {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
             continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        };
+        let Some((stem, has_snapshot)) = session_file_stem_for_candidate(file_name) else {
             continue;
         };
         if stem.starts_with("imported_") {
             continue;
         }
 
-        let key = session_candidate_sort_key(sessions_dir, &path, stem);
+        let modified = entry_modified_sort_key(&entry);
+        by_stem
+            .entry(stem.to_string())
+            .or_insert_with(|| SessionCandidateMeta::new(stem))
+            .update(modified, has_snapshot);
+    }
+
+    let mut candidates: BinaryHeap<Reverse<(u128, u64, String)>> = BinaryHeap::new();
+    for (stem, meta) in by_stem {
+        if !meta.has_snapshot {
+            continue;
+        }
+        let key = (meta.modified, meta.sort_key, stem);
         if candidates.len() < candidate_limit {
             candidates.push(Reverse(key));
             continue;
@@ -714,7 +751,7 @@ struct SessionSummary {
     #[serde(default)]
     last_active_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
-    messages: Vec<SessionMessageSummary>,
+    messages: SessionMessageCounts,
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
@@ -735,38 +772,196 @@ struct SessionSummary {
     status: SessionStatus,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Debug, Default)]
+struct SessionMessageCounts {
+    visible_message_count: usize,
+    user_message_count: usize,
+    assistant_message_count: usize,
+    estimated_tokens: usize,
+}
+
+impl SessionMessageCounts {
+    fn add_message(&mut self, message: &SessionMessageSummary) {
+        if !summary_message_is_visible_conversation(message) {
+            return;
+        }
+
+        self.visible_message_count += 1;
+        match message.role {
+            Role::User => self.user_message_count += 1,
+            Role::Assistant => self.assistant_message_count += 1,
+        }
+        if let Some(usage) = &message.token_usage {
+            self.estimated_tokens = self
+                .estimated_tokens
+                .saturating_add(usage.total_tokens() as usize);
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.visible_message_count = self
+            .visible_message_count
+            .saturating_add(other.visible_message_count);
+        self.user_message_count = self
+            .user_message_count
+            .saturating_add(other.user_message_count);
+        self.assistant_message_count = self
+            .assistant_message_count
+            .saturating_add(other.assistant_message_count);
+        self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionMessageCounts {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(SessionMessageCountsVisitor)
+    }
+}
+
+struct SessionMessageCountsVisitor;
+
+impl<'de> Visitor<'de> for SessionMessageCountsVisitor {
+    type Value = SessionMessageCounts;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("session message summary array")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut counts = SessionMessageCounts::default();
+        while let Some(message) = seq.next_element::<SessionMessageSummary>()? {
+            counts.add_message(&message);
+        }
+        Ok(counts)
+    }
+}
+
 struct SessionMessageSummary {
     role: Role,
     // `/resume` only needs role/display/token metadata for the initial list.
-    // Deserializing full message content here makes large sessions expensive to
-    // show, and preview/search content is loaded lazily through the transcript
-    // paths when needed. We still retain the one content-derived bit needed to
-    // exclude internal system-reminder messages from visible counts.
-    #[serde(
-        default,
-        rename = "content",
-        deserialize_with = "deserialize_content_starts_with_system_reminder"
-    )]
+    // Borrowing content as `RawValue` lets serde skip nested content without
+    // allocating or walking it. After display metadata is known, we inspect only
+    // the raw prefix for old snapshots that predate `display_role`.
     content_starts_with_system_reminder: bool,
-    #[serde(default)]
     display_role: Option<StoredDisplayRole>,
-    #[serde(default)]
     token_usage: Option<SessionTokenUsageSummary>,
 }
 
-fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
-    message.display_role.is_none() && !message.content_starts_with_system_reminder
+impl<'de> Deserialize<'de> for SessionMessageSummary {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(SessionMessageSummaryVisitor)
+    }
 }
 
-fn deserialize_content_starts_with_system_reminder<'de, D>(
-    deserializer: D,
-) -> std::result::Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(content_value_starts_with_system_reminder(&value))
+struct SessionMessageSummaryVisitor;
+
+impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
+    type Value = SessionMessageSummary;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("session message summary")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut role: Option<Role> = None;
+        let mut content: Option<&'de RawValue> = None;
+        let mut display_role: Option<StoredDisplayRole> = None;
+        let mut token_usage: Option<SessionTokenUsageSummary> = None;
+
+        while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+            match key.as_ref() {
+                "role" => {
+                    role = Some(map.next_value()?);
+                }
+                "content" => {
+                    content = Some(map.next_value()?);
+                }
+                "display_role" => {
+                    display_role = map.next_value()?;
+                }
+                "token_usage" => {
+                    token_usage = map.next_value()?;
+                }
+                _ => {
+                    let _ = map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let role = role.ok_or_else(|| serde::de::Error::missing_field("role"))?;
+        let content_starts_with_system_reminder = matches!(role, Role::User)
+            && display_role.is_none()
+            && content.is_some_and(raw_content_starts_with_system_reminder);
+        Ok(SessionMessageSummary {
+            role,
+            content_starts_with_system_reminder,
+            display_role,
+            token_usage,
+        })
+    }
+}
+
+fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
+    if message.display_role.is_some() {
+        return false;
+    }
+    if message.content_starts_with_system_reminder {
+        return false;
+    }
+    true
+}
+
+fn raw_content_starts_with_system_reminder(raw: &RawValue) -> bool {
+    let raw = raw.get().trim_start();
+    json_string_raw_starts_with_system_reminder(raw)
+        || first_text_field_raw_starts_with_system_reminder(raw)
+}
+
+fn json_string_raw_starts_with_system_reminder(raw: &str) -> bool {
+    let Some(rest) = raw.strip_prefix('"') else {
+        return false;
+    };
+
+    rest.trim_start().starts_with("<system-reminder>")
+}
+
+fn first_text_field_raw_starts_with_system_reminder(raw: &str) -> bool {
+    const RAW_SYSTEM_REMINDER_SEARCH_BYTES: usize = 2048;
+    let mut end = raw.len().min(RAW_SYSTEM_REMINDER_SEARCH_BYTES);
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    let haystack = &raw[..end];
+    let mut search_start = 0;
+    while let Some(relative_key_idx) = haystack[search_start..].find("\"text\"") {
+        let key_idx = search_start + relative_key_idx;
+        let previous = haystack[..key_idx]
+            .chars()
+            .rev()
+            .find(|ch| !ch.is_whitespace());
+        let after_key = haystack[key_idx + "\"text\"".len()..].trim_start();
+        if matches!(previous, Some('{') | Some(','))
+            && let Some(after_colon) = after_key.strip_prefix(':')
+        {
+            return json_string_raw_starts_with_system_reminder(after_colon.trim_start());
+        }
+
+        search_start = key_idx + "\"text\"".len();
+    }
+
+    false
 }
 
 #[derive(Deserialize)]
@@ -823,13 +1018,12 @@ struct SessionJournalSummaryMeta {
 struct SessionJournalSummaryEntry {
     meta: SessionJournalSummaryMeta,
     #[serde(default)]
-    append_messages: Vec<SessionMessageSummary>,
+    append_messages: SessionMessageCounts,
 }
 
 fn load_session_summary(path: &Path) -> Result<SessionSummary> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut summary: SessionSummary = serde_json::from_reader(reader)?;
+    let bytes = std::fs::read(path)?;
+    let mut summary: SessionSummary = serde_json::from_slice(&bytes)?;
 
     let journal_path = session::session_journal_path_from_snapshot(path);
     if journal_path.exists() {
@@ -858,7 +1052,7 @@ fn load_session_summary(path: &Path) -> Result<SessionSummary> {
                     summary.saved = entry.meta.saved;
                     summary.save_label = entry.meta.save_label;
                     summary.status = entry.meta.status;
-                    summary.messages.extend(entry.append_messages);
+                    summary.messages.merge(entry.append_messages);
                 }
                 Err(err) => {
                     crate::logging::warn(&format!(
@@ -979,33 +1173,13 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 .unwrap_or_else(|| stem.clone());
             let icon = session_icon(&short_name);
 
-            let mut user_message_count = 0;
-            let mut assistant_message_count = 0;
-            let mut estimated_tokens: usize = 0;
-
-            let visible_message_count = session
-                .messages
-                .iter()
-                .filter(|msg| summary_message_is_visible_conversation(msg))
-                .count();
+            let visible_message_count = session.messages.visible_message_count;
             if visible_message_count == 0 {
                 continue;
             }
-
-            for msg in session
-                .messages
-                .iter()
-                .filter(|msg| summary_message_is_visible_conversation(msg))
-            {
-                match msg.role {
-                    Role::User => user_message_count += 1,
-                    Role::Assistant => assistant_message_count += 1,
-                }
-                if let Some(usage) = &msg.token_usage {
-                    estimated_tokens =
-                        estimated_tokens.saturating_add(usage.total_tokens() as usize);
-                }
-            }
+            let user_message_count = session.messages.user_message_count;
+            let assistant_message_count = session.messages.assistant_message_count;
+            let estimated_tokens = session.messages.estimated_tokens;
 
             let status = session.status.clone();
             let needs_catchup = crate::catchup::needs_catchup(&stem, session.updated_at, &status);
