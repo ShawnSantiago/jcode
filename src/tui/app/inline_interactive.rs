@@ -294,7 +294,22 @@ impl App {
         }
 
         if !self.is_remote && !crate::perf::tui_policy().simplified_model_picker {
-            self.open_loading_model_picker(&current_model);
+            let routes_started = std::time::Instant::now();
+            let routes = self.simplified_model_routes_for_picker(&current_model);
+            let routes_ms = routes_started.elapsed().as_millis();
+            self.open_model_picker_with_routes(
+                cache_signature.clone(),
+                picker_started,
+                routes,
+                routes_ms,
+                false,
+                false,
+            );
+            if self.inline_interactive_state.is_some() {
+                self.set_status_notice("Updating model routes…");
+            } else {
+                self.open_loading_model_picker(&current_model);
+            }
             self.start_model_picker_route_load(cache_signature, picker_started);
             return;
         }
@@ -317,6 +332,7 @@ impl App {
             routes,
             routes_ms,
             false,
+            true,
         );
     }
 
@@ -445,6 +461,7 @@ impl App {
                     result.routes,
                     result.routes_ms,
                     true,
+                    true,
                 );
                 if self.inline_interactive_state.is_some() {
                     self.set_status_notice("Model list updated");
@@ -465,6 +482,7 @@ impl App {
         routes: Vec<crate::provider::ModelRoute>,
         routes_ms: u128,
         preserve_input: bool,
+        cache_entries: bool,
     ) {
         use std::collections::BTreeMap;
 
@@ -843,7 +861,8 @@ impl App {
         };
 
         self.inline_view_state = None;
-        if Self::should_cache_model_picker_entries(model_order.len(), routes.len()) {
+        if cache_entries && Self::should_cache_model_picker_entries(model_order.len(), routes.len())
+        {
             self.model_picker_cache = Some(ModelPickerCache {
                 signature: cache_signature,
                 entries: entries.clone(),
