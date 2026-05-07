@@ -261,7 +261,6 @@ fn fresh_single_session_offers_crashed_recovery_without_auto_opening() {
         .map(|line| line.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-
     assert!(body.contains("Found 3 crashed session(s)"));
     assert!(body.contains("Press Ctrl+R"));
     assert_eq!(
@@ -436,13 +435,13 @@ fn single_session_assistant_markdown_is_prepared_for_desktop_rendering() {
     ));
 
     let body = app.body_lines().join("\n");
-    assert!(body.contains("# Plan"));
+    assert!(body.contains("Plan"));
     assert!(body.contains("• first"));
     assert!(body.contains("• second"));
     assert!(body.contains("Use `cargo test`."));
-    assert!(body.contains("``` rust"));
-    assert!(body.contains("    fn main() {}"));
-    assert!(body.contains("```"));
+    assert!(body.contains("  rust"));
+    assert!(body.contains("  fn main() {}"));
+    assert!(!body.contains("```"));
 }
 
 #[test]
@@ -459,31 +458,62 @@ fn single_session_markdown_renderer_handles_rich_commonmark_shapes() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(body.contains("## Results"));
+    assert!(body.contains("Results"));
     assert_eq!(
-        style_for_text(&lines, "## Results"),
+        style_for_text(&lines, "Results"),
         Some(SingleSessionLineStyle::AssistantHeading)
     );
-    assert!(body.contains("▌ quote line"));
-    assert!(body.contains("▌ continues"));
+    assert!(body.contains("│ quote line continues"));
     assert_eq!(
-        style_for_text(&lines, "▌ quote line"),
+        style_for_text(&lines, "│ quote line continues"),
         Some(SingleSessionLineStyle::AssistantQuote)
     );
     assert!(body.contains("1. first"));
     assert!(body.contains("2. second"));
-    assert!(body.contains("docs ↗ https://example.com and **bold** plus _em_."));
+    assert!(body.contains("docs ↗ https://example.com and bold plus em."));
     assert_eq!(
-        style_for_text(&lines, "docs ↗ https://example.com and **bold** plus _em_."),
+        style_for_text(&lines, "docs ↗ https://example.com and bold plus em."),
         Some(SingleSessionLineStyle::AssistantLink)
     );
-    assert!(body.contains("┆ name │ value"));
-    assert!(body.contains("┆ alpha │ 42"));
+    assert!(body.contains("name  │ value"));
+    assert!(body.contains("alpha │ 42"));
+    assert!(body.contains("──────┼──────"));
     assert_eq!(
-        style_for_text(&lines, "┆ alpha │ 42"),
+        style_for_text(&lines, "alpha │ 42"),
         Some(SingleSessionLineStyle::AssistantTable)
     );
-    assert!(body.contains("───"));
+    assert!(body.contains("────────────"));
+}
+
+#[test]
+fn single_session_markdown_renderer_scopes_links_and_structures_lists() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages.push(SingleSessionMessage::assistant(
+        "This is\none paragraph with [docs](https://example.com).\n\nNext paragraph.\n\n- [x] shipped\n- [ ] polish\n  - nested",
+    ));
+
+    let lines = app.body_styled_lines();
+    let body = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(body.contains("This is one paragraph with docs ↗ https://example.com."));
+    assert_eq!(
+        style_for_text(
+            &lines,
+            "This is one paragraph with docs ↗ https://example.com."
+        ),
+        Some(SingleSessionLineStyle::AssistantLink)
+    );
+    assert_eq!(
+        style_for_text(&lines, "Next paragraph."),
+        Some(SingleSessionLineStyle::Assistant)
+    );
+    assert!(body.contains("✓ shipped"));
+    assert!(body.contains("☐ polish"));
+    assert!(body.contains("  ◦ nested"));
 }
 
 #[test]
@@ -497,19 +527,19 @@ fn single_session_markdown_structure_uses_distinct_colors_and_cards() {
     let buffers = single_session_text_buffers(&app, PhysicalSize::new(1200, 760), &mut font_system);
     let body = &buffers[1];
     assert_eq!(
-        first_glyph_color_for_text(body, "# Heading"),
+        first_glyph_color_for_text(body, "Heading"),
         Some(single_session_line_color(
             SingleSessionLineStyle::AssistantHeading
         ))
     );
     assert_eq!(
-        first_glyph_color_for_text(body, "▌ quoted"),
+        first_glyph_color_for_text(body, "│ quoted"),
         Some(single_session_line_color(
             SingleSessionLineStyle::AssistantQuote
         ))
     );
     assert_eq!(
-        first_glyph_color_for_text(body, "┆ c │ d"),
+        first_glyph_color_for_text(body, "c │ d"),
         Some(single_session_line_color(
             SingleSessionLineStyle::AssistantTable
         ))
@@ -763,10 +793,10 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
     let markdown_key = single_session_text_key(&markdown_app, size);
     assert_eq!(markdown_key.title, "");
     assert!(markdown_key.status.starts_with("receiving"));
-    assert_visual_text_contains(&markdown_key, "# Heading");
-    assert_visual_text_contains(&markdown_key, "▌ quoted");
+    assert_visual_text_contains(&markdown_key, "Heading");
+    assert_visual_text_contains(&markdown_key, "│ quoted");
     assert_visual_text_contains(&markdown_key, "docs ↗ https://example.com");
-    assert_visual_text_contains(&markdown_key, "┆ color │ yes");
+    assert_visual_text_contains(&markdown_key, "color │ yes");
     assert_visual_text_contains(&markdown_key, "streaming tail");
 
     let markdown_vertices = build_single_session_vertices(&markdown_app, size, 0.0, 0);
@@ -828,11 +858,11 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
         Some(SingleSessionLineStyle::Assistant)
     );
     assert_eq!(
-        style_for_text(&lines, "``` rust"),
+        style_for_text(&lines, "  rust"),
         Some(SingleSessionLineStyle::Code)
     );
     assert_eq!(
-        style_for_text(&lines, "    fn main() {}"),
+        style_for_text(&lines, "  fn main() {}"),
         Some(SingleSessionLineStyle::Code)
     );
     assert_eq!(
@@ -883,7 +913,7 @@ fn glyphon_body_buffer_uses_line_style_colors() {
         Some(single_session_line_color(SingleSessionLineStyle::Assistant))
     );
     assert_eq!(
-        first_glyph_color_for_text(body, "``` rust"),
+        first_glyph_color_for_text(body, "  rust"),
         Some(single_session_line_color(SingleSessionLineStyle::Code))
     );
     assert_eq!(
@@ -912,8 +942,8 @@ fn single_session_transcript_card_runs_group_card_styles() {
         .iter()
         .find(|run| run.style == SingleSessionLineStyle::Code)
         .expect("code block should have a card run");
-    assert_eq!(code.line_count, 3);
-    assert_eq!(lines[code.line].text, "``` rust");
+    assert_eq!(code.line_count, 2);
+    assert_eq!(lines[code.line].text, "  rust");
 
     let tool = runs
         .iter()
@@ -1376,7 +1406,7 @@ fn single_session_character_selection_extracts_visible_text() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("first"));
     app.messages
-        .push(SingleSessionMessage::assistant("second\nthird"));
+        .push(SingleSessionMessage::assistant("second  \nthird"));
     let lines = app.body_lines();
     let second_line = lines
         .iter()
