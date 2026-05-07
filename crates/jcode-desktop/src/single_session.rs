@@ -20,7 +20,7 @@ pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FON
 pub(crate) const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
 pub(crate) const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
 pub(crate) const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
-pub(crate) const HANDWRITTEN_WELCOME_PHRASES: &[&str] = &["Hello there", "Hi there", "Hey there"];
+pub(crate) const HANDWRITTEN_WELCOME_PHRASES: &[&str] = &["Hello there"];
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]

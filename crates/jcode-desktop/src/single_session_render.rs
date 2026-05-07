@@ -1515,7 +1515,12 @@ pub(crate) fn single_session_draft_top_for_fresh_state(
 pub(crate) fn fresh_welcome_draft_top(size: PhysicalSize<u32>) -> f32 {
     let hero_bottom = handwritten_welcome_bounds(size).1[1];
     let typography = single_session_typography();
-    let clearance = (typography.code_size * 1.85).max(46.0);
+    let version_clearance = fresh_welcome_version_gap()
+        + fresh_welcome_version_font_size() * 1.4
+        + (typography.body_size * 0.38).max(8.0);
+    let clearance = (typography.code_size * 1.85)
+        .max(version_clearance)
+        .max(54.0);
     hero_bottom + clearance
 }
 
@@ -2282,7 +2287,11 @@ fn fresh_welcome_version_font_size() -> f32 {
 }
 
 fn fresh_welcome_version_top(size: PhysicalSize<u32>) -> f32 {
-    handwritten_welcome_bounds(size).1[1] + 12.0
+    handwritten_welcome_bounds(size).1[1] + fresh_welcome_version_gap()
+}
+
+fn fresh_welcome_version_gap() -> f32 {
+    (fresh_welcome_version_font_size() * 2.25).max(30.0)
 }
 
 fn fresh_welcome_version_left(label: &str, size: PhysicalSize<u32>, font_size: f32) -> f32 {

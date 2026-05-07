@@ -759,10 +759,8 @@ fn fresh_welcome_greeting_uses_handwritten_hero_chrome() {
 
 #[test]
 fn handwritten_welcome_phrase_set_has_stable_curated_variants() {
-    assert_eq!(HANDWRITTEN_WELCOME_PHRASES.len(), 3);
+    assert_eq!(HANDWRITTEN_WELCOME_PHRASES.len(), 1);
     assert_eq!(handwritten_welcome_phrase(0), "Hello there");
-    assert_eq!(handwritten_welcome_phrase(1), "Hi there");
-    assert_eq!(handwritten_welcome_phrase(2), "Hey there");
     assert_eq!(
         handwritten_welcome_phrase(HANDWRITTEN_WELCOME_PHRASES.len()),
         handwritten_welcome_phrase(0)
@@ -2105,6 +2103,15 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
     assert!(
         areas.first().expect("draft text area").top > handwritten_welcome_bounds(size).1[1],
         "fresh input line should stay visually below the handwritten hero"
+    );
+    let hero_bottom = handwritten_welcome_bounds(size).1[1];
+    let version_area = areas
+        .iter()
+        .find(|area| area.top > hero_bottom && area.top < fresh_welcome_draft_top(size))
+        .expect("version label should sit between hero and composer");
+    assert!(
+        version_area.top - hero_bottom >= 29.0,
+        "version label needs enough clearance from handwriting strokes"
     );
 
     app.handle_key(KeyInput::Character("hello".to_string()));
