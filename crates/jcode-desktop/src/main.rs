@@ -1809,14 +1809,15 @@ struct Canvas<'window> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
-    font_system: FontSystem,
+    font_system: Option<FontSystem>,
     swash_cache: SwashCache,
-    text_atlas: TextAtlas,
-    text_renderer: TextRenderer,
+    text_atlas: Option<TextAtlas>,
+    text_renderer: Option<TextRenderer>,
     size: PhysicalSize<u32>,
     viewport_animation: AnimatedViewport,
     focus_pulse: FocusPulse,
     needs_initial_frame: bool,
+    defer_initial_text_frame: bool,
     single_session_text_key: Option<SingleSessionTextKey>,
     single_session_text_buffers: Vec<Buffer>,
     welcome_hero_reveal_key: Option<String>,
@@ -1929,34 +1930,21 @@ impl<'window> Canvas<'window> {
             multiview: None,
         });
         startup_trace.mark("primitive pipeline ready");
-        let mut text_atlas = TextAtlas::new(&device, &queue, format);
-        let text_renderer = TextRenderer::new(
-            &mut text_atlas,
-            &device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
-        startup_trace.mark("text renderer ready");
-
-        let mut font_system = FontSystem::new();
-        font_system
-            .db_mut()
-            .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
-
         Ok(Self {
             surface,
             device,
             queue,
             config,
             render_pipeline,
-            font_system,
+            font_system: None,
             swash_cache: SwashCache::new(),
-            text_atlas,
-            text_renderer,
+            text_atlas: None,
+            text_renderer: None,
             size,
             viewport_animation: AnimatedViewport::default(),
             focus_pulse: FocusPulse::default(),
             needs_initial_frame: true,
+            defer_initial_text_frame: true,
             single_session_text_key: None,
             single_session_text_buffers: Vec::new(),
             welcome_hero_reveal_key: None,
@@ -1983,6 +1971,11 @@ impl<'window> Canvas<'window> {
         now: Instant,
         smooth_scroll_lines: f32,
     ) {
+        let Some(font_system) = self.font_system.as_mut() else {
+            self.single_session_text_key = None;
+            self.single_session_text_buffers.clear();
+            return;
+        };
         let key = single_session_text_key_for_tick_with_scroll(
             app,
             self.size,
@@ -1991,9 +1984,34 @@ impl<'window> Canvas<'window> {
         );
         if self.single_session_text_key.as_ref() != Some(&key) {
             self.single_session_text_buffers =
-                single_session_text_buffers_from_key(&key, self.size, &mut self.font_system);
+                single_session_text_buffers_from_key(&key, self.size, font_system);
             self.single_session_text_key = Some(key);
         }
+    }
+
+    fn ensure_font_system(&mut self) {
+        self.font_system.get_or_insert_with(|| {
+            let mut font_system = FontSystem::new();
+            font_system
+                .db_mut()
+                .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
+            font_system
+        });
+    }
+
+    fn ensure_text_renderer(&mut self) {
+        if self.text_renderer.is_some() {
+            return;
+        }
+        let mut text_atlas = TextAtlas::new(&self.device, &self.queue, self.config.format);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &self.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        self.text_atlas = Some(text_atlas);
+        self.text_renderer = Some(text_renderer);
     }
 
     fn welcome_hero_reveal_progress(
@@ -2048,7 +2066,13 @@ impl<'window> Canvas<'window> {
                 (1.0, false)
             };
 
-        if let DesktopApp::SingleSession(single_session) = app {
+        let defer_text_this_frame = self.defer_initial_text_frame;
+        if defer_text_this_frame {
+            self.defer_initial_text_frame = false;
+            self.single_session_text_key = None;
+            self.single_session_text_buffers.clear();
+        } else if let DesktopApp::SingleSession(single_session) = app {
+            self.ensure_font_system();
             self.refresh_cached_single_session_text_buffers(
                 single_session,
                 now,
@@ -2057,6 +2081,9 @@ impl<'window> Canvas<'window> {
         } else {
             self.single_session_text_key = None;
             self.single_session_text_buffers.clear();
+        }
+        if !self.single_session_text_buffers.is_empty() {
+            self.ensure_text_renderer();
         }
         let text_buffers = &self.single_session_text_buffers;
         let text_areas = if let DesktopApp::SingleSession(single_session) = app {
@@ -2071,11 +2098,23 @@ impl<'window> Canvas<'window> {
             single_session_text_areas(text_buffers, self.size)
         };
         if !text_areas.is_empty() {
-            if let Err(error) = self.text_renderer.prepare(
+            let font_system = self
+                .font_system
+                .as_mut()
+                .expect("font system should be initialized before text prepare");
+            let text_atlas = self
+                .text_atlas
+                .as_mut()
+                .expect("text atlas should be initialized before text prepare");
+            let text_renderer = self
+                .text_renderer
+                .as_mut()
+                .expect("text renderer should be initialized before text prepare");
+            if let Err(error) = text_renderer.prepare(
                 &self.device,
                 &self.queue,
-                &mut self.font_system,
-                &mut self.text_atlas,
+                font_system,
+                text_atlas,
                 Resolution {
                     width: self.config.width,
                     height: self.config.height,
@@ -2154,9 +2193,9 @@ impl<'window> Canvas<'window> {
             render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             render_pass.draw(0..vertices.len() as u32, 0..1);
             if !text_buffers.is_empty()
-                && let Err(error) = self
-                    .text_renderer
-                    .render(&self.text_atlas, &mut render_pass)
+                && let (Some(text_renderer), Some(text_atlas)) =
+                    (self.text_renderer.as_mut(), self.text_atlas.as_ref())
+                && let Err(error) = text_renderer.render(text_atlas, &mut render_pass)
             {
                 eprintln!("jcode-desktop: failed to render text: {error:?}");
             }
@@ -2164,7 +2203,7 @@ impl<'window> Canvas<'window> {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-        Ok(animation_active)
+        Ok(animation_active || defer_text_this_frame)
     }
 }
 
