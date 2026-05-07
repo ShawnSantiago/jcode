@@ -66,10 +66,7 @@ pub(crate) fn build_single_session_vertices_with_scroll(
         size,
     );
 
-    if app.is_welcome_timeline_visible()
-        && !app.has_welcome_timeline_transcript()
-        && app.draft.is_empty()
-    {
+    if app.is_welcome_timeline_visible() {
         push_fresh_welcome_ambient(&mut vertices, size, spinner_tick);
     }
     if app.is_welcome_timeline_visible() {

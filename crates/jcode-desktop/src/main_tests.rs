@@ -245,6 +245,7 @@ fn fresh_single_session_restores_dominant_welcome_hero_without_input_hline() {
 
     app.handle_key(KeyInput::Character("hello".to_string()));
     let typed = build_single_session_vertices(&app, size, 0.0, 18);
+    assert!(vertices_have_color(&typed, WELCOME_AURORA_BLUE));
     assert!(vertices_have_color(&typed, WELCOME_HANDWRITING_COLOR));
     assert!(!vertices_have_color(&typed, [0.060, 0.085, 0.145, 0.34]));
 }
@@ -1953,6 +1954,7 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     assert_eq!(key.welcome_hero, "Hello there");
     assert!(key.status.contains("sending"));
     assert_visual_text_contains(&key, "Hello there");
+    assert!(vertices_have_color(&vertices, WELCOME_AURORA_BLUE));
     assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
     assert!(
         key.body
