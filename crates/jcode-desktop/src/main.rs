@@ -1839,6 +1839,7 @@ struct Canvas<'window> {
     swash_cache: SwashCache,
     text_atlas: Option<TextAtlas>,
     text_renderer: Option<TextRenderer>,
+    text_needs_prepare: bool,
     size: PhysicalSize<u32>,
     viewport_animation: AnimatedViewport,
     focus_pulse: FocusPulse,
@@ -1966,6 +1967,7 @@ impl<'window> Canvas<'window> {
             swash_cache: SwashCache::new(),
             text_atlas: None,
             text_renderer: None,
+            text_needs_prepare: true,
             size,
             viewport_animation: AnimatedViewport::default(),
             focus_pulse: FocusPulse::default(),
@@ -1986,17 +1988,13 @@ impl<'window> Canvas<'window> {
 
         self.size = size;
         self.single_session_text_key = None;
+        self.text_needs_prepare = true;
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn refresh_cached_single_session_text_buffers(
-        &mut self,
-        app: &SingleSessionApp,
-        now: Instant,
-        smooth_scroll_lines: f32,
-    ) {
+    fn refresh_cached_single_session_text_buffers(&mut self, app: &SingleSessionApp, now: Instant) {
         let Some(font_system) = self.font_system.as_mut() else {
             self.single_session_text_key = None;
             self.single_session_text_buffers.clear();
@@ -2006,12 +2004,13 @@ impl<'window> Canvas<'window> {
             app,
             self.size,
             desktop_spinner_tick(now),
-            smooth_scroll_lines,
+            0.0,
         );
         if self.single_session_text_key.as_ref() != Some(&key) {
             self.single_session_text_buffers =
                 single_session_text_buffers_from_key(&key, self.size, font_system);
             self.single_session_text_key = Some(key);
+            self.text_needs_prepare = true;
         }
     }
 
@@ -2038,6 +2037,7 @@ impl<'window> Canvas<'window> {
         );
         self.text_atlas = Some(text_atlas);
         self.text_renderer = Some(text_renderer);
+        self.text_needs_prepare = true;
     }
 
     fn welcome_hero_reveal_progress(
@@ -2099,11 +2099,7 @@ impl<'window> Canvas<'window> {
             self.single_session_text_buffers.clear();
         } else if let DesktopApp::SingleSession(single_session) = app {
             self.ensure_font_system();
-            self.refresh_cached_single_session_text_buffers(
-                single_session,
-                now,
-                smooth_scroll_lines,
-            );
+            self.refresh_cached_single_session_text_buffers(single_session, now);
         } else {
             self.single_session_text_key = None;
             self.single_session_text_buffers.clear();
@@ -2118,12 +2114,12 @@ impl<'window> Canvas<'window> {
                 text_buffers,
                 self.size,
                 spinner_tick,
-                smooth_scroll_lines,
+                0.0,
             )
         } else {
             single_session_text_areas(text_buffers, self.size)
         };
-        if !text_areas.is_empty() {
+        if self.text_needs_prepare && !text_areas.is_empty() {
             let font_system = self
                 .font_system
                 .as_mut()
@@ -2149,6 +2145,8 @@ impl<'window> Canvas<'window> {
                 &mut self.swash_cache,
             ) {
                 eprintln!("jcode-desktop: failed to prepare text: {error:?}");
+            } else {
+                self.text_needs_prepare = false;
             }
         }
 
