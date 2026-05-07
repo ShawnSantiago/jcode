@@ -348,7 +348,7 @@ fn welcome_timeline_visual_offset_pixels(
         return 0.0;
     }
 
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
     let body_bottom = single_session_body_bottom_for_app(app, size);
@@ -1095,7 +1095,7 @@ fn push_single_session_transcript_cards(
     tick: u64,
     smooth_scroll_lines: f32,
 ) {
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
     let width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0 + 12.0).max(1.0);
@@ -1174,11 +1174,11 @@ fn single_session_streaming_shimmer_with_scroll(
     let viewport = single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines);
     let line_index = viewport.lines.iter().rposition(is_shimmer_anchor_line)?;
 
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
     let text_columns = viewport.lines[line_index].text.chars().count().max(8) as f32;
-    let text_width = (text_columns * single_session_body_char_width())
+    let text_width = (text_columns * single_session_body_char_width_for_scale(app.text_scale()))
         .min((size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0));
     let lane_width = (text_width + 56.0).max(120.0);
     let shimmer_width = lane_width.min(180.0).max(72.0);
@@ -1270,7 +1270,7 @@ pub(crate) fn single_session_body_scroll_metrics(
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Option<SingleSessionBodyScrollMetrics> {
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
     let body_bottom = single_session_body_bottom_for_app(app, size);
@@ -1518,7 +1518,7 @@ pub(crate) fn single_session_draft_top_for_app(
 }
 
 fn welcome_timeline_draft_top(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = PANEL_BODY_TOP_PADDING;
     let timeline_lines = welcome_timeline_total_body_lines(app, size).max(1) as f32;
@@ -1539,16 +1539,16 @@ fn welcome_timeline_total_body_lines(app: &SingleSessionApp, size: PhysicalSize<
     let transcript_lines =
         single_session_wrapped_body_lines(app.body_styled_lines(), size, app.text_scale()).len();
     if app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript() {
-        welcome_timeline_virtual_body_lines(size) + transcript_lines
+        welcome_timeline_virtual_body_lines(app, size) + transcript_lines
     } else {
         transcript_lines
     }
 }
 
-fn welcome_timeline_virtual_body_lines(size: PhysicalSize<u32>) -> usize {
+fn welcome_timeline_virtual_body_lines(app: &SingleSessionApp, size: PhysicalSize<u32>) -> usize {
     // Reserve scrollable visual space for the handwritten hero without adding
     // the hero phrase to transcript text or model-derived body lines.
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     ((fresh_welcome_visual_bottom(size) - PANEL_BODY_TOP_PADDING).max(0.0) / line_height)
         .ceil()
@@ -1665,7 +1665,8 @@ pub(crate) fn single_session_text_buffers_from_key(
     size: PhysicalSize<u32>,
     font_system: &mut FontSystem,
 ) -> Vec<Buffer> {
-    let typography = single_session_typography_for_scale(f32::from_bits(key.text_scale_bits));
+    let typography = single_session_typography();
+    let body_typography = single_session_typography_for_scale(f32::from_bits(key.text_scale_bits));
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
 
     let draft_top = single_session_draft_top_for_fresh_state(size, key.fresh_welcome_visible);
@@ -1690,8 +1691,8 @@ pub(crate) fn single_session_text_buffers_from_key(
         single_session_styled_text_buffer(
             font_system,
             &key.body,
-            typography.body_size,
-            typography.body_size * typography.body_line_height,
+            body_typography.body_size,
+            body_typography.body_size * body_typography.body_line_height,
             content_width,
             (size.height as f32 - 150.0).max(1.0),
         ),
@@ -1818,7 +1819,7 @@ fn single_session_rendered_body_lines_for_tick(
 
     // The welcome hero is visual chrome. These blank prelude rows make it
     // scroll like the first timeline block while keeping transcript text pure.
-    let virtual_lines = welcome_timeline_virtual_body_lines(size);
+    let virtual_lines = welcome_timeline_virtual_body_lines(app, size);
     let mut rendered = Vec::with_capacity(virtual_lines + lines.len());
     rendered.extend((0..virtual_lines).map(|_| blank_render_line()));
     rendered.extend(lines);
