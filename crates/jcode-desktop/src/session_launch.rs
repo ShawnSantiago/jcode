@@ -15,6 +15,7 @@ const SERVER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 pub struct DesktopModelChoice {
     pub model: String,
     pub provider: Option<String>,
+    pub api_method: Option<String>,
     pub detail: Option<String>,
     pub available: bool,
 }
@@ -1106,6 +1107,11 @@ fn model_choices_from_server_value(value: &Value) -> Vec<DesktopModelChoice> {
                     .and_then(Value::as_str)
                     .filter(|provider| !provider.is_empty())
                     .map(ToOwned::to_owned),
+                api_method: route
+                    .get("api_method")
+                    .and_then(Value::as_str)
+                    .filter(|method| !method.is_empty())
+                    .map(ToOwned::to_owned),
                 detail: route
                     .get("detail")
                     .and_then(Value::as_str)
@@ -1126,6 +1132,7 @@ fn model_choices_from_server_value(value: &Value) -> Vec<DesktopModelChoice> {
             choices.push(DesktopModelChoice {
                 model: model.to_string(),
                 provider: None,
+                api_method: None,
                 detail: None,
                 available: true,
             });
@@ -1412,6 +1419,7 @@ mod tests {
                 models: vec![DesktopModelChoice {
                     model: "claude-sonnet-4-5".to_string(),
                     provider: Some("claude".to_string()),
+                    api_method: Some("responses".to_string()),
                     detail: Some("active account".to_string()),
                     available: true,
                 }]

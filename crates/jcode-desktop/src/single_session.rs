@@ -180,8 +180,10 @@ pub(crate) struct StdinResponseState {
 pub(crate) struct ModelPickerState {
     pub(crate) open: bool,
     pub(crate) loading: bool,
+    pub(crate) preview: bool,
     pub(crate) filter: String,
     pub(crate) selected: usize,
+    pub(crate) column: usize,
     pub(crate) current_model: Option<String>,
     pub(crate) provider_name: Option<String>,
     pub(crate) choices: Vec<DesktopModelChoice>,
@@ -193,8 +195,10 @@ impl Default for ModelPickerState {
         Self {
             open: false,
             loading: false,
+            preview: false,
             filter: String::new(),
             selected: 0,
+            column: 0,
             current_model: None,
             provider_name: None,
             choices: Vec::new(),
@@ -207,14 +211,28 @@ impl ModelPickerState {
     fn open_loading(&mut self) {
         self.open = true;
         self.loading = true;
+        self.preview = false;
         self.error = None;
         self.selected = self.current_choice_index().unwrap_or(0);
+        self.column = 0;
+    }
+
+    fn open_preview_loading(&mut self, filter: String) {
+        self.open = true;
+        self.loading = true;
+        self.preview = true;
+        self.filter = filter;
+        self.error = None;
+        self.selected = self.current_visible_position().unwrap_or(0);
+        self.column = 0;
     }
 
     fn close(&mut self) {
         self.open = false;
         self.loading = false;
+        self.preview = false;
         self.error = None;
+        self.column = 0;
     }
 
     fn apply_catalog(
@@ -237,6 +255,7 @@ impl ModelPickerState {
         self.ensure_current_choice_present();
         self.selected = self.current_visible_position().unwrap_or(0);
         self.clamp_selection();
+        self.column = self.column.min(2);
     }
 
     fn apply_error(&mut self, error: String) {
@@ -279,11 +298,22 @@ impl ModelPickerState {
     fn push_filter_text(&mut self, text: &str) {
         self.filter.push_str(text);
         self.selected = 0;
+        self.column = 0;
     }
 
     fn pop_filter_char(&mut self) {
         self.filter.pop();
         self.selected = 0;
+        self.column = 0;
+    }
+
+    fn set_filter(&mut self, filter: String) {
+        if self.filter != filter {
+            self.filter = filter;
+            self.selected = 0;
+            self.column = 0;
+        }
+        self.clamp_selection();
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
@@ -340,6 +370,7 @@ impl ModelPickerState {
             DesktopModelChoice {
                 model: current_model,
                 provider: self.provider_name.clone(),
+                api_method: Some("current".to_string()),
                 detail: Some("current model".to_string()),
                 available: true,
             },
@@ -743,8 +774,15 @@ impl SingleSessionApp {
             return self.handle_session_switcher_key(key);
         }
 
-        if self.model_picker.open {
+        if self.model_picker.open && !self.model_picker.preview {
             return self.handle_model_picker_key(key);
+        }
+
+        if self.model_picker.open
+            && self.model_picker.preview
+            && let Some(outcome) = self.handle_model_picker_preview_key(&key)
+        {
+            return outcome;
         }
 
         match key {
@@ -819,11 +857,13 @@ impl SingleSessionApp {
             }
             KeyInput::Backspace => {
                 self.delete_previous_char();
-                KeyOutcome::Redraw
+                self.sync_model_picker_preview_from_draft()
+                    .unwrap_or(KeyOutcome::Redraw)
             }
             KeyInput::DeletePreviousWord => {
                 self.delete_previous_word();
-                KeyOutcome::Redraw
+                self.sync_model_picker_preview_from_draft()
+                    .unwrap_or(KeyOutcome::Redraw)
             }
             KeyInput::DeleteNextWord => {
                 self.delete_next_word();
@@ -859,11 +899,13 @@ impl SingleSessionApp {
             }
             KeyInput::DeleteToLineStart => {
                 self.delete_to_line_start();
-                KeyOutcome::Redraw
+                self.sync_model_picker_preview_from_draft()
+                    .unwrap_or(KeyOutcome::Redraw)
             }
             KeyInput::DeleteToLineEnd => {
                 self.delete_to_line_end();
-                KeyOutcome::Redraw
+                self.sync_model_picker_preview_from_draft()
+                    .unwrap_or(KeyOutcome::Redraw)
             }
             KeyInput::CutInputLine => self.cut_input_line(),
             KeyInput::UndoInput => {
@@ -872,7 +914,8 @@ impl SingleSessionApp {
             }
             KeyInput::Character(text) => {
                 self.insert_draft_text(&text);
-                KeyOutcome::Redraw
+                self.sync_model_picker_preview_from_draft()
+                    .unwrap_or(KeyOutcome::Redraw)
             }
             _ => KeyOutcome::None,
         }
@@ -897,6 +940,74 @@ impl SingleSessionApp {
         KeyOutcome::LoadModelCatalog
     }
 
+    fn open_model_picker_preview(&mut self, filter: String) -> KeyOutcome {
+        self.show_help = false;
+        self.session_switcher.close();
+        self.model_picker.open_preview_loading(filter);
+        self.status = Some("loading models".to_string());
+        self.scroll_body_to_bottom();
+        KeyOutcome::LoadModelCatalog
+    }
+
+    fn sync_model_picker_preview_from_draft(&mut self) -> Option<KeyOutcome> {
+        let Some(filter) = model_picker_preview_filter(&self.draft) else {
+            if self.model_picker.open && self.model_picker.preview {
+                self.model_picker.close();
+                return Some(KeyOutcome::Redraw);
+            }
+            return None;
+        };
+
+        if self.model_picker.open && self.model_picker.preview {
+            self.model_picker.set_filter(filter);
+            Some(KeyOutcome::Redraw)
+        } else {
+            Some(self.open_model_picker_preview(filter))
+        }
+    }
+
+    fn handle_model_picker_preview_key(&mut self, key: &KeyInput) -> Option<KeyOutcome> {
+        match key {
+            KeyInput::Escape => {
+                self.model_picker.close();
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                Some(KeyOutcome::Redraw)
+            }
+            KeyInput::ModelPickerMove(delta) => {
+                self.model_picker.move_selection(*delta);
+                Some(KeyOutcome::Redraw)
+            }
+            KeyInput::ScrollBodyPages(pages) => {
+                self.model_picker
+                    .move_selection(if *pages > 0 { -5 } else { 5 });
+                Some(KeyOutcome::Redraw)
+            }
+            KeyInput::SubmitDraft => {
+                let Some(model) = self.model_picker.selected_model() else {
+                    self.model_picker.close();
+                    self.draft.clear();
+                    self.draft_cursor = 0;
+                    self.input_undo_stack.clear();
+                    return Some(KeyOutcome::Redraw);
+                };
+                self.model_picker.close();
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.input_undo_stack.clear();
+                Some(KeyOutcome::SetModel(model))
+            }
+            KeyInput::RefreshSessions => {
+                let filter = self.model_picker.filter.clone();
+                self.model_picker.open_preview_loading(filter);
+                self.status = Some("loading models".to_string());
+                Some(KeyOutcome::LoadModelCatalog)
+            }
+            _ => None,
+        }
+    }
+
     fn open_session_switcher(&mut self) -> KeyOutcome {
         self.show_help = false;
         self.model_picker.close();
@@ -910,6 +1021,10 @@ impl SingleSessionApp {
 
     fn handle_model_picker_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
+            KeyInput::Escape if !self.model_picker.filter.is_empty() => {
+                self.model_picker.set_filter(String::new());
+                KeyOutcome::Redraw
+            }
             KeyInput::Escape | KeyInput::OpenModelPicker => {
                 self.model_picker.close();
                 KeyOutcome::Redraw
@@ -925,6 +1040,19 @@ impl SingleSessionApp {
             }
             KeyInput::ModelPickerMove(delta) => {
                 self.model_picker.move_selection(delta);
+                KeyOutcome::Redraw
+            }
+            KeyInput::ScrollBodyPages(pages) => {
+                self.model_picker
+                    .move_selection(if pages > 0 { -5 } else { 5 });
+                KeyOutcome::Redraw
+            }
+            KeyInput::MoveCursorRight => {
+                self.model_picker.column = (self.model_picker.column + 1).min(2);
+                KeyOutcome::Redraw
+            }
+            KeyInput::MoveCursorLeft => {
+                self.model_picker.column = self.model_picker.column.saturating_sub(1);
                 KeyOutcome::Redraw
             }
             KeyInput::CycleModel(direction) => KeyOutcome::CycleModel(direction),
@@ -2604,10 +2732,17 @@ fn session_card_search_text(session: &workspace::SessionCard) -> String {
 }
 
 fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyledLine> {
-    let filter = if picker.filter.is_empty() {
-        "<type to filter>"
+    let (active_hint, default_hint) = if picker.preview {
+        ("↵ open", "")
     } else {
-        picker.filter.as_str()
+        ("↑↓ ←→ ↵ Esc", "  ^D=default")
+    };
+    let filter = (!picker.filter.is_empty()).then(|| format!("  \"{}\"", picker.filter));
+    let visible = picker.filtered_indices();
+    let count = if visible.len() == picker.choices.len() {
+        format!(" ({})", picker.choices.len())
+    } else {
+        format!(" ({}/{})", visible.len(), picker.choices.len())
     };
     let mut lines = vec![
         styled_line(
@@ -2621,12 +2756,17 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
             SingleSessionLineStyle::OverlayTitle,
         ),
         styled_line(
-            format!("│ /model {filter}"),
+            format!(
+                "│ {:<32} {:<18} {:<12}{}{}  {}{}",
+                "MODEL",
+                "PROVIDER",
+                "METHOD",
+                filter.unwrap_or_default(),
+                count,
+                active_hint,
+                default_hint,
+            ),
             SingleSessionLineStyle::Overlay,
-        ),
-        styled_line(
-            "│ ↑/↓ select · type filter · Enter switch · Ctrl+R reload · Esc close",
-            SingleSessionLineStyle::Meta,
         ),
     ];
 
@@ -2644,7 +2784,6 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
         ));
     }
 
-    let visible = picker.filtered_indices();
     if visible.is_empty() && !picker.loading {
         lines.push(styled_line(
             "│ no matching models",
@@ -2673,10 +2812,21 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
         } else {
             " "
         };
+        let provider = choice.provider.as_deref().unwrap_or("auto");
+        let method = choice.api_method.as_deref().unwrap_or("auto");
         lines.push(styled_line(
             format!(
-                "│ {selector} {current_marker} {}",
-                model_choice_display_line(choice)
+                "│ {selector} {current_marker} {:<32} {:<18} {:<12}{}{}",
+                truncate_chars(&choice.model, 32),
+                truncate_chars(provider, 18),
+                truncate_chars(method, 12),
+                if choice.available { "" } else { " ×" },
+                choice
+                    .detail
+                    .as_deref()
+                    .filter(|detail| !detail.is_empty())
+                    .map(|detail| format!("  {detail}"))
+                    .unwrap_or_default(),
             ),
             if position == picker.selected {
                 SingleSessionLineStyle::OverlaySelection
@@ -2696,6 +2846,33 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
     lines
 }
 
+fn model_picker_preview_filter(input: &str) -> Option<String> {
+    let trimmed = input.trim_start();
+    let rest = trimmed
+        .strip_prefix("/model")
+        .or_else(|| trimmed.strip_prefix("/models"))?;
+    if rest.is_empty() {
+        return Some(String::new());
+    }
+    rest.chars()
+        .next()
+        .filter(|ch| ch.is_whitespace())
+        .map(|_| rest.trim_start().to_string())
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+    format!("{}…", text.chars().take(max_chars - 1).collect::<String>())
+}
+
 fn model_picker_current_label(provider_name: Option<&str>, current_model: Option<&str>) -> String {
     match (provider_name, current_model) {
         (Some(provider), Some(model)) if !provider.is_empty() => format!("{provider} · {model}"),
@@ -2705,32 +2882,12 @@ fn model_picker_current_label(provider_name: Option<&str>, current_model: Option
     }
 }
 
-fn model_choice_display_line(choice: &DesktopModelChoice) -> String {
-    let provider = choice
-        .provider
-        .as_deref()
-        .filter(|provider| !provider.is_empty())
-        .map(|provider| format!(" · provider {provider}"))
-        .unwrap_or_default();
-    let availability = if choice.available {
-        ""
-    } else {
-        " · unavailable"
-    };
-    let detail = choice
-        .detail
-        .as_deref()
-        .filter(|detail| !detail.is_empty())
-        .map(|detail| format!(" · {detail}"))
-        .unwrap_or_default();
-    format!("{}{provider}{availability}{detail}", choice.model)
-}
-
 fn model_choice_search_text(choice: &DesktopModelChoice) -> String {
     format!(
-        "{} {} {}",
+        "{} {} {} {}",
         choice.model,
         choice.provider.as_deref().unwrap_or_default(),
+        choice.api_method.as_deref().unwrap_or_default(),
         choice.detail.as_deref().unwrap_or_default()
     )
     .to_lowercase()
@@ -2742,6 +2899,7 @@ fn dedupe_model_choices(choices: Vec<DesktopModelChoice>) -> Vec<DesktopModelCho
         if deduped.iter().any(|existing| {
             existing.model == choice.model
                 && existing.provider == choice.provider
+                && existing.api_method == choice.api_method
                 && existing.detail == choice.detail
         }) {
             continue;
