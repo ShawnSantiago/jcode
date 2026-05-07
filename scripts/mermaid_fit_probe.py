@@ -153,12 +153,106 @@ def maybe_png_info(path: str | None) -> dict[str, Any] | None:
     return info
 
 
+def visual_fit_metrics(
+    *,
+    width_cells: int,
+    height_cells: int,
+    img_w_px: int,
+    img_h_px: int,
+    font_w: int,
+    font_h: int,
+    contain_rect: dict[str, int],
+    alpha_bbox: list[int] | tuple[int, int, int, int] | None,
+) -> dict[str, Any] | None:
+    """Project the visible PNG alpha bbox into the TUI pane.
+
+    The layout planner works in cells and the PNG alpha bbox works in pixels.
+    Projecting the bbox into cells gives a camera-like metric that matches the
+    visual complaint: even if the full image rect is centered, is the actual
+    non-transparent diagram content centered in the pane?
+    """
+    if not alpha_bbox or img_w_px <= 0 or img_h_px <= 0 or font_w <= 0 or font_h <= 0:
+        return None
+
+    left_px, top_px, right_px, bottom_px = [float(value) for value in alpha_bbox]
+    render_w_px = contain_rect["width"] * font_w
+    render_h_px = contain_rect["height"] * font_h
+    scale_x = render_w_px / img_w_px
+    scale_y = render_h_px / img_h_px
+
+    content_left = contain_rect["x"] + (left_px * scale_x / font_w)
+    content_top = contain_rect["y"] + (top_px * scale_y / font_h)
+    content_right = contain_rect["x"] + (right_px * scale_x / font_w)
+    content_bottom = contain_rect["y"] + (bottom_px * scale_y / font_h)
+    content_width = max(0.0, content_right - content_left)
+    content_height = max(0.0, content_bottom - content_top)
+
+    left_blank = content_left
+    right_blank = width_cells - content_right
+    top_blank = content_top
+    bottom_blank = height_cells - content_bottom
+    center_x = (content_left + content_right) / 2.0
+    center_y = (content_top + content_bottom) / 2.0
+    pane_center_x = width_cells / 2.0
+    pane_center_y = height_cells / 2.0
+    offset_x = center_x - pane_center_x
+    offset_y = center_y - pane_center_y
+
+    return {
+        "content_bbox_cells": {
+            "left": content_left,
+            "top": content_top,
+            "right": content_right,
+            "bottom": content_bottom,
+            "width": content_width,
+            "height": content_height,
+        },
+        "blank_cells": {
+            "left": left_blank,
+            "right": right_blank,
+            "top": top_blank,
+            "bottom": bottom_blank,
+        },
+        "blank_imbalance_cells": {
+            "horizontal_right_minus_left": right_blank - left_blank,
+            "vertical_bottom_minus_top": bottom_blank - top_blank,
+        },
+        "content_center_offset_cells": {
+            "x": offset_x,
+            "y": offset_y,
+        },
+        "content_area_utilization_percent": utilization_percent(
+            int(round(content_width * content_height * 1000)),
+            int(width_cells * height_cells * 1000),
+        ),
+        "camera_centered": abs(offset_x) <= 1.0 and abs(offset_y) <= 1.0,
+        "note": (
+            "Low content_area_utilization can be normal for a wide/short or tall/narrow diagram. "
+            "A large content_center_offset or top/bottom blank imbalance means the camera/placement is wrong."
+        ),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inner", default="73x46", help="inner pane size in cells, WIDTHxHEIGHT")
     parser.add_argument("--image", default="1180x1470", help="rendered PNG size in px, WIDTHxHEIGHT")
     parser.add_argument("--font", default="8x16", help="terminal cell size in px, WIDTHxHEIGHT")
     parser.add_argument("--png", help="optional rendered PNG path to inspect alpha bounds")
+    parser.add_argument(
+        "--alpha-bbox",
+        help="optional alpha/content bbox LEFT,TOP,RIGHT,BOTTOM in PNG pixels when --png is unavailable",
+    )
+    parser.add_argument(
+        "--assert-camera-centered",
+        action="store_true",
+        help="fail if projected visible content is more than one cell away from pane center",
+    )
+    parser.add_argument(
+        "--assert-old-clipping-repro",
+        action="store_true",
+        help="fail unless the old readability-floor rule would have produced the known clipping bug",
+    )
     args = parser.parse_args()
 
     def parse_pair(raw: str) -> tuple[int, int]:
@@ -172,8 +266,29 @@ def main() -> int:
     png_info = maybe_png_info(args.png)
     if png_info is not None:
         result["png"] = png_info
+    alpha_bbox = None
+    if args.alpha_bbox:
+        alpha_bbox = [int(part) for part in args.alpha_bbox.split(",")]
+    elif png_info is not None:
+        alpha_bbox = png_info.get("alpha_bbox")
+    metrics = visual_fit_metrics(
+        width_cells=width_cells,
+        height_cells=height_cells,
+        img_w_px=img_w_px,
+        img_h_px=img_h_px,
+        font_w=font_w,
+        font_h=font_h,
+        contain_rect=result["contain_rect_cells"],
+        alpha_bbox=alpha_bbox,
+    )
+    if metrics is not None:
+        result["visual_fit_metrics"] = metrics
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result["repro_was_clipping_bug"] or result["fixed_plan"]["mode"] == "fit" else 1
+    if args.assert_camera_centered and metrics is not None:
+        return 0 if metrics["camera_centered"] else 2
+    if args.assert_old_clipping_repro:
+        return 0 if result["repro_was_clipping_bug"] else 3
+    return 0
 
 
 if __name__ == "__main__":
