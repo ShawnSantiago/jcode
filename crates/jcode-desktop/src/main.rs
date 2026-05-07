@@ -2584,6 +2584,10 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         );
         large_body_lines.len() ^ areas.len() ^ vertices.len()
     });
+    let (large_cache_key_ms, large_cache_key_checksum) = benchmark_phase(frames, |frame| {
+        let key = large_app.rendered_body_cache_key((size.width, size.height));
+        (key as usize) ^ frame ^ large_app.messages.len()
+    });
 
     let target_budget_ms = duration_ms(DESKTOP_120FPS_FRAME_BUDGET);
     let critical_phase_means_ms = [
@@ -2599,6 +2603,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         action_visible_ms / frames as f64,
         workspace_navigation_ms / frames as f64,
         large_scroll_ms / frames as f64,
+        large_cache_key_ms / frames as f64,
     ];
     let passes_interaction_cpu_budget = critical_phase_means_ms
         .iter()
@@ -2735,6 +2740,12 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                     large_scroll_ms,
                     frames,
                     large_scroll_checksum,
+                ),
+                benchmark_phase_json(
+                    "large_transcript_cache_key",
+                    large_cache_key_ms,
+                    frames,
+                    large_cache_key_checksum,
                 ),
             ],
             "visible_whole_line_subphases": [

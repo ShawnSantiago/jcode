@@ -40,6 +40,9 @@ const DESKTOP_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/quit", "exit the desktop app"),
 ];
 
+const BODY_CACHE_TEXT_EDGE_BYTES: usize = 256;
+const BODY_CACHE_MESSAGE_EDGE_COUNT: usize = 12;
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SingleSessionTypography {
@@ -539,6 +542,40 @@ impl SingleSessionMessage {
             content: content.into(),
         }
     }
+}
+
+fn hash_messages_cache_fingerprint<H: Hasher>(messages: &[SingleSessionMessage], hasher: &mut H) {
+    messages.len().hash(hasher);
+    if messages.len() <= BODY_CACHE_MESSAGE_EDGE_COUNT * 2 {
+        for message in messages {
+            hash_message_cache_fingerprint(message, hasher);
+        }
+        return;
+    }
+
+    for message in &messages[..BODY_CACHE_MESSAGE_EDGE_COUNT] {
+        hash_message_cache_fingerprint(message, hasher);
+    }
+    for message in &messages[messages.len() - BODY_CACHE_MESSAGE_EDGE_COUNT..] {
+        hash_message_cache_fingerprint(message, hasher);
+    }
+}
+
+fn hash_message_cache_fingerprint<H: Hasher>(message: &SingleSessionMessage, hasher: &mut H) {
+    message.role.hash(hasher);
+    hash_text_cache_fingerprint(&message.content, hasher);
+}
+
+fn hash_text_cache_fingerprint<H: Hasher>(text: &str, hasher: &mut H) {
+    let bytes = text.as_bytes();
+    bytes.len().hash(hasher);
+    if bytes.len() <= BODY_CACHE_TEXT_EDGE_BYTES * 2 {
+        bytes.hash(hasher);
+        return;
+    }
+
+    bytes[..BODY_CACHE_TEXT_EDGE_BYTES].hash(hasher);
+    bytes[bytes.len() - BODY_CACHE_TEXT_EDGE_BYTES..].hash(hasher);
 }
 
 impl SingleSessionApp {
@@ -1381,8 +1418,8 @@ impl SingleSessionApp {
                 )
             })
             .hash(&mut hasher);
-        self.messages.hash(&mut hasher);
-        self.streaming_response.hash(&mut hasher);
+        hash_messages_cache_fingerprint(&self.messages, &mut hasher);
+        hash_text_cache_fingerprint(&self.streaming_response, &mut hasher);
         self.status.hash(&mut hasher);
         self.error.hash(&mut hasher);
         self.show_help.hash(&mut hasher);
@@ -1417,7 +1454,7 @@ impl SingleSessionApp {
                 )
             })
             .hash(&mut hasher);
-        self.messages.hash(&mut hasher);
+        hash_messages_cache_fingerprint(&self.messages, &mut hasher);
         self.status.hash(&mut hasher);
         self.error.hash(&mut hasher);
         self.show_help.hash(&mut hasher);
