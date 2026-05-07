@@ -6,7 +6,6 @@ use crate::tui::mermaid;
 use ratatui::prelude::Rect;
 
 const SIDE_PANEL_INLINE_IMAGE_TARGET_UTILIZATION_PERCENT: u16 = 85;
-const SIDE_PANEL_INLINE_IMAGE_MIN_FULL_FIT_ZOOM_PERCENT: u16 = 100;
 const SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT: u16 = 1000;
 
 pub(super) fn estimate_side_panel_image_layout(
@@ -94,11 +93,7 @@ pub(super) fn estimate_side_panel_image_layout_with_font(
         || area_utilization_percent(fit_rect, fit_area)
             < SIDE_PANEL_INLINE_IMAGE_TARGET_UTILIZATION_PERCENT;
 
-    if fit_zoom < SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT
-        || (fit_zoom < SIDE_PANEL_INLINE_IMAGE_MIN_FULL_FIT_ZOOM_PERCENT
-            && fit_underutilized
-            && preferred_viewport_zoom > fit_zoom)
-    {
+    if fit_underutilized && preferred_viewport_zoom > fit_zoom {
         let zoom_percent = preferred_viewport_zoom;
         return SidePanelImageLayout {
             rows: scaled_image_rows(image_h_cells, zoom_percent)

@@ -178,8 +178,7 @@ fn plan_pinned_diagram_fit_with_font(
         || area_utilization < PINNED_DIAGRAM_TARGET_UTILIZATION_PERCENT;
     let meaningfully_larger = preferred_fill_zoom > fit_zoom.saturating_add(5);
 
-    if (fit_zoom < PINNED_DIAGRAM_MIN_READABLE_ZOOM_PERCENT || underutilized) && meaningfully_larger
-    {
+    if underutilized && meaningfully_larger {
         return PinnedDiagramFitRenderPlan::FillViewport {
             zoom_percent: preferred_fill_zoom,
             scroll_x: centered_viewport_scroll_cells(
@@ -583,6 +582,27 @@ mod tests {
                 assert_eq!(plan.mode_label(), "fit");
             }
             other => panic!("expected contain fit for well-utilized diagram, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pinned_diagram_fit_plan_keeps_contain_for_full_height_beetle_repro() {
+        // Repro from a live Beetle/Harbor TUI frame: a simple TD flowchart
+        // rendered as 1180x1470 in a 73x46-cell side pane. Contain uses almost
+        // the whole pane, so auto fit must show the complete diagram. The old
+        // readability-floor rule forced fit-fill@70%, cropping the top node
+        // while leaving visible blank space below the chart.
+        let inner = Rect::new(96, 1, 73, 46);
+        let plan = plan_pinned_diagram_fit_with_font(inner, 1180, 1470, Some((8, 16)));
+
+        match plan {
+            PinnedDiagramFitRenderPlan::Contain { area } => {
+                assert_eq!(area.width, 73);
+                assert_eq!(area.height, 46);
+                assert_eq!(area.y, inner.y);
+                assert_eq!(plan.mode_label(), "fit");
+            }
+            other => panic!("expected full contain fit for Beetle repro, got {other:?}"),
         }
     }
 }
