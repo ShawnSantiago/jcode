@@ -1298,7 +1298,7 @@ fn welcome_timeline_body_draft_gap() -> f32 {
 }
 
 fn welcome_timeline_total_body_lines(app: &SingleSessionApp, size: PhysicalSize<u32>) -> usize {
-    let transcript_lines = app.body_styled_lines().len();
+    let transcript_lines = single_session_wrapped_body_lines(app.body_styled_lines(), size).len();
     if app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript() {
         welcome_timeline_virtual_body_lines(size) + transcript_lines
     } else {
@@ -1307,6 +1307,8 @@ fn welcome_timeline_total_body_lines(app: &SingleSessionApp, size: PhysicalSize<
 }
 
 fn welcome_timeline_virtual_body_lines(size: PhysicalSize<u32>) -> usize {
+    // Reserve scrollable visual space for the handwritten hero without adding
+    // "Hello there" to transcript text or model-derived body lines.
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
     ((fresh_welcome_draft_top(size) - PANEL_BODY_TOP_PADDING).max(0.0) / line_height)
@@ -1559,11 +1561,13 @@ fn single_session_rendered_body_lines_for_tick(
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Vec<SingleSessionStyledLine> {
-    let lines = app.body_styled_lines_for_tick(tick);
+    let lines = single_session_wrapped_body_lines(app.body_styled_lines_for_tick(tick), size);
     if !(app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript()) {
         return lines;
     }
 
+    // The welcome hero is visual chrome. These blank prelude rows make it
+    // scroll like the first timeline block while keeping transcript text pure.
     let virtual_lines = welcome_timeline_virtual_body_lines(size);
     let mut rendered = Vec::with_capacity(virtual_lines + lines.len());
     rendered.extend((0..virtual_lines).map(|_| blank_render_line()));
@@ -1576,6 +1580,68 @@ fn blank_render_line() -> SingleSessionStyledLine {
         text: String::new(),
         style: SingleSessionLineStyle::Blank,
     }
+}
+
+fn single_session_wrapped_body_lines(
+    lines: Vec<SingleSessionStyledLine>,
+    size: PhysicalSize<u32>,
+) -> Vec<SingleSessionStyledLine> {
+    // Glyphon also wraps, but explicit visual rows keep scroll metrics,
+    // selection hit-testing, and the rendered text viewport in agreement.
+    let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
+    let max_columns = (content_width / single_session_body_char_width())
+        .floor()
+        .max(20.0) as usize;
+    let mut wrapped = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        if line.text.chars().count() <= max_columns || line.text.is_empty() {
+            wrapped.push(line);
+            continue;
+        }
+        for text in wrap_body_line_text(&line.text, max_columns) {
+            wrapped.push(SingleSessionStyledLine {
+                text,
+                style: line.style,
+            });
+        }
+    }
+
+    wrapped
+}
+
+fn wrap_body_line_text(text: &str, max_columns: usize) -> Vec<String> {
+    let max_columns = max_columns.max(1);
+    let mut remaining = text.trim_end();
+    let mut lines = Vec::new();
+
+    while remaining.chars().count() > max_columns {
+        let split = word_wrap_split_index(remaining, max_columns);
+        let (line, rest) = remaining.split_at(split);
+        lines.push(line.trim_end().to_string());
+        remaining = rest.trim_start();
+    }
+
+    lines.push(remaining.to_string());
+    lines
+}
+
+fn word_wrap_split_index(text: &str, max_columns: usize) -> usize {
+    let hard_split = byte_index_at_char_limit(text, max_columns);
+    text[..hard_split]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index))
+        .filter(|index| *index > 0)
+        .unwrap_or(hard_split)
+}
+
+fn byte_index_at_char_limit(text: &str, max_columns: usize) -> usize {
+    text.char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+        .nth(max_columns)
+        .unwrap_or(text.len())
 }
 
 pub(crate) fn single_session_body_line_at_y(size: PhysicalSize<u32>, y: f32) -> Option<usize> {
@@ -1615,9 +1681,7 @@ pub(crate) fn single_session_body_char_width() -> f32 {
     typography.body_size * 0.58
 }
 
-fn single_session_body_top_for_app(app: &SingleSessionApp, size: PhysicalSize<u32>) -> f32 {
-    let _ = (app, size);
-
+fn single_session_body_top_for_app(_app: &SingleSessionApp, _size: PhysicalSize<u32>) -> f32 {
     PANEL_BODY_TOP_PADDING
 }
 

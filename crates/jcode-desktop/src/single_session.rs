@@ -76,6 +76,9 @@ pub(crate) struct SingleSessionApp {
     selection_focus: Option<SelectionPoint>,
     input_undo_stack: Vec<(String, usize)>,
     session_handle: Option<DesktopSessionHandle>,
+    // True for the fresh-start chat that owns the welcome hero as visual UI.
+    // The hero must stay out of `body_styled_lines()` so it never becomes part
+    // of the persisted/rendered transcript text.
     welcome_timeline: bool,
 }
 
@@ -1088,8 +1091,7 @@ impl SingleSessionApp {
         single_session_styled_lines(self.session.as_ref())
     }
 
-    pub(crate) fn body_styled_lines_for_tick(&self, tick: u64) -> Vec<SingleSessionStyledLine> {
-        let _ = tick;
+    pub(crate) fn body_styled_lines_for_tick(&self, _tick: u64) -> Vec<SingleSessionStyledLine> {
         self.body_styled_lines()
     }
 

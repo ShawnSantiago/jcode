@@ -1852,6 +1852,26 @@ fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
 }
 
 #[test]
+fn single_session_visible_body_wraps_long_assistant_lines() {
+    let mut app = SingleSessionApp::new(Some(test_session_card("session_wrap", "wrap", "active")));
+    app.messages.push(SingleSessionMessage::assistant(
+        "This assistant response should wrap cleanly within the desktop transcript column instead of running horizontally forever."
+    ));
+    let size = PhysicalSize::new(360, 480);
+
+    let raw = app.body_styled_lines();
+    let visible = single_session_visible_body(&app, size);
+
+    assert_eq!(raw.len(), 1, "model transcript remains one logical line");
+    assert!(
+        visible.len() > raw.len(),
+        "rendered body should split long assistant text into visual lines: {:?}",
+        visible
+    );
+    assert!(visible.iter().all(|line| line.chars().count() <= 40));
+}
+
+#[test]
 fn long_single_session_transcript_exposes_scrollbar_metrics() {
     let mut app = SingleSessionApp::new(None);
     let size = PhysicalSize::new(900, 360);
