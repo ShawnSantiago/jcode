@@ -1997,6 +1997,46 @@ impl<'window> Canvas<'window> {
             });
         let now = Instant::now();
         let spinner_tick = desktop_spinner_tick(now);
+
+        if let DesktopApp::SingleSession(single_session) = app {
+            self.refresh_cached_single_session_text_buffers(
+                single_session,
+                now,
+                smooth_scroll_lines,
+            );
+        } else {
+            self.single_session_text_key = None;
+            self.single_session_text_buffers.clear();
+        }
+        let text_buffers = &self.single_session_text_buffers;
+        let text_areas = if let DesktopApp::SingleSession(single_session) = app {
+            single_session_text_areas_for_app_with_scroll(
+                single_session,
+                text_buffers,
+                self.size,
+                spinner_tick,
+                smooth_scroll_lines,
+            )
+        } else {
+            single_session_text_areas(text_buffers, self.size)
+        };
+        if !text_areas.is_empty() {
+            if let Err(error) = self.text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.text_atlas,
+                Resolution {
+                    width: self.config.width,
+                    height: self.config.height,
+                },
+                text_areas,
+                &mut self.swash_cache,
+            ) {
+                eprintln!("jcode-desktop: failed to prepare text: {error:?}");
+            }
+        }
+
         let (mut vertices, animation_active) = match app {
             DesktopApp::SingleSession(single_session) => {
                 let focus_pulse = self.focus_pulse.frame(1, now);
@@ -2025,17 +2065,6 @@ impl<'window> Canvas<'window> {
                 )
             }
         };
-        if let DesktopApp::SingleSession(single_session) = app {
-            self.refresh_cached_single_session_text_buffers(
-                single_session,
-                now,
-                smooth_scroll_lines,
-            );
-        } else {
-            self.single_session_text_key = None;
-            self.single_session_text_buffers.clear();
-        }
-        let text_buffers = &self.single_session_text_buffers;
         if let DesktopApp::SingleSession(single_session) = app
             && spinner_tick % 6 < 3
         {
@@ -2053,33 +2082,6 @@ impl<'window> Canvas<'window> {
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        let text_areas = if let DesktopApp::SingleSession(single_session) = app {
-            single_session_text_areas_for_app_with_scroll(
-                single_session,
-                text_buffers,
-                self.size,
-                spinner_tick,
-                smooth_scroll_lines,
-            )
-        } else {
-            single_session_text_areas(text_buffers, self.size)
-        };
-        if !text_areas.is_empty() {
-            if let Err(error) = self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.text_atlas,
-                Resolution {
-                    width: self.config.width,
-                    height: self.config.height,
-                },
-                text_areas,
-                &mut self.swash_cache,
-            ) {
-                eprintln!("jcode-desktop: failed to prepare text: {error:?}");
-            }
-        }
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

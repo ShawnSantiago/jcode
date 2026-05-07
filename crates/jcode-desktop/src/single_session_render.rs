@@ -325,10 +325,11 @@ fn handwritten_welcome_bounds_for_phrase(
     let (source_min, source_max) = stroke_paths_bounds(&paths);
     let source_width = (source_max[0] - source_min[0]).max(1.0);
     let source_height = (source_max[1] - source_min[1]).max(1.0);
+    let normal_draft_top = single_session_draft_top(size);
     let target_width = size.width as f32 * 0.52;
     let scale = target_width / source_width;
     let left = (size.width as f32 - target_width) * 0.5;
-    let top = fresh_welcome_hero_top(size);
+    let top = PANEL_BODY_TOP_PADDING + (normal_draft_top - PANEL_BODY_TOP_PADDING) * 0.31;
     (
         [left, top],
         [left + target_width, top + source_height * scale],
@@ -1512,16 +1513,10 @@ pub(crate) fn single_session_draft_top_for_fresh_state(
 }
 
 pub(crate) fn fresh_welcome_draft_top(size: PhysicalSize<u32>) -> f32 {
+    let hero_bottom = handwritten_welcome_bounds(size).1[1];
     let typography = single_session_typography();
-    (PANEL_BODY_TOP_PADDING + (typography.code_size * 1.36).max(34.0))
-        .min(single_session_draft_top(size))
-}
-
-fn fresh_welcome_hero_top(size: PhysicalSize<u32>) -> f32 {
-    let typography = single_session_typography();
-    let input_bottom =
-        fresh_welcome_draft_top(size) + typography.code_size * typography.code_line_height;
-    input_bottom + (typography.body_size * 1.36).max(34.0)
+    let clearance = (typography.code_size * 1.85).max(46.0);
+    hero_bottom + clearance
 }
 
 fn fresh_welcome_visual_bottom(size: PhysicalSize<u32>) -> f32 {
@@ -1758,32 +1753,12 @@ fn single_session_rendered_body_lines_for_tick(
     }
 
     // The welcome hero is visual chrome. These blank prelude rows make it
-    // scroll like a timeline block while keeping transcript text pure. The first
-    // user turn stays before that visual block so the typed input does not jump
-    // behind the hero after submit.
+    // scroll like the first timeline block while keeping transcript text pure.
     let virtual_lines = welcome_timeline_virtual_body_lines(size);
-    let leading_input_lines = welcome_timeline_leading_input_lines(&lines);
     let mut rendered = Vec::with_capacity(virtual_lines + lines.len());
-    rendered.extend(lines.iter().take(leading_input_lines).cloned());
     rendered.extend((0..virtual_lines).map(|_| blank_render_line()));
-    rendered.extend(lines.into_iter().skip(leading_input_lines));
+    rendered.extend(lines);
     rendered
-}
-
-fn welcome_timeline_leading_input_lines(lines: &[SingleSessionStyledLine]) -> usize {
-    let mut count = 0;
-    for line in lines {
-        let is_leading_input = if count == 0 {
-            line.style == SingleSessionLineStyle::User
-        } else {
-            line.style == SingleSessionLineStyle::UserContinuation
-        };
-        if !is_leading_input {
-            break;
-        }
-        count += 1;
-    }
-    count
 }
 
 fn blank_render_line() -> SingleSessionStyledLine {
@@ -2188,64 +2163,11 @@ pub(crate) fn single_session_text_areas_for_state(
         64
     };
 
-    let mut areas = vec![
-        TextArea {
-            buffer: &buffers[0],
-            left,
-            top: PANEL_TITLE_TOP_PADDING,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right,
-                bottom: 64,
-            },
-            default_color: text_color(PANEL_TITLE_COLOR),
-        },
-        TextArea {
-            buffer: &buffers[4],
-            left: version_left,
-            top: version_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: version_bounds_top,
-                right,
-                bottom: version_bounds_bottom,
-            },
-            default_color: text_color(META_TEXT_COLOR),
-        },
-        TextArea {
-            buffer: &buffers[1],
-            left,
-            top: body_top + body_top_offset_pixels,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: body_top as i32,
-                right,
-                bottom: body_bottom,
-            },
-            default_color: text_color(ASSISTANT_TEXT_COLOR),
-        },
-    ];
+    let mut areas = Vec::new();
 
-    if !welcome_chrome_visible && !status_lane_visible {
-        areas.push(TextArea {
-            buffer: &buffers[3],
-            left,
-            top: draft_top - SINGLE_SESSION_STATUS_GAP,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: (draft_top - SINGLE_SESSION_STATUS_GAP) as i32,
-                right,
-                bottom: draft_top as i32,
-            },
-            default_color: text_color(PANEL_SECTION_COLOR),
-        });
-    }
-
+    // Keep the composer lane first in glyphon preparation order. The visual
+    // positions are unchanged, but fresh keystrokes get shaped before the
+    // heavier transcript/chrome text on frames where both changed.
     if status_lane_visible {
         areas.push(TextArea {
             buffer: &buffers[3],
@@ -2275,6 +2197,62 @@ pub(crate) fn single_session_text_areas_for_state(
             default_color: text_color(PANEL_SECTION_COLOR),
         });
     }
+
+    if !welcome_chrome_visible && !status_lane_visible {
+        areas.push(TextArea {
+            buffer: &buffers[3],
+            left,
+            top: draft_top - SINGLE_SESSION_STATUS_GAP,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: (draft_top - SINGLE_SESSION_STATUS_GAP) as i32,
+                right,
+                bottom: draft_top as i32,
+            },
+            default_color: text_color(PANEL_SECTION_COLOR),
+        });
+    }
+
+    areas.push(TextArea {
+        buffer: &buffers[0],
+        left,
+        top: PANEL_TITLE_TOP_PADDING,
+        scale: 1.0,
+        bounds: TextBounds {
+            left: 0,
+            top: 0,
+            right,
+            bottom: 64,
+        },
+        default_color: text_color(PANEL_TITLE_COLOR),
+    });
+    areas.push(TextArea {
+        buffer: &buffers[4],
+        left: version_left,
+        top: version_top,
+        scale: 1.0,
+        bounds: TextBounds {
+            left: 0,
+            top: version_bounds_top,
+            right,
+            bottom: version_bounds_bottom,
+        },
+        default_color: text_color(META_TEXT_COLOR),
+    });
+    areas.push(TextArea {
+        buffer: &buffers[1],
+        left,
+        top: body_top + body_top_offset_pixels,
+        scale: 1.0,
+        bounds: TextBounds {
+            left: 0,
+            top: body_top as i32,
+            right,
+            bottom: body_bottom,
+        },
+        default_color: text_color(ASSISTANT_TEXT_COLOR),
+    });
 
     areas
 }

@@ -1978,10 +1978,27 @@ fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
     let normal_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.0);
     let smooth_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.5);
 
-    assert_eq!(normal_areas[0].top, PANEL_TITLE_TOP_PADDING);
-    assert_eq!(smooth_areas[0].top, PANEL_TITLE_TOP_PADDING);
-    assert_eq!(normal_areas[2].top, PANEL_BODY_TOP_PADDING);
-    assert!(smooth_areas[2].top < normal_areas[2].top);
+    let normal_body = normal_areas
+        .iter()
+        .find(|area| area.bounds.top == PANEL_BODY_TOP_PADDING as i32)
+        .expect("normal body text area");
+    let smooth_body = smooth_areas
+        .iter()
+        .find(|area| area.bounds.top == PANEL_BODY_TOP_PADDING as i32)
+        .expect("smooth body text area");
+    let normal_title = normal_areas
+        .iter()
+        .find(|area| area.top == PANEL_TITLE_TOP_PADDING && area.bounds.bottom == 64)
+        .expect("normal title text area");
+    let smooth_title = smooth_areas
+        .iter()
+        .find(|area| area.top == PANEL_TITLE_TOP_PADDING && area.bounds.bottom == 64)
+        .expect("smooth title text area");
+
+    assert_eq!(normal_title.top, PANEL_TITLE_TOP_PADDING);
+    assert_eq!(smooth_title.top, PANEL_TITLE_TOP_PADDING);
+    assert_eq!(normal_body.top, PANEL_BODY_TOP_PADDING);
+    assert!(smooth_body.top < normal_body.top);
 }
 
 #[test]
@@ -2002,8 +2019,13 @@ fn welcome_timeline_body_reserves_composer_lane_clearance() {
     let areas = single_session_text_areas_for_app(&app, &buffers, size);
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
-    let body_bottom = areas[2].bounds.bottom as f32;
-    let composer_top = areas[3].top;
+    let status_lane = areas.first().expect("status lane text area");
+    let body_area = areas
+        .iter()
+        .find(|area| area.bounds.top == PANEL_BODY_TOP_PADDING as i32)
+        .expect("welcome timeline body text area");
+    let body_bottom = body_area.bounds.bottom as f32;
+    let composer_top = status_lane.top;
 
     assert!(
         composer_top - body_bottom >= line_height - 1.0,
@@ -2076,13 +2098,13 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
     let areas = single_session_text_areas_for_app(&app, &buffers, size);
 
     assert_eq!(
-        areas.last().expect("draft text area").top,
+        areas.first().expect("draft text area").top,
         fresh_welcome_draft_top(size)
     );
     assert_eq!(areas.len(), 4, "fresh welcome hides normal status chrome");
     assert!(
-        areas.last().expect("draft text area").top < handwritten_welcome_bounds(size).0[1],
-        "fresh input line should render before the handwritten hero"
+        areas.first().expect("draft text area").top > handwritten_welcome_bounds(size).1[1],
+        "fresh input line should stay visually below the handwritten hero"
     );
 
     app.handle_key(KeyInput::Character("hello".to_string()));
@@ -2126,15 +2148,17 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
             .iter()
             .any(|line| line.text.contains("hello desktop"))
     );
-    let first_nonblank = key
+    let submitted_index = key
         .body
         .iter()
-        .find(|line| !line.text.trim().is_empty())
-        .expect("submitted prompt should be first visible timeline text");
+        .position(|line| line.text.contains("hello desktop"))
+        .expect("submitted prompt should remain visible in the timeline");
     assert!(
-        first_nonblank.text.contains("hello desktop"),
-        "submitted input should stay before the visual hero block, got {:?}",
-        first_nonblank.text
+        submitted_index > 0
+            && key.body[..submitted_index]
+                .iter()
+                .all(|line| line.text.trim().is_empty()),
+        "visual hero spacer should stay before submitted input in the timeline body"
     );
     assert!(
         key.body.iter().all(|line| !HANDWRITTEN_WELCOME_PHRASES
@@ -2147,9 +2171,14 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
         4,
         "submit should keep welcome timeline chrome instead of switching screens"
     );
-    assert_eq!(areas[2].top, PANEL_BODY_TOP_PADDING);
-    assert!(areas[3].top > areas[2].top);
-    assert!(areas[3].top >= fresh_welcome_draft_top(size));
+    let status_lane = areas.first().expect("status lane should prepare first");
+    let body_area = areas
+        .iter()
+        .find(|area| area.bounds.top == PANEL_BODY_TOP_PADDING as i32)
+        .expect("welcome body text area");
+    assert_eq!(body_area.top, PANEL_BODY_TOP_PADDING);
+    assert!(status_lane.top > body_area.top);
+    assert!(status_lane.top >= fresh_welcome_draft_top(size));
     assert!(!vertices_have_color(&vertices, [0.060, 0.085, 0.145, 0.34]));
     assert!(
         !vertices_have_color(&vertices, SINGLE_SESSION_CARET_COLOR),
@@ -2186,8 +2215,14 @@ fn session_attach_does_not_move_submitted_fresh_layout() {
 
     assert_visual_text_contains(&after_key, &after_key.welcome_hero);
     assert_visual_text_contains(&after_key, "hello desktop");
-    assert_eq!(before_areas[2].top, after_areas[2].top);
-    assert_eq!(before_areas[3].top, after_areas[3].top);
+    assert_eq!(
+        before_areas.first().unwrap().top,
+        after_areas.first().unwrap().top
+    );
+    assert_eq!(
+        before_areas.last().unwrap().top,
+        after_areas.last().unwrap().top
+    );
 }
 
 #[test]
