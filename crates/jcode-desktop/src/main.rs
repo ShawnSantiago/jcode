@@ -38,6 +38,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
@@ -89,6 +90,8 @@ const SCROLL_FRAME_MAX_DT_SECONDS: f32 = 0.050;
 const SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 48;
 const SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES: usize = 96;
 const DESKTOP_120FPS_FRAME_BUDGET: Duration = Duration::from_micros(8_333);
+const DESKTOP_PRESENT_STALL_BUDGET: Duration = Duration::from_millis(33);
+const DESKTOP_INPUT_LATENCY_BUDGET: Duration = Duration::from_millis(25);
 const DESKTOP_FRAME_PROFILE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
@@ -249,6 +252,7 @@ async fn run() -> Result<()> {
     spawn_session_event_forwarder(session_event_rx, event_loop_proxy.clone());
     let mut recovery_scan_pending = app.is_single_session();
     let mut first_frame_presented = false;
+    let mut interaction_latency = DesktopInteractionLatencyProfiler::new();
 
     event_loop.run(move |event, target| {
         let has_background_work = app.has_background_work();
@@ -304,10 +308,12 @@ async fn run() -> Result<()> {
                     should_redraw |= (next_smooth_scroll - previous_smooth_scroll).abs()
                         >= SCROLL_FRACTIONAL_EPSILON;
                     if should_redraw {
+                        interaction_latency.mark("mouse_wheel", now);
                         window.request_redraw();
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
+                    let cursor_started = Instant::now();
                     cursor_position = position;
                     if selecting_draft
                         && app.update_single_session_draft_selection_at(
@@ -316,6 +322,7 @@ async fn run() -> Result<()> {
                             window.inner_size(),
                         )
                     {
+                        interaction_latency.mark("draft_selection_drag", cursor_started);
                         window.request_redraw();
                     } else if selecting_body
                         && app.update_single_session_selection_at(
@@ -324,6 +331,7 @@ async fn run() -> Result<()> {
                             window.inner_size(),
                         )
                     {
+                        interaction_latency.mark("body_selection_drag", cursor_started);
                         window.request_redraw();
                     }
                 }
@@ -331,8 +339,10 @@ async fn run() -> Result<()> {
                     state,
                     button: MouseButton::Left,
                     ..
-                } => match state {
-                    ElementState::Pressed => {
+                } => {
+                    let mouse_started = Instant::now();
+                    match state {
+                        ElementState::Pressed => {
                         if app.begin_single_session_draft_selection_at(
                             cursor_position.x as f32,
                             cursor_position.y as f32,
@@ -341,6 +351,7 @@ async fn run() -> Result<()> {
                             selecting_body = false;
                             selecting_draft = true;
                             window.set_title(&app.status_title());
+                            interaction_latency.mark("mouse_press", mouse_started);
                             window.request_redraw();
                             return;
                         }
@@ -352,6 +363,7 @@ async fn run() -> Result<()> {
                             window.inner_size(),
                         );
                         if selecting_body {
+                            interaction_latency.mark("mouse_press", mouse_started);
                             window.request_redraw();
                         }
                     }
@@ -368,6 +380,7 @@ async fn run() -> Result<()> {
                                 copy_text_to_clipboard(&text, "copied input selection", &mut app);
                             }
                             window.set_title(&app.status_title());
+                            interaction_latency.mark("mouse_release", mouse_started);
                             window.request_redraw();
                         } else if selecting_body {
                             app.update_single_session_selection_at(
@@ -381,10 +394,12 @@ async fn run() -> Result<()> {
                                 copy_text_to_clipboard(&text, "copied selection", &mut app);
                             }
                             window.set_title(&app.status_title());
+                            interaction_latency.mark("mouse_release", mouse_started);
                             window.request_redraw();
                         }
                     }
-                },
+                    }
+                }
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state == ElementState::Pressed =>
                 {
@@ -404,6 +419,7 @@ async fn run() -> Result<()> {
                     }
                     let key_input = to_key_input(&event.logical_key, modifiers);
                     let key_debug = format!("{key_input:?}");
+                    interaction_latency.mark("keyboard_input", keyboard_started);
                     if key_input == KeyInput::RefreshSessions && app.is_workspace() {
                         if let DesktopApp::Workspace(workspace) = &mut app {
                             workspace.replace_session_cards(load_session_cards_for_desktop());
@@ -657,7 +673,8 @@ async fn run() -> Result<()> {
                         window.current_monitor().map(|monitor| monitor.size()),
                         smooth_scroll_lines,
                     ) {
-                    Ok(animation_active) => {
+                    Ok(frame) => {
+                        interaction_latency.observe_presented(&frame);
                         if !first_frame_presented {
                             first_frame_presented = true;
                             startup_trace.mark("first frame presented");
@@ -673,7 +690,7 @@ async fn run() -> Result<()> {
                                 );
                             }
                         }
-                        if animation_active {
+                        if frame.animation_active {
                             window.request_redraw();
                         }
                     }
@@ -693,11 +710,13 @@ async fn run() -> Result<()> {
                 if let DesktopApp::SingleSession(single_session) = &mut app {
                     single_session.set_recovery_session_count(recovery_count);
                     window.set_title(&app.status_title());
+                    interaction_latency.mark("recovery_count", Instant::now());
                     window.request_redraw();
                 }
             }
             Event::UserEvent(DesktopUserEvent::SessionEvents(events)) => {
                 if apply_desktop_session_event_batch(&mut app, events) {
+                    interaction_latency.mark("backend_events", Instant::now());
                     if let Some(session_id) = app.single_session_live_id() {
                         attach_single_session_by_id(&mut app, &session_id);
                     }
@@ -727,6 +746,7 @@ async fn run() -> Result<()> {
             }
             Event::AboutToWait => {
                 if app.is_single_session() {
+                    let about_to_wait_started = Instant::now();
                     let size = window.inner_size();
                     let previous_smooth_scroll = app.single_session_smooth_scroll_lines(
                         scroll_accumulator.pending_lines(),
@@ -748,6 +768,7 @@ async fn run() -> Result<()> {
                         || (next_smooth_scroll - previous_smooth_scroll).abs()
                             >= SCROLL_FRACTIONAL_EPSILON
                     {
+                        interaction_latency.mark("scroll_momentum", about_to_wait_started);
                         window.request_redraw();
                     }
                 } else if scroll_accumulator.is_active() {
@@ -1215,6 +1236,116 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
     let setup_elapsed = setup_started.elapsed();
     let setup_checksum =
         setup_key.body.len() ^ setup_buffers.len() ^ setup_areas.len() ^ setup_vertices.len();
+
+    let cold_fresh_app = SingleSessionApp::new(None);
+    let cold_fresh_started = Instant::now();
+    let cold_phase_started = Instant::now();
+    let mut cold_fresh_font_system = benchmark_font_system();
+    let cold_fresh_font_ms = cold_phase_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_phase_started = Instant::now();
+    let cold_fresh_key =
+        single_session_text_key_for_tick_with_scroll(&cold_fresh_app, size, 0, 0.0);
+    let cold_fresh_key_ms = cold_phase_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_phase_started = Instant::now();
+    let cold_fresh_buffers =
+        single_session_text_buffers_from_key(&cold_fresh_key, size, &mut cold_fresh_font_system);
+    let cold_fresh_buffers_ms = cold_phase_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_phase_started = Instant::now();
+    let cold_fresh_areas = single_session_text_areas_for_app_with_scroll(
+        &cold_fresh_app,
+        &cold_fresh_buffers,
+        size,
+        0,
+        0.0,
+    );
+    let cold_fresh_areas_ms = cold_phase_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_phase_started = Instant::now();
+    let cold_fresh_vertices = build_single_session_vertices_with_scroll_and_reveal(
+        &cold_fresh_app,
+        size,
+        0.0,
+        0,
+        0.0,
+        1.0,
+    );
+    let cold_fresh_vertices_ms = cold_phase_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_fresh_ms = cold_fresh_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_fresh_checksum = cold_fresh_key.body.len()
+        ^ cold_fresh_buffers.len()
+        ^ cold_fresh_areas.len()
+        ^ cold_fresh_vertices.len();
+
+    let prewarmed_fresh_app = SingleSessionApp::new(None);
+    let mut prewarmed_fresh_font_system = benchmark_font_system();
+    let prewarmed_fresh_started = Instant::now();
+    let prewarmed_fresh_key =
+        single_session_text_key_for_tick_with_scroll(&prewarmed_fresh_app, size, 0, 0.0);
+    let prewarmed_fresh_buffers = single_session_text_buffers_from_key(
+        &prewarmed_fresh_key,
+        size,
+        &mut prewarmed_fresh_font_system,
+    );
+    let prewarmed_fresh_areas = single_session_text_areas_for_app_with_scroll(
+        &prewarmed_fresh_app,
+        &prewarmed_fresh_buffers,
+        size,
+        0,
+        0.0,
+    );
+    let prewarmed_fresh_vertices = build_single_session_vertices_with_scroll_and_reveal(
+        &prewarmed_fresh_app,
+        size,
+        0.0,
+        0,
+        0.0,
+        1.0,
+    );
+    let prewarmed_fresh_ms = prewarmed_fresh_started.elapsed().as_secs_f64() * 1000.0;
+    let prewarmed_fresh_checksum = prewarmed_fresh_key.body.len()
+        ^ prewarmed_fresh_buffers.len()
+        ^ prewarmed_fresh_areas.len()
+        ^ prewarmed_fresh_vertices.len();
+
+    let warm_fresh_app = SingleSessionApp::new(None);
+    let mut warm_fresh_font_system = benchmark_font_system();
+    let warm_fresh_initial_key =
+        single_session_text_key_for_tick_with_scroll(&warm_fresh_app, size, 0, 0.0);
+    let warm_fresh_initial_buffers = single_session_text_buffers_from_key(
+        &warm_fresh_initial_key,
+        size,
+        &mut warm_fresh_font_system,
+    );
+    let warm_fresh_started = Instant::now();
+    let warm_fresh_next_key =
+        single_session_text_key_for_tick_with_scroll(&warm_fresh_app, size, 1, 0.0);
+    let warm_fresh_buffers = single_session_text_buffers_from_key_reusing_unchanged(
+        &warm_fresh_next_key,
+        Some(&warm_fresh_initial_key),
+        warm_fresh_initial_buffers,
+        true,
+        size,
+        &mut warm_fresh_font_system,
+    );
+    let warm_fresh_areas = single_session_text_areas_for_app_with_scroll(
+        &warm_fresh_app,
+        &warm_fresh_buffers,
+        size,
+        1,
+        0.0,
+    );
+    let warm_fresh_vertices = build_single_session_vertices_with_scroll_and_reveal(
+        &warm_fresh_app,
+        size,
+        0.0,
+        1,
+        0.0,
+        1.0,
+    );
+    let warm_fresh_ms = warm_fresh_started.elapsed().as_secs_f64() * 1000.0;
+    let warm_fresh_checksum = warm_fresh_next_key.body.len()
+        ^ warm_fresh_buffers.len()
+        ^ warm_fresh_areas.len()
+        ^ warm_fresh_vertices.len();
 
     let mut legacy_font_system = benchmark_font_system();
     let (legacy_smooth_text_ms, legacy_smooth_text_checksum) = benchmark_phase(frames, |frame| {
@@ -2059,6 +2190,16 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         action_body_lines.len() ^ action_buffers.len() ^ areas.len() ^ vertices.len()
     });
 
+    let mut workspace_app = Workspace::from_session_cards(benchmark_workspace_session_cards(128));
+    let (workspace_navigation_ms, workspace_navigation_checksum) =
+        benchmark_phase(frames, |frame| {
+            let key = if frame % 2 == 0 { "l" } else { "h" };
+            let _ = workspace_app.handle_key(KeyInput::Character(key.to_string()));
+            let layout = workspace_render_layout(&workspace_app, size, Some(size));
+            let vertices = build_vertices(&workspace_app, size, layout, 0.0);
+            vertices.len() ^ (workspace_app.focused_id as usize) ^ workspace_app.surfaces.len()
+        });
+
     let mut large_app = desktop_large_transcript_benchmark_app();
     let large_body_started = Instant::now();
     let large_body_lines = single_session_rendered_body_lines_for_tick(&large_app, size, 0);
@@ -2101,6 +2242,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         hero_boundary_scroll_ms / frames as f64,
         action_input_ms / frames as f64,
         action_visible_ms / frames as f64,
+        workspace_navigation_ms / frames as f64,
         large_scroll_ms / frames as f64,
     ];
     let metrics = single_session_body_scroll_metrics(&app, size, 0);
@@ -2201,6 +2343,12 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                     action_visible_checksum,
                 ),
                 benchmark_phase_json(
+                    "workspace_navigation_geometry",
+                    workspace_navigation_ms,
+                    frames,
+                    workspace_navigation_checksum,
+                ),
+                benchmark_phase_json(
                     "large_transcript_scroll_visible_body_only",
                     large_scroll_ms,
                     frames,
@@ -2214,6 +2362,18 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                 benchmark_phase_json("glyph_runs", visible_glyph_ms, frames, 0),
                 benchmark_phase_json("areas", visible_areas_ms, frames, 0),
                 benchmark_phase_json("vertices", visible_vertices_ms, frames, 0),
+            ],
+            "cold_start_cpu": [
+                benchmark_phase_json("fresh_welcome_cold_text_frame", cold_fresh_ms, 1, cold_fresh_checksum),
+                benchmark_phase_json("fresh_welcome_prewarmed_text_frame", prewarmed_fresh_ms, 1, prewarmed_fresh_checksum),
+                benchmark_phase_json("fresh_welcome_warm_cached_text_frame", warm_fresh_ms, 1, warm_fresh_checksum),
+            ],
+            "cold_start_subphases": [
+                benchmark_phase_json("font_system", cold_fresh_font_ms, 1, 0),
+                benchmark_phase_json("text_key", cold_fresh_key_ms, 1, 0),
+                benchmark_phase_json("text_buffers", cold_fresh_buffers_ms, 1, 0),
+                benchmark_phase_json("text_areas", cold_fresh_areas_ms, 1, 0),
+                benchmark_phase_json("vertices", cold_fresh_vertices_ms, 1, 0),
             ],
             "typing_redraw_subphases": [
                 benchmark_phase_json("text_cache", typing_text_cache_ms, frames, 0),
@@ -2319,11 +2479,51 @@ fn benchmark_hero_boundary_scroll_lines(
 }
 
 fn benchmark_font_system() -> FontSystem {
+    create_desktop_font_system()
+}
+
+fn create_desktop_font_system() -> FontSystem {
     let mut font_system = FontSystem::new();
     font_system
         .db_mut()
         .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
     font_system
+}
+
+fn spawn_desktop_font_system_loader() -> JoinHandle<FontSystem> {
+    std::thread::spawn(create_desktop_font_system)
+}
+
+fn prewarm_desktop_text_renderer(
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    text_atlas: &mut TextAtlas,
+    text_renderer: &mut TextRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: PhysicalSize<u32>,
+) {
+    let app = SingleSessionApp::new(None);
+    let key = single_session_text_key_for_tick_with_scroll(&app, size, 0, 0.0);
+    let buffers = single_session_text_buffers_from_key(&key, size, font_system);
+    let text_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.0);
+    if text_areas.is_empty() {
+        return;
+    }
+    if let Err(error) = text_renderer.prepare(
+        device,
+        queue,
+        font_system,
+        text_atlas,
+        Resolution {
+            width: size.width,
+            height: size.height,
+        },
+        text_areas,
+        swash_cache,
+    ) {
+        eprintln!("jcode-desktop: failed to prewarm text renderer: {error:?}");
+    }
 }
 
 fn desktop_scroll_benchmark_app() -> SingleSessionApp {
@@ -2332,6 +2532,29 @@ fn desktop_scroll_benchmark_app() -> SingleSessionApp {
 
 fn desktop_large_transcript_benchmark_app() -> SingleSessionApp {
     desktop_scroll_benchmark_app_with_turns(2_000)
+}
+
+fn benchmark_workspace_session_cards(count: usize) -> Vec<workspace::SessionCard> {
+    (0..count)
+        .map(|index| workspace::SessionCard {
+            session_id: format!("benchmark-session-{index}"),
+            title: format!("agent {index} · desktop benchmark"),
+            subtitle: format!("workspace surface {index}"),
+            detail: "rendering session metadata, preview lines, and detail transcript".to_string(),
+            preview_lines: vec![
+                "recent prompt: inspect render latency and input jank".to_string(),
+                "assistant: caching text and geometry keeps navigation responsive".to_string(),
+                format!("status: benchmark card {index}"),
+            ],
+            detail_lines: (0..16)
+                .map(|line| {
+                    format!(
+                        "detail line {line}: this synthetic transcript line exercises zoom/detail rendering for card {index}"
+                    )
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn desktop_scroll_benchmark_app_with_turns(turns: usize) -> SingleSessionApp {
@@ -3302,6 +3525,20 @@ impl DesktopFrameProfile {
         self.last_checkpoint
             .saturating_duration_since(self.started_at)
     }
+
+    fn stage_duration(&self, name: &'static str) -> Duration {
+        self.stages
+            .iter()
+            .filter(|stage| stage.name == name)
+            .fold(Duration::ZERO, |total, stage| total + stage.duration)
+    }
+
+    fn cpu_duration(&self) -> Duration {
+        self.stages
+            .iter()
+            .filter(|stage| !matches!(stage.name, "surface_acquire" | "submit_present"))
+            .fold(Duration::ZERO, |total, stage| total + stage.duration)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3314,9 +3551,21 @@ struct DesktopFrameContext {
     text_prepared: bool,
 }
 
+#[derive(Clone, Copy)]
+struct DesktopRenderFrameResult {
+    animation_active: bool,
+    frame_wall: Duration,
+    frame_cpu: Duration,
+    context: DesktopFrameContext,
+}
+
 #[derive(Clone)]
 struct DesktopFrameSlowSample {
-    total: Duration,
+    wall: Duration,
+    cpu: Duration,
+    surface_acquire: Duration,
+    submit_present: Duration,
+    score: Duration,
     stages: Vec<DesktopFrameStageProfile>,
     context: DesktopFrameContext,
 }
@@ -3327,7 +3576,8 @@ struct DesktopFrameProfiler {
     budget: Duration,
     report_interval: Duration,
     frames: usize,
-    slow_frames: usize,
+    slow_cpu_frames: usize,
+    present_stall_frames: usize,
     worst: Option<DesktopFrameSlowSample>,
     last_report: Option<Instant>,
 }
@@ -3349,7 +3599,8 @@ impl DesktopFrameProfiler {
             budget,
             report_interval: DESKTOP_FRAME_PROFILE_REPORT_INTERVAL,
             frames: 0,
-            slow_frames: 0,
+            slow_cpu_frames: 0,
+            present_stall_frames: 0,
             worst: None,
             last_report: None,
         }
@@ -3361,19 +3612,32 @@ impl DesktopFrameProfiler {
         }
 
         self.frames += 1;
-        let total = profile.total_duration();
-        let slow = total >= self.budget;
-        if slow || self.log_all {
-            if slow {
-                self.slow_frames += 1;
+        let wall = profile.total_duration();
+        let cpu = profile.cpu_duration();
+        let surface_acquire = profile.stage_duration("surface_acquire");
+        let submit_present = profile.stage_duration("submit_present");
+        let cpu_slow = cpu >= self.budget;
+        let present_stall = surface_acquire >= DESKTOP_PRESENT_STALL_BUDGET
+            || submit_present >= DESKTOP_PRESENT_STALL_BUDGET;
+        if cpu_slow || present_stall || self.log_all {
+            if cpu_slow {
+                self.slow_cpu_frames += 1;
             }
+            if present_stall {
+                self.present_stall_frames += 1;
+            }
+            let score = cpu.max(surface_acquire).max(submit_present);
             let replace_worst = self
                 .worst
                 .as_ref()
-                .is_none_or(|sample| total > sample.total);
+                .is_none_or(|sample| score > sample.score);
             if replace_worst {
                 self.worst = Some(DesktopFrameSlowSample {
-                    total,
+                    wall,
+                    cpu,
+                    surface_acquire,
+                    submit_present,
+                    score,
                     stages: profile.stages,
                     context,
                 });
@@ -3384,7 +3648,8 @@ impl DesktopFrameProfiler {
         let report_due = self.last_report.is_none_or(|last_report| {
             now.saturating_duration_since(last_report) >= self.report_interval
         });
-        if report_due && (self.slow_frames > 0 || self.log_all) {
+        if report_due && (self.slow_cpu_frames > 0 || self.present_stall_frames > 0 || self.log_all)
+        {
             self.report(now);
         }
     }
@@ -3394,10 +3659,17 @@ impl DesktopFrameProfiler {
             eprintln!(
                 "jcode-desktop-frame-profile {}",
                 serde_json::json!({
-                    "budget_ms": duration_ms(self.budget),
+                    "cpu_budget_ms": duration_ms(self.budget),
+                    "present_stall_budget_ms": duration_ms(DESKTOP_PRESENT_STALL_BUDGET),
                     "window_frames": self.frames,
-                    "slow_frames": self.slow_frames,
-                    "worst_frame_ms": duration_ms(worst.total),
+                    "slow_frames": self.slow_cpu_frames,
+                    "slow_cpu_frames": self.slow_cpu_frames,
+                    "present_stall_frames": self.present_stall_frames,
+                    "worst_frame_ms": duration_ms(worst.wall),
+                    "worst_wall_ms": duration_ms(worst.wall),
+                    "worst_cpu_ms": duration_ms(worst.cpu),
+                    "surface_acquire_ms": duration_ms(worst.surface_acquire),
+                    "submit_present_ms": duration_ms(worst.submit_present),
                     "mode": worst.context.mode,
                     "smooth_scroll_lines": worst.context.smooth_scroll_lines,
                     "text_buffer_count": worst.context.text_buffer_count,
@@ -3412,9 +3684,98 @@ impl DesktopFrameProfiler {
             );
         }
         self.frames = 0;
-        self.slow_frames = 0;
+        self.slow_cpu_frames = 0;
+        self.present_stall_frames = 0;
         self.worst = None;
         self.last_report = Some(now);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DesktopPendingInteraction {
+    kind: &'static str,
+    started_at: Instant,
+    count: usize,
+}
+
+struct DesktopInteractionLatencyProfiler {
+    enabled: bool,
+    log_all: bool,
+    budget: Duration,
+    pending: Option<DesktopPendingInteraction>,
+}
+
+impl DesktopInteractionLatencyProfiler {
+    fn new() -> Self {
+        let mode = std::env::var("JCODE_DESKTOP_FRAME_PROFILE").ok();
+        let enabled = !matches!(mode.as_deref(), Some("0" | "false" | "off"));
+        let log_all = matches!(mode.as_deref(), Some("all" | "trace"));
+        let budget = std::env::var("JCODE_DESKTOP_INPUT_LATENCY_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
+            .unwrap_or(DESKTOP_INPUT_LATENCY_BUDGET);
+        Self {
+            enabled,
+            log_all,
+            budget,
+            pending: None,
+        }
+    }
+
+    fn mark(&mut self, kind: &'static str, started_at: Instant) {
+        if !self.enabled {
+            return;
+        }
+        match self.pending.as_mut() {
+            Some(pending) => {
+                if started_at < pending.started_at {
+                    pending.started_at = started_at;
+                }
+                if pending.kind != kind {
+                    pending.kind = "mixed";
+                }
+                pending.count += 1;
+            }
+            None => {
+                self.pending = Some(DesktopPendingInteraction {
+                    kind,
+                    started_at,
+                    count: 1,
+                });
+            }
+        }
+    }
+
+    fn observe_presented(&mut self, frame: &DesktopRenderFrameResult) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if !self.enabled {
+            return;
+        }
+        let latency = Instant::now().saturating_duration_since(pending.started_at);
+        if latency < self.budget && !self.log_all {
+            return;
+        }
+        eprintln!(
+            "jcode-desktop-latency-profile {}",
+            serde_json::json!({
+                "kind": pending.kind,
+                "interaction_count": pending.count,
+                "latency_budget_ms": duration_ms(self.budget),
+                "latency_ms": duration_ms(latency),
+                "frame_wall_ms": duration_ms(frame.frame_wall),
+                "frame_cpu_ms": duration_ms(frame.frame_cpu),
+                "mode": frame.context.mode,
+                "smooth_scroll_lines": frame.context.smooth_scroll_lines,
+                "text_buffer_count": frame.context.text_buffer_count,
+                "text_area_count": frame.context.text_area_count,
+                "primitive_vertices": frame.context.primitive_vertices,
+                "text_prepared": frame.context.text_prepared,
+            })
+        );
     }
 }
 
@@ -3486,6 +3847,8 @@ struct Canvas<'window> {
 impl<'window> Canvas<'window> {
     async fn new(window: &'window Window, startup_trace: DesktopStartupTrace) -> Result<Self> {
         let size = non_zero_size(window.inner_size());
+        let mut font_system_loader = Some(spawn_desktop_font_system_loader());
+        startup_trace.mark("font loader spawned");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
@@ -3589,16 +3952,40 @@ impl<'window> Canvas<'window> {
             multiview: None,
         });
         startup_trace.mark("primitive pipeline ready");
+        let mut font_system = font_system_loader
+            .take()
+            .and_then(|loader| loader.join().ok())
+            .unwrap_or_else(create_desktop_font_system);
+        let mut text_atlas = TextAtlas::new(&device, &queue, format);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        startup_trace.mark("text renderer ready");
+        let mut swash_cache = SwashCache::new();
+        let mut text_renderer = text_renderer;
+        prewarm_desktop_text_renderer(
+            &mut font_system,
+            &mut swash_cache,
+            &mut text_atlas,
+            &mut text_renderer,
+            &device,
+            &queue,
+            size,
+        );
+        startup_trace.mark("text renderer prewarmed");
         Ok(Self {
             surface,
             device,
             queue,
             config,
             render_pipeline,
-            font_system: None,
-            swash_cache: SwashCache::new(),
-            text_atlas: None,
-            text_renderer: None,
+            font_system: Some(font_system),
+            swash_cache,
+            text_atlas: Some(text_atlas),
+            text_renderer: Some(text_renderer),
             text_needs_prepare: true,
             size,
             viewport_animation: AnimatedViewport::default(),
@@ -3887,13 +4274,10 @@ impl<'window> Canvas<'window> {
     }
 
     fn ensure_font_system(&mut self) {
-        self.font_system.get_or_insert_with(|| {
-            let mut font_system = FontSystem::new();
-            font_system
-                .db_mut()
-                .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
-            font_system
-        });
+        if self.font_system.is_some() {
+            return;
+        }
+        self.font_system = Some(create_desktop_font_system());
     }
 
     fn ensure_text_renderer(&mut self) {
@@ -4021,7 +4405,7 @@ impl<'window> Canvas<'window> {
         app: &DesktopApp,
         monitor_size: Option<PhysicalSize<u32>>,
         smooth_scroll_lines: f32,
-    ) -> std::result::Result<bool, SurfaceError> {
+    ) -> std::result::Result<DesktopRenderFrameResult, SurfaceError> {
         let mut frame_profile = DesktopFrameProfile::new();
         let frame = self.surface.get_current_texture()?;
         frame_profile.checkpoint("surface_acquire");
@@ -4240,22 +4624,27 @@ impl<'window> Canvas<'window> {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         frame_profile.checkpoint("submit_present");
-        self.frame_profiler.observe(
-            frame_profile,
-            DesktopFrameContext {
-                mode: match app {
-                    DesktopApp::SingleSession(_) => "single_session",
-                    DesktopApp::Workspace(_) => "workspace",
-                },
-                smooth_scroll_lines,
-                text_buffer_count: self.single_session_text_buffers.len()
-                    + usize::from(self.single_session_streaming_text_buffer.is_some()),
-                text_area_count,
-                primitive_vertices: primitive_vertex_count,
-                text_prepared,
+        let frame_wall = frame_profile.total_duration();
+        let frame_cpu = frame_profile.cpu_duration();
+        let context = DesktopFrameContext {
+            mode: match app {
+                DesktopApp::SingleSession(_) => "single_session",
+                DesktopApp::Workspace(_) => "workspace",
             },
-        );
-        Ok(animation_active || defer_text_this_frame)
+            smooth_scroll_lines,
+            text_buffer_count: self.single_session_text_buffers.len()
+                + usize::from(self.single_session_streaming_text_buffer.is_some()),
+            text_area_count,
+            primitive_vertices: primitive_vertex_count,
+            text_prepared,
+        };
+        self.frame_profiler.observe(frame_profile, context);
+        Ok(DesktopRenderFrameResult {
+            animation_active: animation_active || defer_text_this_frame,
+            frame_wall,
+            frame_cpu,
+            context,
+        })
     }
 }
 
@@ -4387,6 +4776,8 @@ fn build_vertices(
     let column_width = render_layout.column_width;
     let scroll_offset = render_layout.scroll_offset;
     let vertical_scroll_offset = render_layout.vertical_scroll_offset;
+    let viewport_left = OUTER_PADDING - GAP;
+    let viewport_right = width - OUTER_PADDING + GAP;
 
     for surface in &workspace.surfaces {
         let column = surface.column as f32;
@@ -4400,6 +4791,9 @@ fn build_vertices(
             width: column_width,
             height: workspace_height,
         };
+        if rect.x + rect.width < viewport_left || rect.x > viewport_right {
+            continue;
+        }
         let focused = workspace.is_focused(surface.id);
         let surface_pulse = if focused { focus_pulse } else { 0.0 };
         push_surface(
