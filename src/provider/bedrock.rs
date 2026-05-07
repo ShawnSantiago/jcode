@@ -260,6 +260,14 @@ impl BedrockProvider {
 
     fn seed_cached_catalog(&self) {
         if let Some(catalog) = Self::load_persisted_catalog() {
+            let configured_region = Self::configured_region();
+            if catalog.region.as_deref() != configured_region.as_deref() {
+                crate::logging::info(&format!(
+                    "Ignoring Bedrock model cache for region {:?}; configured region is {:?}",
+                    catalog.region, configured_region
+                ));
+                return;
+            }
             let PersistedCatalog {
                 models: cached_models,
                 inference_profiles,
@@ -563,7 +571,7 @@ impl BedrockProvider {
         if let Some((_, tail)) = value.rsplit_once('/') {
             value = tail.to_string();
         }
-        for prefix in ["us.", "eu.", "apac."] {
+        for prefix in ["us.", "eu.", "apac.", "global."] {
             if let Some(stripped) = value.strip_prefix(prefix) {
                 value = stripped.to_string();
                 break;
@@ -707,6 +715,14 @@ impl BedrockProvider {
             || id.starts_with("stability.")
             || id.starts_with("writer.")
             || id.starts_with("deepseek.")
+            || id.starts_with("openai.")
+            || id.starts_with("qwen.")
+            || id.starts_with("moonshot.")
+            || id.starts_with("moonshotai.")
+            || id.starts_with("minimax.")
+            || id.starts_with("zai.")
+            || id.starts_with("google.")
+            || id.starts_with("nvidia.")
     }
 
     fn model_info(model: &str) -> BedrockModelInfo {
@@ -856,19 +872,13 @@ impl BedrockProvider {
     fn all_display_models(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
-        let profile_required_models = self
-            .profile_required_models
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
         let inference_profile_routes = self
             .inference_profile_routes
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let should_hide_duplicate_foundation_model = |model: &str| {
-            inference_profile_routes.contains_key(model) || profile_required_models.contains(model)
-        };
+        let should_hide_duplicate_foundation_model =
+            |model: &str| inference_profile_routes.contains_key(model);
         for model in Self::known_models().into_iter().map(str::to_string) {
             if should_hide_duplicate_foundation_model(&model) {
                 continue;
@@ -1181,14 +1191,25 @@ impl Provider for BedrockProvider {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let profile_required_models = self
+            .profile_required_models
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
         self.all_display_models()
             .into_iter()
             .map(|model| {
                 let info = Self::model_info(&model);
                 let is_legacy = legacy_models.contains(&model);
+                let profile_foundation = Self::foundation_model_id_from_profile_id(&model);
+                let missing_required_profile = profile_foundation.is_none()
+                    && profile_required_models.contains(&model)
+                    && self.profile_route_for_model(&model).is_none();
                 let mut features = Vec::new();
                 if info.supports_tools {
                     features.push("tools");
+                } else {
+                    features.push("no tools");
                 }
                 if info.supports_vision {
                     features.push("vision");
@@ -1200,20 +1221,28 @@ impl Provider for BedrockProvider {
                     model: model.clone(),
                     provider: "AWS Bedrock".to_string(),
                     api_method: "bedrock".to_string(),
-                    available: !is_legacy,
+                    available: !is_legacy && !missing_required_profile,
                     detail: if is_legacy {
                         "legacy Bedrock model; choose an active model or inference profile"
                             .to_string()
+                    } else if missing_required_profile {
+                        "requires an inference profile; run /refresh-model-list or allow bedrock:ListInferenceProfiles"
+                            .to_string()
                     } else {
+                        let mut parts = Vec::new();
+                        if let Some(foundation) = profile_foundation {
+                            parts.push(format!("inference profile for {}", foundation));
+                        }
+                        parts.push(format!("context ~{} tokens", info.context_tokens));
+                        parts.push(format!("max output ~{}", info.max_output_tokens));
+                        parts.push(features.join(", "));
                         format!(
-                            "ConverseStream · context ~{} tokens · max output ~{} · {}",
-                            info.context_tokens,
-                            info.max_output_tokens,
-                            if features.is_empty() {
-                                "text".to_string()
-                            } else {
-                                features.join(", ")
-                            }
+                            "ConverseStream · {}",
+                            parts
+                                .into_iter()
+                                .filter(|part| !part.trim().is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" · ")
                         )
                     },
                     cheapness: Self::route_pricing(&model),
@@ -1480,6 +1509,72 @@ mod tests {
                 .iter()
                 .any(|model| model == "us.amazon.nova-2-lite-v1:0")
         );
+    }
+
+    #[test]
+    fn profile_required_foundation_model_without_profile_route_is_disabled() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let p = BedrockProvider::new();
+        *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
+        p.profile_required_models
+            .write()
+            .unwrap()
+            .insert("amazon.nova-2-lite-v1:0".to_string());
+
+        let route = p
+            .model_routes()
+            .into_iter()
+            .find(|route| route.model == "amazon.nova-2-lite-v1:0")
+            .expect("profile-required foundation model should be listed with a reason");
+
+        assert!(!route.available);
+        assert!(route.detail.contains("requires an inference profile"));
+    }
+
+    #[test]
+    fn global_inference_profiles_use_foundation_capabilities_and_detail() {
+        let p = BedrockProvider::new();
+        *p.fetched_inference_profiles.write().unwrap() =
+            vec!["global.amazon.nova-2-lite-v1:0".to_string()];
+
+        let route = p
+            .model_routes()
+            .into_iter()
+            .find(|route| route.model == "global.amazon.nova-2-lite-v1:0")
+            .expect("global inference profile should be listed");
+
+        assert!(route.available);
+        assert!(
+            route
+                .detail
+                .contains("inference profile for amazon.nova-2-lite-v1:0")
+        );
+        assert!(route.detail.contains("tools"));
+        assert!(!route.detail.contains("no tools"));
+    }
+
+    #[test]
+    fn ignores_persisted_bedrock_catalog_from_different_region() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        {
+            let _region = EnvVarGuard::set(REGION_ENV, "us-east-1");
+            BedrockProvider::persist_catalog(
+                &["openai.gpt-oss-120b-1:0".to_string()],
+                &[],
+                &HashSet::new(),
+                &HashMap::new(),
+                &HashSet::new(),
+            );
+        }
+        let _region = EnvVarGuard::set(REGION_ENV, "us-east-2");
+
+        let p = BedrockProvider::new();
+
+        assert!(p.fetched_models.read().unwrap().is_empty());
     }
 
     #[test]
