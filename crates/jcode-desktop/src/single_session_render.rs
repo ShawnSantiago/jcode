@@ -1512,6 +1512,40 @@ fn approximate_draft_caret_position(
     }
 }
 
+pub(crate) fn single_session_draft_line_col_at_position(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    x: f32,
+    y: f32,
+) -> Option<(usize, usize)> {
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.code_size * typography.code_line_height;
+    let draft_top = single_session_draft_top_for_app(app, size);
+    let draft_bottom = size.height as f32 - PANEL_TITLE_TOP_PADDING;
+    if y < draft_top || y > draft_bottom || x < PANEL_TITLE_LEFT_PADDING {
+        return None;
+    }
+
+    let line = ((y - draft_top) / line_height).floor().max(0.0) as usize;
+    let draft_lines: Vec<&str> = app.draft.split('\n').collect();
+    let line = line.min(draft_lines.len().saturating_sub(1));
+    let char_width = typography.code_size * 0.58;
+    let raw_column = ((x - PANEL_TITLE_LEFT_PADDING) / char_width)
+        .round()
+        .max(0.0) as usize;
+    let prompt_columns = if line == 0 {
+        app.composer_prompt().chars().count()
+    } else {
+        0
+    };
+    let draft_column = raw_column.saturating_sub(prompt_columns);
+    let max_column = draft_lines
+        .get(line)
+        .map(|text| text.chars().count())
+        .unwrap_or_default();
+    Some((line, draft_column.min(max_column)))
+}
+
 pub(crate) fn single_session_draft_top(size: PhysicalSize<u32>) -> f32 {
     (size.height as f32 - SINGLE_SESSION_DRAFT_TOP_OFFSET).max(112.0)
 }

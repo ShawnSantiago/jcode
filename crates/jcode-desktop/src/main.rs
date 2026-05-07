@@ -310,6 +310,17 @@ async fn run() -> Result<()> {
                     ..
                 } => match state {
                     ElementState::Pressed => {
+                        if app.place_single_session_draft_cursor_at(
+                            cursor_position.x as f32,
+                            cursor_position.y as f32,
+                            window.inner_size(),
+                        ) {
+                            selecting_body = false;
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                            return;
+                        }
+
                         selecting_body = app.begin_single_session_selection_at(
                             cursor_position.x as f32,
                             cursor_position.y as f32,
@@ -1320,6 +1331,21 @@ impl DesktopApp {
                 app.update_selection(point);
                 return true;
             }
+        }
+        false
+    }
+
+    fn place_single_session_draft_cursor_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: PhysicalSize<u32>,
+    ) -> bool {
+        if let Self::SingleSession(app) = self
+            && let Some((line, column)) = single_session_draft_line_col_at_position(app, size, x, y)
+        {
+            app.set_draft_cursor_line_col(line, column);
+            return true;
         }
         false
     }

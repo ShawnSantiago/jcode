@@ -1717,6 +1717,40 @@ fn single_session_copy_latest_response_prefers_streaming_text() {
 fn single_session_streaming_preserves_manual_scroll_but_submit_follows_bottom() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("older"));
+#[test]
+fn single_session_draft_point_at_position_maps_to_cursor_line_column() {
+    let size = PhysicalSize::new(900, 700);
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("hello\nworld".to_string()));
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let char_width = typography.code_size * 0.58;
+    let line_height = typography.code_size * typography.code_line_height;
+    let draft_top = single_session_draft_top_for_app(&app, size);
+    let prompt_columns = app.composer_prompt().chars().count() as f32;
+
+    assert_eq!(
+        single_session_draft_line_col_at_position(
+            &app,
+            size,
+            PANEL_TITLE_LEFT_PADDING + (prompt_columns + 2.0) * char_width,
+            draft_top + line_height * 0.5,
+        ),
+        Some((0, 2))
+    );
+    assert_eq!(
+        single_session_draft_line_col_at_position(
+            &app,
+            size,
+            PANEL_TITLE_LEFT_PADDING + 3.0 * char_width,
+            draft_top + line_height * 1.5,
+        ),
+        Some((1, 3))
+    );
+
+    app.set_draft_cursor_line_col(1, 3);
+    assert_eq!(app.draft_cursor, "hello\nwor".len());
+}
+
     app.messages
         .push(SingleSessionMessage::assistant("older answer"));
     app.scroll_body_lines(12);

@@ -1420,6 +1420,36 @@ impl SingleSessionApp {
         };
         let session_id = session.session_id.clone();
         let title = session.title.clone();
+    pub(crate) fn set_draft_cursor_line_col(&mut self, target_line: usize, target_col: usize) {
+        let mut line = 0usize;
+        let mut line_start = 0usize;
+        for (index, ch) in self.draft.char_indices() {
+            if line == target_line {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                line_start = index + ch.len_utf8();
+            }
+        }
+
+        if line < target_line {
+            self.draft_cursor = self.draft.len();
+            return;
+        }
+
+        let line_end = line_end(&self.draft, line_start);
+        let target = self.draft[line_start..line_end]
+            .char_indices()
+            .map(|(offset, _)| line_start + offset)
+            .chain(std::iter::once(line_end))
+            .nth(target_col)
+            .unwrap_or(line_end);
+        self.draft_cursor = target;
+        self.clamp_draft_cursor();
+        self.clear_selection();
+    }
+
         KeyOutcome::SendDraft {
             session_id,
             title,
