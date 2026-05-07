@@ -1677,7 +1677,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             crate::config::DiagramPanePosition::Side => {
                 const MIN_DIAGRAM_WIDTH: u16 = 24;
                 const MIN_CHAT_WIDTH: u16 = 20;
-                const AUTO_DIAGRAM_WIDTH_CAP_PERCENT: u32 = 50;
+                const AUTO_DIAGRAM_WIDTH_CAP_PERCENT: u32 = 75;
                 let max_diagram = area.width.saturating_sub(MIN_CHAT_WIDTH);
                 if max_diagram >= MIN_DIAGRAM_WIDTH {
                     let ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;

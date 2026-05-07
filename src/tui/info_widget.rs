@@ -1103,8 +1103,9 @@ fn render_diagrams_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData)
     // Could add pagination later for multiple diagrams
     let diagram = &data.diagrams[0];
 
-    // Render the image using mermaid module
-    super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false, false);
+    // Scale up as well as down so margin diagrams use the whole widget instead
+    // of appearing as a small top-left crop in a large panel.
+    super::mermaid::render_image_widget_scale(diagram.hash, inner, frame.buffer_mut(), false);
 }
 
 fn render_overview_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData) {

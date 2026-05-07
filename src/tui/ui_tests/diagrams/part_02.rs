@@ -205,6 +205,57 @@ fn test_hidpi_font_size_does_not_halve_diagram_width() {
 }
 
 #[test]
+fn test_current_mermaid_side_pane_auto_width_uses_most_available_space() {
+    // Regression coverage for a common laptop terminal shape where the old
+    // 50% auto-width cap left the pinned diagram in a narrow strip. The pane
+    // may now grow up to 75% of the terminal while preserving a 20-column chat.
+    let terminal_width: u16 = 95;
+    let terminal_height: u16 = 51;
+    let diagram = info_widget::DiagramInfo {
+        hash: 100,
+        width: 614,
+        height: 743,
+        label: None,
+    };
+
+    let min_diagram_width: u16 = 24;
+    let min_chat_width: u16 = 20;
+    let max_diagram = terminal_width.saturating_sub(min_chat_width);
+    let ratio_target = ((terminal_width as u32 * 40) / 100) as u16;
+    let auto_cap = ((terminal_width as u32 * 75) / 100) as u16;
+    let needed = estimate_pinned_diagram_pane_width_with_font(
+        &diagram,
+        terminal_height,
+        min_diagram_width,
+        TEST_FONT,
+    );
+    let auto_target = needed.min(max_diagram).min(auto_cap.max(min_diagram_width));
+    let pane_width = ratio_target
+        .max(auto_target)
+        .max(min_diagram_width)
+        .min(max_diagram);
+    let chat_width = terminal_width.saturating_sub(pane_width);
+    let inner = Rect::new(
+        chat_width + 1,
+        1,
+        pane_width.saturating_sub(2),
+        terminal_height.saturating_sub(2),
+    );
+    let render_area = vcenter_fitted_image_with_font(inner, diagram.width, diagram.height, TEST_FONT);
+
+    assert!(chat_width >= min_chat_width);
+    assert!(
+        pane_width >= 68,
+        "diagram pane should expand beyond the old 50% cap: pane_width={pane_width}, needed={needed}"
+    );
+    assert_eq!(render_area.width, inner.width);
+    assert!(
+        render_area.height as f64 / inner.height as f64 >= 0.80,
+        "expanded pane should let the contain fit use most height: render={render_area:?}, inner={inner:?}"
+    );
+}
+
+#[test]
 fn test_pinned_diagram_probe_reports_fit_utilization() {
     let area = Rect::new(0, 0, 46, 51);
     let inner = Rect::new(1, 1, 44, 49);
@@ -217,7 +268,11 @@ fn test_pinned_diagram_probe_reports_fit_utilization() {
 
     let probe = debug_probe_pinned_diagram(&diagram, area, inner, false, 0, 0, 100);
 
-    assert_eq!(probe.render_mode, "fit");
+    assert!(
+        probe.render_mode == "fit" || probe.render_mode.starts_with("fit-fill@"),
+        "unexpected fit render mode: {}",
+        probe.render_mode
+    );
     assert_eq!(probe.pane_width_cells, 46);
     assert_eq!(probe.pane_height_cells, 51);
     assert_eq!(probe.inner_width_cells, 44);
