@@ -231,17 +231,22 @@ fn vertices_have_bottom_center_rule(vertices: &[Vertex], color: [f32; 4]) -> boo
 }
 
 #[test]
-fn fresh_single_session_does_not_draw_separate_welcome_chrome() {
+fn fresh_single_session_restores_dominant_welcome_hero_without_input_hline() {
     let mut app = SingleSessionApp::new(None);
     let size = PhysicalSize::new(900, 700);
     let tick_zero = build_single_session_vertices(&app, size, 0.0, 0);
-    let old_welcome_aurora_blue = [0.250, 0.520, 1.000, 0.145];
 
-    assert!(!vertices_have_color(&tick_zero, old_welcome_aurora_blue));
+    assert!(vertices_have_color(&tick_zero, WELCOME_AURORA_BLUE));
+    assert!(vertices_have_color(&tick_zero, WELCOME_HANDWRITING_COLOR));
+    assert!(!vertices_have_color(
+        &tick_zero,
+        [0.060, 0.085, 0.145, 0.34]
+    ));
 
     app.handle_key(KeyInput::Character("hello".to_string()));
     let typed = build_single_session_vertices(&app, size, 0.0, 18);
-    assert!(!vertices_have_color(&typed, old_welcome_aurora_blue));
+    assert!(vertices_have_color(&typed, WELCOME_HANDWRITING_COLOR));
+    assert!(!vertices_have_color(&typed, [0.060, 0.085, 0.145, 0.34]));
 }
 
 #[test]
@@ -680,13 +685,14 @@ fn single_session_header_exposes_desktop_binary_and_version() {
 }
 
 #[test]
-fn fresh_single_session_startup_puts_greeting_in_transcript() {
+fn fresh_single_session_startup_puts_greeting_in_welcome_hero() {
     let app = SingleSessionApp::new(None);
     let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
 
     assert_eq!(key.title, "");
     assert_visual_text_contains(&key, "Hello there");
-    assert!(key.welcome_hero.is_empty());
+    assert!(key.body.is_empty());
+    assert_eq!(key.welcome_hero, "Hello there");
     assert!(key.welcome_hint.is_empty());
 }
 
@@ -705,16 +711,15 @@ fn single_session_text_buffers_include_header_version_area() {
 }
 
 #[test]
-fn fresh_welcome_greeting_is_transcript_text_not_handwritten_chrome() {
+fn fresh_welcome_greeting_uses_handwritten_hero_chrome() {
     let app = SingleSessionApp::new(None);
     let key = single_session_text_key(&app, PhysicalSize::new(1000, 720));
-    let old_handwriting_color = [0.012, 0.080, 0.250, 0.94];
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(1000, 720), 0.0, 0);
 
     assert_visual_text_contains(&key, "Hello there");
-    assert!(key.welcome_hero.is_empty());
+    assert_eq!(key.welcome_hero, "Hello there");
     assert!(key.welcome_hint.is_empty());
-    assert!(!vertices_have_color(&vertices, old_handwriting_color));
+    assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
 }
 
 #[test]
@@ -1871,7 +1876,7 @@ fn glyphon_caret_position_uses_shaped_draft_buffer() {
 }
 
 #[test]
-fn fresh_welcome_uses_stable_composer_while_drafting() {
+fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
     let size = PhysicalSize::new(1000, 720);
     let mut app = SingleSessionApp::new(None);
     let mut font_system = FontSystem::new();
@@ -1880,22 +1885,18 @@ fn fresh_welcome_uses_stable_composer_while_drafting() {
 
     assert_eq!(
         areas.last().expect("draft text area").top,
-        single_session_draft_top(size)
+        fresh_welcome_draft_top(size)
     );
-    assert_eq!(
-        areas.len(),
-        5,
-        "fresh welcome uses normal session text areas"
-    );
+    assert_eq!(areas.len(), 4, "fresh welcome hides normal status chrome");
 
     app.handle_key(KeyInput::Character("hello".to_string()));
     let key = single_session_text_key(&app, size);
     assert!(app.is_fresh_welcome_visible());
     assert_visual_text_contains(&key, "Hello there");
-    assert!(key.welcome_hero.is_empty());
+    assert_eq!(key.welcome_hero, "Hello there");
     assert_eq!(
         single_session_draft_top_for_app(&app, size),
-        single_session_draft_top(size)
+        fresh_welcome_draft_top(size)
     );
 }
 
@@ -2010,22 +2011,23 @@ fn single_session_without_session_is_native_fresh_draft() {
 }
 
 #[test]
-fn fresh_single_session_keeps_welcome_text_in_scrollable_body() {
+fn fresh_single_session_keeps_welcome_model_and_hero_available() {
     let app = SingleSessionApp::new(None);
     let first = single_session_text_key_for_tick(&app, PhysicalSize::new(900, 700), 0);
     let later = single_session_text_key_for_tick(&app, PhysicalSize::new(900, 700), 42);
+    let model_lines = app.body_styled_lines();
 
     assert!(
-        first
-            .body
+        model_lines
             .iter()
             .any(|line| { line.text.contains("Hello there") || line.text.contains("Welcome, ") }),
-        "expected generic or named welcome in body, got: {:?}",
-        first.body
+        "expected generic or named welcome in model body, got: {:?}",
+        model_lines
     );
-    assert!(first.welcome_hero.is_empty());
+    assert_eq!(first.welcome_hero, later.welcome_hero);
+    assert_eq!(first.welcome_hero, "Hello there");
+    assert!(first.body.is_empty());
     assert!(first.welcome_hint.is_empty());
-    assert_eq!(first.body[0].text, later.body[0].text);
 }
 
 #[test]
