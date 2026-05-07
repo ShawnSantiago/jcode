@@ -14,6 +14,15 @@ fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
     Some(Arc::new(img))
 }
 
+pub(super) fn viewport_crop_should_scale_to_area(
+    crop_w: u32,
+    crop_h: u32,
+    view_w_px: u32,
+    view_h_px: u32,
+) -> bool {
+    crop_w == view_w_px && crop_h == view_h_px
+}
+
 fn kitty_viewport_unique_id(hash: u64) -> u32 {
     let mixed = (hash as u32) ^ ((hash >> 32) as u32) ^ 0x4B49_5459;
     mixed.max(1)
@@ -665,6 +674,19 @@ pub fn render_image_widget_viewport_precise(
     if crop_w == 0 || crop_h == 0 {
         return 0;
     }
+    let viewport_resize = || {
+        if viewport_crop_should_scale_to_area(crop_w, crop_h, view_w_px, view_h_px) {
+            // A viewport crop is intentionally smaller than the destination
+            // cell area when zoomed in. Scale it back up to the destination,
+            // otherwise Resize::Fit leaves the crop at source pixel size and
+            // the pane visually stays tiny despite a fit-fill plan.
+            Resize::Scale(None)
+        } else {
+            // If the requested viewport is larger than the source image on an
+            // axis, preserve aspect ratio instead of stretching the full image.
+            Resize::Fit(None)
+        }
+    };
 
     let viewport = ViewportState {
         scroll_x_px,
@@ -737,7 +759,7 @@ pub fn render_image_widget_viewport_precise(
                 image_area,
                 buf,
                 &mut img_state.protocol,
-                Resize::Fit(None),
+                viewport_resize(),
             ) {
                 return 0;
             }
@@ -773,7 +795,7 @@ pub fn render_image_widget_viewport_precise(
             image_area,
             buf,
             &mut img_state.protocol,
-            Resize::Fit(None),
+            viewport_resize(),
         ) {
             return 0;
         }

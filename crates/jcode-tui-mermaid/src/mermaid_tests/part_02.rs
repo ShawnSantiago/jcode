@@ -11,3 +11,23 @@ fn precise_viewport_accepts_high_auto_zoom_without_panicking() {
         0
     );
 }
+
+#[test]
+fn viewport_crop_resize_scales_complete_zoomed_crops_to_fill_destination() {
+    // A high-zoom fit-fill viewport crops a small source rectangle, then must
+    // scale that crop back up to the destination cell area. Rendering it with
+    // Fit caused the pane to report fit-fill while visually staying tiny.
+    assert!(super::viewport_render::viewport_crop_should_scale_to_area(
+        280, 180, 280, 180
+    ));
+
+    // When the requested viewport is larger than the source on an axis, the
+    // crop is the whole remaining source image. That case should keep aspect
+    // ratio instead of stretching a non-cropped image.
+    assert!(!super::viewport_render::viewport_crop_should_scale_to_area(
+        280, 120, 280, 180
+    ));
+    assert!(!super::viewport_render::viewport_crop_should_scale_to_area(
+        200, 180, 280, 180
+    ));
+}
