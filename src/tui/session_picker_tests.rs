@@ -15,6 +15,13 @@ fn write_session_file_with_mtime(
         .expect("set modified time");
 }
 
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
 fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatus) -> SessionInfo {
     make_session_with_flags(id, short_name, is_debug, false, status)
 }
@@ -86,6 +93,58 @@ fn make_session_with_flags(
         },
         external_path: None,
     }
+}
+
+#[test]
+fn test_format_estimated_tokens_uses_compact_units() {
+    assert_eq!(SessionPicker::format_estimated_tokens(0), "~0 tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(999), "~999 tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(1_000), "~1k tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(1_234), "~1.2k tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(12_345), "~12k tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(999_500), "~1M tok");
+    assert_eq!(
+        SessionPicker::format_estimated_tokens(1_234_567),
+        "~1.2M tok"
+    );
+    assert_eq!(
+        SessionPicker::format_estimated_tokens(1_234_567_890),
+        "~1.2B tok"
+    );
+    assert_eq!(
+        SessionPicker::format_estimated_tokens(1_234_567_890_123),
+        "~1.2T tok"
+    );
+}
+
+#[test]
+fn test_session_item_uses_single_primary_title_line() {
+    let mut session = make_session(
+        "session_primary_title",
+        "rhino",
+        false,
+        SessionStatus::Closed,
+    );
+    session.title = "Generated release planning".to_string();
+    session.estimated_tokens = 1_234_567;
+    let picker = SessionPicker::new(vec![session.clone()]);
+
+    let rows = picker.render_session_item_lines(&session, false);
+    let text_rows: Vec<String> = rows.iter().map(line_text).collect();
+
+    assert_eq!(text_rows.len(), 4);
+    assert!(text_rows[0].contains("Generated release planning"));
+    assert!(
+        text_rows[1..]
+            .iter()
+            .all(|row| !row.contains("Generated release planning")),
+        "title should only be rendered on the primary row: {text_rows:?}"
+    );
+    assert!(
+        text_rows.iter().all(|row| !row.contains("rhino")),
+        "memorable short name should remain searchable but not take display space: {text_rows:?}"
+    );
+    assert!(text_rows[1].contains("~1.2M tok"));
 }
 
 #[test]

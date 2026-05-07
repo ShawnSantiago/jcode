@@ -444,9 +444,27 @@ pub(super) fn is_pid_running(pid: u32) -> bool {
 // On startup we only need to scan this tiny directory (usually 0-5 files)
 // instead of the entire sessions/ directory (tens of thousands of files).
 
-/// Find a session by ID or memorable name
-/// If the input doesn't look like a full session ID (doesn't contain underscore followed by digits),
-/// try to find a session whose short name matches.
+fn normalize_resume_lookup_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn session_matches_resume_title(session: &Session, normalized_query: &str) -> bool {
+    if normalized_query.is_empty() {
+        return false;
+    }
+
+    session
+        .display_title()
+        .map(normalize_resume_lookup_text)
+        .is_some_and(|title| title == normalized_query || title.contains(normalized_query))
+}
+
+/// Find a session by ID, memorable name, generated title, or custom rename.
+/// If the input doesn't load as a full session ID, scan recent session snapshots
+/// and return the newest matching short name/title.
 /// Returns the full session ID if found.
 pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // Try loading directly first so stable imported IDs like `imported_codex_*`
@@ -465,32 +483,57 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
         }
     }
 
-    // Otherwise, search for a session with matching short name
+    // Otherwise, search for a session with matching short name or title.
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {
         anyhow::bail!("No sessions found");
     }
 
-    let mut matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
+    let normalized_query = normalize_resume_lookup_text(name_or_id);
+    let mut exact_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
+    let mut title_matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
 
     for entry in std::fs::read_dir(&sessions_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false)
-            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && let Some(short_name) = extract_session_name(stem)
-            && short_name == name_or_id
-            && let Ok(session) = Session::load(stem)
-        {
-            matches.push((stem.to_string(), session.updated_at));
+        if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+
+        let short_name_matches =
+            extract_session_name(stem).is_some_and(|short| short == name_or_id);
+        if short_name_matches {
+            if let Ok(session) = Session::load_startup_stub(stem).or_else(|_| Session::load(stem)) {
+                exact_matches.push((stem.to_string(), session.updated_at));
+            }
+            continue;
+        }
+
+        let Ok(session) = Session::load_startup_stub(stem).or_else(|_| Session::load(stem)) else {
+            continue;
+        };
+        if session.short_name.as_deref() == Some(name_or_id) {
+            exact_matches.push((stem.to_string(), session.updated_at));
+        } else if session_matches_resume_title(&session, &normalized_query) {
+            title_matches.push((stem.to_string(), session.updated_at));
         }
     }
+
+    let matches = if exact_matches.is_empty() {
+        &mut title_matches
+    } else {
+        &mut exact_matches
+    };
 
     if matches.is_empty() {
         anyhow::bail!("No session found matching '{}'", name_or_id);
     }
 
-    // Sort by updated_at descending and return the most recent match
+    // Sort by updated_at descending and return the most recent match.
     matches.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(matches[0].0.clone())
 }
@@ -509,6 +552,34 @@ mod batch_crash_tests {
         assert_eq!(info.session_ids.len(), 2);
         assert_eq!(info.display_names.len(), 2);
         assert_eq!(info.display_names[0], "fox");
+    }
+
+    #[test]
+    fn find_session_by_name_or_id_matches_custom_title() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let session_id = "session_renamecli_1770000000000";
+        let mut session = Session::create_with_id(
+            session_id.to_string(),
+            None,
+            Some("Generated planning title".to_string()),
+        );
+        session.status = SessionStatus::Closed;
+        session.rename_title(Some("RenameTest".to_string()));
+        session.save().expect("save renamed session");
+
+        assert_eq!(
+            find_session_by_name_or_id("renametest").expect("resolve custom title"),
+            session_id
+        );
+        assert_eq!(
+            find_session_by_name_or_id("Rename").expect("resolve title fragment"),
+            session_id
+        );
+
+        crate::env::remove_var("JCODE_HOME");
     }
 
     #[test]
