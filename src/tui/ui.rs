@@ -1655,8 +1655,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_enabled = app.diagram_pane_enabled();
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = app.side_panel().focused_page().is_some();
-    let suppress_side_diagram =
-        has_side_panel_content && pane_position == crate::config::DiagramPanePosition::Side;
+    // The side panel is itself a single right-hand auxiliary surface and can render
+    // visual content such as Mermaid diagrams inline. Do not also open the global
+    // pinned diagram pane while it is visible, otherwise a side-panel Mermaid can
+    // produce chat + side panel + diagram triple-split layouts.
+    let suppress_side_diagram = has_side_panel_content;
     let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned
         && pane_enabled
         && !suppress_side_diagram

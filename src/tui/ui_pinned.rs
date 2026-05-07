@@ -1188,6 +1188,22 @@ pub(super) fn draw_side_panel_markdown(
         format!(" {}/{} ", page_index, page_count),
         Style::default().fg(dim_color()),
     ));
+    if focused {
+        title_parts.push(Span::styled(
+            " j/k scroll ",
+            Style::default().fg(dim_color()),
+        ));
+        if page_count > 1 {
+            title_parts.push(Span::styled(
+                " Tab/Shift-Tab pages ",
+                Style::default().fg(dim_color()),
+            ));
+        }
+        title_parts.push(Span::styled(
+            " Esc focus chat ",
+            Style::default().fg(dim_color()),
+        ));
+    }
     if rendered_full_width.has_scrollable_images {
         title_parts.push(Span::styled(
             " readable ",

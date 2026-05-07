@@ -232,6 +232,12 @@ impl App {
                 self.diff_pane_scroll = usize::MAX;
                 self.diff_pane_auto_scroll = true;
             }
+            KeyCode::Tab if self.side_panel.focused_page().is_some() => {
+                self.focus_adjacent_side_panel_page(1);
+            }
+            KeyCode::BackTab if self.side_panel.focused_page().is_some() => {
+                self.focus_adjacent_side_panel_page(-1);
+            }
             KeyCode::Char('h') | KeyCode::Left if self.side_panel.focused_page().is_some() => {
                 self.pan_diff_pane_x(-4);
             }
@@ -254,6 +260,33 @@ impl App {
         }
 
         true
+    }
+
+    fn focus_adjacent_side_panel_page(&mut self, delta: isize) {
+        let page_count = self.side_panel.pages.len();
+        if page_count < 2 {
+            return;
+        }
+
+        let current_index = self
+            .side_panel
+            .focused_page_id
+            .as_deref()
+            .and_then(|focused_id| {
+                self.side_panel
+                    .pages
+                    .iter()
+                    .position(|page| page.id == focused_id)
+            })
+            .unwrap_or(0);
+        let next_index = (current_index as isize + delta).rem_euclid(page_count as isize) as usize;
+
+        let next_id = self.side_panel.pages[next_index].id.clone();
+        self.side_panel.focused_page_id = Some(next_id.clone());
+        self.last_side_panel_focus_id = Some(next_id);
+        self.diff_pane_scroll = 0;
+        self.diff_pane_auto_scroll = true;
+        crate::tui::clear_side_panel_render_caches();
     }
 
     fn side_pane_has_visual_images(&self) -> bool {
