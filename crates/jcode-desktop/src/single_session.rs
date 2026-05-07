@@ -1307,7 +1307,7 @@ impl SingleSessionApp {
     pub(crate) fn streaming_response_styled_lines(&self) -> Vec<SingleSessionStyledLine> {
         let mut lines = Vec::new();
         if !self.streaming_response.is_empty() {
-            append_assistant_lines(&mut lines, self.streaming_response.trim_end());
+            append_streaming_assistant_lines(&mut lines, self.streaming_response.trim_end());
         }
         lines
     }
@@ -1351,7 +1351,7 @@ impl SingleSessionApp {
             if !lines.is_empty() {
                 lines.push(blank_styled_line());
             }
-            append_assistant_lines(&mut lines, self.streaming_response.trim_end());
+            append_streaming_assistant_lines(&mut lines, self.streaming_response.trim_end());
         }
         if let Some(error) = &self.error {
             if !lines.is_empty() {
@@ -3062,6 +3062,14 @@ fn is_user_prompt_line(line: &str) -> bool {
 
 fn append_assistant_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
     lines.extend(render_assistant_markdown_lines(content));
+}
+
+fn append_streaming_assistant_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
+    lines.extend(
+        content
+            .lines()
+            .map(|line| styled_line(line, SingleSessionLineStyle::Assistant)),
+    );
 }
 
 fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine> {

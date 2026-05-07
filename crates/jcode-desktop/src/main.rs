@@ -2207,6 +2207,32 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             ^ vertices.len()
     });
 
+    let mut long_streaming_app = app.clone();
+    long_streaming_app.scroll_body_to_bottom();
+    long_streaming_app.streaming_response = (0..512)
+        .map(|index| {
+            format!(
+                "### partial heading {index}\n- live item with **bold** text and `code` span number {index}\n"
+            )
+        })
+        .collect::<String>();
+    let (long_streaming_body_wrap_ms, long_streaming_body_wrap_checksum) =
+        benchmark_phase(frames, |frame| {
+            long_streaming_app
+                .streaming_response
+                .push(benchmark_typing_char(frame));
+            if frame % 29 == 0 {
+                long_streaming_app.streaming_response.push('\n');
+            }
+            let mut rendered_lines = Vec::new();
+            append_single_session_streaming_response_rendered_body_lines(
+                &long_streaming_app,
+                size,
+                &mut rendered_lines,
+            );
+            rendered_lines.len() ^ long_streaming_app.streaming_response.len()
+        });
+
     let mut event_batch_app = DesktopApp::SingleSession(SingleSessionApp::new(None));
     let (event_batch_ms, event_batch_checksum) = benchmark_phase(frames, |frame| {
         let events = (0..128)
@@ -2565,6 +2591,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         typing_redraw_ms / frames as f64,
         fresh_typing_ms / frames as f64,
         streaming_delta_ms / frames as f64,
+        long_streaming_body_wrap_ms / frames as f64,
         event_batch_ms / frames as f64,
         event_forwarder_flood_ms / frames as f64,
         hero_boundary_scroll_ms / frames as f64,
@@ -2587,6 +2614,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             "passes_120fps_interaction_cpu_budget": passes_interaction_cpu_budget,
             "passes_no_paint_watchdog_budget": end_to_end_stream_flood.passes_no_paint_budget(),
             "passes_streaming_incremental_wrap_guard": streaming_static_base_rebuilds <= 1,
+            "passes_long_streaming_body_wrap_budget": (long_streaming_body_wrap_ms / frames as f64) <= target_budget_ms,
             "event_delivery": {
                 "previous_background_poll_interval_ms": duration_ms(BACKGROUND_POLL_INTERVAL),
                 "backend_redraw_frame_interval_ms": duration_ms(BACKEND_REDRAW_FRAME_INTERVAL),
@@ -2659,6 +2687,12 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                     streaming_delta_ms,
                     frames,
                     streaming_delta_checksum,
+                ),
+                benchmark_phase_json(
+                    "long_streaming_response_body_wrap",
+                    long_streaming_body_wrap_ms,
+                    frames,
+                    long_streaming_body_wrap_checksum,
                 ),
                 benchmark_phase_json(
                     "background_event_batch_coalesce_apply",
@@ -4617,8 +4651,10 @@ fn single_session_streaming_primitive_geometry_cache_key(
     spinner_tick: u64,
     smooth_scroll_lines: f32,
     welcome_hero_reveal_progress: f32,
-    body_lines: &[SingleSessionStyledLine],
+    body_key: Option<u64>,
+    body_line_count: usize,
 ) -> Option<u64> {
+    let body_key = body_key?;
     if app.streaming_response.is_empty()
         || app.show_help
         || app.model_picker.open
@@ -4652,10 +4688,8 @@ fn single_session_streaming_primitive_geometry_cache_key(
         .filter(|byte| *byte == b'\n')
         .count()
         .hash(&mut hasher);
-    body_lines.len().hash(&mut hasher);
-    for line in body_lines {
-        line.style.hash(&mut hasher);
-    }
+    body_key.hash(&mut hasher);
+    body_line_count.hash(&mut hasher);
     Some(hasher.finish())
 }
 
@@ -5317,6 +5351,7 @@ impl<'window> Canvas<'window> {
             };
         frame_profile.checkpoint("welcome_reveal");
 
+        let mut single_session_rendered_body_key = None;
         let defer_text_this_frame = self.defer_initial_text_frame;
         if defer_text_this_frame {
             self.defer_initial_text_frame = false;
@@ -5332,6 +5367,7 @@ impl<'window> Canvas<'window> {
         } else if let DesktopApp::SingleSession(single_session) = app {
             let (rendered_body_key, rendered_body_changed) =
                 self.cached_single_session_body_lines(single_session, spinner_tick);
+            single_session_rendered_body_key = Some(rendered_body_key);
             self.ensure_font_system();
             self.refresh_cached_single_session_text_buffers(
                 single_session,
@@ -5501,7 +5537,8 @@ impl<'window> Canvas<'window> {
                     spinner_tick,
                     smooth_scroll_lines,
                     welcome_hero_reveal_progress,
-                    &self.single_session_body_lines,
+                    single_session_rendered_body_key,
+                    self.single_session_body_lines.len(),
                 );
                 let vertices = if let Some(cache_key) = geometry_cache_key {
                     if self.primitive_vertices_cache_key == Some(cache_key) {
