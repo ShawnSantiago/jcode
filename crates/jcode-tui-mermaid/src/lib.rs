@@ -150,7 +150,9 @@ pub use runtime::{
     is_video_export_mode, protocol_type, register_external_image, register_inline_image,
     set_video_export_mode,
 };
-pub use viewport_render::{invalidate_render_state, render_image_widget_viewport};
+pub use viewport_render::{
+    invalidate_render_state, render_image_widget_viewport, render_image_widget_viewport_precise,
+};
 pub use widget_render::{render_image_widget, render_image_widget_fit, render_image_widget_scale};
 
 use cache_render::{

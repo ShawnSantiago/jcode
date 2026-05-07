@@ -118,7 +118,8 @@ pub use diagram_pane::{
 };
 #[cfg(test)]
 use diagram_pane::{
-    div_ceil_u32, estimate_pinned_diagram_pane_width_with_font, is_diagram_poor_fit,
+    debug_probe_pinned_diagram_with_font, div_ceil_u32,
+    estimate_pinned_diagram_pane_width_with_font, is_diagram_poor_fit,
     vcenter_fitted_image_with_font,
 };
 use diagram_pane::{

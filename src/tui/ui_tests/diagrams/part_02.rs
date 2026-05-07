@@ -284,6 +284,52 @@ fn test_pinned_diagram_probe_reports_fit_utilization() {
 }
 
 #[test]
+fn test_pinned_diagram_probe_reports_high_zoom_fit_fill_for_wide_short_diagram() {
+    // Regression for a Mermaid LR flowchart in the side pane: normal contain fit
+    // used only a small strip at the top of the pane. The auto plan should now
+    // request a high-zoom centered viewport and report full inner utilization.
+    let area = Rect::new(74, 0, 120, 72);
+    let inner = Rect::new(75, 1, 118, 70);
+    let diagram = info_widget::DiagramInfo {
+        hash: 125,
+        width: 1440,
+        height: 110,
+        label: None,
+    };
+
+    let probe = debug_probe_pinned_diagram_with_font(
+        &diagram,
+        area,
+        inner,
+        false,
+        0,
+        0,
+        100,
+        Some((8, 16)),
+    );
+
+    assert!(
+        probe.render_mode.starts_with("fit-fill@"),
+        "wide short diagram should auto fit-fill, got {}",
+        probe.render_mode
+    );
+    let zoom_text = probe.render_mode.trim_start_matches("fit-fill@");
+    let zoom_text = zoom_text.trim_end_matches('%');
+    let zoom = zoom_text
+        .parse::<u16>()
+        .expect("fit-fill mode should include a numeric zoom");
+    assert!(
+        (700..=1000).contains(&zoom),
+        "wide short diagram should use high but capped auto zoom, got {zoom}%"
+    );
+    assert_eq!(probe.inner_utilization.width_cells, inner.width);
+    assert_eq!(probe.inner_utilization.height_cells, inner.height);
+    assert_eq!(probe.inner_utilization.width_utilization_percent, 100.0);
+    assert_eq!(probe.inner_utilization.height_utilization_percent, 100.0);
+    assert_eq!(probe.inner_utilization.area_utilization_percent, 100.0);
+}
+
+#[test]
 fn test_pinned_diagram_probe_reports_full_inner_usage_in_viewport_mode() {
     let area = Rect::new(0, 0, 46, 51);
     let inner = Rect::new(1, 1, 44, 49);

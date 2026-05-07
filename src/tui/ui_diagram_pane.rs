@@ -39,8 +39,8 @@ struct PinnedDiagramDebugState {
 }
 
 const PINNED_DIAGRAM_TARGET_UTILIZATION_PERCENT: f64 = 85.0;
-const PINNED_DIAGRAM_MIN_READABLE_ZOOM_PERCENT: u8 = 70;
-const PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT: u8 = 200;
+const PINNED_DIAGRAM_MIN_READABLE_ZOOM_PERCENT: u16 = 70;
+const PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT: u16 = 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PinnedDiagramFitRenderPlan {
@@ -48,7 +48,7 @@ enum PinnedDiagramFitRenderPlan {
     Contain { area: Rect },
     /// Keep text readable by filling the pane and cropping to a centered viewport.
     FillViewport {
-        zoom_percent: u8,
+        zoom_percent: u16,
         scroll_x: i32,
         scroll_y: i32,
     },
@@ -78,7 +78,7 @@ fn utilization_percent(used: u32, total: u32) -> f64 {
     }
 }
 
-fn axis_fill_zoom_percent(available_cells: u16, image_px: u32, cell_px: u16) -> u8 {
+fn axis_fill_zoom_percent(available_cells: u16, image_px: u32, cell_px: u16) -> u16 {
     if available_cells == 0 || image_px == 0 || cell_px == 0 {
         return 100;
     }
@@ -88,7 +88,7 @@ fn axis_fill_zoom_percent(available_cells: u16, image_px: u32, cell_px: u16) -> 
         .saturating_mul(100)
         .checked_div(image_px.max(1))
         .unwrap_or(100)
-        .clamp(1, PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT as u32) as u8
+        .clamp(1, PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT as u32) as u16
 }
 
 fn fit_zoom_percent_for_area(
@@ -96,7 +96,7 @@ fn fit_zoom_percent_for_area(
     img_w_px: u32,
     img_h_px: u32,
     font_size: Option<(u16, u16)>,
-) -> u8 {
+) -> u16 {
     if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
         return 100;
     }
@@ -116,13 +116,13 @@ fn fit_zoom_percent_for_area(
         / img_h_px.max(1);
     zoom_w
         .min(zoom_h)
-        .clamp(1, PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT as u32) as u8
+        .clamp(1, PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT as u32) as u16
 }
 
 fn centered_viewport_scroll_cells(
     image_px: u32,
     area_cells: u16,
-    zoom_percent: u8,
+    zoom_percent: u16,
     cell_px: u16,
 ) -> i32 {
     if image_px == 0 || area_cells == 0 || zoom_percent == 0 || cell_px == 0 {
@@ -139,10 +139,7 @@ fn centered_viewport_scroll_cells(
         return 0;
     }
 
-    let cell_px_at_zoom = (cell_px as u32).saturating_mul(100) / zoom;
-    if cell_px_at_zoom == 0 {
-        return 0;
-    }
+    let cell_px_at_zoom = div_ceil_u32((cell_px as u32).saturating_mul(100), zoom).max(1);
 
     ((max_scroll_px / 2) / cell_px_at_zoom).min(i32::MAX as u32) as i32
 }
@@ -212,6 +209,53 @@ fn plan_pinned_diagram_fit(area: Rect, img_w_px: u32, img_h_px: u32) -> PinnedDi
     )
 }
 
+fn pinned_diagram_content_area_for_title(
+    area: Rect,
+    pane_position: crate::config::DiagramPanePosition,
+) -> Option<Rect> {
+    use ratatui::widgets::{Block, Borders};
+
+    match pane_position {
+        crate::config::DiagramPanePosition::Side => {
+            let inner = Block::default().borders(Borders::LEFT).inner(area);
+            if inner.width == 0 || inner.height <= 1 {
+                None
+            } else {
+                Some(Rect {
+                    x: inner.x,
+                    y: inner.y + 1,
+                    width: inner.width,
+                    height: inner.height - 1,
+                })
+            }
+        }
+        crate::config::DiagramPanePosition::Top => {
+            let inner = Block::default().borders(Borders::ALL).inner(area);
+            if inner.width == 0 || inner.height == 0 {
+                None
+            } else {
+                Some(inner)
+            }
+        }
+    }
+}
+
+fn planned_pinned_diagram_mode_label(
+    diagram: &info_widget::DiagramInfo,
+    area: Rect,
+    pane_position: crate::config::DiagramPanePosition,
+    fit_mode: bool,
+    zoom_percent: u8,
+) -> String {
+    if !fit_mode {
+        return "pan".to_string();
+    }
+
+    pinned_diagram_content_area_for_title(area, pane_position)
+        .map(|inner| plan_pinned_diagram_fit(inner, diagram.width, diagram.height).mode_label())
+        .unwrap_or_else(|| pinned_diagram_render_mode_label(fit_mode, zoom_percent))
+}
+
 fn probe_rect(
     rendered_width: u16,
     rendered_height: u16,
@@ -262,6 +306,20 @@ fn build_pinned_diagram_live_snapshot(
     layout: PinnedDiagramSnapshotLayout,
     view: PinnedDiagramSnapshotView,
 ) -> PinnedDiagramLiveDebugSnapshot {
+    build_pinned_diagram_live_snapshot_with_font(
+        diagram,
+        layout,
+        view,
+        super::super::mermaid::get_font_size(),
+    )
+}
+
+fn build_pinned_diagram_live_snapshot_with_font(
+    diagram: &info_widget::DiagramInfo,
+    layout: PinnedDiagramSnapshotLayout,
+    view: PinnedDiagramSnapshotView,
+    font_size: Option<(u16, u16)>,
+) -> PinnedDiagramLiveDebugSnapshot {
     let PinnedDiagramSnapshotLayout {
         area,
         inner,
@@ -276,10 +334,11 @@ fn build_pinned_diagram_live_snapshot(
     } = view;
     let fit_mode = diagram_view_uses_fit_mode(focused, scroll_x, scroll_y, zoom_percent);
     let fit_plan = if fit_mode {
-        Some(plan_pinned_diagram_fit(
+        Some(plan_pinned_diagram_fit_with_font(
             inner,
             diagram.width,
             diagram.height,
+            font_size,
         ))
     } else {
         None
@@ -353,6 +412,35 @@ pub fn debug_probe_pinned_diagram(
             scroll_y,
             zoom_percent,
         },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn debug_probe_pinned_diagram_with_font(
+    diagram: &info_widget::DiagramInfo,
+    area: Rect,
+    inner: Rect,
+    focused: bool,
+    scroll_x: i32,
+    scroll_y: i32,
+    zoom_percent: u8,
+    font_size: Option<(u16, u16)>,
+) -> PinnedDiagramLiveDebugSnapshot {
+    build_pinned_diagram_live_snapshot_with_font(
+        diagram,
+        PinnedDiagramSnapshotLayout {
+            area,
+            inner,
+            index: 0,
+            total: 1,
+        },
+        PinnedDiagramSnapshotView {
+            focused,
+            scroll_x,
+            scroll_y,
+            zoom_percent,
+        },
+        font_size,
     )
 }
 
@@ -435,19 +523,50 @@ mod tests {
                 scroll_x,
                 scroll_y,
             } => {
-                assert_eq!(zoom_percent, 200);
+                assert!(
+                    zoom_percent > 200,
+                    "auto fit-fill should not be capped at 200%, got {zoom_percent}%"
+                );
                 assert!(
                     scroll_x > 0,
                     "fill viewport should start horizontally centered"
                 );
                 assert_eq!(
                     scroll_y, 0,
-                    "the full diagram height fits at 200% in this pane"
+                    "the full diagram height fits at the selected zoom in this pane"
                 );
                 assert_eq!(plan.visible_rect(inner), inner);
-                assert_eq!(plan.mode_label(), "fit-fill@200%");
+                assert_eq!(plan.mode_label(), format!("fit-fill@{zoom_percent}%"));
             }
             other => panic!("expected fill viewport for underutilized contain fit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pinned_diagram_fit_plan_fills_wide_short_lr_flowchart() {
+        // Regression for a side-pane Mermaid LR flowchart that rendered as a
+        // tiny horizontal strip with large blank space below it. A 200% cap is
+        // still too low here; matching the pane aspect requires a much higher
+        // centered viewport zoom.
+        let inner = Rect::new(75, 1, 118, 70);
+        let plan = plan_pinned_diagram_fit_with_font(inner, 1440, 110, Some((8, 16)));
+
+        match plan {
+            PinnedDiagramFitRenderPlan::FillViewport {
+                zoom_percent,
+                scroll_x,
+                scroll_y,
+            } => {
+                assert!(
+                    zoom_percent >= 700,
+                    "wide short diagrams need high fit-fill zoom, got {zoom_percent}%"
+                );
+                assert!(scroll_x > 0, "wide diagram should be horizontally centered");
+                assert_eq!(scroll_y, 0, "short diagram should use its full height");
+                assert_eq!(plan.visible_rect(inner), inner);
+                assert_eq!(plan.mode_label(), format!("fit-fill@{zoom_percent}%"));
+            }
+            other => panic!("expected fit-fill viewport for wide short diagram, got {other:?}"),
         }
     }
 
@@ -643,7 +762,9 @@ pub(crate) fn draw_pinned_diagram(
             Style::default().fg(tool_color()),
         ));
     }
-    let mode_label = if fit_mode { " fit " } else { " pan " };
+    let planned_mode =
+        planned_pinned_diagram_mode_label(diagram, area, pane_position, fit_mode, zoom_percent);
+    let mode_label = format!(" {planned_mode} ");
     title_parts.push(Span::styled(
         mode_label,
         Style::default().fg(if focused { accent_color() } else { dim_color() }),
@@ -770,7 +891,7 @@ pub(crate) fn draw_pinned_diagram(
                         scroll_x,
                         scroll_y,
                     } => {
-                        rendered = super::super::mermaid::render_image_widget_viewport(
+                        rendered = super::super::mermaid::render_image_widget_viewport_precise(
                             diagram.hash,
                             inner,
                             frame.buffer_mut(),
