@@ -462,7 +462,7 @@ fn single_session_transcript_roles_render_without_stringly_labels() {
     let body = app.body_lines().join("\n");
     assert!(body.contains("1  question"));
     assert!(body.contains("answer"));
-    assert!(body.contains("• using tool bash"));
+    assert!(body.contains("  using tool bash"));
     assert!(body.contains("  system note"));
     assert!(body.contains("  meta note"));
     assert!(!body.contains("user:"));
@@ -877,7 +877,7 @@ fn single_session_text_buffers_include_header_version_area() {
     let mut font_system = FontSystem::new();
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
 
-    assert_eq!(buffers.len(), 6);
+    assert_eq!(buffers.len(), 5);
     assert_eq!(single_session_text_areas(&buffers, size).len(), 5);
 }
 
@@ -1027,7 +1027,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
     let segments = single_session_styled_text_segments(&lines);
     assert!(
         segments.contains(&(
-            "1".to_string(),
+            "1",
             Attrs::new()
                 .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
                 .color(user_prompt_number_color(2))
@@ -1035,7 +1035,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
     );
     assert!(
         segments.contains(&(
-            "› ".to_string(),
+            "› ",
             Attrs::new()
                 .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
                 .color(text_color(USER_PROMPT_ACCENT_COLOR))
@@ -1043,7 +1043,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
     );
     assert!(
         segments.contains(&(
-            "question".to_string(),
+            "question",
             Attrs::new()
                 .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
                 .color(single_session_line_color(SingleSessionLineStyle::User))
@@ -1051,7 +1051,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
     );
     assert!(
         segments.contains(&(
-            "answer".to_string(),
+            "answer",
             Attrs::new()
                 .family(Family::Name(SINGLE_SESSION_ASSISTANT_FONT_FAMILY))
                 .color(single_session_line_color(SingleSessionLineStyle::Assistant))
@@ -1079,7 +1079,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
         Some(SingleSessionLineStyle::Code)
     );
     assert_eq!(
-        style_for_text(&lines, "• bash done"),
+        style_for_text(&lines, "  bash done"),
         Some(SingleSessionLineStyle::Tool)
     );
     assert_eq!(
@@ -1130,7 +1130,7 @@ fn glyphon_body_buffer_uses_line_style_colors() {
         Some(single_session_line_color(SingleSessionLineStyle::Code))
     );
     assert_eq!(
-        first_glyph_color_for_text(body, "• bash done"),
+        first_glyph_color_for_text(body, "  bash done"),
         Some(single_session_line_color(SingleSessionLineStyle::Tool))
     );
     assert_eq!(
@@ -1158,12 +1158,12 @@ fn single_session_transcript_card_runs_group_card_styles() {
     assert_eq!(code.line_count, 2);
     assert_eq!(lines[code.line].text, "  rust");
 
-    let tool = runs
-        .iter()
-        .find(|run| run.style == SingleSessionLineStyle::Tool)
-        .expect("tool line should have a card run");
-    assert_eq!(tool.line_count, 1);
-    assert_eq!(lines[tool.line].text, "• bash done");
+    // Tool rows are neutral inline transcript rows, not orange card runs.
+    assert!(
+        runs.iter()
+            .all(|run| run.style != SingleSessionLineStyle::Tool)
+    );
+    assert!(lines.iter().any(|line| line.text == "  bash done"));
 
     let error = runs
         .iter()
@@ -1185,7 +1185,6 @@ fn single_session_vertices_include_transcript_card_backgrounds() {
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(1000, 720), 0.0, 0);
 
     assert!(vertices_have_color(&vertices, CODE_BLOCK_BACKGROUND_COLOR));
-    assert!(vertices_have_color(&vertices, TOOL_CARD_BACKGROUND_COLOR));
     assert!(vertices_have_color(&vertices, ERROR_CARD_BACKGROUND_COLOR));
 }
 
@@ -1256,9 +1255,15 @@ fn first_glyph_color_for_text(buffer: &Buffer, text: &str) -> Option<TextColor> 
 }
 
 #[test]
-fn single_session_tool_events_create_transcript_cards() {
+fn single_session_tool_events_expand_context_and_collapse_previous_call() {
     let mut app = SingleSessionApp::new(None);
     app.apply_session_event(session_launch::DesktopSessionEvent::ToolStarted {
+        name: "bash".to_string(),
+    });
+    app.apply_session_event(session_launch::DesktopSessionEvent::ToolInput {
+        delta: r#"{"command":"cargo test -p jcode-desktop","timeout":120000,"intent":"Run desktop tests"}"#.to_string(),
+    });
+    app.apply_session_event(session_launch::DesktopSessionEvent::ToolExecuting {
         name: "bash".to_string(),
     });
     app.apply_session_event(session_launch::DesktopSessionEvent::ToolFinished {
@@ -1268,9 +1273,53 @@ fn single_session_tool_events_create_transcript_cards() {
     });
 
     let body = app.body_lines().join("\n");
-    assert!(body.contains("• bash running"));
-    assert!(body.contains("• bash done: tests passed"));
+    assert!(body.contains("  ▾ bash done: tests passed"));
+    assert!(body.contains("    intent: Run desktop tests"));
+    assert!(body.contains("    command: cargo test -p jcode-desktop"));
+    assert!(body.contains("    timeout: 120000"));
     assert_eq!(app.status.as_deref(), Some("tool bash done"));
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::ToolStarted {
+        name: "read".to_string(),
+    });
+    let body = app.body_lines().join("\n");
+    assert!(body.contains("  ▸ bash done: tests passed"));
+    assert!(!body.contains("Run desktop tests"));
+    assert!(body.contains("  ▾ read preparing"));
+}
+
+#[test]
+fn single_session_adjacent_tool_messages_render_as_compact_summary() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::tool("▸ read done: 100 chars"));
+    app.messages
+        .push(SingleSessionMessage::tool("▸ agentgrep done: 10 matches"));
+    app.messages
+        .push(SingleSessionMessage::tool("▸ agentgrep done: 11 matches"));
+    app.messages.push(SingleSessionMessage::tool("▸ edit done"));
+
+    let body = app.body_lines();
+    assert_eq!(body.len(), 1);
+    assert_eq!(
+        body[0],
+        "  ▸ tools: 1 read, 2 agentgrep, 1 edit · ~23 tokens"
+    );
+}
+
+#[test]
+fn single_session_tool_summary_resets_at_non_tool_messages() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::tool("▸ read done: 100 chars"));
+    app.messages.push(SingleSessionMessage::assistant("ok"));
+    app.messages.push(SingleSessionMessage::tool("▸ edit done"));
+
+    let body = app.body_lines().join("\n");
+    assert!(body.contains("  ▸ read done: 100 chars"));
+    assert!(body.contains("ok"));
+    assert!(body.contains("  ▸ edit done"));
+    assert!(!body.contains("tools:"));
 }
 
 #[test]

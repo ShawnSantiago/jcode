@@ -503,7 +503,7 @@ fn welcome_timeline_visual_offset_pixels_for_total_lines(
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
-    let body_bottom = single_session_body_bottom_for_app(app, size);
+    let body_bottom = single_session_body_bottom_for_total_lines(app, size, total_lines);
     let visible_lines = (((body_bottom - body_top).max(line_height)) / line_height)
         .floor()
         .max(1.0);
@@ -1001,14 +1001,11 @@ fn push_stroke_segment(
 ) {
     let soft_color = alpha_scaled(color, 0.16);
     push_stroke_segment_quad(vertices, a, b, thickness + 3.0, soft_color, size);
-    push_stroke_dot(vertices, b, thickness * 0.78, soft_color, size);
 
     let feather_color = alpha_scaled(color, 0.28);
     push_stroke_segment_quad(vertices, a, b, thickness + 1.4, feather_color, size);
-    push_stroke_dot(vertices, b, thickness * 0.64, feather_color, size);
 
     push_stroke_segment_quad(vertices, a, b, thickness, color, size);
-    push_stroke_dot(vertices, b, thickness * 0.52, color, size);
 }
 
 fn push_stroke_segment_quad(
@@ -1598,7 +1595,6 @@ fn single_session_line_card_color(style: SingleSessionLineStyle) -> Option<[f32;
         SingleSessionLineStyle::Code => Some(CODE_BLOCK_BACKGROUND_COLOR),
         SingleSessionLineStyle::AssistantQuote => Some(QUOTE_CARD_BACKGROUND_COLOR),
         SingleSessionLineStyle::AssistantTable => Some(TABLE_CARD_BACKGROUND_COLOR),
-        SingleSessionLineStyle::Tool => Some(TOOL_CARD_BACKGROUND_COLOR),
         SingleSessionLineStyle::Error => Some(ERROR_CARD_BACKGROUND_COLOR),
         SingleSessionLineStyle::OverlaySelection => Some(OVERLAY_SELECTION_BACKGROUND_COLOR),
         _ => None,
@@ -1846,9 +1842,27 @@ fn welcome_timeline_draft_top_for_total_lines(
     let body_top = PANEL_BODY_TOP_PADDING;
     let timeline_lines = total_lines.max(1) as f32;
     let desired = body_top + timeline_lines * line_height + welcome_timeline_body_draft_gap();
-    desired
-        .min(single_session_draft_top(size))
-        .max(fresh_welcome_draft_top(size))
+    let clamped = desired.min(single_session_draft_top(size));
+    if clamped > body_top {
+        clamped
+    } else {
+        clamped.max(fresh_welcome_draft_top(size))
+    }
+}
+
+fn single_session_draft_top_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    total_lines: usize,
+) -> f32 {
+    if app.is_welcome_timeline_visible() {
+        if app.has_welcome_timeline_transcript() {
+            return welcome_timeline_draft_top_for_total_lines(app, size, total_lines);
+        }
+        return fresh_welcome_draft_top_for_scale(size, app.text_scale());
+    }
+
+    single_session_draft_top(size)
 }
 
 fn welcome_timeline_body_draft_gap() -> f32 {
@@ -1964,14 +1978,21 @@ pub(crate) fn single_session_text_key_for_tick_with_rendered_body(
     smooth_scroll_lines: f32,
     rendered_body_lines: &[SingleSessionStyledLine],
 ) -> SingleSessionTextKey {
-    let body = single_session_body_viewport_from_lines(
+    let viewport = single_session_body_viewport_from_lines(
         app,
         size,
         smooth_scroll_lines,
         rendered_body_lines,
-    )
-    .lines;
-    single_session_text_key_for_body_lines(app, size, tick, body)
+    );
+    let welcome_chrome_offset_pixels = welcome_timeline_visual_offset_pixels_for_total_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        viewport.total_lines,
+    );
+    let welcome_chrome_visible =
+        welcome_timeline_chrome_visible(app, size, welcome_chrome_offset_pixels);
+    single_session_text_key_for_body_lines(app, size, tick, viewport.lines, welcome_chrome_visible)
 }
 
 fn single_session_text_key_for_body_lines(
@@ -1979,9 +2000,9 @@ fn single_session_text_key_for_body_lines(
     size: PhysicalSize<u32>,
     tick: u64,
     body: Vec<SingleSessionStyledLine>,
+    welcome_chrome_visible: bool,
 ) -> SingleSessionTextKey {
     let welcome_handoff_visible = false;
-    let welcome_chrome_visible = app.is_welcome_timeline_visible();
     let welcome_input_visible = true;
     let (welcome_hero, welcome_hint) = if welcome_chrome_visible {
         (app.welcome_hero_text(), Vec::new())
@@ -2029,6 +2050,42 @@ pub(crate) fn single_session_text_buffers_from_key(
     size: PhysicalSize<u32>,
     font_system: &mut FontSystem,
 ) -> Vec<Buffer> {
+    single_session_text_buffers_from_key_reusing_unchanged(
+        key,
+        None,
+        Vec::new(),
+        false,
+        size,
+        font_system,
+    )
+}
+
+pub(crate) fn single_session_text_buffers_from_key_reusing_unchanged(
+    key: &SingleSessionTextKey,
+    previous_key: Option<&SingleSessionTextKey>,
+    old_buffers: Vec<Buffer>,
+    reuse_body_buffer: bool,
+    size: PhysicalSize<u32>,
+    font_system: &mut FontSystem,
+) -> Vec<Buffer> {
+    single_session_text_buffers_from_key_reusing_unchanged_from_options(
+        key,
+        previous_key,
+        old_buffers.into_iter().map(Some).collect(),
+        reuse_body_buffer,
+        size,
+        font_system,
+    )
+}
+
+fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
+    key: &SingleSessionTextKey,
+    previous_key: Option<&SingleSessionTextKey>,
+    mut old_buffers: Vec<Option<Buffer>>,
+    reuse_body_buffer: bool,
+    size: PhysicalSize<u32>,
+    font_system: &mut FontSystem,
+) -> Vec<Buffer> {
     let text_scale = f32::from_bits(key.text_scale_bits);
     let typography = single_session_typography_for_scale(text_scale);
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
@@ -2040,14 +2097,30 @@ pub(crate) fn single_session_text_buffers_from_key(
     };
     let prompt_height = (size.height as f32 - draft_top - SINGLE_SESSION_STATUS_GAP - 18.0)
         .max(typography.code_size * typography.code_line_height * 2.0);
-    let hero_font_size = welcome_hero_font_size(&key.welcome_hero, size) * text_scale;
     let version_font_size = if key.fresh_welcome_visible {
         fresh_welcome_version_font_size()
     } else {
         typography.meta_size
     };
 
-    vec![
+    let layout_compatible = previous_key.is_some_and(|previous| {
+        previous.size == key.size && previous.text_scale_bits == key.text_scale_bits
+    });
+    let take_reusable =
+        |old_buffers: &mut Vec<Option<Buffer>>, index: usize, reusable: bool| -> Option<Buffer> {
+            if !reusable {
+                return None;
+            }
+            old_buffers.get_mut(index).and_then(Option::take)
+        };
+    let previous = previous_key.filter(|_| layout_compatible);
+
+    let title_buffer = take_reusable(
+        &mut old_buffers,
+        0,
+        previous.is_some_and(|previous| previous.title == key.title),
+    )
+    .unwrap_or_else(|| {
         single_session_text_buffer(
             font_system,
             &key.title,
@@ -2055,7 +2128,15 @@ pub(crate) fn single_session_text_buffers_from_key(
             typography.title_size * typography.meta_line_height,
             content_width,
             48.0,
-        ),
+        )
+    });
+
+    let body_buffer = take_reusable(
+        &mut old_buffers,
+        1,
+        reuse_body_buffer || previous.is_some_and(|previous| previous.body == key.body),
+    )
+    .unwrap_or_else(|| {
         single_session_styled_text_buffer(
             font_system,
             &key.body,
@@ -2063,7 +2144,15 @@ pub(crate) fn single_session_text_buffers_from_key(
             typography.body_size * typography.body_line_height,
             content_width,
             (size.height as f32 - 150.0).max(1.0),
-        ),
+        )
+    });
+
+    let draft_buffer = take_reusable(
+        &mut old_buffers,
+        2,
+        previous.is_some_and(|previous| previous.draft == key.draft),
+    )
+    .unwrap_or_else(|| {
         single_session_text_buffer(
             font_system,
             &key.draft,
@@ -2071,7 +2160,15 @@ pub(crate) fn single_session_text_buffers_from_key(
             typography.code_size * typography.code_line_height,
             content_width,
             prompt_height,
-        ),
+        )
+    });
+
+    let status_buffer = take_reusable(
+        &mut old_buffers,
+        3,
+        previous.is_some_and(|previous| previous.status == key.status),
+    )
+    .unwrap_or_else(|| {
         single_session_text_buffer(
             font_system,
             &key.status,
@@ -2079,7 +2176,15 @@ pub(crate) fn single_session_text_buffers_from_key(
             typography.meta_size * typography.meta_line_height,
             content_width,
             28.0,
-        ),
+        )
+    });
+
+    let version_buffer = take_reusable(
+        &mut old_buffers,
+        4,
+        previous.is_some_and(|previous| previous.version == key.version),
+    )
+    .unwrap_or_else(|| {
         single_session_text_buffer(
             font_system,
             &key.version,
@@ -2087,15 +2192,15 @@ pub(crate) fn single_session_text_buffers_from_key(
             version_font_size * typography.meta_line_height,
             content_width,
             24.0,
-        ),
-        single_session_nowrap_text_buffer(
-            font_system,
-            key.welcome_hero.trim(),
-            hero_font_size,
-            hero_font_size * 1.08,
-            size.width as f32 * 0.64,
-            hero_font_size * 1.25,
-        ),
+        )
+    });
+
+    vec![
+        title_buffer,
+        body_buffer,
+        draft_buffer,
+        status_buffer,
+        version_buffer,
     ]
 }
 
@@ -2117,14 +2222,6 @@ pub(crate) fn single_session_body_text_buffer_from_lines(
     );
     buffer.shape_until(font_system, i32::MAX);
     buffer
-}
-
-fn welcome_hero_font_size(hero: &str, size: PhysicalSize<u32>) -> f32 {
-    let width = size.width as f32;
-    let height = size.height as f32;
-    let chars = hero.trim().chars().count().max(1) as f32;
-    let target_width = width * 0.50;
-    (target_width / (chars * 0.56)).clamp(42.0, height * 0.18)
 }
 
 pub(crate) fn single_session_visible_body(
@@ -2228,6 +2325,62 @@ pub(crate) fn single_session_rendered_body_lines_for_tick(
     rendered.extend((0..virtual_lines).map(|_| blank_render_line()));
     rendered.extend(lines);
     rendered
+}
+
+pub(crate) fn single_session_rendered_static_body_lines_for_streaming(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    _tick: u64,
+) -> Option<Vec<SingleSessionStyledLine>> {
+    let lines = single_session_wrapped_body_lines(
+        app.body_styled_lines_without_streaming_response()?,
+        size,
+        app.text_scale(),
+    );
+    if !(app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript()) {
+        return Some(lines);
+    }
+
+    let virtual_lines = welcome_timeline_virtual_body_lines(app, size);
+    let mut rendered = Vec::with_capacity(virtual_lines + lines.len());
+    rendered.extend((0..virtual_lines).map(|_| blank_render_line()));
+    rendered.extend(lines);
+    Some(rendered)
+}
+
+pub(crate) fn append_single_session_streaming_response_rendered_body_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    rendered_lines: &mut Vec<SingleSessionStyledLine>,
+) {
+    if app.streaming_response.is_empty() {
+        return;
+    }
+    if !app.messages.is_empty() {
+        rendered_lines.push(blank_render_line());
+    }
+    rendered_lines.extend(single_session_wrapped_body_lines(
+        app.streaming_response_styled_lines(),
+        size,
+        app.text_scale(),
+    ));
+}
+
+pub(crate) fn single_session_streaming_response_rendered_body_line_count(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+) -> usize {
+    if app.streaming_response.is_empty() {
+        return 0;
+    }
+    let separator = usize::from(!app.messages.is_empty());
+    separator
+        + single_session_wrapped_body_lines(
+            app.streaming_response_styled_lines(),
+            size,
+            app.text_scale(),
+        )
+        .len()
 }
 
 fn blank_render_line() -> SingleSessionStyledLine {
@@ -2403,27 +2556,6 @@ fn single_session_text_buffer(
     buffer
 }
 
-fn single_session_nowrap_text_buffer(
-    font_system: &mut FontSystem,
-    text: &str,
-    font_size: f32,
-    line_height: f32,
-    width: f32,
-    height: f32,
-) -> Buffer {
-    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
-    buffer.set_size(font_system, width, height);
-    buffer.set_wrap(font_system, Wrap::None);
-    buffer.set_text(
-        font_system,
-        text,
-        Attrs::new().family(Family::Name(SINGLE_SESSION_FONT_FAMILY)),
-        desktop_text_shaping(text),
-    );
-    buffer.shape_until_scroll(font_system);
-    buffer
-}
-
 fn single_session_styled_text_buffer(
     font_system: &mut FontSystem,
     lines: &[SingleSessionStyledLine],
@@ -2435,31 +2567,55 @@ fn single_session_styled_text_buffer(
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
     buffer.set_size(font_system, width, height);
     let segments = single_session_styled_text_segments(lines);
-    let shaping = if segments.iter().all(|(text, _)| text.is_ascii()) {
-        Shaping::Basic
-    } else {
+    let shaping = if segments
+        .iter()
+        .any(|(text, _)| text_needs_advanced_shaping(text))
+    {
         Shaping::Advanced
+    } else {
+        Shaping::Basic
     };
-    buffer.set_rich_text(
-        font_system,
-        segments.iter().map(|(text, attrs)| (text.as_str(), *attrs)),
-        shaping,
-    );
+    buffer.set_rich_text(font_system, segments.iter().copied(), shaping);
     buffer.shape_until_scroll(font_system);
     buffer
 }
 
 fn desktop_text_shaping(text: &str) -> Shaping {
-    if text.is_ascii() {
-        Shaping::Basic
-    } else {
+    if text_needs_advanced_shaping(text) {
         Shaping::Advanced
+    } else {
+        Shaping::Basic
     }
+}
+
+fn text_needs_advanced_shaping(text: &str) -> bool {
+    text.chars().any(char_needs_advanced_shaping)
+}
+
+fn char_needs_advanced_shaping(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        // Combining marks and joiners.
+        0x0300..=0x036F
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE00..=0xFE0F
+            | 0xFE20..=0xFE2F
+            | 0x200C..=0x200D
+            // Scripts where shaping, bidi, or syllable reordering matter.
+            | 0x0590..=0x08FF
+            | 0x0900..=0x0DFF
+            | 0x1780..=0x18AF
+            // Emoji and symbol sequences often depend on variation selectors / ZWJ.
+            | 0x1F000..=0x1FAFF
+    )
 }
 
 pub(crate) fn single_session_styled_text_segments(
     lines: &[SingleSessionStyledLine],
-) -> Vec<(String, Attrs<'static>)> {
+) -> Vec<(&str, Attrs<'static>)> {
     let mut segments = Vec::new();
     let total_user_turns = lines
         .iter()
@@ -2470,57 +2626,57 @@ pub(crate) fn single_session_styled_text_segments(
             if line.style == SingleSessionLineStyle::User {
                 push_user_prompt_segments(&mut segments, &line.text, total_user_turns);
             } else {
-                segments.push((line.text.clone(), single_session_style_attrs(line.style)));
+                segments.push((line.text.as_str(), single_session_style_attrs(line.style)));
             }
         }
         if index + 1 < lines.len() {
             segments.push((
-                "\n".to_string(),
+                "\n",
                 single_session_style_attrs(SingleSessionLineStyle::Blank),
             ));
         }
     }
     if segments.is_empty() {
         segments.push((
-            String::new(),
+            "",
             single_session_style_attrs(SingleSessionLineStyle::Blank),
         ));
     }
     segments
 }
 
-fn push_user_prompt_segments(
-    segments: &mut Vec<(String, Attrs<'static>)>,
-    line: &str,
+fn push_user_prompt_segments<'a>(
+    segments: &mut Vec<(&'a str, Attrs<'static>)>,
+    line: &'a str,
     total_user_turns: usize,
 ) {
     let Some((number, text)) = line.split_once("  ") else {
         segments.push((
-            line.to_string(),
+            line,
             single_session_style_attrs(SingleSessionLineStyle::User),
         ));
         return;
     };
     let Ok(turn) = number.parse::<usize>() else {
         segments.push((
-            line.to_string(),
+            line,
             single_session_style_attrs(SingleSessionLineStyle::User),
         ));
         return;
     };
 
     segments.push((
-        number.to_string(),
+        number,
         single_session_color_attrs(user_prompt_number_color_for_distance(
             total_user_turns.saturating_add(1).saturating_sub(turn),
         )),
     ));
     segments.push((
-        "› ".to_string(),
+        "› ",
         single_session_color_attrs(text_color(USER_PROMPT_ACCENT_COLOR)),
     ));
     segments.push((
-        text.to_string(),
+        text,
         single_session_style_attrs(SingleSessionLineStyle::User),
     ));
 }
@@ -2631,16 +2787,20 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
     let body_top_offset_pixels =
         single_session_body_viewport_for_tick(app, size, tick, smooth_scroll_lines)
             .top_offset_pixels;
+    let welcome_chrome_offset_pixels =
+        welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines);
+    let welcome_chrome_visible =
+        welcome_timeline_chrome_visible(app, size, welcome_chrome_offset_pixels);
     single_session_text_areas_for_state(
         buffers,
         size,
-        app.is_welcome_timeline_visible(),
+        welcome_chrome_visible,
         false,
         body_top_offset_pixels,
         single_session_body_top_for_app(app, size),
         single_session_body_bottom_for_app(app, size) as i32,
         single_session_draft_top_for_app(app, size),
-        welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
+        welcome_chrome_offset_pixels,
         welcome_status_lane_visible(app),
         app.text_scale(),
     )
@@ -2675,24 +2835,58 @@ pub(crate) fn single_session_text_areas_for_app_with_cached_body_viewport<'a>(
     smooth_scroll_lines: f32,
     viewport: SingleSessionBodyViewport,
 ) -> Vec<TextArea<'a>> {
+    let welcome_chrome_offset_pixels = welcome_timeline_visual_offset_pixels_for_total_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        viewport.total_lines,
+    );
+    let welcome_chrome_visible =
+        welcome_timeline_chrome_visible(app, size, welcome_chrome_offset_pixels);
     single_session_text_areas_for_state(
         buffers,
         size,
-        app.is_welcome_timeline_visible(),
+        welcome_chrome_visible,
         false,
         viewport.top_offset_pixels,
         single_session_body_top_for_app(app, size),
         single_session_body_bottom_for_total_lines(app, size, viewport.total_lines) as i32,
-        single_session_draft_top_for_app(app, size),
-        welcome_timeline_visual_offset_pixels_for_total_lines(
-            app,
-            size,
-            smooth_scroll_lines,
-            viewport.total_lines,
-        ),
+        single_session_draft_top_for_total_lines(app, size, viewport.total_lines),
+        welcome_chrome_offset_pixels,
         welcome_status_lane_visible(app),
         app.text_scale(),
     )
+}
+
+pub(crate) fn single_session_streaming_text_area_for_cached_body_viewport<'a>(
+    app: &SingleSessionApp,
+    buffer: &'a Buffer,
+    size: PhysicalSize<u32>,
+    viewport: SingleSessionBodyViewport,
+    streaming_start_line: usize,
+) -> TextArea<'a> {
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.body_size * typography.body_line_height;
+    let left = PANEL_TITLE_LEFT_PADDING;
+    let right = size.width.saturating_sub(PANEL_TITLE_LEFT_PADDING as u32) as i32;
+    let body_top = single_session_body_top_for_app(app, size);
+    let top = body_top
+        + viewport.top_offset_pixels
+        + streaming_start_line.saturating_sub(viewport.start_line) as f32 * line_height;
+    TextArea {
+        buffer,
+        left,
+        top,
+        scale: 1.0,
+        bounds: TextBounds {
+            left: 0,
+            top: body_top as i32,
+            right,
+            bottom: single_session_body_bottom_for_total_lines(app, size, viewport.total_lines)
+                as i32,
+        },
+        default_color: text_color(ASSISTANT_TEXT_COLOR),
+    }
 }
 
 pub(crate) fn single_session_text_areas_for_fresh_state(

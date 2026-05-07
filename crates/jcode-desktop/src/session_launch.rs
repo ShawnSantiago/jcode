@@ -30,6 +30,12 @@ pub enum DesktopSessionEvent {
     ToolStarted {
         name: String,
     },
+    ToolExecuting {
+        name: String,
+    },
+    ToolInput {
+        delta: String,
+    },
     ToolFinished {
         name: String,
         summary: String,
@@ -978,12 +984,25 @@ fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent>
             .get("detail")
             .and_then(Value::as_str)
             .map(|detail| DesktopSessionEvent::Status(detail.to_string())),
-        "tool_start" | "tool_exec" => {
+        "tool_start" => {
             value
                 .get("name")
                 .and_then(Value::as_str)
                 .map(|name| DesktopSessionEvent::ToolStarted {
                     name: name.to_string(),
+                })
+        }
+        "tool_exec" => value.get("name").and_then(Value::as_str).map(|name| {
+            DesktopSessionEvent::ToolExecuting {
+                name: name.to_string(),
+            }
+        }),
+        "tool_input" => {
+            value
+                .get("delta")
+                .and_then(Value::as_str)
+                .map(|delta| DesktopSessionEvent::ToolInput {
+                    delta: delta.to_string(),
                 })
         }
         "tool_done" => value.get("name").and_then(Value::as_str).map(|name| {
@@ -1317,8 +1336,22 @@ mod tests {
             Some(DesktopSessionEvent::Done)
         );
         assert_eq!(
-            desktop_event_from_server_value(&json!({"type": "tool_exec", "name": "bash"})),
+            desktop_event_from_server_value(&json!({"type": "tool_start", "name": "bash"})),
             Some(DesktopSessionEvent::ToolStarted {
+                name: "bash".to_string()
+            })
+        );
+        assert_eq!(
+            desktop_event_from_server_value(
+                &json!({"type": "tool_input", "delta": "{\"command\":"})
+            ),
+            Some(DesktopSessionEvent::ToolInput {
+                delta: "{\"command\":".to_string()
+            })
+        );
+        assert_eq!(
+            desktop_event_from_server_value(&json!({"type": "tool_exec", "name": "bash"})),
+            Some(DesktopSessionEvent::ToolExecuting {
                 name: "bash".to_string()
             })
         );

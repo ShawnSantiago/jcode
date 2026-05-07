@@ -109,6 +109,8 @@ pub(crate) struct SingleSessionApp {
     draft_selection_focus: Option<SelectionPoint>,
     input_undo_stack: Vec<(String, usize)>,
     session_handle: Option<DesktopSessionHandle>,
+    active_tool_message_index: Option<usize>,
+    active_tool_input_buffer: String,
     // True for the fresh-start chat that owns the welcome hero as visual UI.
     // The hero must stay out of `body_styled_lines()` so it never becomes part
     // of the persisted/rendered transcript text.
@@ -130,13 +132,13 @@ pub(crate) struct SelectionLineSegment {
     pub(crate) end_column: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SingleSessionStyledLine {
     pub(crate) text: String,
     pub(crate) style: SingleSessionLineStyle,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SingleSessionLineStyle {
     Assistant,
     AssistantHeading,
@@ -539,6 +541,8 @@ impl SingleSessionApp {
             draft_selection_focus: None,
             input_undo_stack: Vec::new(),
             session_handle: None,
+            active_tool_message_index: None,
+            active_tool_input_buffer: String::new(),
             welcome_timeline,
             welcome_hero_phrase_index,
             text_scale: 1.0,
@@ -592,6 +596,8 @@ impl SingleSessionApp {
         self.clear_draft_selection();
         self.input_undo_stack.clear();
         self.session_handle = None;
+        self.active_tool_message_index = None;
+        self.active_tool_input_buffer.clear();
         self.welcome_timeline = true;
     }
 
@@ -635,7 +641,7 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn has_frame_animation(&self) -> bool {
-        true
+        self.has_activity_indicator()
     }
 
     fn current_session_id(&self) -> Option<&str> {
@@ -1101,30 +1107,7 @@ impl SingleSessionApp {
         }
         if !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
         {
-            let mut lines = Vec::new();
-            let mut user_turn = 1;
-            for message in &self.messages {
-                if !lines.is_empty() {
-                    lines.push(blank_styled_line());
-                }
-                append_chat_message_lines(&mut lines, message, &mut user_turn);
-            }
-            if !self.streaming_response.is_empty() {
-                if !lines.is_empty() {
-                    lines.push(blank_styled_line());
-                }
-                append_assistant_lines(&mut lines, self.streaming_response.trim_end());
-            }
-            if let Some(error) = &self.error {
-                if !lines.is_empty() {
-                    lines.push(blank_styled_line());
-                }
-                lines.push(styled_line(
-                    format!("error: {error}"),
-                    SingleSessionLineStyle::Error,
-                ));
-            }
-            return lines;
+            return self.transcript_styled_lines(true);
         }
 
         if self.is_welcome_timeline_visible() {
@@ -1152,6 +1135,84 @@ impl SingleSessionApp {
         self.body_styled_lines()
     }
 
+    pub(crate) fn body_styled_lines_without_streaming_response(
+        &self,
+    ) -> Option<Vec<SingleSessionStyledLine>> {
+        if self.stdin_response.is_some()
+            || self.session_switcher.open
+            || self.model_picker.open
+            || self.show_help
+            || self.error.is_some()
+        {
+            return None;
+        }
+        if self.messages.is_empty() && self.streaming_response.is_empty() {
+            return None;
+        }
+        Some(self.transcript_styled_lines(false))
+    }
+
+    pub(crate) fn streaming_response_styled_lines(&self) -> Vec<SingleSessionStyledLine> {
+        let mut lines = Vec::new();
+        if !self.streaming_response.is_empty() {
+            append_assistant_lines(&mut lines, self.streaming_response.trim_end());
+        }
+        lines
+    }
+
+    fn transcript_styled_lines(
+        &self,
+        include_streaming_response: bool,
+    ) -> Vec<SingleSessionStyledLine> {
+        let mut lines = Vec::new();
+        let mut user_turn = 1;
+        let mut message_index = 0;
+        while message_index < self.messages.len() {
+            if !lines.is_empty() {
+                lines.push(blank_styled_line());
+            }
+            let message = &self.messages[message_index];
+            if message.role == SingleSessionRole::Tool {
+                let group_start = message_index;
+                while message_index < self.messages.len()
+                    && self.messages[message_index].role == SingleSessionRole::Tool
+                {
+                    message_index += 1;
+                }
+                let tool_messages = &self.messages[group_start..message_index];
+                let group_contains_active_tool = self
+                    .active_tool_message_index
+                    .is_some_and(|index| (group_start..message_index).contains(&index));
+                if tool_messages.len() > 1 && !group_contains_active_tool {
+                    append_tool_group_summary(&mut lines, tool_messages);
+                } else {
+                    for tool_message in tool_messages {
+                        append_chat_message_lines(&mut lines, tool_message, &mut user_turn);
+                    }
+                }
+                continue;
+            }
+            append_chat_message_lines(&mut lines, message, &mut user_turn);
+            message_index += 1;
+        }
+        if include_streaming_response && !self.streaming_response.is_empty() {
+            if !lines.is_empty() {
+                lines.push(blank_styled_line());
+            }
+            append_assistant_lines(&mut lines, self.streaming_response.trim_end());
+        }
+        if let Some(error) = &self.error {
+            if !lines.is_empty() {
+                lines.push(blank_styled_line());
+            }
+            lines.push(styled_line(
+                format!("error: {error}"),
+                SingleSessionLineStyle::Error,
+            ));
+        }
+        lines
+    }
+
     pub(crate) fn rendered_body_cache_key(&self, size: (u32, u32)) -> u64 {
         let mut hasher = DefaultHasher::new();
         size.hash(&mut hasher);
@@ -1170,6 +1231,41 @@ impl SingleSessionApp {
             .hash(&mut hasher);
         self.messages.hash(&mut hasher);
         self.streaming_response.hash(&mut hasher);
+        self.status.hash(&mut hasher);
+        self.error.hash(&mut hasher);
+        self.show_help.hash(&mut hasher);
+        self.model_picker.open.hash(&mut hasher);
+        self.model_picker.filter.hash(&mut hasher);
+        self.model_picker.selected.hash(&mut hasher);
+        self.session_switcher.open.hash(&mut hasher);
+        self.session_switcher.filter.hash(&mut hasher);
+        self.session_switcher.selected.hash(&mut hasher);
+        self.stdin_response.hash(&mut hasher);
+        self.welcome_name.hash(&mut hasher);
+        self.recovery_session_count.hash(&mut hasher);
+        self.welcome_timeline.hash(&mut hasher);
+        self.welcome_hero_phrase_index.hash(&mut hasher);
+        self.text_scale.to_bits().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub(crate) fn rendered_body_static_cache_key(&self, size: (u32, u32)) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        size.hash(&mut hasher);
+        self.session
+            .as_ref()
+            .map(|session| {
+                (
+                    session.session_id.as_str(),
+                    session.title.as_str(),
+                    session.subtitle.as_str(),
+                    session.detail.as_str(),
+                    session.preview_lines.as_slice(),
+                    session.detail_lines.as_slice(),
+                )
+            })
+            .hash(&mut hasher);
+        self.messages.hash(&mut hasher);
         self.status.hash(&mut hasher);
         self.error.hash(&mut hasher);
         self.show_help.hash(&mut hasher);
@@ -1239,9 +1335,19 @@ impl SingleSessionApp {
                 self.status = Some("receiving".to_string());
             }
             DesktopSessionEvent::ToolStarted { name } => {
-                self.status = Some(format!("using tool {name}"));
+                self.collapse_active_tool_message();
+                self.active_tool_input_buffer.clear();
+                self.status = Some(format!("preparing tool {name}"));
                 self.messages
-                    .push(SingleSessionMessage::tool(format!("{name} running")));
+                    .push(SingleSessionMessage::tool(format!("▾ {name} preparing")));
+                self.active_tool_message_index = Some(self.messages.len().saturating_sub(1));
+            }
+            DesktopSessionEvent::ToolExecuting { name } => {
+                self.status = Some(format!("using tool {name}"));
+                self.replace_active_tool_header(&format!("▾ {name} running"));
+            }
+            DesktopSessionEvent::ToolInput { delta } => {
+                self.append_active_tool_input(&delta);
             }
             DesktopSessionEvent::ToolFinished {
                 name,
@@ -1254,9 +1360,18 @@ impl SingleSessionApp {
                     format!("tool {name} done")
                 });
                 let marker = if is_error { "failed" } else { "done" };
-                self.messages.push(SingleSessionMessage::tool(format!(
-                    "{name} {marker}: {summary}"
-                )));
+                let line = format!("▾ {name} {marker}: {summary}");
+                self.flush_active_tool_input_to_message();
+                if let Some(index) = self.active_tool_message_index
+                    && let Some(message) = self.messages.get_mut(index)
+                    && message.role == SingleSessionRole::Tool
+                {
+                    message.content =
+                        merge_tool_finish_with_existing_context(&message.content, &line);
+                } else {
+                    self.messages.push(SingleSessionMessage::tool(line));
+                    self.active_tool_message_index = Some(self.messages.len().saturating_sub(1));
+                }
             }
             DesktopSessionEvent::ModelChanged {
                 model,
@@ -1328,6 +1443,8 @@ impl SingleSessionApp {
                 self.is_processing = false;
                 self.stdin_response = None;
                 self.session_handle = None;
+                self.active_tool_message_index = None;
+                self.active_tool_input_buffer.clear();
                 self.status = Some("ready".to_string());
             }
             DesktopSessionEvent::Error(error) => {
@@ -1335,6 +1452,8 @@ impl SingleSessionApp {
                 self.is_processing = false;
                 self.stdin_response = None;
                 self.session_handle = None;
+                self.active_tool_message_index = None;
+                self.active_tool_input_buffer.clear();
                 self.status = Some("error".to_string());
                 self.error = Some(error);
             }
@@ -1934,6 +2053,69 @@ impl SingleSessionApp {
         self.streaming_response.clear();
     }
 
+    fn collapse_active_tool_message(&mut self) {
+        let Some(index) = self.active_tool_message_index.take() else {
+            return;
+        };
+        let Some(message) = self.messages.get_mut(index) else {
+            return;
+        };
+        if message.role != SingleSessionRole::Tool {
+            return;
+        }
+        if let Some(first_line) = message.content.lines().next() {
+            message.content = first_line.replacen('▾', "▸", 1);
+        }
+    }
+
+    fn append_active_tool_input(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.active_tool_input_buffer.push_str(delta);
+    }
+
+    fn flush_active_tool_input_to_message(&mut self) {
+        if self.active_tool_input_buffer.is_empty() {
+            return;
+        }
+        let Some(index) = self.active_tool_message_index else {
+            return;
+        };
+        let Some(message) = self.messages.get_mut(index) else {
+            return;
+        };
+        if message.role != SingleSessionRole::Tool {
+            return;
+        }
+        if !message.content.contains("\n  input: ") {
+            message.content.push_str("\n  input: ");
+        }
+        message.content.push_str(&self.active_tool_input_buffer);
+        self.active_tool_input_buffer.clear();
+    }
+
+    fn replace_active_tool_header(&mut self, header: &str) {
+        let Some(index) = self.active_tool_message_index else {
+            self.messages
+                .push(SingleSessionMessage::tool(header.to_string()));
+            self.active_tool_message_index = Some(self.messages.len().saturating_sub(1));
+            return;
+        };
+        let Some(message) = self.messages.get_mut(index) else {
+            self.messages
+                .push(SingleSessionMessage::tool(header.to_string()));
+            self.active_tool_message_index = Some(self.messages.len().saturating_sub(1));
+            return;
+        };
+        if message.role == SingleSessionRole::Tool {
+            let replacement = merge_tool_finish_with_existing_context(&message.content, header);
+            if message.content != replacement {
+                message.content = replacement;
+            }
+        }
+    }
+
     fn insert_draft_text(&mut self, text: &str) {
         if self.replace_draft_selection_with(text) {
             return;
@@ -2107,6 +2289,7 @@ fn is_in_flight_status(status: &str) -> bool {
             | "switching model"
             | "cancelling"
     ) || status.starts_with("using tool ")
+        || status.starts_with("preparing tool ")
         || status.starts_with("attached ")
 }
 
@@ -3341,10 +3524,213 @@ fn append_tool_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
     if content.is_empty() {
         return;
     }
+    for (index, line) in content.lines().enumerate() {
+        if index > 0
+            && let Some(raw_input) = line.strip_prefix("  input: ")
+        {
+            for display_line in formatted_tool_input_lines(raw_input) {
+                lines.push(styled_line(
+                    format!("    {display_line}"),
+                    SingleSessionLineStyle::Tool,
+                ));
+            }
+            continue;
+        }
+        let text = if index == 0 {
+            format!("  {line}")
+        } else {
+            format!("    {line}")
+        };
+        lines.push(styled_line(text, SingleSessionLineStyle::Tool));
+    }
+}
+
+fn append_tool_group_summary(
+    lines: &mut Vec<SingleSessionStyledLine>,
+    tool_messages: &[SingleSessionMessage],
+) {
+    if tool_messages.is_empty() {
+        return;
+    }
+
+    let mut names: Vec<String> = Vec::new();
+    let mut counts: Vec<usize> = Vec::new();
+    let mut approx_tokens = 0usize;
+
+    for message in tool_messages {
+        approx_tokens += message.content.chars().count().div_ceil(4);
+        let name = tool_summary_name(&message.content);
+        if let Some(index) = names.iter().position(|existing| existing == &name) {
+            counts[index] += 1;
+        } else {
+            names.push(name);
+            counts.push(1);
+        }
+    }
+
+    let fragments = names
+        .into_iter()
+        .zip(counts)
+        .map(|(name, count)| format!("{count} {name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let token_fragment = format_approx_tokens(approx_tokens);
     lines.push(styled_line(
-        format!("• {content}"),
+        format!("  ▸ tools: {fragments} · ~{token_fragment} tokens"),
         SingleSessionLineStyle::Tool,
     ));
+}
+
+fn tool_summary_name(content: &str) -> String {
+    content
+        .lines()
+        .next()
+        .unwrap_or("tool")
+        .trim_start_matches(['▾', '▸'])
+        .trim()
+        .split_whitespace()
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("tool")
+        .to_string()
+}
+
+fn format_approx_tokens(tokens: usize) -> String {
+    if tokens >= 10_000 {
+        format!("{}k", ((tokens + 500) / 1000))
+    } else if tokens >= 1_000 {
+        let tenths = (tokens + 50) / 100;
+        format!("{}.{}k", tenths / 10, tenths % 10)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn formatted_tool_input_lines(raw_input: &str) -> Vec<String> {
+    const MAX_INPUT_LINES: usize = 6;
+    let raw_input = raw_input.trim();
+    if raw_input.is_empty() {
+        return vec!["input: <empty>".to_string()];
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        return vec![format!("input: {}", compact_tool_text(raw_input, 132))];
+    };
+
+    let serde_json::Value::Object(map) = value else {
+        return vec![format!(
+            "input: {}",
+            compact_tool_json_value("input", &value)
+        )];
+    };
+
+    if map.is_empty() {
+        return vec!["input: {}".to_string()];
+    }
+
+    let mut keys = map.keys().cloned().collect::<Vec<_>>();
+    keys.sort_by(|left, right| {
+        tool_input_key_priority(left)
+            .cmp(&tool_input_key_priority(right))
+            .then_with(|| left.cmp(right))
+    });
+
+    let total = keys.len();
+    let mut rendered = keys
+        .into_iter()
+        .take(MAX_INPUT_LINES)
+        .filter_map(|key| {
+            map.get(&key)
+                .map(|value| format!("{key}: {}", compact_tool_json_value(&key, value)))
+        })
+        .collect::<Vec<_>>();
+    if total > MAX_INPUT_LINES {
+        rendered.push(format!("… {} more", total - MAX_INPUT_LINES));
+    }
+    rendered
+}
+
+fn tool_input_key_priority(key: &str) -> usize {
+    match key {
+        "intent" => 0,
+        "command" => 1,
+        "file_path" | "path" => 2,
+        "query" => 3,
+        "pattern" | "glob" => 4,
+        "url" => 5,
+        "task" | "prompt" => 6,
+        _ => 100,
+    }
+}
+
+fn compact_tool_json_value(key: &str, value: &serde_json::Value) -> String {
+    if is_sensitive_tool_input_key(key) {
+        return "••••".to_string();
+    }
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            if key.to_ascii_lowercase().contains("base64") {
+                format!("<base64, {} chars>", value.chars().count())
+            } else {
+                compact_tool_text(value, 108)
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                "[]".to_string()
+            } else if values.len() <= 3 && values.iter().all(is_compact_tool_scalar) {
+                let joined = values
+                    .iter()
+                    .map(|value| compact_tool_json_value(key, value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                compact_tool_text(&format!("[{joined}]"), 108)
+            } else {
+                format!("[{} items]", values.len())
+            }
+        }
+        serde_json::Value::Object(map) => format!("{{{} fields}}", map.len()),
+    }
+}
+
+fn is_compact_tool_scalar(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+    )
+}
+
+fn is_sensitive_tool_input_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("password") || key.contains("token") || key.contains("secret")
+}
+
+fn compact_tool_text(text: &str, max_chars: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() > max_chars {
+        format!("{}…", text.chars().take(max_chars).collect::<String>())
+    } else {
+        text
+    }
+}
+
+fn merge_tool_finish_with_existing_context(existing: &str, finish_line: &str) -> String {
+    let context = existing
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if context.is_empty() {
+        finish_line.to_string()
+    } else {
+        format!("{}\n{}", finish_line, context.join("\n"))
+    }
 }
 
 fn append_meta_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
