@@ -2006,9 +2006,7 @@ fn single_session_styled_text_buffer(
     let segments = single_session_styled_text_segments(lines);
     buffer.set_rich_text(
         font_system,
-        segments
-            .iter()
-            .map(|(text, color)| (text.as_str(), single_session_color_attrs(*color))),
+        segments.iter().map(|(text, attrs)| (text.as_str(), *attrs)),
         Shaping::Basic,
     );
     buffer.shape_until_scroll(font_system);
@@ -2017,54 +2015,81 @@ fn single_session_styled_text_buffer(
 
 pub(crate) fn single_session_styled_text_segments(
     lines: &[SingleSessionStyledLine],
-) -> Vec<(String, TextColor)> {
+) -> Vec<(String, Attrs<'static>)> {
     let mut segments = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !line.text.is_empty() {
             if line.style == SingleSessionLineStyle::User {
                 push_user_prompt_segments(&mut segments, &line.text);
             } else {
-                segments.push((line.text.clone(), single_session_line_color(line.style)));
+                segments.push((line.text.clone(), single_session_style_attrs(line.style)));
             }
         }
         if index + 1 < lines.len() {
             segments.push((
                 "\n".to_string(),
-                single_session_line_color(SingleSessionLineStyle::Blank),
+                single_session_style_attrs(SingleSessionLineStyle::Blank),
             ));
         }
     }
     if segments.is_empty() {
         segments.push((
             String::new(),
-            single_session_line_color(SingleSessionLineStyle::Blank),
+            single_session_style_attrs(SingleSessionLineStyle::Blank),
         ));
     }
     segments
 }
 
-fn push_user_prompt_segments(segments: &mut Vec<(String, TextColor)>, line: &str) {
+fn push_user_prompt_segments(segments: &mut Vec<(String, Attrs<'static>)>, line: &str) {
     let Some((number, text)) = line.split_once("  ") else {
         segments.push((
             line.to_string(),
-            single_session_line_color(SingleSessionLineStyle::User),
+            single_session_style_attrs(SingleSessionLineStyle::User),
         ));
         return;
     };
     let Ok(turn) = number.parse::<usize>() else {
         segments.push((
             line.to_string(),
-            single_session_line_color(SingleSessionLineStyle::User),
+            single_session_style_attrs(SingleSessionLineStyle::User),
         ));
         return;
     };
 
-    segments.push((number.to_string(), user_prompt_number_color(turn)));
-    segments.push(("› ".to_string(), text_color(USER_PROMPT_ACCENT_COLOR)));
+    segments.push((
+        number.to_string(),
+        single_session_color_attrs(user_prompt_number_color(turn)),
+    ));
+    segments.push((
+        "› ".to_string(),
+        single_session_color_attrs(text_color(USER_PROMPT_ACCENT_COLOR)),
+    ));
     segments.push((
         text.to_string(),
-        single_session_line_color(SingleSessionLineStyle::User),
+        single_session_style_attrs(SingleSessionLineStyle::User),
     ));
+}
+
+fn single_session_style_attrs(style: SingleSessionLineStyle) -> Attrs<'static> {
+    let family = if is_ai_response_font_style(style) {
+        SINGLE_SESSION_ASSISTANT_FONT_FAMILY
+    } else {
+        SINGLE_SESSION_FONT_FAMILY
+    };
+    Attrs::new()
+        .family(Family::Name(family))
+        .color(single_session_line_color(style))
+}
+
+fn is_ai_response_font_style(style: SingleSessionLineStyle) -> bool {
+    matches!(
+        style,
+        SingleSessionLineStyle::Assistant
+            | SingleSessionLineStyle::AssistantHeading
+            | SingleSessionLineStyle::AssistantQuote
+            | SingleSessionLineStyle::AssistantLink
+    )
 }
 
 fn single_session_color_attrs(color: TextColor) -> Attrs<'static> {

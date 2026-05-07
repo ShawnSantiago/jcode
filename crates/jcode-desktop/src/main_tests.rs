@@ -889,12 +889,38 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
 
     let lines = app.body_styled_lines();
     let segments = single_session_styled_text_segments(&lines);
-    assert!(segments.contains(&("1".to_string(), user_prompt_number_color(1))));
-    assert!(segments.contains(&("› ".to_string(), text_color(USER_PROMPT_ACCENT_COLOR))));
-    assert!(segments.contains(&(
-        "question".to_string(),
-        single_session_line_color(SingleSessionLineStyle::User)
-    )));
+    assert!(
+        segments.contains(&(
+            "1".to_string(),
+            Attrs::new()
+                .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
+                .color(user_prompt_number_color(1))
+        ))
+    );
+    assert!(
+        segments.contains(&(
+            "› ".to_string(),
+            Attrs::new()
+                .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
+                .color(text_color(USER_PROMPT_ACCENT_COLOR))
+        ))
+    );
+    assert!(
+        segments.contains(&(
+            "question".to_string(),
+            Attrs::new()
+                .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
+                .color(single_session_line_color(SingleSessionLineStyle::User))
+        ))
+    );
+    assert!(
+        segments.contains(&(
+            "answer".to_string(),
+            Attrs::new()
+                .family(Family::Name(SINGLE_SESSION_ASSISTANT_FONT_FAMILY))
+                .color(single_session_line_color(SingleSessionLineStyle::Assistant))
+        ))
+    );
 
     assert_eq!(
         style_for_text(&lines, "1  question"),

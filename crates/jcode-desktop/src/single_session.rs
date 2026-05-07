@@ -6,6 +6,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use workspace::{KeyInput, KeyOutcome};
 
 pub(crate) const SINGLE_SESSION_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
+pub(crate) const SINGLE_SESSION_ASSISTANT_FONT_FAMILY: &str = "Kalam";
 pub(crate) const SINGLE_SESSION_FONT_WEIGHT: &str = "Light";
 pub(crate) const SINGLE_SESSION_FONT_FALLBACKS: &[&str] = &[
     "JetBrainsMono Nerd Font Mono",

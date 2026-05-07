@@ -18,9 +18,9 @@ use glyphon::{
 };
 use render_helpers::*;
 use single_session::{
-    SINGLE_SESSION_FONT_FAMILY, SelectionPoint, SingleSessionApp, SingleSessionLineStyle,
-    SingleSessionStyledLine, handwritten_welcome_phrase, single_session_surface,
-    single_session_typography,
+    SINGLE_SESSION_ASSISTANT_FONT_FAMILY, SINGLE_SESSION_FONT_FAMILY, SelectionPoint,
+    SingleSessionApp, SingleSessionLineStyle, SingleSessionStyledLine, handwritten_welcome_phrase,
+    single_session_surface, single_session_typography,
 };
 use single_session_render::*;
 use wgpu::util::DeviceExt;
@@ -1931,13 +1931,18 @@ impl<'window> Canvas<'window> {
         );
         startup_trace.mark("text renderer ready");
 
+        let mut font_system = FontSystem::new();
+        font_system
+            .db_mut()
+            .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
+
         Ok(Self {
             surface,
             device,
             queue,
             config,
             render_pipeline,
-            font_system: FontSystem::new(),
+            font_system,
             swash_cache: SwashCache::new(),
             text_atlas,
             text_renderer,
