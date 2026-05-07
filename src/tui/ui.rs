@@ -101,6 +101,7 @@ mod transitions;
 #[path = "ui_viewport.rs"]
 mod viewport;
 
+use crate::tui::mermaid;
 #[cfg(test)]
 use box_utils::truncate_line_to_width;
 use box_utils::{
@@ -124,6 +125,7 @@ use diagram_pane::{
 };
 use diagram_pane::{
     draw_pinned_diagram, estimate_pinned_diagram_pane_height, estimate_pinned_diagram_pane_width,
+    pinned_diagram_preferred_aspect_ratio,
 };
 pub(crate) use diagram_pane::{pinned_diagram_debug_json, reset_pinned_diagram_debug_snapshot};
 use file_diff_ui::active_file_diff_context;
@@ -1833,7 +1835,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let prep_start = Instant::now();
     let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
     let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
-    let prepared_wide = prepare::prepare_messages(app, wide_prepare_width, chat_area.height);
+    let pinned_mermaid_aspect_ratio =
+        diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
+    let prepared_wide = mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
+        prepare::prepare_messages(app, wide_prepare_width, chat_area.height)
+    });
     let show_donut = super::idle_donut_active(app);
     let donut_height: u16 = if show_donut { 14 } else { 0 };
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
@@ -1855,7 +1861,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
         let prepared_narrow =
-            prepare::prepare_messages(app, narrow_prepare_width, chat_area.height);
+            mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
+                prepare::prepare_messages(app, narrow_prepare_width, chat_area.height)
+            });
         let narrow_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
         let narrow_overflows = narrow_content_height + fixed_height > available_height;
         if narrow_overflows {

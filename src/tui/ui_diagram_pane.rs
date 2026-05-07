@@ -239,6 +239,28 @@ fn pinned_diagram_content_area_for_title(
     }
 }
 
+pub(crate) fn content_area_preferred_aspect_ratio(area: Rect) -> Option<f32> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let (font_w, font_h) = super::super::mermaid::get_font_size().unwrap_or((8, 16));
+    let width_px = area.width as f32 * font_w.max(1) as f32;
+    let height_px = area.height as f32 * font_h.max(1) as f32;
+    if width_px > 0.0 && height_px > 0.0 {
+        Some(width_px / height_px)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn pinned_diagram_preferred_aspect_ratio(
+    area: Rect,
+    pane_position: crate::config::DiagramPanePosition,
+) -> Option<f32> {
+    pinned_diagram_content_area_for_title(area, pane_position)
+        .and_then(content_area_preferred_aspect_ratio)
+}
+
 fn planned_pinned_diagram_mode_label(
     diagram: &info_widget::DiagramInfo,
     area: Rect,
@@ -878,52 +900,55 @@ pub(crate) fn draw_pinned_diagram(
         });
 
         let mut rendered = 0u16;
-        if pane_animating {
-            clear_area(frame, inner);
-            let placeholder =
-                super::super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
-            let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
-            frame.render_widget(paragraph, inner);
-            rendered = inner.height;
-        } else if super::super::mermaid::protocol_type().is_some() {
-            if focused && !fit_mode {
-                rendered = super::super::mermaid::render_image_widget_viewport(
-                    diagram.hash,
-                    inner,
-                    frame.buffer_mut(),
-                    scroll_x,
-                    scroll_y,
-                    zoom_percent,
-                    false,
-                );
-            } else {
-                match plan_pinned_diagram_fit(inner, diagram.width, diagram.height) {
-                    PinnedDiagramFitRenderPlan::Contain { area: render_area } => {
-                        rendered = super::super::mermaid::render_image_widget_scale(
-                            diagram.hash,
-                            render_area,
-                            frame.buffer_mut(),
-                            false,
-                        );
-                    }
-                    PinnedDiagramFitRenderPlan::FillViewport {
-                        zoom_percent,
+        let mermaid_aspect_ratio = content_area_preferred_aspect_ratio(inner);
+        super::super::mermaid::with_preferred_aspect_ratio(mermaid_aspect_ratio, || {
+            if pane_animating {
+                clear_area(frame, inner);
+                let placeholder =
+                    super::super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
+                let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
+                frame.render_widget(paragraph, inner);
+                rendered = inner.height;
+            } else if super::super::mermaid::protocol_type().is_some() {
+                if focused && !fit_mode {
+                    rendered = super::super::mermaid::render_image_widget_viewport(
+                        diagram.hash,
+                        inner,
+                        frame.buffer_mut(),
                         scroll_x,
                         scroll_y,
-                    } => {
-                        rendered = super::super::mermaid::render_image_widget_viewport_precise(
-                            diagram.hash,
-                            inner,
-                            frame.buffer_mut(),
+                        zoom_percent,
+                        false,
+                    );
+                } else {
+                    match plan_pinned_diagram_fit(inner, diagram.width, diagram.height) {
+                        PinnedDiagramFitRenderPlan::Contain { area: render_area } => {
+                            rendered = super::super::mermaid::render_image_widget_scale(
+                                diagram.hash,
+                                render_area,
+                                frame.buffer_mut(),
+                                false,
+                            );
+                        }
+                        PinnedDiagramFitRenderPlan::FillViewport {
+                            zoom_percent,
                             scroll_x,
                             scroll_y,
-                            zoom_percent,
-                            false,
-                        );
+                        } => {
+                            rendered = super::super::mermaid::render_image_widget_viewport_precise(
+                                diagram.hash,
+                                inner,
+                                frame.buffer_mut(),
+                                scroll_x,
+                                scroll_y,
+                                zoom_percent,
+                                false,
+                            );
+                        }
                     }
                 }
             }
-        }
+        });
 
         if rendered > 0 && super::super::mermaid::is_video_export_mode() {
             super::super::mermaid::write_video_export_marker(

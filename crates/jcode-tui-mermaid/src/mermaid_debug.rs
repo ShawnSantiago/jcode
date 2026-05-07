@@ -89,7 +89,7 @@ pub fn debug_cache() -> Vec<MermaidCacheEntry> {
         return cache
             .entries
             .iter()
-            .map(|(hash, diagram)| MermaidCacheEntry {
+            .map(|((hash, _profile), diagram)| MermaidCacheEntry {
                 hash: format!("{:016x}", hash),
                 path: diagram.path.to_string_lossy().to_string(),
                 width: diagram.width,

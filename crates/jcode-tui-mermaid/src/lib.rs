@@ -37,6 +37,7 @@ use ratatui_image::{
     protocol::StatefulProtocol,
 };
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 use std::fs;
 use std::hash::{Hash as _, Hasher};
@@ -45,6 +46,72 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Instant;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) struct RenderProfile {
+    preferred_aspect_per_mille: Option<u16>,
+}
+
+impl RenderProfile {
+    fn from_preferred_aspect_ratio(ratio: Option<f32>) -> Self {
+        let preferred_aspect_per_mille = ratio
+            .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+            .map(|ratio| (ratio * 1000.0).round().clamp(100.0, 10_000.0) as u16);
+        Self {
+            preferred_aspect_per_mille,
+        }
+    }
+
+    fn preferred_aspect_ratio(self) -> Option<f32> {
+        self.preferred_aspect_per_mille
+            .map(|value| value as f32 / 1000.0)
+    }
+
+    fn cache_suffix(self) -> Option<String> {
+        self.preferred_aspect_per_mille
+            .map(|value| format!("_a{value}"))
+    }
+}
+
+thread_local! {
+    static RENDER_PROFILE_CONTEXT: Cell<RenderProfile> = Cell::new(RenderProfile::default());
+}
+
+fn current_render_profile() -> RenderProfile {
+    RENDER_PROFILE_CONTEXT.with(|profile| profile.get())
+}
+
+pub fn current_preferred_aspect_ratio_bucket() -> Option<u16> {
+    current_render_profile().preferred_aspect_per_mille
+}
+
+pub fn preferred_aspect_ratio_bucket(ratio: Option<f32>) -> Option<u16> {
+    RenderProfile::from_preferred_aspect_ratio(ratio).preferred_aspect_per_mille
+}
+
+struct RenderProfileGuard {
+    previous: RenderProfile,
+}
+
+impl Drop for RenderProfileGuard {
+    fn drop(&mut self) {
+        RENDER_PROFILE_CONTEXT.with(|profile| profile.set(self.previous));
+    }
+}
+
+fn push_render_profile(profile: RenderProfile) -> RenderProfileGuard {
+    let previous = RENDER_PROFILE_CONTEXT.with(|current| {
+        let previous = current.get();
+        current.set(profile);
+        previous
+    });
+    RenderProfileGuard { previous }
+}
+
+pub fn with_preferred_aspect_ratio<R>(ratio: Option<f32>, f: impl FnOnce() -> R) -> R {
+    let _guard = push_render_profile(RenderProfile::from_preferred_aspect_ratio(ratio));
+    f()
+}
 
 #[derive(Debug, Clone)]
 pub struct DiagramInfo {
@@ -205,9 +272,10 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 static DEFERRED_RENDER_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 /// Background mermaid renders currently queued or in flight, keyed by
-/// (content hash, target width).
-static PENDING_RENDER_REQUESTS: LazyLock<Mutex<HashMap<(u64, u32), PendingDeferredRender>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// (content hash, target width, render profile).
+static PENDING_RENDER_REQUESTS: LazyLock<
+    Mutex<HashMap<(u64, u32, RenderProfile), PendingDeferredRender>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Sender for the shared deferred Mermaid render worker.
 static DEFERRED_RENDER_TX: OnceLock<mpsc::Sender<DeferredRenderTask>> = OnceLock::new();
@@ -564,7 +632,7 @@ struct PendingDeferredRender {
 struct DeferredRenderTask {
     content: String,
     terminal_width: Option<u16>,
-    render_key: (u64, u32),
+    render_key: (u64, u32, RenderProfile),
 }
 
 #[derive(Debug, Clone, Copy, Default)]

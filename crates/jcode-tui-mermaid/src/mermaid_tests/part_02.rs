@@ -31,3 +31,34 @@ fn viewport_crop_resize_scales_complete_zoomed_crops_to_fill_destination() {
         200, 180, 280, 180
     ));
 }
+
+#[test]
+fn preferred_aspect_ratio_context_is_scoped_and_bucketed() {
+    assert_eq!(super::current_preferred_aspect_ratio_bucket(), None);
+
+    let outer = super::with_preferred_aspect_ratio(Some(0.75), || {
+        assert_eq!(super::current_preferred_aspect_ratio_bucket(), Some(750));
+        super::with_preferred_aspect_ratio(Some(1.25), || {
+            assert_eq!(super::current_preferred_aspect_ratio_bucket(), Some(1250));
+        });
+        super::current_preferred_aspect_ratio_bucket()
+    });
+
+    assert_eq!(outer, Some(750));
+    assert_eq!(super::current_preferred_aspect_ratio_bucket(), None);
+}
+
+#[test]
+fn preferred_aspect_ratio_adjusts_render_height_without_changing_width_bucket() {
+    let (default_width, default_height) = super::calculate_render_size(6, 5, Some(80));
+    let (profile_width, profile_height) = super::with_preferred_aspect_ratio(Some(0.5), || {
+        super::calculate_render_size(6, 5, Some(80))
+    });
+
+    assert_eq!(profile_width, default_width);
+    assert!(
+        profile_height > default_height,
+        "portrait side-pane aspect should request a taller render: default={default_height}, profiled={profile_height}"
+    );
+    assert!((profile_width / profile_height - 0.5).abs() < 0.01);
+}
