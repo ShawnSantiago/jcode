@@ -210,12 +210,24 @@ fn single_session_vertices_do_not_draw_input_underline() {
     });
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
     let old_composer_line_color = [0.060, 0.085, 0.145, 0.34];
+    let outline_color = panel_accent_color(single_session_surface(None).color_index, true);
 
     assert!(!vertices_have_color(&vertices, old_composer_line_color));
     assert!(!vertices_have_color(
         &fresh_vertices,
         old_composer_line_color
     ));
+    assert!(!vertices_have_bottom_center_rule(&vertices, outline_color));
+    assert!(!vertices_have_bottom_center_rule(
+        &fresh_vertices,
+        outline_color
+    ));
+}
+
+fn vertices_have_bottom_center_rule(vertices: &[Vertex], color: [f32; 4]) -> bool {
+    vertices.iter().any(|vertex| {
+        vertex.color == color && vertex.position[1] <= -0.99 && vertex.position[0].abs() < 0.85
+    })
 }
 
 #[test]
@@ -1625,9 +1637,28 @@ fn desktop_help_text_documents_desktop_options() {
     assert!(help.contains("Usage:"));
     assert!(help.contains("--fullscreen"));
     assert!(help.contains("--workspace"));
+    assert!(help.contains("--startup-log"));
+    assert!(help.contains("--startup-benchmark"));
     assert!(help.contains("--headless-chat-smoke <MSG>"));
     assert!(help.contains("--version"));
     assert!(help.contains("--help"));
+}
+
+#[test]
+fn desktop_startup_flags_enable_logging_and_benchmark_mode() {
+    let args = vec!["jcode-desktop".to_string(), "--startup-log".to_string()];
+    assert!(startup_log_requested(&args));
+    assert!(!startup_benchmark_requested(&args));
+
+    let args = vec![
+        "jcode-desktop".to_string(),
+        "--startup-benchmark".to_string(),
+    ];
+    assert!(startup_benchmark_requested(&args));
+    assert!(!startup_log_requested(&["jcode-desktop".to_string()]));
+
+    assert!(env_flag_enabled(OsString::from("1")));
+    assert!(!env_flag_enabled(OsString::from("false")));
 }
 
 #[test]

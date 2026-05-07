@@ -58,11 +58,10 @@ pub(crate) fn build_single_session_vertices_with_scroll(
         height: height.max(1.0),
     };
     let surface = single_session_surface(app.session.as_ref());
-    push_surface(
+    push_single_session_surface_without_bottom_rule(
         &mut vertices,
         rect,
         surface.color_index,
-        true,
         focus_pulse,
         size,
     );
@@ -88,6 +87,92 @@ pub(crate) fn build_single_session_vertices_with_scroll(
     push_single_session_scrollbar(&mut vertices, app, size, spinner_tick, smooth_scroll_lines);
 
     vertices
+}
+
+fn push_single_session_surface_without_bottom_rule(
+    vertices: &mut Vec<Vertex>,
+    rect: Rect,
+    color_index: usize,
+    focus_pulse: f32,
+    size: PhysicalSize<u32>,
+) {
+    let accent = panel_accent_color(color_index, true);
+    push_rounded_rect(
+        vertices,
+        rect,
+        PANEL_RADIUS,
+        with_alpha(accent, 0.105),
+        size,
+    );
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: 5.0_f32.min(rect.width),
+            height: rect.height,
+        },
+        PANEL_RADIUS,
+        with_alpha(accent, 0.78),
+        size,
+    );
+
+    let stroke_width = FOCUSED_BORDER_WIDTH + focus_pulse * 2.5;
+    push_top_and_side_surface_outline(vertices, rect, stroke_width, accent, size);
+
+    if focus_pulse > 0.0 {
+        let pulse_rect = inset_rect(rect, -3.0 * focus_pulse);
+        push_top_and_side_surface_outline(
+            vertices,
+            pulse_rect,
+            1.0,
+            with_alpha(FOCUS_RING_COLOR, 0.32 * focus_pulse),
+            size,
+        );
+    }
+}
+
+fn push_top_and_side_surface_outline(
+    vertices: &mut Vec<Vertex>,
+    rect: Rect,
+    stroke_width: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let stroke_width = stroke_width.max(1.0).min(rect.width).min(rect.height);
+    push_rect(
+        vertices,
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: stroke_width,
+        },
+        color,
+        size,
+    );
+    push_rect(
+        vertices,
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: stroke_width,
+            height: rect.height,
+        },
+        color,
+        size,
+    );
+    push_rect(
+        vertices,
+        Rect {
+            x: rect.x + rect.width - stroke_width,
+            y: rect.y,
+            width: stroke_width,
+            height: rect.height,
+        },
+        color,
+        size,
+    );
 }
 
 pub(crate) fn push_native_activity_spinner(

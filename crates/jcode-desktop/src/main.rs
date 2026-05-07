@@ -172,6 +172,9 @@ fn main() -> Result<()> {
 
 async fn run() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    let startup_benchmark = startup_benchmark_requested(&args);
+    let startup_trace = DesktopStartupTrace::new(startup_benchmark || startup_log_requested(&args));
+    startup_trace.mark("args parsed");
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("{}", desktop_help_text());
         return Ok(());
@@ -186,6 +189,7 @@ async fn run() -> Result<()> {
     let fullscreen = args.iter().any(|arg| arg == "--fullscreen");
     let desktop_mode = desktop_mode_from_args(args.iter().map(String::as_str));
     let event_loop = EventLoop::new().context("failed to create event loop")?;
+    startup_trace.mark("event loop created");
     let mut window_builder = WindowBuilder::new()
         .with_title("Jcode Desktop")
         .with_inner_size(LogicalSize::new(
@@ -202,6 +206,7 @@ async fn run() -> Result<()> {
             .build(&event_loop)
             .context("failed to create desktop window")?,
     ));
+    startup_trace.mark("window created");
 
     let mut app = if desktop_mode == DesktopMode::WorkspacePrototype {
         let session_cards = load_session_cards_for_desktop();
@@ -213,11 +218,10 @@ async fn run() -> Result<()> {
     } else {
         fresh_single_session_app()
     };
-    if let DesktopApp::SingleSession(single_session) = &mut app {
-        single_session.set_recovery_session_count(load_crashed_session_cards_for_desktop().len());
-    }
+    startup_trace.mark("app state initialized");
     window.set_title(&app.status_title());
-    let mut canvas = Canvas::new(window).await?;
+    let mut canvas = Canvas::new(window, startup_trace).await?;
+    startup_trace.mark("canvas ready");
     let mut modifiers = ModifiersState::empty();
     let mut cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
     let mut selecting_body = false;
@@ -225,6 +229,9 @@ async fn run() -> Result<()> {
     let mut hot_reloader = DesktopHotReloader::new();
     let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
     let (session_event_tx, session_event_rx) = mpsc::channel();
+    let (recovery_count_tx, recovery_count_rx) = mpsc::channel();
+    let mut recovery_scan_pending = app.is_single_session();
+    let mut first_frame_presented = false;
 
     event_loop.run(move |event, target| {
         let has_background_work = app.has_background_work();
@@ -575,6 +582,21 @@ async fn run() -> Result<()> {
                     ),
                 ) {
                     Ok(animation_active) => {
+                        if !first_frame_presented {
+                            first_frame_presented = true;
+                            startup_trace.mark("first frame presented");
+                            if startup_benchmark {
+                                target.exit();
+                                return;
+                            }
+                            if recovery_scan_pending {
+                                recovery_scan_pending = false;
+                                spawn_recovery_session_count_scan(
+                                    recovery_count_tx.clone(),
+                                    startup_trace,
+                                );
+                            }
+                        }
                         if animation_active {
                             window.request_redraw();
                         }
@@ -591,6 +613,14 @@ async fn run() -> Result<()> {
                 _ => {}
             },
             Event::AboutToWait => {
+                if let Ok(recovery_count) = recovery_count_rx.try_recv() {
+                    if let DesktopApp::SingleSession(single_session) = &mut app {
+                        single_session.set_recovery_session_count(recovery_count);
+                        window.set_title(&app.status_title());
+                        window.request_redraw();
+                    }
+                }
+
                 if apply_pending_session_events(&mut app, &session_event_rx) {
                     if let Some(session_id) = app.single_session_live_id() {
                         attach_single_session_by_id(&mut app, &session_id);
@@ -662,6 +692,25 @@ fn load_crashed_session_cards_for_desktop() -> Vec<workspace::SessionCard> {
     }
 }
 
+fn spawn_recovery_session_count_scan(
+    recovery_count_tx: mpsc::Sender<usize>,
+    startup_trace: DesktopStartupTrace,
+) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("jcode-desktop-recovery-scan".to_string())
+        .spawn(move || {
+            startup_trace.mark("recovery scan started");
+            let recovery_count = load_crashed_session_cards_for_desktop().len();
+            startup_trace.mark(&format!(
+                "recovery scan completed ({recovery_count} crashed)"
+            ));
+            let _ = recovery_count_tx.send(recovery_count);
+        })
+    {
+        eprintln!("jcode-desktop: failed to start recovery scan: {error:#}");
+    }
+}
+
 fn headless_chat_smoke_message(args: &[String]) -> Option<String> {
     args.iter().enumerate().find_map(|(index, arg)| {
         arg.strip_prefix("--headless-chat-smoke=")
@@ -683,6 +732,8 @@ const DESKTOP_HELP_LINES: &[&str] = &[
     "Options:",
     "  --fullscreen                 Start borderless fullscreen",
     "  --workspace                  Open the workspace prototype instead of the single-session chat",
+    "  --startup-log                Print launch timing milestones to stderr",
+    "  --startup-benchmark          Print launch timings and exit after the first frame",
     "  --headless-chat-smoke <MSG>  Run a hidden backend smoke test and print JSON events",
     "  --headless-chat-smoke=<MSG>  Same as above",
     "  -V, --version                Print version information",
@@ -692,6 +743,47 @@ const DESKTOP_HELP_LINES: &[&str] = &[
 
 fn desktop_help_text() -> String {
     DESKTOP_HELP_LINES.join("\n")
+}
+
+fn startup_log_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--startup-log")
+        || std::env::var_os("JCODE_DESKTOP_STARTUP_LOG").is_some_and(env_flag_enabled)
+}
+
+fn startup_benchmark_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--startup-benchmark")
+}
+
+fn env_flag_enabled(value: OsString) -> bool {
+    let value = value.to_string_lossy();
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "off" | "no"
+    )
+}
+
+#[derive(Clone, Copy)]
+struct DesktopStartupTrace {
+    started_at: Instant,
+    enabled: bool,
+}
+
+impl DesktopStartupTrace {
+    fn new(enabled: bool) -> Self {
+        Self {
+            started_at: Instant::now(),
+            enabled,
+        }
+    }
+
+    fn mark(&self, milestone: &str) {
+        if self.enabled {
+            eprintln!(
+                "jcode-desktop startup +{:>7.2} ms  {milestone}",
+                self.started_at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
 }
 
 fn run_headless_chat_smoke(message: String) -> Result<()> {
@@ -1585,15 +1677,17 @@ struct Canvas<'window> {
 }
 
 impl<'window> Canvas<'window> {
-    async fn new(window: &'window Window) -> Result<Self> {
+    async fn new(window: &'window Window, startup_trace: DesktopStartupTrace) -> Result<Self> {
         let size = non_zero_size(window.inner_size());
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
+        startup_trace.mark("wgpu instance created");
         let surface = instance
             .create_surface(window)
             .context("failed to create wgpu surface")?;
+        startup_trace.mark("wgpu surface created");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -1602,6 +1696,7 @@ impl<'window> Canvas<'window> {
             })
             .await
             .context("failed to find a compatible GPU adapter")?;
+        startup_trace.mark("wgpu adapter ready");
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -1613,6 +1708,7 @@ impl<'window> Canvas<'window> {
             )
             .await
             .context("failed to create wgpu device")?;
+        startup_trace.mark("wgpu device ready");
         let capabilities = surface.get_capabilities(&adapter);
         let format = capabilities
             .formats
@@ -1644,6 +1740,7 @@ impl<'window> Canvas<'window> {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+        startup_trace.mark("surface configured");
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("jcode-desktop-primitive-shader"),
@@ -1684,6 +1781,7 @@ impl<'window> Canvas<'window> {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+        startup_trace.mark("primitive pipeline ready");
         let mut text_atlas = TextAtlas::new(&device, &queue, format);
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
@@ -1691,6 +1789,7 @@ impl<'window> Canvas<'window> {
             wgpu::MultisampleState::default(),
             None,
         );
+        startup_trace.mark("text renderer ready");
 
         Ok(Self {
             surface,
