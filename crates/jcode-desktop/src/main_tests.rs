@@ -1421,6 +1421,67 @@ fn single_session_paste_text_preserves_spaces() {
 }
 
 #[test]
+fn clipboard_text_normalization_preserves_whitespace_but_unifies_newlines() {
+    assert_eq!(normalize_clipboard_text("a\r\nb\rc  "), "a\nb\nc  ");
+    assert_eq!(
+        normalize_clipboard_text("  padded\ttext  "),
+        "  padded\ttext  "
+    );
+}
+
+#[test]
+fn paste_clipboard_text_inserts_at_cursor_and_supports_undo() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.handle_key(KeyInput::Character("hello world".to_string()));
+    app.draft_cursor = "hello".len();
+
+    assert!(paste_clipboard_text(&mut desktop, "\r\n  pasted  "));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    assert_eq!(app.draft, "hello\n  pasted   world");
+    assert_eq!(app.draft_cursor, "hello\n  pasted  ".len());
+
+    assert_eq!(app.handle_key(KeyInput::UndoInput), KeyOutcome::Redraw);
+    assert_eq!(app.draft, "hello world");
+    assert_eq!(app.draft_cursor, "hello".len());
+}
+
+#[test]
+fn paste_clipboard_text_routes_to_interactive_stdin_response() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.apply_session_event(session_launch::DesktopSessionEvent::StdinRequest {
+        request_id: "stdin-1".to_string(),
+        prompt: "Password:".to_string(),
+        is_password: true,
+        tool_call_id: "tool-1".to_string(),
+    });
+
+    assert!(paste_clipboard_text(&mut desktop, "secret\r\nline"));
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    assert_eq!(app.stdin_response.as_ref().unwrap().input, "secret\nline");
+    assert!(app.draft.is_empty());
+}
+
+#[test]
+fn paste_clipboard_text_ignores_empty_text_so_image_fallback_can_run() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    assert!(!paste_clipboard_text(&mut desktop, ""));
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    assert!(app.draft.is_empty());
+}
+
+#[test]
 fn single_session_character_selection_extracts_visible_text() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("first"));
@@ -2019,6 +2080,10 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
         fresh_welcome_draft_top(size)
     );
     assert_eq!(areas.len(), 4, "fresh welcome hides normal status chrome");
+    assert!(
+        areas.last().expect("draft text area").top < handwritten_welcome_bounds(size).0[1],
+        "fresh input line should render before the handwritten hero"
+    );
 
     app.handle_key(KeyInput::Character("hello".to_string()));
     let key = single_session_text_key(&app, size);
@@ -2060,6 +2125,16 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
         key.body
             .iter()
             .any(|line| line.text.contains("hello desktop"))
+    );
+    let first_nonblank = key
+        .body
+        .iter()
+        .find(|line| !line.text.trim().is_empty())
+        .expect("submitted prompt should be first visible timeline text");
+    assert!(
+        first_nonblank.text.contains("hello desktop"),
+        "submitted input should stay before the visual hero block, got {:?}",
+        first_nonblank.text
     );
     assert!(
         key.body.iter().all(|line| !HANDWRITTEN_WELCOME_PHRASES

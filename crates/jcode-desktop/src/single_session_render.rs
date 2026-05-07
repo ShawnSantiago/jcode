@@ -325,11 +325,10 @@ fn handwritten_welcome_bounds_for_phrase(
     let (source_min, source_max) = stroke_paths_bounds(&paths);
     let source_width = (source_max[0] - source_min[0]).max(1.0);
     let source_height = (source_max[1] - source_min[1]).max(1.0);
-    let normal_draft_top = single_session_draft_top(size);
     let target_width = size.width as f32 * 0.52;
     let scale = target_width / source_width;
     let left = (size.width as f32 - target_width) * 0.5;
-    let top = PANEL_BODY_TOP_PADDING + (normal_draft_top - PANEL_BODY_TOP_PADDING) * 0.31;
+    let top = fresh_welcome_hero_top(size);
     (
         [left, top],
         [left + target_width, top + source_height * scale],
@@ -1493,10 +1492,10 @@ fn welcome_timeline_total_body_lines(app: &SingleSessionApp, size: PhysicalSize<
 
 fn welcome_timeline_virtual_body_lines(size: PhysicalSize<u32>) -> usize {
     // Reserve scrollable visual space for the handwritten hero without adding
-    // "Hello there" to transcript text or model-derived body lines.
+    // the hero phrase to transcript text or model-derived body lines.
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
-    ((fresh_welcome_draft_top(size) - PANEL_BODY_TOP_PADDING).max(0.0) / line_height)
+    ((fresh_welcome_visual_bottom(size) - PANEL_BODY_TOP_PADDING).max(0.0) / line_height)
         .ceil()
         .max(0.0) as usize
 }
@@ -1513,13 +1512,20 @@ pub(crate) fn single_session_draft_top_for_fresh_state(
 }
 
 pub(crate) fn fresh_welcome_draft_top(size: PhysicalSize<u32>) -> f32 {
-    let hero_bottom = handwritten_welcome_bounds(size).1[1];
     let typography = single_session_typography();
-    let clearance = (typography.code_size * 1.85).max(46.0);
-    let draft_top = hero_bottom + clearance;
-    draft_top
+    (PANEL_BODY_TOP_PADDING + (typography.code_size * 1.36).max(34.0))
         .min(single_session_draft_top(size))
-        .max(hero_bottom + clearance)
+}
+
+fn fresh_welcome_hero_top(size: PhysicalSize<u32>) -> f32 {
+    let typography = single_session_typography();
+    let input_bottom =
+        fresh_welcome_draft_top(size) + typography.code_size * typography.code_line_height;
+    input_bottom + (typography.body_size * 1.36).max(34.0)
+}
+
+fn fresh_welcome_visual_bottom(size: PhysicalSize<u32>) -> f32 {
+    fresh_welcome_version_top(size) + fresh_welcome_version_font_size() * 1.4
 }
 
 #[cfg(test)]
@@ -1752,12 +1758,32 @@ fn single_session_rendered_body_lines_for_tick(
     }
 
     // The welcome hero is visual chrome. These blank prelude rows make it
-    // scroll like the first timeline block while keeping transcript text pure.
+    // scroll like a timeline block while keeping transcript text pure. The first
+    // user turn stays before that visual block so the typed input does not jump
+    // behind the hero after submit.
     let virtual_lines = welcome_timeline_virtual_body_lines(size);
+    let leading_input_lines = welcome_timeline_leading_input_lines(&lines);
     let mut rendered = Vec::with_capacity(virtual_lines + lines.len());
+    rendered.extend(lines.iter().take(leading_input_lines).cloned());
     rendered.extend((0..virtual_lines).map(|_| blank_render_line()));
-    rendered.extend(lines);
+    rendered.extend(lines.into_iter().skip(leading_input_lines));
     rendered
+}
+
+fn welcome_timeline_leading_input_lines(lines: &[SingleSessionStyledLine]) -> usize {
+    let mut count = 0;
+    for line in lines {
+        let is_leading_input = if count == 0 {
+            line.style == SingleSessionLineStyle::User
+        } else {
+            line.style == SingleSessionLineStyle::UserContinuation
+        };
+        if !is_leading_input {
+            break;
+        }
+        count += 1;
+    }
+    count
 }
 
 fn blank_render_line() -> SingleSessionStyledLine {

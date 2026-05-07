@@ -1559,7 +1559,7 @@ fn copy_text_to_clipboard(text: &str, success_notice: &'static str, app: &mut De
             success_notice.to_string(),
         )),
         Err(error) => app.apply_session_event(session_launch::DesktopSessionEvent::Error(format!(
-            "failed to copy latest response: {error}"
+            "failed to update clipboard after {success_notice}: {error}"
         ))),
     }
 }
@@ -1567,22 +1567,37 @@ fn copy_text_to_clipboard(text: &str, success_notice: &'static str, app: &mut De
 fn paste_clipboard_into_app(app: &mut DesktopApp) -> Result<()> {
     match clipboard_text() {
         Ok(text) => {
-            app.paste_text(&text);
-            Ok(())
+            if paste_clipboard_text(app, &text) || !app.accepts_clipboard_image_paste() {
+                return Ok(());
+            }
+            paste_clipboard_image_into_app(app)
+                .with_context(|| "clipboard text was empty and no pasteable image was available")
         }
         Err(text_error) if app.accepts_clipboard_image_paste() => {
-            match clipboard_image_png_base64() {
-                Ok((media_type, base64_data)) => {
-                    app.attach_clipboard_image(media_type, base64_data);
-                    Ok(())
-                }
-                Err(image_error) => Err(anyhow::anyhow!(
-                    "clipboard contains neither pasteable text nor image: text: {text_error}; image: {image_error}"
-                )),
-            }
+            paste_clipboard_image_into_app(app)
+                .with_context(|| format!("clipboard did not contain pasteable text: {text_error}"))
         }
         Err(error) => Err(error),
     }
+}
+
+fn paste_clipboard_text(app: &mut DesktopApp, text: &str) -> bool {
+    let text = normalize_clipboard_text(text);
+    if text.is_empty() {
+        return false;
+    }
+    app.paste_text(&text);
+    true
+}
+
+fn paste_clipboard_image_into_app(app: &mut DesktopApp) -> Result<()> {
+    let (media_type, base64_data) = clipboard_image_png_base64()?;
+    app.attach_clipboard_image(media_type, base64_data);
+    Ok(())
+}
+
+fn normalize_clipboard_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn clipboard_image_png_base64() -> Result<(String, String)> {
