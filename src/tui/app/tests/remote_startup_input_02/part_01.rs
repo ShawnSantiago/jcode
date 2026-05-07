@@ -150,6 +150,48 @@ fn test_model_picker_bedrock_selection_prefixes_model() {
 }
 
 #[test]
+fn test_model_picker_bedrock_arn_selection_prefixes_model() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let model =
+        "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0";
+    app.remote_available_entries = vec![model.to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: model.to_string(),
+        provider: "AWS Bedrock".to_string(),
+        api_method: "bedrock".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    }];
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+    let model_idx = picker
+        .entries
+        .iter()
+        .position(|m| m.name == model)
+        .expect("Bedrock ARN should be in picker");
+    let filtered_pos = picker
+        .filtered
+        .iter()
+        .position(|&i| i == model_idx)
+        .expect("Bedrock ARN should be in filtered list");
+
+    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    let expected = format!("bedrock:{model}");
+    assert_eq!(app.pending_model_switch.as_deref(), Some(expected.as_str()));
+    assert!(app.inline_interactive_state.is_none());
+}
+
+#[test]
 fn test_handle_key_cursor_movement() {
     let mut app = create_test_app();
 

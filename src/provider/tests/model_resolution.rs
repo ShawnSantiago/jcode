@@ -28,6 +28,12 @@ fn test_provider_for_model_bedrock() {
         provider_for_model("us.amazon.nova-micro-v1:0"),
         Some("bedrock")
     );
+    assert_eq!(
+        provider_for_model(
+            "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0"
+        ),
+        Some("bedrock")
+    );
 }
 
 #[test]

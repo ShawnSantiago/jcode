@@ -47,6 +47,10 @@ struct BedrockModelInfo {
 struct PersistedCatalog {
     models: Vec<String>,
     inference_profiles: Vec<String>,
+    #[serde(default)]
+    profile_required_models: Vec<String>,
+    #[serde(default)]
+    inference_profile_routes: HashMap<String, String>,
     region: Option<String>,
     fetched_at_rfc3339: String,
 }
@@ -55,6 +59,8 @@ pub struct BedrockProvider {
     model: Arc<RwLock<String>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
     fetched_inference_profiles: Arc<RwLock<Vec<String>>>,
+    profile_required_models: Arc<RwLock<HashSet<String>>>,
+    inference_profile_routes: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl BedrockProvider {
@@ -65,6 +71,8 @@ impl BedrockProvider {
             model: Arc::new(RwLock::new(model)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             fetched_inference_profiles: Arc::new(RwLock::new(Vec::new())),
+            profile_required_models: Arc::new(RwLock::new(HashSet::new())),
+            inference_profile_routes: Arc::new(RwLock::new(HashMap::new())),
         };
         provider.seed_cached_catalog();
         provider
@@ -186,7 +194,9 @@ impl BedrockProvider {
             .send()
             .await
             .map(|_| ())
-            .map_err(|err| anyhow::anyhow!(Self::classify_error_message(&err.to_string())))
+            .map_err(|err| {
+                anyhow::anyhow!(Self::classify_error_message(&Self::sdk_error_message(&err)))
+            })
     }
 
     fn configured_region() -> Option<String> {
@@ -216,13 +226,20 @@ impl BedrockProvider {
         crate::storage::read_json(&path).ok()
     }
 
-    fn persist_catalog(models: &[String], inference_profiles: &[String]) {
+    fn persist_catalog(
+        models: &[String],
+        inference_profiles: &[String],
+        profile_required_models: &HashSet<String>,
+        inference_profile_routes: &HashMap<String, String>,
+    ) {
         let Ok(path) = Self::persisted_catalog_path() else {
             return;
         };
         let payload = PersistedCatalog {
             models: models.to_vec(),
             inference_profiles: inference_profiles.to_vec(),
+            profile_required_models: profile_required_models.iter().cloned().collect(),
+            inference_profile_routes: inference_profile_routes.clone(),
             region: Self::configured_region(),
             fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
         };
@@ -237,11 +254,29 @@ impl BedrockProvider {
 
     fn seed_cached_catalog(&self) {
         if let Some(catalog) = Self::load_persisted_catalog() {
-            if let Ok(mut models) = self.fetched_models.write() {
-                *models = catalog.models;
+            let PersistedCatalog {
+                models: cached_models,
+                inference_profiles,
+                profile_required_models,
+                inference_profile_routes,
+                ..
+            } = catalog;
+            let mut inference_profile_routes = inference_profile_routes;
+            Self::merge_profile_routes_from_profile_ids(
+                &mut inference_profile_routes,
+                inference_profiles.iter(),
+            );
+            if let Ok(mut guard) = self.fetched_models.write() {
+                *guard = cached_models;
             }
             if let Ok(mut profiles) = self.fetched_inference_profiles.write() {
-                *profiles = catalog.inference_profiles;
+                *profiles = inference_profiles;
+            }
+            if let Ok(mut required) = self.profile_required_models.write() {
+                *required = profile_required_models.into_iter().collect();
+            }
+            if let Ok(mut routes) = self.inference_profile_routes.write() {
+                *routes = inference_profile_routes;
             }
         }
     }
@@ -276,6 +311,19 @@ impl BedrockProvider {
             "Bedrock request failed. Check AWS credentials, region, model access, and IAM permissions."
         };
         format!("{} Original error: {}", hint, raw.trim())
+    }
+
+    fn sdk_error_message(err: &(impl std::fmt::Display + std::fmt::Debug)) -> String {
+        let display = err.to_string();
+        let trimmed = display.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("service error")
+            || trimmed.eq_ignore_ascii_case("dispatch failure")
+        {
+            format!("{err:?}")
+        } else {
+            display
+        }
     }
 
     fn json_to_document(value: &serde_json::Value) -> aws_smithy_types::Document {
@@ -494,6 +542,122 @@ impl BedrockProvider {
         value
     }
 
+    fn foundation_model_id_from_arn(arn: &str) -> Option<String> {
+        arn.rsplit_once("foundation-model/")
+            .map(|(_, model)| model.trim())
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+    }
+
+    fn inference_profile_id_from_arn(arn: &str) -> Option<String> {
+        arn.rsplit_once("inference-profile/")
+            .map(|(_, profile)| profile.trim())
+            .filter(|profile| !profile.is_empty())
+            .map(str::to_string)
+    }
+
+    fn foundation_model_id_from_profile_id(profile_id: &str) -> Option<String> {
+        let id = profile_id.trim();
+        let id = Self::inference_profile_id_from_arn(id).unwrap_or_else(|| id.to_string());
+        for prefix in ["us.", "eu.", "apac.", "global."] {
+            if let Some(model) = id.strip_prefix(prefix)
+                && !model.is_empty()
+            {
+                return Some(model.to_string());
+            }
+        }
+        None
+    }
+
+    fn region_profile_prefix() -> Option<&'static str> {
+        let region = Self::configured_region()?;
+        if region.starts_with("us-") {
+            Some("us.")
+        } else if region.starts_with("eu-") {
+            Some("eu.")
+        } else if region.starts_with("ap-") {
+            Some("apac.")
+        } else {
+            None
+        }
+    }
+
+    fn inference_profile_priority(profile_id: &str) -> u8 {
+        let id = profile_id.trim().to_ascii_lowercase();
+        if let Some(prefix) = Self::region_profile_prefix()
+            && id.starts_with(prefix)
+        {
+            return 0;
+        }
+        if id.starts_with("us.") || id.starts_with("eu.") || id.starts_with("apac.") {
+            1
+        } else if id.starts_with("global.") {
+            2
+        } else {
+            3
+        }
+    }
+
+    fn insert_preferred_profile_route(
+        routes: &mut HashMap<String, String>,
+        foundation_model: &str,
+        profile_id: &str,
+    ) {
+        let foundation_model = foundation_model.trim();
+        let profile_id = profile_id.trim();
+        if foundation_model.is_empty() || profile_id.is_empty() {
+            return;
+        }
+        let should_replace = routes
+            .get(foundation_model)
+            .map(|current| {
+                Self::inference_profile_priority(profile_id)
+                    < Self::inference_profile_priority(current)
+            })
+            .unwrap_or(true);
+        if should_replace {
+            routes.insert(foundation_model.to_string(), profile_id.to_string());
+        }
+    }
+
+    fn merge_profile_routes_from_profile_ids(
+        routes: &mut HashMap<String, String>,
+        profiles: impl IntoIterator<Item = impl AsRef<str>>,
+    ) {
+        for profile in profiles {
+            let profile = profile.as_ref().trim();
+            let Some(foundation_model) = Self::foundation_model_id_from_profile_id(profile) else {
+                continue;
+            };
+            let profile_id =
+                Self::inference_profile_id_from_arn(profile).unwrap_or_else(|| profile.to_string());
+            Self::insert_preferred_profile_route(routes, &foundation_model, &profile_id);
+        }
+    }
+
+    fn profile_route_for_model(&self, model: &str) -> Option<String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+
+        if let Ok(routes) = self.inference_profile_routes.read()
+            && let Some(route) = routes.get(model).cloned()
+        {
+            return Some(route);
+        }
+
+        if let Ok(profiles) = self.fetched_inference_profiles.read() {
+            let mut derived = HashMap::new();
+            Self::merge_profile_routes_from_profile_ids(&mut derived, profiles.iter());
+            if let Some(route) = derived.get(model).cloned() {
+                return Some(route);
+            }
+        }
+
+        None
+    }
+
     pub fn is_bedrock_model_id(model: &str) -> bool {
         let trimmed = model.trim();
         if trimmed.is_empty() {
@@ -633,13 +797,32 @@ impl BedrockProvider {
     fn all_display_models(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
+        let profile_required_models = self
+            .profile_required_models
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let inference_profile_routes = self
+            .inference_profile_routes
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let should_hide_non_invokable_foundation_model = |model: &str| {
+            profile_required_models.contains(model) && inference_profile_routes.contains_key(model)
+        };
         for model in Self::known_models().into_iter().map(str::to_string) {
+            if should_hide_non_invokable_foundation_model(&model) {
+                continue;
+            }
             if seen.insert(model.clone()) {
                 models.push(model);
             }
         }
         if let Ok(fetched) = self.fetched_models.read() {
             for model in fetched.iter() {
+                if should_hide_non_invokable_foundation_model(model) {
+                    continue;
+                }
                 if seen.insert(model.clone()) {
                     models.push(model.clone());
                 }
@@ -658,21 +841,35 @@ impl BedrockProvider {
     async fn refresh_catalog(&self) -> Result<(Vec<String>, Vec<String>)> {
         let client = Self::control_client().await;
         let mut models = Vec::new();
+        let mut profile_required_models = HashSet::new();
         let model_resp = client
             .list_foundation_models()
             .send()
             .await
-            .map_err(|err| anyhow::anyhow!(Self::classify_error_message(&err.to_string())))?;
+            .map_err(|err| {
+                anyhow::anyhow!(Self::classify_error_message(&Self::sdk_error_message(&err)))
+            })?;
         for summary in model_resp.model_summaries() {
             let model_id = summary.model_id();
             if !model_id.is_empty() {
                 models.push(model_id.to_string());
+                let inference_types = summary.inference_types_supported();
+                let supports_on_demand = inference_types
+                    .iter()
+                    .any(|kind| kind.as_str() == "ON_DEMAND");
+                let supports_inference_profile = inference_types
+                    .iter()
+                    .any(|kind| kind.as_str() == "INFERENCE_PROFILE");
+                if supports_inference_profile && !supports_on_demand {
+                    profile_required_models.insert(model_id.to_string());
+                }
             }
         }
         models.sort();
         models.dedup();
 
         let mut profiles = Vec::new();
+        let mut inference_profile_routes = HashMap::new();
         match client.list_inference_profiles().send().await {
             Ok(resp) => {
                 for summary in resp.inference_profile_summaries() {
@@ -684,14 +881,32 @@ impl BedrockProvider {
                     if !arn.is_empty() {
                         profiles.push(arn.to_string());
                     }
+                    if summary.status().as_str() == "ACTIVE" && !id.is_empty() {
+                        for model in summary.models() {
+                            if let Some(model_arn) = model.model_arn()
+                                && let Some(foundation_model) =
+                                    Self::foundation_model_id_from_arn(model_arn)
+                            {
+                                Self::insert_preferred_profile_route(
+                                    &mut inference_profile_routes,
+                                    &foundation_model,
+                                    id,
+                                );
+                            }
+                        }
+                    }
                 }
                 profiles.sort();
                 profiles.dedup();
+                Self::merge_profile_routes_from_profile_ids(
+                    &mut inference_profile_routes,
+                    profiles.iter(),
+                );
             }
             Err(err) => {
                 crate::logging::info(&format!(
                     "Bedrock inference profile discovery skipped: {}",
-                    Self::classify_error_message(&err.to_string())
+                    Self::classify_error_message(&Self::sdk_error_message(&err))
                 ));
             }
         }
@@ -702,7 +917,18 @@ impl BedrockProvider {
         if let Ok(mut guard) = self.fetched_inference_profiles.write() {
             *guard = profiles.clone();
         }
-        Self::persist_catalog(&models, &profiles);
+        if let Ok(mut guard) = self.profile_required_models.write() {
+            *guard = profile_required_models.clone();
+        }
+        if let Ok(mut guard) = self.inference_profile_routes.write() {
+            *guard = inference_profile_routes.clone();
+        }
+        Self::persist_catalog(
+            &models,
+            &profiles,
+            &profile_required_models,
+            &inference_profile_routes,
+        );
         Ok((models, profiles))
     }
 }
@@ -752,7 +978,7 @@ impl Provider for BedrockProvider {
                 Err(err) => {
                     let _ = tx
                         .send(Err(anyhow::anyhow!(Self::classify_error_message(
-                            &err.to_string()
+                            &Self::sdk_error_message(&err)
                         ))))
                         .await;
                     return;
@@ -831,7 +1057,7 @@ impl Provider for BedrockProvider {
                     Err(err) => {
                         let _ = tx
                             .send(Err(anyhow::anyhow!(Self::classify_error_message(
-                                &err.to_string()
+                                &Self::sdk_error_message(&err)
                             ))))
                             .await;
                         break;
@@ -858,7 +1084,11 @@ impl Provider for BedrockProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        *self.model.write().unwrap_or_else(|p| p.into_inner()) = model.to_string();
+        let model = model.trim();
+        let model = self
+            .profile_route_for_model(model)
+            .unwrap_or_else(|| model.to_string());
+        *self.model.write().unwrap_or_else(|p| p.into_inner()) = model;
         Ok(())
     }
 
@@ -945,6 +1175,8 @@ impl Provider for BedrockProvider {
             model: Arc::new(RwLock::new(self.model())),
             fetched_models: self.fetched_models.clone(),
             fetched_inference_profiles: self.fetched_inference_profiles.clone(),
+            profile_required_models: self.profile_required_models.clone(),
+            inference_profile_routes: self.inference_profile_routes.clone(),
         })
     }
 }
@@ -1069,6 +1301,97 @@ mod tests {
         p.set_model("us.anthropic.claude-3-5-sonnet-20241022-v2:0")
             .unwrap();
         assert_eq!(p.model(), "us.anthropic.claude-3-5-sonnet-20241022-v2:0");
+    }
+
+    #[test]
+    fn maps_profile_required_foundation_model_to_inference_profile() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let p = BedrockProvider::new();
+        p.profile_required_models
+            .write()
+            .unwrap()
+            .insert("amazon.nova-2-lite-v1:0".to_string());
+        p.inference_profile_routes.write().unwrap().insert(
+            "amazon.nova-2-lite-v1:0".to_string(),
+            "us.amazon.nova-2-lite-v1:0".to_string(),
+        );
+
+        p.set_model("amazon.nova-2-lite-v1:0").unwrap();
+
+        assert_eq!(p.model(), "us.amazon.nova-2-lite-v1:0");
+    }
+
+    #[test]
+    fn maps_foundation_model_from_stale_cached_profile_list() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let p = BedrockProvider::new();
+        *p.fetched_inference_profiles.write().unwrap() = vec![
+            "global.amazon.nova-2-lite-v1:0".to_string(),
+            "us.amazon.nova-2-lite-v1:0".to_string(),
+        ];
+
+        p.set_model("amazon.nova-2-lite-v1:0").unwrap();
+
+        assert_eq!(p.model(), "us.amazon.nova-2-lite-v1:0");
+    }
+
+    #[test]
+    fn hides_profile_required_foundation_model_when_profile_route_exists() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let p = BedrockProvider::new();
+        *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
+        *p.fetched_inference_profiles.write().unwrap() =
+            vec!["us.amazon.nova-2-lite-v1:0".to_string()];
+        p.profile_required_models
+            .write()
+            .unwrap()
+            .insert("amazon.nova-2-lite-v1:0".to_string());
+        p.inference_profile_routes.write().unwrap().insert(
+            "amazon.nova-2-lite-v1:0".to_string(),
+            "us.amazon.nova-2-lite-v1:0".to_string(),
+        );
+
+        let display = p.all_display_models();
+
+        assert!(
+            !display
+                .iter()
+                .any(|model| model == "amazon.nova-2-lite-v1:0")
+        );
+        assert!(
+            display
+                .iter()
+                .any(|model| model == "us.amazon.nova-2-lite-v1:0")
+        );
+    }
+
+    #[test]
+    fn prefers_region_inference_profile_over_global_profile() {
+        let _guard = crate::storage::lock_test_env();
+        let _region = EnvVarGuard::set(REGION_ENV, "us-east-2");
+        let mut routes = HashMap::new();
+
+        BedrockProvider::insert_preferred_profile_route(
+            &mut routes,
+            "amazon.nova-2-lite-v1:0",
+            "global.amazon.nova-2-lite-v1:0",
+        );
+        BedrockProvider::insert_preferred_profile_route(
+            &mut routes,
+            "amazon.nova-2-lite-v1:0",
+            "us.amazon.nova-2-lite-v1:0",
+        );
+
+        assert_eq!(
+            routes.get("amazon.nova-2-lite-v1:0").map(String::as_str),
+            Some("us.amazon.nova-2-lite-v1:0")
+        );
     }
 
     #[test]
