@@ -669,7 +669,11 @@ fn single_session_cut_and_retrieve_queued_draft_match_tui_shortcuts() {
 
 #[test]
 fn single_session_header_exposes_desktop_binary_and_version() {
-    let mut app = SingleSessionApp::new(None);
+    let mut app = SingleSessionApp::new(Some(test_session_card(
+        "session_header",
+        "session header",
+        "active",
+    )));
     app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
         session_id: "session_header".to_string(),
     });
@@ -856,7 +860,11 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
 
 #[test]
 fn glyphon_body_buffer_uses_line_style_colors() {
-    let mut app = SingleSessionApp::new(None);
+    let mut app = SingleSessionApp::new(Some(test_session_card(
+        "session_colors",
+        "colors",
+        "active",
+    )));
     app.messages.push(SingleSessionMessage::user("question"));
     app.messages.push(SingleSessionMessage::assistant(
         "answer\n\n```rust\nfn main() {}\n```",
@@ -1821,7 +1829,11 @@ fn smooth_scroll_viewport_keeps_fractional_line_offset() {
 
 #[test]
 fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
-    let mut app = SingleSessionApp::new(None);
+    let mut app = SingleSessionApp::new(Some(test_session_card(
+        "session_smooth",
+        "smooth",
+        "active",
+    )));
     let size = PhysicalSize::new(900, 360);
     for index in 0..48 {
         app.messages
@@ -1901,7 +1913,7 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
 }
 
 #[test]
-fn fresh_submit_keeps_stable_layout_and_greeting_in_history() {
+fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     let size = PhysicalSize::new(1000, 720);
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("hello desktop".to_string()));
@@ -1918,19 +1930,29 @@ fn fresh_submit_keeps_stable_layout_and_greeting_in_history() {
     push_single_session_caret(&mut vertices, &app, size, buffers.get(2));
 
     assert_eq!(key.title, "");
+    assert_eq!(key.welcome_hero, "Hello there");
     assert!(key.status.contains("sending"));
     assert_visual_text_contains(&key, "Hello there");
+    assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
     assert!(
         key.body
             .iter()
             .any(|line| line.text.contains("hello desktop"))
     );
+    assert!(
+        key.body
+            .iter()
+            .all(|line| !line.text.contains("Hello there")),
+        "welcome hero must stay visual-only, not become a transcript line"
+    );
     assert_eq!(
         areas.len(),
-        5,
-        "submit should keep normal session text areas"
+        4,
+        "submit should keep welcome timeline chrome instead of switching screens"
     );
-    assert_eq!(areas[4].top, single_session_draft_top(size));
+    assert_eq!(areas[2].top, PANEL_BODY_TOP_PADDING);
+    assert!(areas[3].top > areas[2].top);
+    assert!(areas[3].top >= fresh_welcome_draft_top(size));
     assert!(!vertices_have_color(&vertices, [0.060, 0.085, 0.145, 0.34]));
     assert!(vertices_have_color(&vertices, SINGLE_SESSION_CARET_COLOR));
 }
@@ -1965,11 +1987,11 @@ fn session_attach_does_not_move_submitted_fresh_layout() {
     assert_visual_text_contains(&after_key, "Hello there");
     assert_visual_text_contains(&after_key, "hello desktop");
     assert_eq!(before_areas[2].top, after_areas[2].top);
-    assert_eq!(before_areas[4].top, after_areas[4].top);
+    assert_eq!(before_areas[3].top, after_areas[3].top);
 }
 
 #[test]
-fn long_transcript_can_scroll_back_to_welcome_greeting() {
+fn long_transcript_keeps_welcome_visual_only() {
     let size = PhysicalSize::new(900, 360);
     let mut app = SingleSessionApp::new(None);
     for index in 0..48 {
@@ -1984,9 +2006,13 @@ fn long_transcript_can_scroll_back_to_welcome_greeting() {
     let metrics = single_session_body_scroll_metrics(&app, size, 0).expect("scroll metrics");
     app.scroll_body_lines(metrics.max_scroll_lines as i32);
     let top = single_session_visible_body(&app, size).join("\n");
+    let key = single_session_text_key(&app, size);
+    let vertices = build_single_session_vertices(&app, size, 0.0, 0);
 
-    assert!(top.contains("Hello there"));
+    assert!(!top.contains("Hello there"));
     assert!(!top.contains("message 47"));
+    assert_eq!(key.welcome_hero, "Hello there");
+    assert!(vertices_have_color(&vertices, WELCOME_HANDWRITING_COLOR));
 }
 
 #[test]
@@ -2018,10 +2044,8 @@ fn fresh_single_session_keeps_welcome_model_and_hero_available() {
     let model_lines = app.body_styled_lines();
 
     assert!(
-        model_lines
-            .iter()
-            .any(|line| { line.text.contains("Hello there") || line.text.contains("Welcome, ") }),
-        "expected generic or named welcome in model body, got: {:?}",
+        model_lines.is_empty(),
+        "fresh welcome greeting should be visual-only, not transcript body: {:?}",
         model_lines
     );
     assert_eq!(first.welcome_hero, later.welcome_hero);

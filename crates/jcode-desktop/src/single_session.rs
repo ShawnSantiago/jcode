@@ -76,6 +76,7 @@ pub(crate) struct SingleSessionApp {
     selection_focus: Option<SelectionPoint>,
     input_undo_stack: Vec<(String, usize)>,
     session_handle: Option<DesktopSessionHandle>,
+    welcome_timeline: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -471,6 +472,7 @@ impl SingleSessionMessage {
 
 impl SingleSessionApp {
     pub(crate) fn new(session: Option<workspace::SessionCard>) -> Self {
+        let welcome_timeline = session.is_none();
         Self {
             session,
             draft: String::new(),
@@ -495,13 +497,24 @@ impl SingleSessionApp {
             selection_focus: None,
             input_undo_stack: Vec::new(),
             session_handle: None,
+            welcome_timeline,
         }
     }
 
     pub(crate) fn replace_session(&mut self, session: Option<workspace::SessionCard>) {
+        let replacing_with_session = session.is_some();
         self.session = session;
         if let Some(session) = &self.session {
             self.live_session_id = Some(session.session_id.clone());
+        }
+        if replacing_with_session
+            && self.messages.is_empty()
+            && self.streaming_response.is_empty()
+            && self.error.is_none()
+        {
+            self.welcome_timeline = false;
+        } else if !replacing_with_session {
+            self.welcome_timeline = true;
         }
         self.detail_scroll = 0;
     }
@@ -533,6 +546,7 @@ impl SingleSessionApp {
         self.clear_selection();
         self.input_undo_stack.clear();
         self.session_handle = None;
+        self.welcome_timeline = true;
     }
 
     pub(crate) fn status_title(&self) -> String {
@@ -950,6 +964,7 @@ impl SingleSessionApp {
         self.stdin_response = None;
         self.body_scroll_lines = 0;
         self.show_help = false;
+        self.welcome_timeline = false;
         self.session_switcher.close();
         self.status = Some(format!("resumed {title}"));
         KeyOutcome::Redraw
@@ -1026,7 +1041,7 @@ impl SingleSessionApp {
         }
         if !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
         {
-            let mut lines = welcome_history_styled_lines(&self.welcome_name);
+            let mut lines = Vec::new();
             let mut user_turn = 1;
             for message in &self.messages {
                 if !lines.is_empty() {
@@ -1052,8 +1067,16 @@ impl SingleSessionApp {
             return lines;
         }
 
-        if self.is_fresh_welcome_visible() {
-            return welcome_styled_lines(&self.welcome_name, 0, self.recovery_session_count);
+        if self.is_welcome_timeline_visible() {
+            if let Some(status) = &self.status
+                && self.session.is_none()
+            {
+                return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
+            }
+            if self.recovery_session_count > 0 {
+                return welcome_recovery_styled_lines(self.recovery_session_count);
+            }
+            return Vec::new();
         }
 
         if let Some(status) = &self.status
@@ -1066,13 +1089,27 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn body_styled_lines_for_tick(&self, tick: u64) -> Vec<SingleSessionStyledLine> {
-        if self.is_fresh_welcome_visible() {
-            welcome_styled_lines(&self.welcome_name, tick, self.recovery_session_count)
-        } else {
-            self.body_styled_lines()
-        }
+        let _ = tick;
+        self.body_styled_lines()
     }
 
+    pub(crate) fn welcome_hero_text(&self) -> String {
+        welcome_greeting_text(&self.welcome_name)
+    }
+
+    pub(crate) fn is_welcome_timeline_visible(&self) -> bool {
+        self.welcome_timeline
+            && !self.show_help
+            && !self.model_picker.open
+            && !self.session_switcher.open
+            && self.stdin_response.is_none()
+    }
+
+    pub(crate) fn has_welcome_timeline_transcript(&self) -> bool {
+        !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_fresh_welcome_visible(&self) -> bool {
         self.session.is_none()
             && self.live_session_id.is_none()
@@ -1695,6 +1732,7 @@ fn blank_styled_line() -> SingleSessionStyledLine {
     styled_line(String::new(), SingleSessionLineStyle::Blank)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn welcome_styled_lines(
     name: &Option<String>,
     tick: u64,
@@ -1738,10 +1776,12 @@ pub(crate) fn welcome_styled_lines(
     lines
 }
 
-fn welcome_history_styled_lines(name: &Option<String>) -> Vec<SingleSessionStyledLine> {
+fn welcome_recovery_styled_lines(recovery_session_count: usize) -> Vec<SingleSessionStyledLine> {
     vec![styled_line(
-        welcome_greeting_text(name),
-        SingleSessionLineStyle::AssistantHeading,
+        format!(
+            "Found {recovery_session_count} crashed session(s). Press Ctrl+R to open them in new windows."
+        ),
+        SingleSessionLineStyle::Status,
     )]
 }
 
