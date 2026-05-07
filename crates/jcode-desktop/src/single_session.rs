@@ -94,7 +94,7 @@ pub(crate) struct SingleSessionApp {
     pub(crate) status: Option<String>,
     pub(crate) error: Option<String>,
     pub(crate) is_processing: bool,
-    pub(crate) body_scroll_lines: usize,
+    pub(crate) body_scroll_lines: f32,
     pub(crate) show_help: bool,
     pub(crate) pending_images: Vec<(String, String)>,
     pub(crate) model_picker: ModelPickerState,
@@ -524,7 +524,7 @@ impl SingleSessionApp {
             status: None,
             error: None,
             is_processing: false,
-            body_scroll_lines: 0,
+            body_scroll_lines: 0.0,
             show_help: false,
             pending_images: Vec::new(),
             model_picker: ModelPickerState::default(),
@@ -578,7 +578,7 @@ impl SingleSessionApp {
         self.status = None;
         self.error = None;
         self.is_processing = false;
-        self.body_scroll_lines = 0;
+        self.body_scroll_lines = 0.0;
         self.show_help = false;
         self.pending_images.clear();
         self.model_picker = ModelPickerState::default();
@@ -678,11 +678,7 @@ impl SingleSessionApp {
         } else {
             "Enter send · Shift+Enter newline · Ctrl+Enter queue/send"
         };
-        let scroll = match self.body_scroll_lines {
-            0 => String::new(),
-            1 => " · scrolled up 1 line".to_string(),
-            lines => format!(" · scrolled up {lines} lines"),
-        };
+        let scroll = scroll_status_fragment(self.body_scroll_lines);
         let images = match self.pending_images.len() {
             0 => String::new(),
             1 => " · 1 image".to_string(),
@@ -774,7 +770,7 @@ impl SingleSessionApp {
                 }
             }
             KeyInput::ScrollBodyPages(pages) => {
-                self.scroll_body_lines(pages * 12);
+                self.scroll_body_lines((pages * 12) as f32);
                 KeyOutcome::Redraw
             }
             KeyInput::JumpPrompt(direction) => {
@@ -1026,7 +1022,7 @@ impl SingleSessionApp {
         self.streaming_response.clear();
         self.error = None;
         self.stdin_response = None;
-        self.body_scroll_lines = 0;
+        self.body_scroll_lines = 0.0;
         self.show_help = false;
         self.welcome_timeline = false;
         self.session_switcher.close();
@@ -1369,18 +1365,16 @@ impl SingleSessionApp {
         }
     }
 
-    pub(crate) fn scroll_body_lines(&mut self, lines: i32) {
-        if lines > 0 {
-            self.body_scroll_lines = self.body_scroll_lines.saturating_add(lines as usize);
-        } else {
-            self.body_scroll_lines = self
-                .body_scroll_lines
-                .saturating_sub(lines.unsigned_abs() as usize);
+    pub(crate) fn scroll_body_lines(&mut self, lines: impl Into<f64>) {
+        let lines = lines.into() as f32;
+        if !lines.is_finite() || lines.abs() < f32::EPSILON {
+            return;
         }
+        self.body_scroll_lines = (self.body_scroll_lines + lines).max(0.0);
     }
 
     pub(crate) fn scroll_body_to_bottom(&mut self) {
-        self.body_scroll_lines = 0;
+        self.body_scroll_lines = 0.0;
     }
 
     pub(crate) fn latest_assistant_response(&self) -> Option<String> {
@@ -1407,7 +1401,7 @@ impl SingleSessionApp {
         }
         let current_line = lines
             .len()
-            .saturating_sub(self.body_scroll_lines)
+            .saturating_sub(self.body_scroll_lines.floor().max(0.0) as usize)
             .saturating_sub(1);
         let target = if direction < 0 {
             prompt_indices
@@ -1428,7 +1422,7 @@ impl SingleSessionApp {
             next
         };
         if let Some(target) = target {
-            self.body_scroll_lines = lines.len().saturating_sub(target + 1);
+            self.body_scroll_lines = lines.len().saturating_sub(target + 1) as f32;
         }
     }
 
@@ -2114,6 +2108,21 @@ fn is_in_flight_status(status: &str) -> bool {
             | "cancelling"
     ) || status.starts_with("using tool ")
         || status.starts_with("attached ")
+}
+
+fn scroll_status_fragment(scroll_lines: f32) -> String {
+    if !scroll_lines.is_finite() || scroll_lines < 0.05 {
+        return String::new();
+    }
+    if (scroll_lines - 1.0).abs() < 0.05 {
+        return " · scrolled up 1 line".to_string();
+    }
+    let rounded = (scroll_lines * 10.0).round() / 10.0;
+    if (rounded - rounded.round()).abs() < 0.05 {
+        format!(" · scrolled up {} lines", rounded.round() as usize)
+    } else {
+        format!(" · scrolled up {rounded:.1} lines")
+    }
 }
 
 fn blank_styled_line() -> SingleSessionStyledLine {

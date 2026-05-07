@@ -383,9 +383,9 @@ fn single_session_composer_uses_next_prompt_number_and_status_footer() {
     assert!(app.composer_status_line().contains("Ctrl+Enter queue/send"));
     assert!(!app.composer_status_line().contains("scrolled up"));
 
-    app.scroll_body_lines(1);
+    app.scroll_body_lines(1.0);
     assert!(app.composer_status_line().contains("scrolled up 1 line"));
-    app.scroll_body_lines(2);
+    app.scroll_body_lines(2.0);
     assert!(app.composer_status_line().contains("scrolled up 3 lines"));
     app.scroll_body_to_bottom();
     assert!(!app.composer_status_line().contains("scrolled up"));
@@ -1835,13 +1835,13 @@ fn single_session_prompt_jump_moves_between_user_turns() {
             .push(SingleSessionMessage::assistant(format!("answer {index}")));
     }
 
-    assert_eq!(app.body_scroll_lines, 0);
+    assert_eq!(app.body_scroll_lines, 0.0);
     assert_eq!(app.handle_key(KeyInput::JumpPrompt(-1)), KeyOutcome::Redraw);
-    assert!(app.body_scroll_lines > 0);
+    assert!(app.body_scroll_lines > 0.0);
     let older_scroll = app.body_scroll_lines;
 
     assert_eq!(app.handle_key(KeyInput::JumpPrompt(1)), KeyOutcome::Redraw);
-    assert!(app.body_scroll_lines < older_scroll || app.body_scroll_lines == 0);
+    assert!(app.body_scroll_lines < older_scroll || app.body_scroll_lines == 0.0);
 }
 
 #[test]
@@ -1869,12 +1869,12 @@ fn single_session_streaming_preserves_manual_scroll_but_submit_follows_bottom() 
     app.messages.push(SingleSessionMessage::user("older"));
     app.messages
         .push(SingleSessionMessage::assistant("older answer"));
-    app.scroll_body_lines(12);
+    app.scroll_body_lines(12.0);
 
     app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
         "new token".to_string(),
     ));
-    assert_eq!(app.body_scroll_lines, 12);
+    assert_eq!(app.body_scroll_lines, 12.0);
 
     app.handle_key(KeyInput::Character("new prompt".to_string()));
     assert_eq!(
@@ -1884,7 +1884,7 @@ fn single_session_streaming_preserves_manual_scroll_but_submit_follows_bottom() 
             images: Vec::new()
         }
     );
-    assert_eq!(app.body_scroll_lines, 0);
+    assert_eq!(app.body_scroll_lines, 0.0);
 }
 
 #[test]
@@ -2053,7 +2053,7 @@ fn single_session_scrollback_virtualizes_visible_body_lines() {
     assert!(bottom.contains("message 31"));
     assert!(!bottom.contains("message 0"));
 
-    app.scroll_body_lines(24);
+    app.scroll_body_lines(24.0);
     let older = single_session_visible_body(&app, size).join("\n");
     assert!(older.contains("message 0") || older.contains("message 1"));
 }
@@ -2062,16 +2062,16 @@ fn single_session_scrollback_virtualizes_visible_body_lines() {
 fn mouse_scroll_delta_maps_to_body_scroll_lines() {
     assert_eq!(
         mouse_scroll_lines(MouseScrollDelta::LineDelta(0.0, 1.0)),
-        Some(3)
+        Some(3.0)
     );
     assert_eq!(
         mouse_scroll_lines(MouseScrollDelta::LineDelta(0.0, -1.0)),
-        Some(-3)
+        Some(-3.0)
     );
 }
 
 #[test]
-fn pixel_scroll_deltas_accumulate_fractional_lines() {
+fn pixel_scroll_deltas_preserve_fractional_lines() {
     let mut accumulator = ScrollLineAccumulator::default();
     let now = Instant::now();
     let half_line = body_scroll_line_pixels() as f64 * 0.5;
@@ -2081,14 +2081,14 @@ fn pixel_scroll_deltas_accumulate_fractional_lines() {
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, half_line)),
             now,
         ),
-        None
+        Some(0.5)
     );
     assert_eq!(
         accumulator.scroll_lines(
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, half_line)),
             now + Duration::from_millis(16),
         ),
-        Some(1)
+        Some(0.5)
     );
 }
 
@@ -2099,7 +2099,7 @@ fn scroll_accumulator_keeps_fractional_momentum_after_wheel_input() {
 
     assert_eq!(
         accumulator.scroll_lines(MouseScrollDelta::LineDelta(0.0, 1.0), now),
-        Some(3)
+        Some(3.0)
     );
     assert!(accumulator.is_active());
 
@@ -2109,13 +2109,15 @@ fn scroll_accumulator_keeps_fractional_momentum_after_wheel_input() {
         "momentum should continue after the input event"
     );
     assert!(
-        accumulator.pending_lines().abs() >= SCROLL_FRACTIONAL_EPSILON,
-        "momentum should leave a fractional smooth-scroll offset"
+        frame
+            .scroll_lines
+            .is_some_and(|lines| lines.abs() >= SCROLL_FRACTIONAL_EPSILON),
+        "momentum should emit fractional scroll lines"
     );
 }
 
 #[test]
-fn pixel_scroll_reversal_and_idle_reset_drop_stale_fraction() {
+fn pixel_scroll_reversal_and_idle_reset_keep_fractional_deltas() {
     let mut accumulator = ScrollLineAccumulator::default();
     let now = Instant::now();
     let three_quarters = body_scroll_line_pixels() as f64 * 0.75;
@@ -2126,21 +2128,21 @@ fn pixel_scroll_reversal_and_idle_reset_drop_stale_fraction() {
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, three_quarters)),
             now,
         ),
-        None
+        Some(0.75)
     );
     assert_eq!(
         accumulator.scroll_lines(
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, -half_line)),
             now + Duration::from_millis(16),
         ),
-        None
+        Some(-0.5)
     );
     assert_eq!(
         accumulator.scroll_lines(
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, -half_line)),
             now + Duration::from_millis(32),
         ),
-        Some(-1)
+        Some(-0.5)
     );
 
     assert_eq!(
@@ -2148,14 +2150,14 @@ fn pixel_scroll_reversal_and_idle_reset_drop_stale_fraction() {
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, three_quarters)),
             now + Duration::from_millis(48),
         ),
-        None
+        Some(0.75)
     );
     assert_eq!(
         accumulator.scroll_lines(
             MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, three_quarters)),
             now + SCROLL_GESTURE_IDLE_RESET + Duration::from_millis(80),
         ),
-        None
+        Some(0.75)
     );
 }
 
@@ -2170,24 +2172,24 @@ fn mouse_scroll_clamps_to_available_single_session_history() {
     let mut desktop = DesktopApp::SingleSession(app);
     let mut metrics_cache = SingleSessionScrollMetricsCache::default();
 
-    assert!(desktop.scroll_single_session_body(10_000, size, &mut metrics_cache));
+    assert!(desktop.scroll_single_session_body(10_000.0, size, &mut metrics_cache));
     let DesktopApp::SingleSession(app) = &desktop else {
         unreachable!();
     };
     let max_scroll = single_session_body_scroll_metrics(app, size, 0)
         .expect("scroll metrics")
         .max_scroll_lines;
-    assert_eq!(app.body_scroll_lines, max_scroll);
+    assert_eq!(app.body_scroll_lines, max_scroll as f32);
 
-    assert!(desktop.scroll_single_session_body(-1, size, &mut metrics_cache));
+    assert!(desktop.scroll_single_session_body(-1.0, size, &mut metrics_cache));
     let DesktopApp::SingleSession(app) = &desktop else {
         unreachable!();
     };
-    assert_eq!(app.body_scroll_lines, max_scroll - 1);
+    assert_eq!(app.body_scroll_lines, max_scroll as f32 - 1.0);
 }
 
 #[test]
-fn smooth_scroll_viewport_keeps_fractional_line_offset() {
+fn fractional_scroll_viewport_keeps_fractional_line_offset() {
     let mut app = SingleSessionApp::new(None);
     let size = PhysicalSize::new(900, 360);
     for index in 0..48 {
@@ -2196,15 +2198,16 @@ fn smooth_scroll_viewport_keeps_fractional_line_offset() {
     }
 
     let normal = single_session_body_viewport_for_tick(&app, size, 0, 0.0);
-    let smooth = single_session_body_viewport_for_tick(&app, size, 0, 0.5);
+    app.scroll_body_lines(0.5);
+    let fractional = single_session_body_viewport_for_tick(&app, size, 0, 0.0);
 
-    assert!(smooth.top_offset_pixels < 0.0);
-    assert_eq!(smooth.lines.len(), normal.lines.len() + 1);
-    assert_eq!(&smooth.lines[1..], normal.lines.as_slice());
+    assert!(fractional.top_offset_pixels < 0.0);
+    assert_eq!(fractional.lines.len(), normal.lines.len() + 1);
+    assert_eq!(&fractional.lines[1..], normal.lines.as_slice());
 }
 
 #[test]
-fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
+fn fractional_scroll_offsets_body_text_area_without_moving_chrome() {
     let mut app = SingleSessionApp::new(Some(test_session_card(
         "session_smooth",
         "smooth",
@@ -2215,33 +2218,36 @@ fn smooth_scroll_offsets_body_text_area_without_moving_chrome() {
         app.messages
             .push(SingleSessionMessage::assistant(format!("message {index}")));
     }
+    let mut fractional_app = app.clone();
+    fractional_app.scroll_body_lines(0.5);
     let mut font_system = FontSystem::new();
-    let key = single_session_text_key_for_tick_with_scroll(&app, size, 0, 0.5);
+    let key = single_session_text_key(&fractional_app, size);
     let buffers = single_session_text_buffers_from_key(&key, size, &mut font_system);
     let normal_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.0);
-    let smooth_areas = single_session_text_areas_for_app_with_scroll(&app, &buffers, size, 0, 0.5);
+    let fractional_areas =
+        single_session_text_areas_for_app_with_scroll(&fractional_app, &buffers, size, 0, 0.0);
 
     let normal_body = normal_areas
         .iter()
         .find(|area| area.bounds.top == PANEL_BODY_TOP_PADDING as i32)
         .expect("normal body text area");
-    let smooth_body = smooth_areas
+    let fractional_body = fractional_areas
         .iter()
         .find(|area| area.bounds.top == PANEL_BODY_TOP_PADDING as i32)
-        .expect("smooth body text area");
+        .expect("fractional body text area");
     let normal_title = normal_areas
         .iter()
         .find(|area| area.top == PANEL_TITLE_TOP_PADDING && area.bounds.bottom == 64)
         .expect("normal title text area");
-    let smooth_title = smooth_areas
+    let fractional_title = fractional_areas
         .iter()
         .find(|area| area.top == PANEL_TITLE_TOP_PADDING && area.bounds.bottom == 64)
-        .expect("smooth title text area");
+        .expect("fractional title text area");
 
     assert_eq!(normal_title.top, PANEL_TITLE_TOP_PADDING);
-    assert_eq!(smooth_title.top, PANEL_TITLE_TOP_PADDING);
+    assert_eq!(fractional_title.top, PANEL_TITLE_TOP_PADDING);
     assert_eq!(normal_body.top, PANEL_BODY_TOP_PADDING);
-    assert!(smooth_body.top < normal_body.top);
+    assert!(fractional_body.top < normal_body.top);
 }
 
 #[test]

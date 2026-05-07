@@ -513,7 +513,7 @@ fn welcome_timeline_visual_offset_pixels_for_total_lines(
     }
 
     let max_scroll = (total_lines - visible_lines).max(0.0);
-    let scroll = (app.body_scroll_lines as f32 + smooth_scroll_lines).clamp(0.0, max_scroll);
+    let scroll = (app.body_scroll_lines + smooth_scroll_lines).clamp(0.0, max_scroll);
     let top_line = (total_lines - scroll - visible_lines).max(0.0);
     -top_line * line_height
 }
@@ -1466,8 +1466,8 @@ fn push_single_session_scrollbar_for_metrics(
     let thumb_height = (metrics.visible_lines as f32 / metrics.total_lines as f32 * track_height)
         .clamp(28.0, track_height);
     let travel = (track_height - thumb_height).max(0.0);
-    let smooth_scroll_lines = (metrics.scroll_lines as f32 + smooth_scroll_lines)
-        .clamp(0.0, metrics.max_scroll_lines as f32);
+    let smooth_scroll_lines =
+        (metrics.scroll_lines + smooth_scroll_lines).clamp(0.0, metrics.max_scroll_lines as f32);
     let scroll_fraction = smooth_scroll_lines / metrics.max_scroll_lines.max(1) as f32;
     let thumb_y = track_top + (1.0 - scroll_fraction.clamp(0.0, 1.0)) * travel;
 
@@ -1497,11 +1497,11 @@ fn push_single_session_scrollbar_for_metrics(
     );
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SingleSessionBodyScrollMetrics {
     pub(crate) total_lines: usize,
     pub(crate) visible_lines: usize,
-    pub(crate) scroll_lines: usize,
+    pub(crate) scroll_lines: f32,
     pub(crate) max_scroll_lines: usize,
 }
 
@@ -1530,7 +1530,7 @@ pub(crate) fn single_session_body_scroll_metrics_for_total_lines(
     (max_scroll_lines > 0).then_some(SingleSessionBodyScrollMetrics {
         total_lines,
         visible_lines,
-        scroll_lines: app.body_scroll_lines.min(max_scroll_lines),
+        scroll_lines: app.body_scroll_lines.min(max_scroll_lines as f32),
         max_scroll_lines,
     })
 }
@@ -2193,7 +2193,7 @@ pub(crate) fn single_session_body_viewport_from_lines(
     }
 
     let max_scroll = lines.len().saturating_sub(visible_lines);
-    let scroll = (app.body_scroll_lines as f32 + smooth_scroll_lines).clamp(0.0, max_scroll as f32);
+    let scroll = (app.body_scroll_lines + smooth_scroll_lines).clamp(0.0, max_scroll as f32);
     let bottom_line = lines.len() as f32 - scroll;
     let top_line = bottom_line - visible_lines as f32;
     let start = top_line.floor().max(0.0) as usize;
