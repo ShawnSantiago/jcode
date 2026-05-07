@@ -2115,10 +2115,14 @@ pub(crate) fn single_session_styled_text_segments(
     lines: &[SingleSessionStyledLine],
 ) -> Vec<(String, Attrs<'static>)> {
     let mut segments = Vec::new();
+    let total_user_turns = lines
+        .iter()
+        .filter(|line| line.style == SingleSessionLineStyle::User)
+        .count();
     for (index, line) in lines.iter().enumerate() {
         if !line.text.is_empty() {
             if line.style == SingleSessionLineStyle::User {
-                push_user_prompt_segments(&mut segments, &line.text);
+                push_user_prompt_segments(&mut segments, &line.text, total_user_turns);
             } else {
                 segments.push((line.text.clone(), single_session_style_attrs(line.style)));
             }
@@ -2139,7 +2143,11 @@ pub(crate) fn single_session_styled_text_segments(
     segments
 }
 
-fn push_user_prompt_segments(segments: &mut Vec<(String, Attrs<'static>)>, line: &str) {
+fn push_user_prompt_segments(
+    segments: &mut Vec<(String, Attrs<'static>)>,
+    line: &str,
+    total_user_turns: usize,
+) {
     let Some((number, text)) = line.split_once("  ") else {
         segments.push((
             line.to_string(),
@@ -2157,7 +2165,9 @@ fn push_user_prompt_segments(segments: &mut Vec<(String, Attrs<'static>)>, line:
 
     segments.push((
         number.to_string(),
-        single_session_color_attrs(user_prompt_number_color(turn)),
+        single_session_color_attrs(user_prompt_number_color_for_distance(
+            total_user_turns.saturating_add(1).saturating_sub(turn),
+        )),
     ));
     segments.push((
         "› ".to_string(),
@@ -2197,8 +2207,31 @@ fn single_session_color_attrs(color: TextColor) -> Attrs<'static> {
 }
 
 pub(crate) fn user_prompt_number_color(turn: usize) -> TextColor {
-    let index = turn.saturating_sub(1) % USER_PROMPT_NUMBER_COLORS.len();
-    text_color(USER_PROMPT_NUMBER_COLORS[index])
+    user_prompt_number_color_for_distance(turn.saturating_sub(1))
+}
+
+fn user_prompt_number_color_for_distance(distance: usize) -> TextColor {
+    // Match the TUI prompt-number effect: recent prompts start in a softened
+    // rainbow and older prompts exponentially decay toward gray.
+    const RAINBOW: [[f32; 3]; 7] = [
+        [1.000, 0.314, 0.314],
+        [1.000, 0.627, 0.314],
+        [1.000, 0.902, 0.314],
+        [0.314, 0.863, 0.392],
+        [0.314, 0.784, 0.863],
+        [0.392, 0.549, 1.000],
+        [0.706, 0.392, 1.000],
+    ];
+    const GRAY: [f32; 3] = [0.314, 0.314, 0.314];
+
+    let decay = (-0.4 * distance as f32).exp();
+    let rainbow = RAINBOW[distance.min(RAINBOW.len() - 1)];
+    text_color([
+        rainbow[0] * decay + GRAY[0] * (1.0 - decay),
+        rainbow[1] * decay + GRAY[1] * (1.0 - decay),
+        rainbow[2] * decay + GRAY[2] * (1.0 - decay),
+        1.0,
+    ])
 }
 
 pub(crate) fn single_session_line_color(style: SingleSessionLineStyle) -> TextColor {

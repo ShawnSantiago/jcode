@@ -1030,7 +1030,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
             "1".to_string(),
             Attrs::new()
                 .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
-                .color(user_prompt_number_color(1))
+                .color(user_prompt_number_color(2))
         ))
     );
     assert!(

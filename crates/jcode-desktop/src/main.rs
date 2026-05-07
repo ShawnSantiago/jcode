@@ -120,14 +120,6 @@ const ERROR_TEXT_COLOR: [f32; 4] = [0.360, 0.000, 0.000, 1.0];
 const OVERLAY_TEXT_COLOR: [f32; 4] = [0.030, 0.045, 0.075, 1.0];
 const OVERLAY_SELECTION_TEXT_COLOR: [f32; 4] = [0.010, 0.035, 0.105, 1.0];
 const USER_PROMPT_ACCENT_COLOR: [f32; 4] = [0.000, 0.105, 0.250, 1.0];
-const USER_PROMPT_NUMBER_COLORS: [[f32; 4]; 6] = [
-    [0.330, 0.045, 0.515, 1.0],
-    [0.000, 0.230, 0.365, 1.0],
-    [0.060, 0.285, 0.110, 1.0],
-    [0.540, 0.190, 0.000, 1.0],
-    [0.030, 0.165, 0.520, 1.0],
-    [0.440, 0.055, 0.180, 1.0],
-];
 const PANEL_SECTION_COLOR: [f32; 4] = [0.045, 0.055, 0.080, 0.95];
 const SELECTION_HIGHLIGHT_COLOR: [f32; 4] = [0.220, 0.420, 0.700, 0.22];
 const STREAMING_SHIMMER_SOFT_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.055];
