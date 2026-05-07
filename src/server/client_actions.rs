@@ -599,10 +599,10 @@ pub(super) async fn handle_rename_session(
         .filter(|title| !title.is_empty())
         .map(ToOwned::to_owned);
 
-    let display_title = {
+    let (renamed_session_id, display_title) = {
         let mut agent_guard = agent.lock().await;
         match agent_guard.rename_session_title(normalized_title.clone()) {
-            Ok(display_title) => display_title,
+            Ok(display_title) => (agent_guard.session_id().to_string(), display_title),
             Err(error) => {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
@@ -616,11 +616,15 @@ pub(super) async fn handle_rename_session(
 
     crate::tui::session_picker::invalidate_session_list_cache();
     let event = ServerEvent::SessionRenamed {
-        session_id: client_session_id.to_string(),
+        session_id: renamed_session_id.clone(),
         title: normalized_title,
         display_title,
     };
-    let delivered = fanout_session_event(swarm_members, client_session_id, event.clone()).await;
+    let mut delivered =
+        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
+    if renamed_session_id != client_session_id {
+        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
+    }
     if delivered == 0 {
         let _ = client_event_tx.send(event);
     }
