@@ -2393,13 +2393,14 @@ pub(crate) fn single_session_streaming_response_rendered_body_line_count(
         return 0;
     }
     let separator = usize::from(!app.messages.is_empty());
+    let max_columns = single_session_body_max_columns(size, app.text_scale());
     separator
-        + single_session_wrapped_body_lines(
-            app.streaming_response_styled_lines(),
-            size,
-            app.text_scale(),
-        )
-        .len()
+        + app
+            .streaming_response
+            .trim_end()
+            .lines()
+            .map(|line| wrapped_body_line_count_for_text(line, max_columns))
+            .sum::<usize>()
 }
 
 fn blank_render_line() -> SingleSessionStyledLine {
@@ -2416,14 +2417,11 @@ fn single_session_wrapped_body_lines(
 ) -> Vec<SingleSessionStyledLine> {
     // Glyphon also wraps, but explicit visual rows keep scroll metrics,
     // selection hit-testing, and the rendered text viewport in agreement.
-    let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
-    let max_columns = (content_width / single_session_body_char_width_for_scale(text_scale))
-        .floor()
-        .max(20.0) as usize;
+    let max_columns = single_session_body_max_columns(size, text_scale);
     let mut wrapped = Vec::with_capacity(lines.len());
 
     for line in lines {
-        if line.text.chars().count() <= max_columns || line.text.is_empty() {
+        if line.text.is_empty() || !text_exceeds_columns(&line.text, max_columns) {
             wrapped.push(line);
             continue;
         }
@@ -2438,12 +2436,19 @@ fn single_session_wrapped_body_lines(
     wrapped
 }
 
+fn single_session_body_max_columns(size: PhysicalSize<u32>, text_scale: f32) -> usize {
+    let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
+    (content_width / single_session_body_char_width_for_scale(text_scale))
+        .floor()
+        .max(20.0) as usize
+}
+
 fn wrap_body_line_text(text: &str, max_columns: usize) -> Vec<String> {
     let max_columns = max_columns.max(1);
     let mut remaining = text.trim_end();
     let mut lines = Vec::new();
 
-    while remaining.chars().count() > max_columns {
+    while text_exceeds_columns(remaining, max_columns) {
         let split = word_wrap_split_index(remaining, max_columns);
         let (line, rest) = remaining.split_at(split);
         lines.push(line.trim_end().to_string());
@@ -2452,6 +2457,30 @@ fn wrap_body_line_text(text: &str, max_columns: usize) -> Vec<String> {
 
     lines.push(remaining.to_string());
     lines
+}
+
+fn wrapped_body_line_count_for_text(text: &str, max_columns: usize) -> usize {
+    let max_columns = max_columns.max(1);
+    let mut remaining = text.trim_end();
+    if remaining.is_empty() {
+        return 1;
+    }
+
+    let mut count = 1;
+    while text_exceeds_columns(remaining, max_columns) {
+        let split = word_wrap_split_index(remaining, max_columns);
+        let (_, rest) = remaining.split_at(split);
+        remaining = rest.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn text_exceeds_columns(text: &str, max_columns: usize) -> bool {
+    text.chars().nth(max_columns.max(1)).is_some()
 }
 
 fn word_wrap_split_index(text: &str, max_columns: usize) -> usize {

@@ -42,6 +42,7 @@ const DESKTOP_SLASH_COMMANDS: &[(&str, &str)] = &[
 
 const BODY_CACHE_TEXT_EDGE_BYTES: usize = 256;
 const BODY_CACHE_MESSAGE_EDGE_COUNT: usize = 12;
+const BODY_CACHE_MESSAGE_MIDDLE_SAMPLE_COUNT: usize = 8;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -546,7 +547,8 @@ impl SingleSessionMessage {
 
 fn hash_messages_cache_fingerprint<H: Hasher>(messages: &[SingleSessionMessage], hasher: &mut H) {
     messages.len().hash(hasher);
-    if messages.len() <= BODY_CACHE_MESSAGE_EDGE_COUNT * 2 {
+    if messages.len() <= BODY_CACHE_MESSAGE_EDGE_COUNT * 2 + BODY_CACHE_MESSAGE_MIDDLE_SAMPLE_COUNT
+    {
         for message in messages {
             hash_message_cache_fingerprint(message, hasher);
         }
@@ -555,6 +557,16 @@ fn hash_messages_cache_fingerprint<H: Hasher>(messages: &[SingleSessionMessage],
 
     for message in &messages[..BODY_CACHE_MESSAGE_EDGE_COUNT] {
         hash_message_cache_fingerprint(message, hasher);
+    }
+    let middle_start = BODY_CACHE_MESSAGE_EDGE_COUNT;
+    let middle_len = messages
+        .len()
+        .saturating_sub(BODY_CACHE_MESSAGE_EDGE_COUNT * 2);
+    for sample in 1..=BODY_CACHE_MESSAGE_MIDDLE_SAMPLE_COUNT {
+        let index =
+            middle_start + sample * middle_len / (BODY_CACHE_MESSAGE_MIDDLE_SAMPLE_COUNT + 1);
+        index.hash(hasher);
+        hash_message_cache_fingerprint(&messages[index], hasher);
     }
     for message in &messages[messages.len() - BODY_CACHE_MESSAGE_EDGE_COUNT..] {
         hash_message_cache_fingerprint(message, hasher);

@@ -2830,3 +2830,44 @@ fn focused_panel_draft_only_shows_for_focused_insert_panel() {
         None
     );
 }
+
+#[test]
+fn streaming_response_line_count_matches_wrapped_tail_lines() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::assistant("finished response"));
+    app.streaming_response = format!(
+        "short line\n{}\nwrapped words {}",
+        "x".repeat(512),
+        "word ".repeat(96)
+    );
+    let size = PhysicalSize::new(640, 800);
+
+    let mut rendered_lines = Vec::new();
+    append_single_session_streaming_response_rendered_body_lines(&app, size, &mut rendered_lines);
+
+    assert_eq!(
+        single_session_streaming_response_rendered_body_line_count(&app, size),
+        rendered_lines.len()
+    );
+}
+
+#[test]
+fn rendered_body_cache_key_samples_large_transcript_middle() {
+    let mut first = SingleSessionApp::new(None);
+    first.messages = (0..64)
+        .map(|index| SingleSessionMessage::assistant(format!("assistant message {index:02}")))
+        .collect();
+    let mut second = first.clone();
+    second.messages[34] = SingleSessionMessage::assistant("assistant message XX");
+    let size = (1280, 800);
+
+    assert_ne!(
+        first.rendered_body_cache_key(size),
+        second.rendered_body_cache_key(size)
+    );
+    assert_ne!(
+        first.rendered_body_static_cache_key(size),
+        second.rendered_body_static_cache_key(size)
+    );
+}

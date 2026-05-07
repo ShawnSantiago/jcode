@@ -2232,6 +2232,35 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             );
             rendered_lines.len() ^ long_streaming_app.streaming_response.len()
         });
+    let mut long_streaming_line_count_app = long_streaming_app.clone();
+    let (long_streaming_line_count_ms, long_streaming_line_count_checksum) =
+        benchmark_phase(frames, |frame| {
+            long_streaming_line_count_app
+                .streaming_response
+                .push(benchmark_typing_char(frame));
+            if frame % 31 == 0 {
+                long_streaming_line_count_app.streaming_response.push('\n');
+            }
+            single_session_streaming_response_rendered_body_line_count(
+                &long_streaming_line_count_app,
+                size,
+            ) ^ long_streaming_line_count_app.streaming_response.len()
+        });
+    let mut long_unbroken_streaming_app = app.clone();
+    long_unbroken_streaming_app.streaming_response = "x".repeat(8192);
+    let (long_unbroken_streaming_wrap_ms, long_unbroken_streaming_wrap_checksum) =
+        benchmark_phase(frames, |frame| {
+            long_unbroken_streaming_app
+                .streaming_response
+                .push(benchmark_typing_char(frame));
+            let mut rendered_lines = Vec::new();
+            append_single_session_streaming_response_rendered_body_lines(
+                &long_unbroken_streaming_app,
+                size,
+                &mut rendered_lines,
+            );
+            rendered_lines.len() ^ long_unbroken_streaming_app.streaming_response.len()
+        });
 
     let mut event_batch_app = DesktopApp::SingleSession(SingleSessionApp::new(None));
     let (event_batch_ms, event_batch_checksum) = benchmark_phase(frames, |frame| {
@@ -2596,6 +2625,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         fresh_typing_ms / frames as f64,
         streaming_delta_ms / frames as f64,
         long_streaming_body_wrap_ms / frames as f64,
+        long_streaming_line_count_ms / frames as f64,
+        long_unbroken_streaming_wrap_ms / frames as f64,
         event_batch_ms / frames as f64,
         event_forwarder_flood_ms / frames as f64,
         hero_boundary_scroll_ms / frames as f64,
@@ -2620,6 +2651,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             "passes_no_paint_watchdog_budget": end_to_end_stream_flood.passes_no_paint_budget(),
             "passes_streaming_incremental_wrap_guard": streaming_static_base_rebuilds <= 1,
             "passes_long_streaming_body_wrap_budget": (long_streaming_body_wrap_ms / frames as f64) <= target_budget_ms,
+            "passes_long_streaming_line_count_budget": (long_streaming_line_count_ms / frames as f64) <= target_budget_ms,
+            "passes_long_unbroken_streaming_wrap_budget": (long_unbroken_streaming_wrap_ms / frames as f64) <= target_budget_ms,
             "event_delivery": {
                 "previous_background_poll_interval_ms": duration_ms(BACKGROUND_POLL_INTERVAL),
                 "backend_redraw_frame_interval_ms": duration_ms(BACKEND_REDRAW_FRAME_INTERVAL),
@@ -2698,6 +2731,18 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                     long_streaming_body_wrap_ms,
                     frames,
                     long_streaming_body_wrap_checksum,
+                ),
+                benchmark_phase_json(
+                    "long_streaming_response_line_count",
+                    long_streaming_line_count_ms,
+                    frames,
+                    long_streaming_line_count_checksum,
+                ),
+                benchmark_phase_json(
+                    "long_unbroken_streaming_line_wrap",
+                    long_unbroken_streaming_wrap_ms,
+                    frames,
+                    long_unbroken_streaming_wrap_checksum,
                 ),
                 benchmark_phase_json(
                     "background_event_batch_coalesce_apply",
