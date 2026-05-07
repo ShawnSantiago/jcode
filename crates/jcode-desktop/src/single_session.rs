@@ -925,6 +925,13 @@ impl SingleSessionApp {
         self.text_scale
     }
 
+    pub(crate) fn has_active_selection(&self) -> bool {
+        self.selection_anchor.is_some()
+            || self.selection_focus.is_some()
+            || self.draft_selection_anchor.is_some()
+            || self.draft_selection_focus.is_some()
+    }
+
     fn adjust_text_scale(&mut self, direction: i8) {
         let delta = direction as f32 * SINGLE_SESSION_TEXT_SCALE_STEP;
         self.text_scale = (self.text_scale + delta)

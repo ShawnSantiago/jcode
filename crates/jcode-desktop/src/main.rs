@@ -208,6 +208,9 @@ async fn run() -> Result<()> {
     if let Some(frames) = scroll_render_benchmark_frames(&args) {
         return run_scroll_render_benchmark(frames);
     }
+    if let Some(raw_events) = stream_e2e_benchmark_raw_events(&args) {
+        return run_stream_e2e_benchmark(raw_events);
+    }
     let fullscreen = args.iter().any(|arg| arg == "--fullscreen");
     let desktop_mode = desktop_mode_from_args(args.iter().map(String::as_str));
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event()
@@ -947,6 +950,7 @@ const DESKTOP_HELP_LINES: &[&str] = &[
     "  --startup-log                Print launch timing milestones to stderr",
     "  --startup-benchmark          Print launch timings and exit after the first frame",
     "  --scroll-render-benchmark[N]  Print CPU scroll/render benchmark JSON and exit",
+    "  --stream-e2e-benchmark[N]     Print stream event-to-paint guardrail JSON and exit",
     "  --headless-chat-smoke <MSG>  Run a hidden backend smoke test and print JSON events",
     "  --headless-chat-smoke=<MSG>  Same as above",
     "  -V, --version                Print version information",
@@ -976,6 +980,20 @@ fn scroll_render_benchmark_frames(args: &[String]) -> Option<usize> {
                     args.get(index + 1)
                         .and_then(|value| value.parse::<usize>().ok())
                         .unwrap_or(600)
+                })
+            })
+    })
+}
+
+fn stream_e2e_benchmark_raw_events(args: &[String]) -> Option<usize> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--stream-e2e-benchmark=")
+            .and_then(|value| value.parse::<usize>().ok())
+            .or_else(|| {
+                (arg == "--stream-e2e-benchmark").then(|| {
+                    args.get(index + 1)
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS * 6)
                 })
             })
     })
@@ -2013,6 +2031,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
     let mut streaming_text_cache_ms = 0.0;
     let mut streaming_areas_ms = 0.0;
     let mut streaming_vertices_ms = 0.0;
+    let mut streaming_static_base_rebuilds = 0usize;
+    let mut streaming_tail_text_buffer_rebuilds = 0usize;
     let (streaming_delta_ms, streaming_delta_checksum) = benchmark_phase(frames, |frame| {
         streaming_app
             .streaming_response
@@ -2026,6 +2046,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         if !streaming_app.streaming_response.is_empty() {
             let base_key = streaming_app.rendered_body_static_cache_key((size.width, size.height));
             if streaming_base_key != Some(base_key) {
+                streaming_static_base_rebuilds += 1;
                 streaming_body_lines = single_session_rendered_static_body_lines_for_streaming(
                     &streaming_app,
                     size,
@@ -2123,6 +2144,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             streaming_body_lines[streaming_visible_start..streaming_visible_end].hash(&mut hasher);
             let tail_key = hasher.finish();
             if streaming_tail_text_key != Some(tail_key) {
+                streaming_tail_text_buffer_rebuilds += 1;
                 streaming_tail_text_buffer = Some(single_session_body_text_buffer_from_lines(
                     &mut streaming_font_system,
                     &streaming_body_lines[streaming_visible_start..streaming_visible_end],
@@ -2177,6 +2199,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         streaming_body_lines.len()
             ^ streaming_buffers.len()
             ^ streaming_tail_text_buffer.is_some() as usize
+            ^ streaming_static_base_rebuilds
+            ^ streaming_tail_text_buffer_rebuilds
             ^ areas.len()
             ^ vertices.len()
     });
@@ -2560,6 +2584,7 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                 <= target_budget_ms,
             "passes_120fps_interaction_cpu_budget": passes_interaction_cpu_budget,
             "passes_no_paint_watchdog_budget": end_to_end_stream_flood.passes_no_paint_budget(),
+            "passes_streaming_incremental_wrap_guard": streaming_static_base_rebuilds <= 1,
             "event_delivery": {
                 "previous_background_poll_interval_ms": duration_ms(BACKGROUND_POLL_INTERVAL),
                 "backend_redraw_frame_interval_ms": duration_ms(BACKEND_REDRAW_FRAME_INTERVAL),
@@ -2712,6 +2737,12 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                 benchmark_phase_json("areas", streaming_areas_ms, frames, 0),
                 benchmark_phase_json("vertices", streaming_vertices_ms, frames, 0),
             ],
+            "streaming_incremental_wrap": {
+                "static_base_rebuilds": streaming_static_base_rebuilds,
+                "tail_text_buffer_rebuilds": streaming_tail_text_buffer_rebuilds,
+                "static_base_rebuild_budget": 1,
+                "passes_static_base_rebuild_budget": streaming_static_base_rebuilds <= 1,
+            },
             "hero_boundary": {
                 "start_scroll_lines": hero_boundary_scroll,
                 "body_buffer_rebuilds": hero_body_buffer_rebuilds,
@@ -2737,6 +2768,27 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                 1,
                 large_body_lines.len(),
             ),
+        }))?
+    );
+    Ok(())
+}
+
+fn run_stream_e2e_benchmark(raw_events: usize) -> Result<()> {
+    let result = run_desktop_stream_end_to_end_benchmark(raw_events);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "target_frame_budget_ms": duration_ms(DESKTOP_120FPS_FRAME_BUDGET),
+            "no_paint_budget_ms": duration_ms(DESKTOP_NO_PAINT_BUDGET),
+            "event_delivery": {
+                "backend_redraw_frame_interval_ms": duration_ms(BACKEND_REDRAW_FRAME_INTERVAL),
+                "backend_event_forward_interval_ms": duration_ms(BACKEND_EVENT_FORWARD_INTERVAL),
+                "backend_event_forward_max_raw_events": BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS,
+                "backend_event_forward_max_payload_bytes": BACKEND_EVENT_FORWARD_MAX_PAYLOAD_BYTES,
+            },
+            "passes_120fps_interaction_cpu_budget": result.passes_interaction_budget(),
+            "passes_no_paint_watchdog_budget": result.passes_no_paint_budget(),
+            "end_to_end_stream_flood": result.to_json(),
         }))?
     );
     Ok(())
@@ -4033,7 +4085,7 @@ impl DesktopFrameProfile {
         Self {
             started_at: now,
             last_checkpoint: now,
-            stages: Vec::with_capacity(14),
+            stages: Vec::with_capacity(20),
         }
     }
 
@@ -4061,7 +4113,7 @@ impl DesktopFrameProfile {
     fn cpu_duration(&self) -> Duration {
         self.stages
             .iter()
-            .filter(|stage| !matches!(stage.name, "surface_acquire" | "submit_present"))
+            .filter(|stage| !matches!(stage.name, "surface_acquire" | "queue_submit" | "present"))
             .fold(Duration::ZERO, |total, stage| total + stage.duration)
     }
 }
@@ -4074,6 +4126,7 @@ struct DesktopFrameContext {
     text_area_count: usize,
     primitive_vertices: usize,
     text_prepared: bool,
+    primitive_geometry_cache_hit: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -4089,7 +4142,8 @@ struct DesktopFrameSlowSample {
     wall: Duration,
     cpu: Duration,
     surface_acquire: Duration,
-    submit_present: Duration,
+    queue_submit: Duration,
+    present: Duration,
     score: Duration,
     stages: Vec<DesktopFrameStageProfile>,
     context: DesktopFrameContext,
@@ -4140,10 +4194,12 @@ impl DesktopFrameProfiler {
         let wall = profile.total_duration();
         let cpu = profile.cpu_duration();
         let surface_acquire = profile.stage_duration("surface_acquire");
-        let submit_present = profile.stage_duration("submit_present");
+        let queue_submit = profile.stage_duration("queue_submit");
+        let present = profile.stage_duration("present");
         let cpu_slow = cpu >= self.budget;
         let present_stall = surface_acquire >= DESKTOP_PRESENT_STALL_BUDGET
-            || submit_present >= DESKTOP_PRESENT_STALL_BUDGET;
+            || queue_submit >= DESKTOP_PRESENT_STALL_BUDGET
+            || present >= DESKTOP_PRESENT_STALL_BUDGET;
         if cpu_slow || present_stall || self.log_all {
             if cpu_slow {
                 self.slow_cpu_frames += 1;
@@ -4151,7 +4207,7 @@ impl DesktopFrameProfiler {
             if present_stall {
                 self.present_stall_frames += 1;
             }
-            let score = cpu.max(surface_acquire).max(submit_present);
+            let score = cpu.max(surface_acquire).max(queue_submit).max(present);
             let replace_worst = self
                 .worst
                 .as_ref()
@@ -4161,7 +4217,8 @@ impl DesktopFrameProfiler {
                     wall,
                     cpu,
                     surface_acquire,
-                    submit_present,
+                    queue_submit,
+                    present,
                     score,
                     stages: profile.stages,
                     context,
@@ -4194,13 +4251,16 @@ impl DesktopFrameProfiler {
                     "worst_wall_ms": duration_ms(worst.wall),
                     "worst_cpu_ms": duration_ms(worst.cpu),
                     "surface_acquire_ms": duration_ms(worst.surface_acquire),
-                    "submit_present_ms": duration_ms(worst.submit_present),
+                    "queue_submit_ms": duration_ms(worst.queue_submit),
+                    "present_ms": duration_ms(worst.present),
+                    "submit_present_ms": duration_ms(worst.queue_submit + worst.present),
                     "mode": worst.context.mode,
                     "smooth_scroll_lines": worst.context.smooth_scroll_lines,
                     "text_buffer_count": worst.context.text_buffer_count,
                     "text_area_count": worst.context.text_area_count,
                     "primitive_vertices": worst.context.primitive_vertices,
                     "text_prepared": worst.context.text_prepared,
+                    "primitive_geometry_cache_hit": worst.context.primitive_geometry_cache_hit,
                     "stages": worst.stages.iter().map(|stage| serde_json::json!({
                         "name": stage.name,
                         "ms": duration_ms(stage.duration),
@@ -4485,6 +4545,55 @@ fn log_desktop_slow_interaction(
     );
 }
 
+fn single_session_streaming_primitive_geometry_cache_key(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    focus_pulse: f32,
+    spinner_tick: u64,
+    smooth_scroll_lines: f32,
+    welcome_hero_reveal_progress: f32,
+    body_lines: &[SingleSessionStyledLine],
+) -> Option<u64> {
+    if app.streaming_response.is_empty()
+        || app.show_help
+        || app.model_picker.open
+        || app.model_picker.loading
+        || app.session_switcher.open
+        || app.session_switcher.loading
+        || app.stdin_response.is_some()
+        || app.has_active_selection()
+        || app.is_welcome_timeline_visible()
+    {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    (size.width, size.height).hash(&mut hasher);
+    app.text_scale().to_bits().hash(&mut hasher);
+    app.body_scroll_lines.to_bits().hash(&mut hasher);
+    smooth_scroll_lines.to_bits().hash(&mut hasher);
+    focus_pulse.to_bits().hash(&mut hasher);
+    welcome_hero_reveal_progress.to_bits().hash(&mut hasher);
+    spinner_tick.hash(&mut hasher);
+    app.is_processing.hash(&mut hasher);
+    app.status.hash(&mut hasher);
+    app.error.hash(&mut hasher);
+    app.pending_images.len().hash(&mut hasher);
+    app.messages.len().hash(&mut hasher);
+    app.draft.len().hash(&mut hasher);
+    app.draft_cursor.hash(&mut hasher);
+    app.draft
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        .hash(&mut hasher);
+    body_lines.len().hash(&mut hasher);
+    for line in body_lines {
+        line.style.hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
 struct Canvas<'window> {
     surface: wgpu::Surface<'window>,
     device: wgpu::Device,
@@ -4496,11 +4605,16 @@ struct Canvas<'window> {
     text_atlas: Option<TextAtlas>,
     text_renderer: Option<TextRenderer>,
     text_needs_prepare: bool,
+    streaming_text_atlas: Option<TextAtlas>,
+    streaming_text_renderer: Option<TextRenderer>,
+    streaming_text_needs_prepare: bool,
     size: PhysicalSize<u32>,
     viewport_animation: AnimatedViewport,
     focus_pulse: FocusPulse,
     primitive_vertex_buffer: Option<wgpu::Buffer>,
     primitive_vertex_capacity: usize,
+    primitive_vertices_cache_key: Option<u64>,
+    primitive_vertices_cache: Vec<Vertex>,
     needs_initial_frame: bool,
     defer_initial_text_frame: bool,
     single_session_text_cache_key: Option<u64>,
@@ -4664,11 +4778,16 @@ impl<'window> Canvas<'window> {
             text_atlas: Some(text_atlas),
             text_renderer: Some(text_renderer),
             text_needs_prepare: true,
+            streaming_text_atlas: None,
+            streaming_text_renderer: None,
+            streaming_text_needs_prepare: false,
             size,
             viewport_animation: AnimatedViewport::default(),
             focus_pulse: FocusPulse::default(),
             primitive_vertex_buffer: None,
             primitive_vertex_capacity: 0,
+            primitive_vertices_cache_key: None,
+            primitive_vertices_cache: Vec::new(),
             needs_initial_frame: true,
             defer_initial_text_frame: true,
             single_session_text_cache_key: None,
@@ -4705,9 +4824,12 @@ impl<'window> Canvas<'window> {
         self.single_session_streaming_text_key = None;
         self.single_session_streaming_text_start_line = None;
         self.single_session_streaming_text_buffer = None;
+        self.streaming_text_needs_prepare = false;
         self.single_session_body_text_scroll_start = None;
         self.single_session_body_text_window_start = None;
         self.single_session_body_text_window_end = None;
+        self.primitive_vertices_cache_key = None;
+        self.primitive_vertices_cache.clear();
         self.text_needs_prepare = true;
         self.config.width = size.width;
         self.config.height = size.height;
@@ -4893,6 +5015,7 @@ impl<'window> Canvas<'window> {
             self.single_session_streaming_text_key = None;
             self.single_session_streaming_text_start_line = None;
             self.single_session_streaming_text_buffer = None;
+            self.streaming_text_needs_prepare = false;
             return;
         };
 
@@ -4918,7 +5041,7 @@ impl<'window> Canvas<'window> {
                 ));
             self.single_session_streaming_text_key = Some(key);
             self.single_session_streaming_text_start_line = Some(start_line);
-            self.text_needs_prepare = true;
+            self.streaming_text_needs_prepare = true;
         }
     }
 
@@ -4976,6 +5099,22 @@ impl<'window> Canvas<'window> {
         self.text_atlas = Some(text_atlas);
         self.text_renderer = Some(text_renderer);
         self.text_needs_prepare = true;
+    }
+
+    fn ensure_streaming_text_renderer(&mut self) {
+        if self.streaming_text_renderer.is_some() {
+            return;
+        }
+        let mut text_atlas = TextAtlas::new(&self.device, &self.queue, self.config.format);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &self.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        self.streaming_text_atlas = Some(text_atlas);
+        self.streaming_text_renderer = Some(text_renderer);
+        self.streaming_text_needs_prepare = true;
     }
 
     fn upload_primitive_vertices(&mut self, vertices: &[Vertex]) {
@@ -5121,6 +5260,7 @@ impl<'window> Canvas<'window> {
             self.single_session_streaming_text_key = None;
             self.single_session_streaming_text_start_line = None;
             self.single_session_streaming_text_buffer = None;
+            self.streaming_text_needs_prepare = false;
             self.single_session_body_text_scroll_start = None;
             self.single_session_body_text_window_start = None;
             self.single_session_body_text_window_end = None;
@@ -5142,6 +5282,7 @@ impl<'window> Canvas<'window> {
             self.single_session_streaming_text_key = None;
             self.single_session_streaming_text_start_line = None;
             self.single_session_streaming_text_buffer = None;
+            self.streaming_text_needs_prepare = false;
             self.single_session_body_text_scroll_start = None;
             self.single_session_body_text_window_start = None;
             self.single_session_body_text_window_end = None;
@@ -5150,39 +5291,36 @@ impl<'window> Canvas<'window> {
         if !self.single_session_text_buffers.is_empty() {
             self.ensure_text_renderer();
         }
+        if self.single_session_streaming_text_buffer.is_some() {
+            self.ensure_streaming_text_renderer();
+        }
         frame_profile.checkpoint("text_renderer");
         let text_buffers = &self.single_session_text_buffers;
         let has_text_buffers = !text_buffers.is_empty();
+        let has_streaming_text_buffer = self.single_session_streaming_text_buffer.is_some();
         let mut text_area_count = 0usize;
         let mut text_prepared = false;
+        let single_session_viewport = if let DesktopApp::SingleSession(single_session) = app {
+            Some(single_session_body_viewport_from_lines(
+                single_session,
+                self.size,
+                smooth_scroll_lines,
+                &self.single_session_body_lines,
+            ))
+        } else {
+            None
+        };
         if self.text_needs_prepare {
             let text_areas = if let DesktopApp::SingleSession(single_session) = app {
-                let viewport = single_session_body_viewport_from_lines(
-                    single_session,
-                    self.size,
-                    smooth_scroll_lines,
-                    &self.single_session_body_lines,
-                );
-                let mut areas = single_session_text_areas_for_app_with_cached_body_viewport(
+                single_session_text_areas_for_app_with_cached_body_viewport(
                     single_session,
                     text_buffers,
                     self.size,
                     smooth_scroll_lines,
-                    viewport.clone(),
-                );
-                if let (Some(buffer), Some(start_line)) = (
-                    self.single_session_streaming_text_buffer.as_ref(),
-                    self.single_session_streaming_text_start_line,
-                ) {
-                    areas.push(single_session_streaming_text_area_for_cached_body_viewport(
-                        single_session,
-                        buffer,
-                        self.size,
-                        viewport,
-                        start_line,
-                    ));
-                }
-                areas
+                    single_session_viewport
+                        .clone()
+                        .expect("single-session viewport should exist"),
+                )
             } else {
                 single_session_text_areas(text_buffers, self.size)
             };
@@ -5224,15 +5362,102 @@ impl<'window> Canvas<'window> {
         } else {
             frame_profile.checkpoint("text_areas");
         }
-        frame_profile.checkpoint("text_prepare");
+        frame_profile.checkpoint("text_prepare_static");
+        if self.streaming_text_needs_prepare {
+            let streaming_text_areas = if let (
+                DesktopApp::SingleSession(single_session),
+                Some(viewport),
+                Some(buffer),
+                Some(start_line),
+            ) = (
+                app,
+                single_session_viewport.clone(),
+                self.single_session_streaming_text_buffer.as_ref(),
+                self.single_session_streaming_text_start_line,
+            ) {
+                vec![single_session_streaming_text_area_for_cached_body_viewport(
+                    single_session,
+                    buffer,
+                    self.size,
+                    viewport,
+                    start_line,
+                )]
+            } else {
+                Vec::new()
+            };
+            text_area_count += streaming_text_areas.len();
+            if streaming_text_areas.is_empty() {
+                self.streaming_text_needs_prepare = false;
+            } else {
+                text_prepared = true;
+                let font_system = self
+                    .font_system
+                    .as_mut()
+                    .expect("font system should be initialized before streaming text prepare");
+                let text_atlas = self
+                    .streaming_text_atlas
+                    .as_mut()
+                    .expect("streaming text atlas should be initialized before text prepare");
+                let text_renderer = self
+                    .streaming_text_renderer
+                    .as_mut()
+                    .expect("streaming text renderer should be initialized before text prepare");
+                if let Err(error) = text_renderer.prepare(
+                    &self.device,
+                    &self.queue,
+                    font_system,
+                    text_atlas,
+                    Resolution {
+                        width: self.config.width,
+                        height: self.config.height,
+                    },
+                    streaming_text_areas,
+                    &mut self.swash_cache,
+                ) {
+                    eprintln!("jcode-desktop: failed to prepare streaming text: {error:?}");
+                } else {
+                    self.streaming_text_needs_prepare = false;
+                }
+            }
+        }
+        frame_profile.checkpoint("text_prepare_streaming");
 
+        let mut primitive_geometry_cache_hit = false;
         let (mut vertices, animation_active) = match app {
             DesktopApp::SingleSession(single_session) => {
                 let focus_pulse = self.focus_pulse.frame(1, now);
                 let animation_active = self.focus_pulse.is_animating()
                     || single_session.has_background_work()
                     || welcome_hero_reveal_active;
-                (
+                let geometry_cache_key = single_session_streaming_primitive_geometry_cache_key(
+                    single_session,
+                    self.size,
+                    focus_pulse,
+                    spinner_tick,
+                    smooth_scroll_lines,
+                    welcome_hero_reveal_progress,
+                    &self.single_session_body_lines,
+                );
+                let vertices = if let Some(cache_key) = geometry_cache_key {
+                    if self.primitive_vertices_cache_key == Some(cache_key) {
+                        primitive_geometry_cache_hit = true;
+                        self.primitive_vertices_cache.clone()
+                    } else {
+                        let vertices = build_single_session_vertices_with_cached_body(
+                            single_session,
+                            self.size,
+                            focus_pulse,
+                            spinner_tick,
+                            smooth_scroll_lines,
+                            welcome_hero_reveal_progress,
+                            &self.single_session_body_lines,
+                        );
+                        self.primitive_vertices_cache_key = Some(cache_key);
+                        self.primitive_vertices_cache = vertices.clone();
+                        vertices
+                    }
+                } else {
+                    self.primitive_vertices_cache_key = None;
                     build_single_session_vertices_with_cached_body(
                         single_session,
                         self.size,
@@ -5241,11 +5466,12 @@ impl<'window> Canvas<'window> {
                         smooth_scroll_lines,
                         welcome_hero_reveal_progress,
                         &self.single_session_body_lines,
-                    ),
-                    animation_active,
-                )
+                    )
+                };
+                (vertices, animation_active)
             }
             DesktopApp::Workspace(workspace) => {
+                self.primitive_vertices_cache_key = None;
                 let target_layout = workspace_render_layout(workspace, self.size, monitor_size);
                 let render_layout = self.viewport_animation.frame(target_layout, now);
                 let focus_pulse = self.focus_pulse.frame(workspace.focused_id, now);
@@ -5300,12 +5526,22 @@ impl<'window> Canvas<'window> {
             {
                 eprintln!("jcode-desktop: failed to render text: {error:?}");
             }
+            if has_streaming_text_buffer
+                && let (Some(text_renderer), Some(text_atlas)) = (
+                    self.streaming_text_renderer.as_mut(),
+                    self.streaming_text_atlas.as_ref(),
+                )
+                && let Err(error) = text_renderer.render(text_atlas, &mut render_pass)
+            {
+                eprintln!("jcode-desktop: failed to render streaming text: {error:?}");
+            }
         }
         frame_profile.checkpoint("render_pass");
 
         self.queue.submit(Some(encoder.finish()));
+        frame_profile.checkpoint("queue_submit");
         frame.present();
-        frame_profile.checkpoint("submit_present");
+        frame_profile.checkpoint("present");
         let frame_wall = frame_profile.total_duration();
         let frame_cpu = frame_profile.cpu_duration();
         let context = DesktopFrameContext {
@@ -5319,6 +5555,7 @@ impl<'window> Canvas<'window> {
             text_area_count,
             primitive_vertices: primitive_vertex_count,
             text_prepared,
+            primitive_geometry_cache_hit,
         };
         self.frame_profiler.observe(frame_profile, context);
         Ok(DesktopRenderFrameResult {
