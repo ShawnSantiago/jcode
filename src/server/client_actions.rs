@@ -812,75 +812,24 @@ pub(super) fn handle_compact(
     tokio::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
-        let provider = agent_guard.provider_fork();
-        let compaction = agent_guard.registry().compaction();
-        let messages = agent_guard.provider_messages();
+        let (message, success) = agent_guard.request_manual_compaction();
         drop(agent_guard);
 
-        if !provider.supports_compaction() {
-            let _ = tx.send(ServerEvent::CompactResult {
-                id,
-                message: "Manual compaction is not available for this provider.".to_string(),
-                success: false,
-            });
-            return;
+        if success {
+            crate::runtime_memory_log::emit_event(
+                crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                    "manual_compaction_requested",
+                    "manual_compaction_started",
+                )
+                .with_session_id(session_id)
+                .force_attribution(),
+            );
         }
 
-        let result = match compaction.try_write() {
-            Ok(mut manager) => {
-                let stats = manager.stats_with(&messages);
-                let status_msg = format!(
-                    "**Context Status:**\n\
-                    • Messages: {} (active), {} (total history)\n\
-                    • Token usage: ~{}k (estimate ~{}k) / {}k ({:.1}%)\n\
-                    • Has summary: {}\n\
-                    • Compacting: {}",
-                    stats.active_messages,
-                    stats.total_turns,
-                    stats.effective_tokens / 1000,
-                    stats.token_estimate / 1000,
-                    manager.token_budget() / 1000,
-                    stats.context_usage * 100.0,
-                    if stats.has_summary { "yes" } else { "no" },
-                    if stats.is_compacting {
-                        "in progress..."
-                    } else {
-                        "no"
-                    }
-                );
-
-                match manager.force_compact_with(&messages, provider) {
-                    Ok(()) => {
-                        crate::runtime_memory_log::emit_event(
-                            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
-                                "manual_compaction_requested",
-                                "manual_compaction_started",
-                            )
-                            .with_session_id(session_id.clone())
-                            .force_attribution(),
-                        );
-                        ServerEvent::CompactResult {
-                            id,
-                            message: format!(
-                                "{}\n\n📦 **Compacting context** (manual) — summarizing older messages in the background to stay within the context window.\n\
-                            The summary will be applied automatically when ready.",
-                                status_msg
-                            ),
-                            success: true,
-                        }
-                    }
-                    Err(reason) => ServerEvent::CompactResult {
-                        id,
-                        message: format!("{status_msg}\n\n⚠ **Cannot compact:** {reason}"),
-                        success: false,
-                    },
-                }
-            }
-            Err(_) => ServerEvent::CompactResult {
-                id,
-                message: "⚠ Cannot access compaction manager (lock held)".to_string(),
-                success: false,
-            },
+        let result = ServerEvent::CompactResult {
+            id,
+            message,
+            success,
         };
         let _ = tx.send(result);
     });

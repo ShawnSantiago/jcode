@@ -430,7 +430,7 @@ impl Agent {
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
-        if self.provider.uses_jcode_compaction() || self.session.compaction.is_some() {
+        if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
@@ -461,13 +461,13 @@ impl Agent {
                         }
                         manager.messages_for_api_with(all_messages)
                     };
-                    let event = if self.provider.uses_jcode_compaction() {
-                        manager.take_compaction_event()
-                    } else {
-                        None
-                    };
+                    let event = manager.take_compaction_event();
                     if event.is_some() || discarded_oversized_native {
                         self.sync_session_compaction_state_from_manager(&manager);
+                    }
+                    if event.is_some() {
+                        self.note_compaction_applied();
+                        self.persist_session_best_effort("compaction completion");
                     }
                     let user_count = messages
                         .iter()
