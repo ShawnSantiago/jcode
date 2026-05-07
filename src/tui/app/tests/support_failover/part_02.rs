@@ -417,7 +417,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
-                model: "moonshotai/kimi-k2.6".to_string(),
+                model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
                 available: true,
@@ -425,8 +425,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
-                model: "moonshotai/kimi-k2.6".to_string(),
-                provider: "MoonshotAI".to_string(),
+                model: "deepseek/deepseek-v4-pro".to_string(),
+                provider: "DeepSeek".to_string(),
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),

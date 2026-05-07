@@ -585,13 +585,18 @@ impl App {
             )
         }
 
-        const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-7", "moonshotai/kimi-k2.6"];
+        const RECOMMENDED_MODELS: &[&str] = &[
+            "gpt-5.5",
+            "claude-opus-4-7",
+            "deepseek/deepseek-v4-pro",
+        ];
 
         const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &["claude-opus-4-7"];
 
         const OPENAI_OAUTH_ONLY_MODELS: &[&str] =
             &["gpt-5.5", "gpt-5.4", "gpt-5.4[1m]", "gpt-5.4-pro"];
         const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.7", "gpt-5.5", "gpt-5.4"];
+        const OPENROUTER_AUTO_ONLY_MODELS: &[&str] = &["deepseek/deepseek-v4-pro"];
 
         fn recommendation_rank(name: &str, recommended_models: &[&str]) -> usize {
             recommended_models
@@ -600,7 +605,10 @@ impl App {
                 .unwrap_or(usize::MAX)
         }
 
-        fn route_can_be_recommended(route: &PickerOption) -> bool {
+        fn route_can_be_recommended(model: &str, route: &PickerOption) -> bool {
+            if model == "deepseek/deepseek-v4-pro" {
+                return route.api_method == "openrouter" && route.provider == "auto";
+            }
             matches!(
                 route.api_method.as_str(),
                 "claude-oauth" | "openai-oauth" | "openai-api-key" | "copilot"
@@ -696,8 +704,9 @@ impl App {
                                 && (*effort == "xhigh" || *effort == "high")
                                 && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                                     || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                                    || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                                    || (route_can_be_recommended(route) && route.available)),
+                                    || COPILOT_OAUTH_MODELS.contains(&name.as_str())
+                                    || OPENROUTER_AUTO_ONLY_MODELS.contains(&name.as_str()))
+                                    || (route_can_be_recommended(name, route) && route.available)),
                             recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
                             old: old_threshold_secs > 0
                                 && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
@@ -715,8 +724,9 @@ impl App {
                     let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
                         && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                             || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                            || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                            || (route_can_be_recommended(&route) && route.available));
+                            || COPILOT_OAUTH_MODELS.contains(&name.as_str())
+                            || OPENROUTER_AUTO_ONLY_MODELS.contains(&name.as_str()))
+                            || (route_can_be_recommended(name, &route) && route.available));
                     entries.push(PickerEntry {
                         name: name.clone(),
                         options: vec![route],

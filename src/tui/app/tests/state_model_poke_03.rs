@@ -539,28 +539,28 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         text
     );
     assert!(
-        text.contains("moonshotai/kimi-k2.6") && text.contains("openrouter"),
+        text.contains("deepseek/deepseek-v4-pro") && text.contains("openrouter"),
         "OpenRouter route should be visible, got:\n{}",
         text
     );
-    let kimi26_auto_row = text
+    let deepseek_auto_row = text
         .lines()
-        .find(|line| line.contains("moonshotai/kimi-k2.6") && line.contains("auto"))
+        .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
         .unwrap_or("");
-    let kimi26_provider_row = text
+    let deepseek_provider_row = text
         .lines()
-        .find(|line| line.contains("moonshotai/kimi-k2.6") && line.contains("MoonshotAI"))
+        .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
         .unwrap_or("");
     assert!(
-        kimi26_auto_row.contains('★'),
+        deepseek_auto_row.contains('★'),
         "OpenRouter auto route should carry the recommended marker, got row `{}` in:\n{}",
-        kimi26_auto_row,
+        deepseek_auto_row,
         text
     );
     assert!(
-        !kimi26_provider_row.contains('★'),
+        !deepseek_provider_row.contains('★'),
         "OpenRouter provider-specific routes should not carry the recommended marker, got row `{}` in:\n{}",
-        kimi26_provider_row,
+        deepseek_provider_row,
         text
     );
     let kimi25_row = text
@@ -569,7 +569,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         .unwrap_or("");
     assert!(
         !kimi25_row.contains('★'),
-        "Kimi K2.5 should no longer be recommended, got row `{}` in:\n{}",
+        "Kimi K2.5 should not be recommended, got row `{}` in:\n{}",
         kimi25_row,
         text
     );
