@@ -25,12 +25,32 @@ pub(crate) fn build_single_session_vertices(
     build_single_session_vertices_with_scroll(app, size, focus_pulse, spinner_tick, 0.0)
 }
 
+#[cfg(test)]
 pub(crate) fn build_single_session_vertices_with_scroll(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     focus_pulse: f32,
     spinner_tick: u64,
     smooth_scroll_lines: f32,
+) -> Vec<Vertex> {
+    let welcome_hero_reveal_progress = welcome_hero_reveal_progress_for_tick(spinner_tick);
+    build_single_session_vertices_with_scroll_and_reveal(
+        app,
+        size,
+        focus_pulse,
+        spinner_tick,
+        smooth_scroll_lines,
+        welcome_hero_reveal_progress,
+    )
+}
+
+pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    focus_pulse: f32,
+    spinner_tick: u64,
+    smooth_scroll_lines: f32,
+    welcome_hero_reveal_progress: f32,
 ) -> Vec<Vertex> {
     let width = size.width as f32;
     let height = size.height as f32;
@@ -74,7 +94,7 @@ pub(crate) fn build_single_session_vertices_with_scroll(
             &mut vertices,
             &app.welcome_hero_text(),
             size,
-            1.0,
+            welcome_hero_reveal_progress,
             welcome_timeline_visual_offset_pixels(app, size, smooth_scroll_lines),
         );
     }
@@ -100,6 +120,38 @@ pub(crate) fn build_single_session_vertices_with_scroll(
     push_single_session_scrollbar(&mut vertices, app, size, spinner_tick, smooth_scroll_lines);
 
     vertices
+}
+
+#[cfg(test)]
+pub(crate) fn welcome_hero_reveal_progress_for_tick(spinner_tick: u64) -> f32 {
+    let elapsed =
+        Duration::from_millis(spinner_tick.saturating_mul(DESKTOP_SPINNER_FRAME_MS as u64));
+    welcome_hero_reveal_progress_for_elapsed(elapsed)
+}
+
+pub(crate) fn welcome_hero_reveal_progress_for_elapsed(elapsed: Duration) -> f32 {
+    const REVEAL_DURATION: Duration = Duration::from_millis(1350);
+    const FIRST_INK_PROGRESS: f32 = 0.018;
+
+    let raw = (elapsed.as_secs_f32() / REVEAL_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    if raw >= 1.0 {
+        return 1.0;
+    }
+
+    let eased = ease_in_out_cubic(raw);
+    FIRST_INK_PROGRESS + (1.0 - FIRST_INK_PROGRESS) * eased
+}
+
+pub(crate) fn welcome_hero_reveal_is_active(progress: f32) -> bool {
+    progress < 0.999
+}
+
+fn ease_in_out_cubic(t: f32) -> f32 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
 }
 
 fn push_single_session_surface_without_bottom_rule(

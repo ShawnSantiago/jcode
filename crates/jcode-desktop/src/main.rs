@@ -1812,6 +1812,8 @@ struct Canvas<'window> {
     needs_initial_frame: bool,
     single_session_text_key: Option<SingleSessionTextKey>,
     single_session_text_buffers: Vec<Buffer>,
+    welcome_hero_reveal_key: Option<String>,
+    welcome_hero_reveal_started_at: Option<Instant>,
 }
 
 impl<'window> Canvas<'window> {
@@ -1945,6 +1947,8 @@ impl<'window> Canvas<'window> {
             needs_initial_frame: true,
             single_session_text_key: None,
             single_session_text_buffers: Vec::new(),
+            welcome_hero_reveal_key: None,
+            welcome_hero_reveal_started_at: None,
         })
     }
 
@@ -1980,6 +1984,31 @@ impl<'window> Canvas<'window> {
         }
     }
 
+    fn welcome_hero_reveal_progress(
+        &mut self,
+        app: &SingleSessionApp,
+        now: Instant,
+    ) -> (f32, bool) {
+        if !app.is_welcome_timeline_visible() {
+            self.welcome_hero_reveal_key = None;
+            self.welcome_hero_reveal_started_at = None;
+            return (1.0, false);
+        }
+
+        let key = app.welcome_hero_text();
+        if self.welcome_hero_reveal_key.as_deref() != Some(key.as_str()) {
+            self.welcome_hero_reveal_key = Some(key);
+            self.welcome_hero_reveal_started_at = Some(now);
+        }
+
+        let elapsed = self
+            .welcome_hero_reveal_started_at
+            .map(|started_at| now.saturating_duration_since(started_at))
+            .unwrap_or_default();
+        let progress = welcome_hero_reveal_progress_for_elapsed(elapsed);
+        (progress, welcome_hero_reveal_is_active(progress))
+    }
+
     fn render(
         &mut self,
         app: &DesktopApp,
@@ -1997,6 +2026,15 @@ impl<'window> Canvas<'window> {
             });
         let now = Instant::now();
         let spinner_tick = desktop_spinner_tick(now);
+
+        let (welcome_hero_reveal_progress, welcome_hero_reveal_active) =
+            if let DesktopApp::SingleSession(single_session) = app {
+                self.welcome_hero_reveal_progress(single_session, now)
+            } else {
+                self.welcome_hero_reveal_key = None;
+                self.welcome_hero_reveal_started_at = None;
+                (1.0, false)
+            };
 
         if let DesktopApp::SingleSession(single_session) = app {
             self.refresh_cached_single_session_text_buffers(
@@ -2040,15 +2078,17 @@ impl<'window> Canvas<'window> {
         let (mut vertices, animation_active) = match app {
             DesktopApp::SingleSession(single_session) => {
                 let focus_pulse = self.focus_pulse.frame(1, now);
-                let animation_active =
-                    self.focus_pulse.is_animating() || single_session.has_background_work();
+                let animation_active = self.focus_pulse.is_animating()
+                    || single_session.has_background_work()
+                    || welcome_hero_reveal_active;
                 (
-                    build_single_session_vertices_with_scroll(
+                    build_single_session_vertices_with_scroll_and_reveal(
                         single_session,
                         self.size,
                         focus_pulse,
                         spinner_tick,
                         smooth_scroll_lines,
+                        welcome_hero_reveal_progress,
                     ),
                     animation_active,
                 )

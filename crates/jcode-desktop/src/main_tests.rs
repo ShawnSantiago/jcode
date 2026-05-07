@@ -758,6 +758,47 @@ fn fresh_welcome_greeting_uses_handwritten_hero_chrome() {
 }
 
 #[test]
+fn fresh_welcome_handwriting_reveals_over_time() {
+    let app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(1000, 720);
+    let early = build_single_session_vertices(&app, size, 0.0, 0);
+    let middle = build_single_session_vertices(&app, size, 0.0, 4);
+    let done = build_single_session_vertices(&app, size, 0.0, 10);
+
+    let early_ink = vertices_with_color_count(&early, WELCOME_HANDWRITING_COLOR);
+    let middle_ink = vertices_with_color_count(&middle, WELCOME_HANDWRITING_COLOR);
+    let done_ink = vertices_with_color_count(&done, WELCOME_HANDWRITING_COLOR);
+
+    assert!(early_ink > 0, "first frame should show initial ink");
+    assert!(
+        early_ink < middle_ink && middle_ink < done_ink,
+        "handwritten ink should grow during reveal: early={early_ink}, middle={middle_ink}, done={done_ink}"
+    );
+    assert!(vertices_have_color(
+        &middle,
+        WELCOME_HANDWRITING_HIGHLIGHT_COLOR
+    ));
+    assert!(!vertices_have_color(
+        &done,
+        WELCOME_HANDWRITING_HIGHLIGHT_COLOR
+    ));
+}
+
+#[test]
+fn welcome_hero_reveal_progress_eases_to_full() {
+    let start = welcome_hero_reveal_progress_for_elapsed(Duration::ZERO);
+    let middle = welcome_hero_reveal_progress_for_elapsed(Duration::from_millis(675));
+    let done = welcome_hero_reveal_progress_for_elapsed(Duration::from_millis(1350));
+
+    assert!(start > 0.0 && start < middle);
+    assert!(middle < done);
+    assert_eq!(done, 1.0);
+    assert!(welcome_hero_reveal_is_active(start));
+    assert!(welcome_hero_reveal_is_active(middle));
+    assert!(!welcome_hero_reveal_is_active(done));
+}
+
+#[test]
 fn handwritten_welcome_phrase_set_has_stable_curated_variants() {
     assert_eq!(HANDWRITTEN_WELCOME_PHRASES.len(), 1);
     assert_eq!(handwritten_welcome_phrase(0), "Hello there");
@@ -988,6 +1029,13 @@ fn single_session_vertices_include_transcript_card_backgrounds() {
 
 fn vertices_have_color(vertices: &[Vertex], color: [f32; 4]) -> bool {
     vertices.iter().any(|vertex| vertex.color == color)
+}
+
+fn vertices_with_color_count(vertices: &[Vertex], color: [f32; 4]) -> usize {
+    vertices
+        .iter()
+        .filter(|vertex| vertex.color == color)
+        .count()
 }
 
 fn positions_for_color(vertices: &[Vertex], color: [f32; 4]) -> Vec<[u32; 2]> {
