@@ -98,6 +98,7 @@ const SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_AFTER_LINES: usize = 4;
 const DESKTOP_120FPS_FRAME_BUDGET: Duration = Duration::from_micros(8_333);
 const DESKTOP_PRESENT_STALL_BUDGET: Duration = Duration::from_millis(33);
 const DESKTOP_INPUT_LATENCY_BUDGET: Duration = Duration::from_millis(25);
+const DESKTOP_NO_PAINT_BUDGET: Duration = Duration::from_millis(250);
 const DESKTOP_FRAME_PROFILE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
@@ -259,6 +260,7 @@ async fn run() -> Result<()> {
     let mut recovery_scan_pending = app.is_single_session();
     let mut first_frame_presented = false;
     let mut interaction_latency = DesktopInteractionLatencyProfiler::new();
+    let mut no_paint_watchdog = DesktopNoPaintWatchdog::new();
     let mut last_backend_redraw_request: Option<Instant> = None;
     let mut pending_backend_redraw_since: Option<Instant> = None;
 
@@ -283,6 +285,28 @@ async fn run() -> Result<()> {
             target.set_control_flow(ControlFlow::WaitUntil(wake));
         } else {
             target.set_control_flow(ControlFlow::Wait);
+        }
+
+        let pending_interaction_kind = interaction_latency.pending_kind();
+        let frame_animation_active = app.has_frame_animation();
+        let pending_backend_redraw = pending_backend_redraw_since.is_some();
+        let no_paint_active = !first_frame_presented
+            || has_background_work
+            || frame_animation_active
+            || pending_backend_redraw
+            || pending_interaction_kind.is_some();
+        if no_paint_watchdog.observe_active_tick(
+            event_loop_now,
+            NoPaintWatchdogContext {
+                active: no_paint_active,
+                mode: app.mode(),
+                has_background_work,
+                frame_animation_active,
+                pending_backend_redraw,
+                pending_interaction_kind,
+            },
+        ) {
+            window.request_redraw();
         }
 
         match event {
@@ -694,6 +718,7 @@ async fn run() -> Result<()> {
                         smooth_scroll_lines,
                     ) {
                     Ok(frame) => {
+                        no_paint_watchdog.observe_presented(Instant::now(), &frame);
                         interaction_latency.observe_presented(&frame);
                         if !first_frame_presented {
                             first_frame_presented = true;
@@ -2193,6 +2218,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                 ^ batch.events.len()
                 ^ usize::from(remaining_is_queued)
         });
+    let end_to_end_stream_flood =
+        run_desktop_stream_end_to_end_benchmark(BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS * 6);
 
     let mut hero_app = desktop_scroll_benchmark_app_with_turns(24);
     let hero_body_lines = single_session_rendered_body_lines_for_tick(&hero_app, size, 0);
@@ -2520,6 +2547,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         workspace_navigation_ms / frames as f64,
         large_scroll_ms / frames as f64,
     ];
+    let passes_interaction_cpu_budget = critical_phase_means_ms
+        .iter()
+        .all(|mean_ms| *mean_ms <= target_budget_ms);
     let metrics = single_session_body_scroll_metrics(&app, size, 0);
     println!(
         "{}",
@@ -2528,14 +2558,24 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             "target_frame_budget_ms": target_budget_ms,
             "passes_120fps_scroll_cpu_budget": (visible_whole_line_text_ms / frames as f64)
                 <= target_budget_ms,
-            "passes_120fps_interaction_cpu_budget": critical_phase_means_ms
-                .iter()
-                .all(|mean_ms| *mean_ms <= target_budget_ms),
+            "passes_120fps_interaction_cpu_budget": passes_interaction_cpu_budget,
+            "passes_no_paint_watchdog_budget": end_to_end_stream_flood.passes_no_paint_budget(),
             "event_delivery": {
                 "previous_background_poll_interval_ms": duration_ms(BACKGROUND_POLL_INTERVAL),
+                "backend_redraw_frame_interval_ms": duration_ms(BACKEND_REDRAW_FRAME_INTERVAL),
+                "backend_event_forward_interval_ms": duration_ms(BACKEND_EVENT_FORWARD_INTERVAL),
+                "backend_event_forward_max_raw_events": BACKEND_EVENT_FORWARD_MAX_RAW_EVENTS,
+                "backend_event_forward_max_payload_bytes": BACKEND_EVENT_FORWARD_MAX_PAYLOAD_BYTES,
                 "backend_events_wake_event_loop": true,
                 "coalesces_consecutive_text_delta_events": true,
+                "bounded_stream_flood_forwarding": true,
             },
+            "no_paint_watchdog": {
+                "budget_ms": duration_ms(DESKTOP_NO_PAINT_BUDGET),
+                "log_event": "jcode-desktop-no-paint-profile",
+                "requests_recovery_redraw": true,
+            },
+            "end_to_end_stream_flood": end_to_end_stream_flood.to_json(),
             "size": { "width": size.width, "height": size.height },
             "messages": app.messages.len(),
             "scroll_metrics": metrics.map(|metrics| serde_json::json!({
@@ -3015,6 +3055,13 @@ struct DesktopAppDebugSnapshot {
 }
 
 impl DesktopApp {
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::SingleSession(_) => "single_session",
+            Self::Workspace(_) => "workspace",
+        }
+    }
+
     fn is_single_session(&self) -> bool {
         matches!(self, Self::SingleSession(_))
     }
@@ -3504,6 +3551,142 @@ fn log_desktop_session_event_batch_profile(
             "redraw_deferred": redraw_deferred,
         })
     );
+}
+
+#[derive(Debug, Clone)]
+struct DesktopStreamEndToEndBenchmark {
+    raw_events: usize,
+    batches: usize,
+    coalesced_events: usize,
+    paints: usize,
+    max_batch_raw_events: usize,
+    max_batch_payload_bytes: usize,
+    total_wall: Duration,
+    max_forwarder_accumulated: Duration,
+    max_apply: Duration,
+    max_no_paint_gap: Duration,
+    max_batch_to_paint: Duration,
+    stream_left_queued_after_first_batch: bool,
+}
+
+impl DesktopStreamEndToEndBenchmark {
+    fn passes_no_paint_budget(&self) -> bool {
+        self.max_no_paint_gap <= DESKTOP_NO_PAINT_BUDGET
+    }
+
+    fn passes_interaction_budget(&self) -> bool {
+        self.max_apply <= DESKTOP_120FPS_FRAME_BUDGET
+            && self.max_forwarder_accumulated <= DESKTOP_NO_PAINT_BUDGET
+            && self.max_batch_to_paint <= DESKTOP_NO_PAINT_BUDGET
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "raw_events": self.raw_events,
+            "batches": self.batches,
+            "coalesced_events": self.coalesced_events,
+            "paints": self.paints,
+            "max_batch_raw_events": self.max_batch_raw_events,
+            "max_batch_payload_bytes": self.max_batch_payload_bytes,
+            "total_wall_ms": duration_ms(self.total_wall),
+            "max_forwarder_accumulated_ms": duration_ms(self.max_forwarder_accumulated),
+            "max_apply_ms": duration_ms(self.max_apply),
+            "max_no_paint_gap_ms": duration_ms(self.max_no_paint_gap),
+            "max_batch_to_paint_ms": duration_ms(self.max_batch_to_paint),
+            "stream_left_queued_after_first_batch": self.stream_left_queued_after_first_batch,
+            "passes_no_paint_budget": self.passes_no_paint_budget(),
+            "passes_interaction_budget": self.passes_interaction_budget(),
+        })
+    }
+}
+
+fn run_desktop_stream_end_to_end_benchmark(raw_events: usize) -> DesktopStreamEndToEndBenchmark {
+    let raw_events = raw_events.max(1);
+    let (tx, rx) = mpsc::channel();
+    for index in 0..raw_events {
+        tx.send(session_launch::DesktopSessionEvent::TextDelta(format!(
+            "{} ",
+            index + 1
+        )))
+        .unwrap();
+    }
+    drop(tx);
+
+    let started = Instant::now();
+    let mut next_forward_at = started;
+    let mut app = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let mut batches = 0usize;
+    let mut coalesced_events = 0usize;
+    let mut paints = 0usize;
+    let mut max_batch_raw_events = 0usize;
+    let mut max_batch_payload_bytes = 0usize;
+    let mut max_forwarder_accumulated = Duration::ZERO;
+    let mut max_apply = Duration::ZERO;
+    let mut max_no_paint_gap = Duration::ZERO;
+    let mut max_batch_to_paint = Duration::ZERO;
+    let mut last_paint_at = started;
+    let mut pending_batch_since: Option<Instant> = None;
+    let mut stream_left_queued_after_first_batch = false;
+
+    while let Ok(first_event) = rx.try_recv() {
+        let now = Instant::now();
+        if now < next_forward_at {
+            std::thread::sleep(next_forward_at.saturating_duration_since(now));
+        }
+
+        let batch = collect_desktop_session_event_batch(first_event, &rx);
+        if batches == 0 {
+            stream_left_queued_after_first_batch = batch.raw_event_count < raw_events;
+        }
+        let forwarded_at = Instant::now();
+        next_forward_at = forwarded_at + BACKEND_EVENT_FORWARD_INTERVAL;
+
+        batches += 1;
+        coalesced_events += batch.events.len();
+        max_batch_raw_events = max_batch_raw_events.max(batch.raw_event_count);
+        max_batch_payload_bytes = max_batch_payload_bytes.max(batch.raw_payload_bytes);
+        max_forwarder_accumulated = max_forwarder_accumulated.max(batch.accumulated_for());
+        pending_batch_since.get_or_insert(batch.first_received_at);
+
+        let apply_stats = apply_desktop_session_event_batch_with_stats(&mut app, batch.events);
+        max_apply = max_apply.max(apply_stats.elapsed);
+        if apply_stats.visible_changed {
+            let paint_now = Instant::now();
+            if paint_now.saturating_duration_since(last_paint_at) >= BACKEND_REDRAW_FRAME_INTERVAL {
+                paints += 1;
+                max_no_paint_gap =
+                    max_no_paint_gap.max(paint_now.saturating_duration_since(last_paint_at));
+                if let Some(pending_since) = pending_batch_since.take() {
+                    max_batch_to_paint =
+                        max_batch_to_paint.max(paint_now.saturating_duration_since(pending_since));
+                }
+                last_paint_at = paint_now;
+            }
+        }
+    }
+
+    if let Some(pending_since) = pending_batch_since.take() {
+        let paint_now = Instant::now();
+        paints += 1;
+        max_no_paint_gap = max_no_paint_gap.max(paint_now.saturating_duration_since(last_paint_at));
+        max_batch_to_paint =
+            max_batch_to_paint.max(paint_now.saturating_duration_since(pending_since));
+    }
+
+    DesktopStreamEndToEndBenchmark {
+        raw_events,
+        batches,
+        coalesced_events,
+        paints,
+        max_batch_raw_events,
+        max_batch_payload_bytes,
+        total_wall: started.elapsed(),
+        max_forwarder_accumulated,
+        max_apply,
+        max_no_paint_gap,
+        max_batch_to_paint,
+        stream_left_queued_after_first_batch,
+    }
 }
 
 fn desktop_session_event_affects_visible_state(
@@ -4090,6 +4273,10 @@ impl DesktopInteractionLatencyProfiler {
         }
     }
 
+    fn pending_kind(&self) -> Option<&'static str> {
+        self.pending.as_ref().map(|pending| pending.kind)
+    }
+
     fn observe_presented(&mut self, frame: &DesktopRenderFrameResult) {
         let Some(pending) = self.pending.take() else {
             return;
@@ -4118,6 +4305,154 @@ impl DesktopInteractionLatencyProfiler {
                 "text_prepared": frame.context.text_prepared,
             })
         );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NoPaintWatchdogContext {
+    active: bool,
+    mode: &'static str,
+    has_background_work: bool,
+    frame_animation_active: bool,
+    pending_backend_redraw: bool,
+    pending_interaction_kind: Option<&'static str>,
+}
+
+struct DesktopNoPaintWatchdog {
+    enabled: bool,
+    log_all: bool,
+    budget: Duration,
+    last_presented_at: Instant,
+    last_reported_at: Option<Instant>,
+    last_redraw_request_at: Option<Instant>,
+}
+
+impl DesktopNoPaintWatchdog {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self::new_with_start(now)
+    }
+
+    fn new_with_start(now: Instant) -> Self {
+        let mode = std::env::var("JCODE_DESKTOP_FRAME_PROFILE").ok();
+        let enabled = !matches!(mode.as_deref(), Some("0" | "false" | "off"));
+        let log_all = matches!(mode.as_deref(), Some("all" | "trace"));
+        let budget = std::env::var("JCODE_DESKTOP_NO_PAINT_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
+            .unwrap_or(DESKTOP_NO_PAINT_BUDGET);
+        Self {
+            enabled,
+            log_all,
+            budget,
+            last_presented_at: now,
+            last_reported_at: None,
+            last_redraw_request_at: None,
+        }
+    }
+
+    fn observe_presented(&mut self, now: Instant, _frame: &DesktopRenderFrameResult) {
+        self.last_presented_at = now;
+        self.last_reported_at = None;
+        self.last_redraw_request_at = None;
+    }
+
+    fn observe_active_tick(&mut self, now: Instant, context: NoPaintWatchdogContext) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if !context.active {
+            self.last_reported_at = None;
+            self.last_redraw_request_at = None;
+            return false;
+        }
+        let gap = now.saturating_duration_since(self.last_presented_at);
+        if gap < self.budget && !self.log_all {
+            return false;
+        }
+
+        let report_due = self.last_reported_at.is_none_or(|last_reported| {
+            now.saturating_duration_since(last_reported) >= DESKTOP_FRAME_PROFILE_REPORT_INTERVAL
+        });
+        if report_due {
+            self.last_reported_at = Some(now);
+            eprintln!(
+                "jcode-desktop-no-paint-profile {}",
+                serde_json::json!({
+                    "budget_ms": duration_ms(self.budget),
+                    "gap_ms": duration_ms(gap),
+                    "mode": context.mode,
+                    "has_background_work": context.has_background_work,
+                    "frame_animation_active": context.frame_animation_active,
+                    "pending_backend_redraw": context.pending_backend_redraw,
+                    "pending_interaction_kind": context.pending_interaction_kind,
+                })
+            );
+        }
+
+        let redraw_due = self.last_redraw_request_at.is_none_or(|last_request| {
+            now.saturating_duration_since(last_request) >= BACKEND_REDRAW_FRAME_INTERVAL
+        });
+        if redraw_due {
+            self.last_redraw_request_at = Some(now);
+        }
+        redraw_due
+    }
+}
+
+#[cfg(test)]
+mod desktop_no_paint_watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn no_paint_watchdog_requests_redraw_after_active_gap_budget() {
+        let start = Instant::now();
+        let mut watchdog = DesktopNoPaintWatchdog::new_with_start(start);
+        let context = NoPaintWatchdogContext {
+            active: true,
+            mode: "single_session",
+            has_background_work: true,
+            frame_animation_active: false,
+            pending_backend_redraw: false,
+            pending_interaction_kind: Some("backend_events"),
+        };
+
+        assert!(!watchdog.observe_active_tick(start + watchdog.budget / 2, context));
+        assert!(watchdog.observe_active_tick(start + watchdog.budget, context));
+        assert!(!watchdog.observe_active_tick(
+            start + watchdog.budget + BACKEND_REDRAW_FRAME_INTERVAL / 2,
+            context
+        ));
+        assert!(watchdog.observe_active_tick(
+            start + watchdog.budget + BACKEND_REDRAW_FRAME_INTERVAL,
+            context
+        ));
+    }
+
+    #[test]
+    fn no_paint_watchdog_resets_when_idle_or_presented() {
+        let start = Instant::now();
+        let mut watchdog = DesktopNoPaintWatchdog::new_with_start(start);
+        let active_context = NoPaintWatchdogContext {
+            active: true,
+            mode: "single_session",
+            has_background_work: true,
+            frame_animation_active: false,
+            pending_backend_redraw: false,
+            pending_interaction_kind: None,
+        };
+        let idle_context = NoPaintWatchdogContext {
+            active: false,
+            ..active_context
+        };
+
+        assert!(watchdog.observe_active_tick(start + watchdog.budget, active_context));
+        assert!(
+            !watchdog.observe_active_tick(start + watchdog.budget + watchdog.budget, idle_context)
+        );
+        assert!(watchdog.last_redraw_request_at.is_none());
     }
 }
 
