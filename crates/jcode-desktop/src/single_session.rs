@@ -21,6 +21,9 @@ pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FON
 pub(crate) const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
 pub(crate) const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
 pub(crate) const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
+pub(crate) const SINGLE_SESSION_TEXT_SCALE_STEP: f32 = 0.10;
+pub(crate) const SINGLE_SESSION_MIN_TEXT_SCALE: f32 = 0.65;
+pub(crate) const SINGLE_SESSION_MAX_TEXT_SCALE: f32 = 1.35;
 pub(crate) const HANDWRITTEN_WELCOME_PHRASES: &[&str] = &["Hello there"];
 
 #[allow(dead_code)]
@@ -50,6 +53,18 @@ pub(crate) const fn single_session_typography() -> SingleSessionTypography {
         body_line_height: SINGLE_SESSION_BODY_LINE_HEIGHT,
         code_line_height: SINGLE_SESSION_CODE_LINE_HEIGHT,
         meta_line_height: SINGLE_SESSION_META_LINE_HEIGHT,
+    }
+}
+
+pub(crate) fn single_session_typography_for_scale(scale: f32) -> SingleSessionTypography {
+    let base = single_session_typography();
+    let scale = scale.clamp(SINGLE_SESSION_MIN_TEXT_SCALE, SINGLE_SESSION_MAX_TEXT_SCALE);
+    SingleSessionTypography {
+        title_size: base.title_size * scale,
+        body_size: base.body_size * scale,
+        meta_size: base.meta_size * scale,
+        code_size: base.code_size * scale,
+        ..base
     }
 }
 
@@ -83,6 +98,7 @@ pub(crate) struct SingleSessionApp {
     // of the persisted/rendered transcript text.
     welcome_timeline: bool,
     welcome_hero_phrase_index: usize,
+    text_scale: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -507,6 +523,7 @@ impl SingleSessionApp {
             session_handle: None,
             welcome_timeline,
             welcome_hero_phrase_index,
+            text_scale: 1.0,
         }
     }
 
@@ -722,6 +739,14 @@ impl SingleSessionApp {
                 KeyOutcome::RestoreCrashedSessions
             }
             KeyInput::RefreshSessions => KeyOutcome::Redraw,
+            KeyInput::AdjustTextScale(direction) => {
+                self.adjust_text_scale(direction);
+                KeyOutcome::Redraw
+            }
+            KeyInput::ResetTextScale => {
+                self.text_scale = 1.0;
+                KeyOutcome::Redraw
+            }
             KeyInput::CancelGeneration => {
                 if self.is_processing {
                     KeyOutcome::CancelGeneration
@@ -830,6 +855,16 @@ impl SingleSessionApp {
             }
             _ => KeyOutcome::None,
         }
+    }
+
+    pub(crate) fn text_scale(&self) -> f32 {
+        self.text_scale
+    }
+
+    fn adjust_text_scale(&mut self, direction: i8) {
+        let delta = direction as f32 * SINGLE_SESSION_TEXT_SCALE_STEP;
+        self.text_scale = (self.text_scale + delta)
+            .clamp(SINGLE_SESSION_MIN_TEXT_SCALE, SINGLE_SESSION_MAX_TEXT_SCALE);
     }
 
     fn open_model_picker(&mut self) -> KeyOutcome {

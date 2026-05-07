@@ -96,6 +96,8 @@ pub enum KeyInput {
     SpawnPanel,
     HotkeyHelp,
     RefreshSessions,
+    AdjustTextScale(i8),
+    ResetTextScale,
     SetPanelSize(PanelSizePreset),
     Character(String),
     Other,
@@ -611,7 +613,9 @@ impl Workspace {
             | KeyInput::OpenModelPicker
             | KeyInput::OpenSessionSwitcher
             | KeyInput::ModelPickerMove(_)
-            | KeyInput::CycleModel(_) => KeyOutcome::None,
+            | KeyInput::CycleModel(_)
+            | KeyInput::AdjustTextScale(_)
+            | KeyInput::ResetTextScale => KeyOutcome::None,
             KeyInput::RetrieveQueuedDraft => KeyOutcome::None,
             KeyInput::PasteText => KeyOutcome::PasteText,
             KeyInput::Character(text) => {

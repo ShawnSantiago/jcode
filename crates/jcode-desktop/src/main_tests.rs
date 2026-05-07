@@ -678,6 +678,26 @@ fn desktop_maps_terminal_editing_shortcuts_from_tui() {
 }
 
 #[test]
+fn desktop_maps_text_scale_shortcuts() {
+    assert_eq!(
+        to_key_input(&Key::Character("-".into()), ModifiersState::CONTROL),
+        KeyInput::AdjustTextScale(-1)
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("=".into()), ModifiersState::CONTROL),
+        KeyInput::AdjustTextScale(1)
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("+".into()), ModifiersState::CONTROL),
+        KeyInput::AdjustTextScale(1)
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("0".into()), ModifiersState::CONTROL),
+        KeyInput::ResetTextScale
+    );
+}
+
+#[test]
 fn single_session_cut_and_retrieve_queued_draft_match_tui_shortcuts() {
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("cut me".to_string()));

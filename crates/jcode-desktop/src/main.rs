@@ -20,7 +20,7 @@ use render_helpers::*;
 use single_session::{
     SINGLE_SESSION_ASSISTANT_FONT_FAMILY, SINGLE_SESSION_FONT_FAMILY, SelectionPoint,
     SingleSessionApp, SingleSessionLineStyle, SingleSessionStyledLine, handwritten_welcome_phrase,
-    single_session_surface, single_session_typography,
+    single_session_surface, single_session_typography, single_session_typography_for_scale,
 };
 use single_session_render::*;
 use wgpu::util::DeviceExt;
@@ -1487,6 +1487,13 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("r") => {
             KeyInput::RefreshSessions
         }
+        Key::Character(text) if modifiers.control_key() && (text == "-" || text == "_") => {
+            KeyInput::AdjustTextScale(-1)
+        }
+        Key::Character(text) if modifiers.control_key() && (text == "=" || text == "+") => {
+            KeyInput::AdjustTextScale(1)
+        }
+        Key::Character(text) if modifiers.control_key() && text == "0" => KeyInput::ResetTextScale,
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("v") => {
             KeyInput::PasteText
         }

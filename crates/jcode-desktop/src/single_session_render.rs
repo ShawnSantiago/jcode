@@ -10,6 +10,7 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) welcome_hint: Vec<SingleSessionStyledLine>,
     pub(crate) activity_active: bool,
     pub(crate) welcome_handoff_visible: bool,
+    pub(crate) text_scale_bits: u32,
     pub(crate) body: Vec<SingleSessionStyledLine>,
     pub(crate) draft: String,
     pub(crate) status: String,
@@ -1535,7 +1536,8 @@ fn welcome_timeline_body_draft_gap() -> f32 {
 }
 
 fn welcome_timeline_total_body_lines(app: &SingleSessionApp, size: PhysicalSize<u32>) -> usize {
-    let transcript_lines = single_session_wrapped_body_lines(app.body_styled_lines(), size).len();
+    let transcript_lines =
+        single_session_wrapped_body_lines(app.body_styled_lines(), size, app.text_scale()).len();
     if app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript() {
         welcome_timeline_virtual_body_lines(size) + transcript_lines
     } else {
@@ -1643,6 +1645,7 @@ pub(crate) fn single_session_text_key_for_tick_with_scroll(
         welcome_hint,
         activity_active: app.has_activity_indicator(),
         welcome_handoff_visible,
+        text_scale_bits: app.text_scale().to_bits(),
         body,
         draft: if welcome_input_visible {
             visualize_composer_whitespace(&app.composer_text())
@@ -1662,7 +1665,7 @@ pub(crate) fn single_session_text_buffers_from_key(
     size: PhysicalSize<u32>,
     font_system: &mut FontSystem,
 ) -> Vec<Buffer> {
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(f32::from_bits(key.text_scale_bits));
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
 
     let draft_top = single_session_draft_top_for_fresh_state(size, key.fresh_welcome_visible);
@@ -1772,7 +1775,7 @@ pub(crate) fn single_session_body_viewport_for_tick(
     tick: u64,
     smooth_scroll_lines: f32,
 ) -> SingleSessionBodyViewport {
-    let typography = single_session_typography();
+    let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
     let body_bottom = single_session_body_bottom_for_app(app, size);
@@ -1804,7 +1807,11 @@ fn single_session_rendered_body_lines_for_tick(
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Vec<SingleSessionStyledLine> {
-    let lines = single_session_wrapped_body_lines(app.body_styled_lines_for_tick(tick), size);
+    let lines = single_session_wrapped_body_lines(
+        app.body_styled_lines_for_tick(tick),
+        size,
+        app.text_scale(),
+    );
     if !(app.is_welcome_timeline_visible() && app.has_welcome_timeline_transcript()) {
         return lines;
     }
@@ -1828,11 +1835,12 @@ fn blank_render_line() -> SingleSessionStyledLine {
 fn single_session_wrapped_body_lines(
     lines: Vec<SingleSessionStyledLine>,
     size: PhysicalSize<u32>,
+    text_scale: f32,
 ) -> Vec<SingleSessionStyledLine> {
     // Glyphon also wraps, but explicit visual rows keep scroll metrics,
     // selection hit-testing, and the rendered text viewport in agreement.
     let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
-    let max_columns = (content_width / single_session_body_char_width())
+    let max_columns = (content_width / single_session_body_char_width_for_scale(text_scale))
         .floor()
         .max(20.0) as usize;
     let mut wrapped = Vec::with_capacity(lines.len());
@@ -1920,7 +1928,11 @@ pub(crate) fn single_session_body_column_at_x(x: f32, line: &str) -> usize {
 }
 
 pub(crate) fn single_session_body_char_width() -> f32 {
-    let typography = single_session_typography();
+    single_session_body_char_width_for_scale(1.0)
+}
+
+fn single_session_body_char_width_for_scale(text_scale: f32) -> f32 {
+    let typography = single_session_typography_for_scale(text_scale);
     typography.body_size * 0.58
 }
 
@@ -1966,7 +1978,7 @@ fn single_session_text_buffer(
         font_system,
         text,
         Attrs::new().family(Family::Name(SINGLE_SESSION_FONT_FAMILY)),
-        Shaping::Basic,
+        Shaping::Advanced,
     );
     buffer.shape_until_scroll(font_system);
     buffer
@@ -1987,7 +1999,7 @@ fn single_session_nowrap_text_buffer(
         font_system,
         text,
         Attrs::new().family(Family::Name(SINGLE_SESSION_FONT_FAMILY)),
-        Shaping::Basic,
+        Shaping::Advanced,
     );
     buffer.shape_until_scroll(font_system);
     buffer
@@ -2007,7 +2019,7 @@ fn single_session_styled_text_buffer(
     buffer.set_rich_text(
         font_system,
         segments.iter().map(|(text, attrs)| (text.as_str(), *attrs)),
-        Shaping::Basic,
+        Shaping::Advanced,
     );
     buffer.shape_until_scroll(font_system);
     buffer
