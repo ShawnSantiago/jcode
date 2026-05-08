@@ -764,6 +764,32 @@ async fn run() -> Result<()> {
                     window.request_redraw();
                 }
             }
+            Event::UserEvent(DesktopUserEvent::SessionCardLoaded {
+                session_id,
+                card,
+                loaded_in,
+            }) => {
+                let card_found = card.is_some();
+                let mut applied = false;
+                if let DesktopApp::SingleSession(single_session) = &mut app
+                    && single_session.live_session_id.as_deref() == Some(session_id.as_str())
+                    && let Some(card) = card
+                {
+                    single_session.replace_session(Some(card));
+                    applied = true;
+                }
+                log_desktop_session_card_refresh_profile(
+                    &session_id,
+                    loaded_in,
+                    card_found,
+                    applied,
+                );
+                if applied {
+                    window.set_title(&app.status_title());
+                    interaction_latency.mark("session_card_refresh", Instant::now());
+                    window.request_redraw();
+                }
+            }
             Event::UserEvent(DesktopUserEvent::SessionEvents(batch)) => {
                 let ui_received_at = Instant::now();
                 let accumulated_for = batch.accumulated_for();
@@ -774,10 +800,14 @@ async fn run() -> Result<()> {
                 let ui_queue_delay = ui_received_at.saturating_duration_since(forwarded_at);
                 let mut redraw_requested = false;
                 let mut redraw_deferred = false;
+                let mut session_card_refresh_spawned = false;
                 if apply_stats.visible_changed {
                     let now = Instant::now();
-                    if let Some(session_id) = app.single_session_live_id() {
-                        attach_single_session_by_id(&mut app, &session_id);
+                    if apply_stats.session_card_refresh_requested
+                        && let Some(session_id) = app.single_session_live_id()
+                    {
+                        spawn_single_session_card_refresh(session_id, event_loop_proxy.clone());
+                        session_card_refresh_spawned = true;
                     }
                     if let Some((message, images)) = app.take_next_queued_single_session_draft() {
                         let result = if let Some(session_id) = app.single_session_live_id() {
@@ -822,6 +852,7 @@ async fn run() -> Result<()> {
                     &apply_stats,
                     redraw_requested,
                     redraw_deferred,
+                    session_card_refresh_spawned,
                 );
             }
             Event::AboutToWait => {
@@ -925,6 +956,29 @@ fn spawn_recovery_session_count_scan(
         })
     {
         eprintln!("jcode-desktop: failed to start recovery scan: {error:#}");
+    }
+}
+
+fn spawn_single_session_card_refresh(
+    session_id: String,
+    event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
+) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("jcode-desktop-session-card-refresh".to_string())
+        .spawn(move || {
+            let started = Instant::now();
+            let card = load_session_cards_for_desktop()
+                .into_iter()
+                .find(|card| card.session_id == session_id);
+            let loaded_in = started.elapsed();
+            let _ = event_loop_proxy.send_event(DesktopUserEvent::SessionCardLoaded {
+                session_id,
+                card,
+                loaded_in,
+            });
+        })
+    {
+        eprintln!("jcode-desktop: failed to start session card refresh: {error:#}");
     }
 }
 
@@ -1036,6 +1090,11 @@ impl DesktopStartupTrace {
 #[derive(Debug)]
 enum DesktopUserEvent {
     SessionEvents(DesktopSessionEventBatch),
+    SessionCardLoaded {
+        session_id: String,
+        card: Option<workspace::SessionCard>,
+        loaded_in: Duration,
+    },
     RecoveryCount(usize),
 }
 
@@ -3076,19 +3135,6 @@ fn desktop_mode_from_args<'a>(args: impl IntoIterator<Item = &'a str>) -> Deskto
     }
 }
 
-fn attach_single_session_by_id(app: &mut DesktopApp, session_id: &str) {
-    let Some(card) = load_session_cards_for_desktop()
-        .into_iter()
-        .find(|card| card.session_id == session_id)
-    else {
-        return;
-    };
-
-    if let DesktopApp::SingleSession(single_session) = app {
-        single_session.replace_session(Some(card));
-    }
-}
-
 struct DesktopHotReloader {
     relaunch: Option<DesktopRelaunch>,
     initial_modified: Option<std::time::SystemTime>,
@@ -3620,6 +3666,7 @@ struct DesktopSessionApplyStats {
     visible_changed: bool,
     event_count: usize,
     text_delta_bytes: usize,
+    session_card_refresh_requested: bool,
     elapsed: Duration,
 }
 
@@ -3632,6 +3679,7 @@ fn apply_desktop_session_event_batch_with_stats(
             visible_changed: false,
             event_count: 0,
             text_delta_bytes: 0,
+            session_card_refresh_requested: false,
             elapsed: Duration::ZERO,
         };
     }
@@ -3639,10 +3687,12 @@ fn apply_desktop_session_event_batch_with_stats(
     let event_count = events.len();
     let mut text_delta_bytes = 0usize;
     let mut visible_changed = false;
+    let mut session_card_refresh_requested = false;
     for event in events {
         if let session_launch::DesktopSessionEvent::TextDelta(text) = &event {
             text_delta_bytes += text.len();
         }
+        session_card_refresh_requested |= desktop_session_event_refreshes_session_card(&event);
         visible_changed |= desktop_session_event_affects_visible_state(&event);
         app.apply_session_event(event);
     }
@@ -3659,8 +3709,20 @@ fn apply_desktop_session_event_batch_with_stats(
         visible_changed,
         event_count,
         text_delta_bytes,
+        session_card_refresh_requested,
         elapsed,
     }
+}
+
+fn desktop_session_event_refreshes_session_card(
+    event: &session_launch::DesktopSessionEvent,
+) -> bool {
+    matches!(
+        event,
+        session_launch::DesktopSessionEvent::SessionStarted { .. }
+            | session_launch::DesktopSessionEvent::Done
+            | session_launch::DesktopSessionEvent::Error(_)
+    )
 }
 
 fn log_desktop_session_event_batch_profile(
@@ -3671,12 +3733,15 @@ fn log_desktop_session_event_batch_profile(
     apply_stats: &DesktopSessionApplyStats,
     redraw_requested: bool,
     redraw_deferred: bool,
+    session_card_refresh_spawned: bool,
 ) {
     if raw_event_count < 128
         && raw_payload_bytes < 8 * 1024
         && accumulated_for < Duration::from_millis(40)
         && ui_queue_delay < DESKTOP_INPUT_LATENCY_BUDGET
         && apply_stats.elapsed < DESKTOP_120FPS_FRAME_BUDGET
+        && !apply_stats.session_card_refresh_requested
+        && !session_card_refresh_spawned
     {
         return;
     }
@@ -3693,6 +3758,29 @@ fn log_desktop_session_event_batch_profile(
             "visible_changed": apply_stats.visible_changed,
             "redraw_requested": redraw_requested,
             "redraw_deferred": redraw_deferred,
+            "session_card_refresh_requested": apply_stats.session_card_refresh_requested,
+            "session_card_refresh_spawned": session_card_refresh_spawned,
+        }),
+    );
+}
+
+fn log_desktop_session_card_refresh_profile(
+    session_id: &str,
+    loaded_in: Duration,
+    card_found: bool,
+    applied: bool,
+) {
+    if loaded_in < Duration::from_millis(40) && card_found {
+        return;
+    }
+    emit_desktop_profile_event(
+        "jcode-desktop-session-card-refresh-profile",
+        serde_json::json!({
+            "session_id": session_id,
+            "loaded_in_ms": duration_ms(loaded_in),
+            "card_found": card_found,
+            "applied": applied,
+            "ui_thread_blocking": false,
         }),
     );
 }

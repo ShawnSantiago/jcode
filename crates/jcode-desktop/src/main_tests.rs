@@ -2871,3 +2871,38 @@ fn rendered_body_cache_key_samples_large_transcript_middle() {
         second.rendered_body_static_cache_key(size)
     );
 }
+
+#[test]
+fn streaming_text_delta_batches_do_not_refresh_session_metadata() {
+    let mut app = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+        session_id: "session_live".to_string(),
+    });
+
+    let stats = apply_desktop_session_event_batch_with_stats(
+        &mut app,
+        vec![session_launch::DesktopSessionEvent::TextDelta(
+            "streaming chunk".to_string(),
+        )],
+    );
+
+    assert!(stats.visible_changed);
+    assert_eq!(stats.text_delta_bytes, "streaming chunk".len());
+    assert!(!stats.session_card_refresh_requested);
+}
+
+#[test]
+fn terminal_session_events_request_async_session_metadata_refresh() {
+    let mut app = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+        session_id: "session_live".to_string(),
+    });
+
+    let stats = apply_desktop_session_event_batch_with_stats(
+        &mut app,
+        vec![session_launch::DesktopSessionEvent::Done],
+    );
+
+    assert!(stats.visible_changed);
+    assert!(stats.session_card_refresh_requested);
+}
