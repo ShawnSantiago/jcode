@@ -113,7 +113,17 @@ fn spawn_visible_session_window(
     }
 }
 
-fn provider_key_for_spawn_model(model: Option<&str>) -> Option<String> {
+fn provider_key_for_spawn_model(
+    model: Option<&str>,
+    provider_key_override: Option<&str>,
+) -> Option<String> {
+    if let Some(provider_key) = provider_key_override
+        .map(str::trim)
+        .filter(|provider_key| !provider_key.is_empty())
+    {
+        return Some(provider_key.to_string());
+    }
+
     let model = model?.trim();
     if model.is_empty() {
         return None;
@@ -161,6 +171,7 @@ fn cleanup_prepared_visible_spawn_session(session_id: &str) {
 fn prepare_visible_spawn_session<F>(
     working_dir: Option<&str>,
     model_override: Option<&str>,
+    provider_key_override: Option<&str>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -168,7 +179,7 @@ fn prepare_visible_spawn_session<F>(
 where
     F: FnOnce(&str, &std::path::Path, bool, Option<&str>) -> anyhow::Result<bool>,
 {
-    let provider_key = provider_key_for_spawn_model(model_override);
+    let provider_key = provider_key_for_spawn_model(model_override, provider_key_override);
     let (new_session_id, cwd) = create_visible_spawn_session(
         working_dir,
         model_override,
@@ -296,32 +307,25 @@ pub(super) async fn spawn_swarm_agent(
 ) -> anyhow::Result<String> {
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
-    let coordinator_model = {
-        let agent_sessions = sessions.read().await;
-        agent_sessions.get(req_session_id).and_then(|agent| {
-            agent
-                .try_lock()
-                .ok()
-                .map(|agent_guard| agent_guard.provider_model())
-        })
-    };
-    let spawn_model = crate::config::config()
-        .agents
-        .swarm_model
-        .clone()
-        .or(coordinator_model.clone());
-    let coordinator_is_canary = {
+    let (coordinator_model, coordinator_provider_key, coordinator_is_canary) = {
         let agent_sessions = sessions.read().await;
         agent_sessions
             .get(req_session_id)
             .and_then(|agent| {
-                agent
-                    .try_lock()
-                    .ok()
-                    .map(|agent_guard| agent_guard.is_canary())
+                agent.try_lock().ok().map(|agent_guard| {
+                    (
+                        Some(agent_guard.provider_model()),
+                        agent_guard.session_provider_key(),
+                        agent_guard.is_canary(),
+                    )
+                })
             })
-            .unwrap_or(false)
+            .unwrap_or((None, None, false))
     };
+    let configured_swarm_model = crate::config::config().agents.swarm_model.clone();
+    let spawn_model = coordinator_model.or(configured_swarm_model);
+    let spawn_provider_key = coordinator_provider_key
+        .or_else(|| provider_key_for_spawn_model(spawn_model.as_deref(), None));
 
     let startup_message = initial_message
         .as_deref()
@@ -330,6 +334,7 @@ pub(super) async fn spawn_swarm_agent(
     let visible_spawn = prepare_visible_spawn_session(
         resolved_working_dir.as_deref(),
         spawn_model.as_deref(),
+        spawn_provider_key.as_deref(),
         coordinator_is_canary,
         startup_message.as_deref(),
         spawn_visible_session_window,
@@ -355,6 +360,7 @@ pub(super) async fn spawn_swarm_agent(
                 soft_interrupt_queues,
                 coordinator_is_canary,
                 spawn_model.clone(),
+                spawn_provider_key.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
             )

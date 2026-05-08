@@ -92,6 +92,14 @@ impl Agent {
         Ok(())
     }
 
+    pub fn session_provider_key(&self) -> Option<String> {
+        self.session.provider_key.clone()
+    }
+
+    pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
+        self.session.provider_key = provider_key;
+    }
+
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {
         self.session.rename_title(title);
         self.log_env_snapshot("rename_session");
