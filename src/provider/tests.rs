@@ -22,7 +22,10 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_OPENROUTER_STATIC_MODELS",
         "JCODE_OPENAI_COMPAT_API_BASE",
         "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "JCODE_OPENAI_COMPAT_ENV_FILE",
         "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "OPENAI_COMPAT_API_KEY",
         "OPENAI_API_KEY",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
@@ -82,6 +85,61 @@ fn with_env_var<T>(key: &str, value: &str, f: impl FnOnce() -> T) -> T {
         crate::env::remove_var(key);
     }
     result
+}
+
+#[test]
+fn openai_compatible_api_key_setup_makes_configured_model_route_available() {
+    with_clean_provider_test_env(|| {
+        let env_file = crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file;
+        crate::provider_catalog::save_env_value_to_env_file(
+            "JCODE_OPENAI_COMPAT_API_BASE",
+            env_file,
+            Some("https://example-openai-compatible.test/v1"),
+        )
+        .expect("save api base");
+        crate::provider_catalog::save_env_value_to_env_file(
+            "OPENAI_COMPAT_API_KEY",
+            env_file,
+            Some("sk-test-openai-compatible"),
+        )
+        .expect("save api key");
+        crate::provider_catalog::save_env_value_to_env_file(
+            "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+            env_file,
+            Some("glm-test-login-flow"),
+        )
+        .expect("save default model");
+
+        assert!(
+            crate::provider_catalog::openai_compatible_profile_is_configured(
+                crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+            )
+        );
+
+        let provider = MultiProvider::new();
+        let routes = provider.model_routes();
+        assert!(
+            routes.iter().any(|route| {
+                route.provider == "OpenAI-compatible"
+                    && matches!(
+                        route.api_method.as_str(),
+                        "openai-compatible" | "openai-compatible:openai-compatible"
+                    )
+                    && route.model == "glm-test-login-flow"
+                    && route.available
+            }),
+            "configured OpenAI-compatible model should be immediately visible after API-key setup; routes: {routes:?}"
+        );
+
+        provider
+            .set_model_on_openai_compatible_profile(
+                crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+                "glm-test-login-flow",
+            )
+            .expect("configured OpenAI-compatible model should select without requiring another provider login");
+
+        assert_eq!(provider.model(), "glm-test-login-flow");
+    });
 }
 
 fn test_multi_provider_with_cursor() -> MultiProvider {
