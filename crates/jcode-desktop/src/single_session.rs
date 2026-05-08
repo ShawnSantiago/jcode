@@ -100,6 +100,7 @@ pub(crate) struct SingleSessionApp {
     pub(crate) is_processing: bool,
     pub(crate) body_scroll_lines: f32,
     pub(crate) show_help: bool,
+    pub(crate) show_session_info: bool,
     pub(crate) pending_images: Vec<(String, String)>,
     pub(crate) model_picker: ModelPickerState,
     pub(crate) session_switcher: SessionSwitcherState,
@@ -608,6 +609,7 @@ impl SingleSessionApp {
             is_processing: false,
             body_scroll_lines: 0.0,
             show_help: false,
+            show_session_info: false,
             pending_images: Vec::new(),
             model_picker: ModelPickerState::default(),
             session_switcher: SessionSwitcherState::default(),
@@ -664,6 +666,7 @@ impl SingleSessionApp {
         self.is_processing = false;
         self.body_scroll_lines = 0.0;
         self.show_help = false;
+        self.show_session_info = false;
         self.pending_images.clear();
         self.model_picker = ModelPickerState::default();
         self.session_switcher = SessionSwitcherState::default();
@@ -684,7 +687,7 @@ impl SingleSessionApp {
     pub(crate) fn status_title(&self) -> String {
         let title = self.title();
         format!(
-            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+; spawn · Esc interrupt · --workspace for Niri layout"
+            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+Shift+S info · Ctrl+; spawn · Esc interrupt · --workspace for Niri layout"
         )
     }
 
@@ -713,6 +716,7 @@ impl SingleSessionApp {
             && !self.session_switcher.open
             && self.stdin_response.is_none()
             && self.show_help == false
+            && self.show_session_info == false
             && self.session.is_some()
     }
 
@@ -840,6 +844,19 @@ impl SingleSessionApp {
             KeyInput::OpenModelPicker => self.open_model_picker(),
             KeyInput::HotkeyHelp => {
                 self.show_help = !self.show_help;
+                if self.show_help {
+                    self.show_session_info = false;
+                }
+                self.scroll_body_to_bottom();
+                KeyOutcome::Redraw
+            }
+            KeyInput::ToggleSessionInfo => {
+                self.show_session_info = !self.show_session_info;
+                if self.show_session_info {
+                    self.show_help = false;
+                    self.model_picker.close();
+                    self.session_switcher.close();
+                }
                 self.scroll_body_to_bottom();
                 KeyOutcome::Redraw
             }
@@ -891,6 +908,10 @@ impl SingleSessionApp {
             KeyInput::SubmitDraft => self.submit_draft(),
             KeyInput::Escape if self.show_help => {
                 self.show_help = false;
+                KeyOutcome::Redraw
+            }
+            KeyInput::Escape if self.show_session_info => {
+                self.show_session_info = false;
                 KeyOutcome::Redraw
             }
             KeyInput::Escape => {
@@ -989,6 +1010,7 @@ impl SingleSessionApp {
 
     fn open_model_picker(&mut self) -> KeyOutcome {
         self.show_help = false;
+        self.show_session_info = false;
         self.session_switcher.close();
         self.model_picker.open_loading();
         self.status = Some("loading models".to_string());
@@ -998,6 +1020,7 @@ impl SingleSessionApp {
 
     fn open_model_picker_preview(&mut self, filter: String) -> KeyOutcome {
         self.show_help = false;
+        self.show_session_info = false;
         self.session_switcher.close();
         self.model_picker.open_preview_loading(filter);
         self.status = Some("loading models".to_string());
@@ -1066,6 +1089,7 @@ impl SingleSessionApp {
 
     fn open_session_switcher(&mut self) -> KeyOutcome {
         self.show_help = false;
+        self.show_session_info = false;
         self.model_picker.close();
         let current_session_id = self.current_session_id().map(str::to_string);
         self.session_switcher
@@ -1292,12 +1316,18 @@ impl SingleSessionApp {
         if self.model_picker.open {
             return model_picker_inline_styled_lines(&self.model_picker);
         }
+        if self.show_session_info {
+            return session_info_inline_styled_lines(self);
+        }
         Vec::new()
     }
 
     pub(crate) fn inline_widget_line_count(&self) -> usize {
         if self.model_picker.open {
             return model_picker_inline_styled_lines(&self.model_picker).len();
+        }
+        if self.show_session_info {
+            return session_info_inline_styled_lines(self).len();
         }
         0
     }
@@ -1315,6 +1345,7 @@ impl SingleSessionApp {
             if let Some(status) = &self.status
                 && self.session.is_none()
                 && !self.model_picker.open
+                && !self.show_session_info
             {
                 return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
             }
@@ -1327,6 +1358,7 @@ impl SingleSessionApp {
         if let Some(status) = &self.status
             && self.session.is_none()
             && !self.model_picker.open
+            && !self.show_session_info
         {
             return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
         }
@@ -1914,12 +1946,12 @@ impl SingleSessionApp {
                 }
             }
             "/status" => {
-                let status = self.composer_status_line_for_tick(0);
                 self.draft.clear();
                 self.draft_cursor = 0;
                 self.input_undo_stack.clear();
-                self.messages.push(SingleSessionMessage::meta(status));
-                self.status = Some("status shown".to_string());
+                self.show_help = false;
+                self.show_session_info = true;
+                self.status = Some("showing session info".to_string());
                 self.scroll_body_to_bottom();
                 KeyOutcome::Redraw
             }
@@ -2794,6 +2826,177 @@ fn session_card_search_text(session: &workspace::SessionCard) -> String {
     text.to_lowercase()
 }
 
+fn session_info_inline_styled_lines(app: &SingleSessionApp) -> Vec<SingleSessionStyledLine> {
+    let (user_count, assistant_count, tool_count, system_count, meta_count) =
+        session_message_role_counts(&app.messages);
+    let session_id = app
+        .current_session_id()
+        .map(|id| format!("{} ({})", short_session_id(id), id))
+        .unwrap_or_else(|| "fresh / not started".to_string());
+    let model = model_picker_current_label(
+        app.model_picker.provider_name.as_deref(),
+        app.model_picker.current_model.as_deref(),
+    );
+    let status = app.status.as_deref().unwrap_or("ready");
+    let transcript_chars: usize = app
+        .messages
+        .iter()
+        .map(|message| message.content.len())
+        .sum();
+    let streaming_chars = app.streaming_response.len();
+    let streaming_lines = app.streaming_response.lines().count();
+    let body_lines = app.body_styled_lines_without_inline_widgets().len();
+    let selection = if app.has_body_selection() || app.has_draft_selection() {
+        "active"
+    } else {
+        "none"
+    };
+    let stdin = app
+        .stdin_response
+        .as_ref()
+        .map(|state| {
+            if state.is_password {
+                "password requested"
+            } else {
+                "input requested"
+            }
+        })
+        .unwrap_or("none");
+    let active_tool = app
+        .active_tool_message_index
+        .map(|index| format!("message #{index}"))
+        .unwrap_or_else(|| "none".to_string());
+
+    let mut lines = vec![
+        styled_line(
+            "╭─ session info · Ctrl+Shift+S/Esc close",
+            SingleSessionLineStyle::OverlayTitle,
+        ),
+        styled_line(
+            format!("│ title        {}", compact_tool_text(&app.title(), 92)),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!("│ session id   {}", compact_tool_text(&session_id, 92)),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!("│ status       {}", compact_tool_text(status, 92)),
+            SingleSessionLineStyle::Status,
+        ),
+        styled_line(
+            format!("│ model        {}", compact_tool_text(&model, 92)),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "│ work         {} · worker {} · active tool {}",
+                if app.is_processing { "running" } else { "idle" },
+                if app.session_handle.is_some() {
+                    "attached"
+                } else {
+                    "none"
+                },
+                active_tool
+            ),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "│ messages     {} total · {user_count} user · {assistant_count} assistant · {tool_count} tool · {system_count} system · {meta_count} meta",
+                app.messages.len()
+            ),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "│ transcript   {body_lines} visible lines · {transcript_chars} chars · streaming {streaming_chars} chars/{streaming_lines} lines"
+            ),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "│ composer     prompt #{} · draft {} chars · {} image(s) · {} queued · stdin {}",
+                app.next_prompt_number(),
+                app.draft.len(),
+                app.pending_images.len(),
+                app.queued_drafts.len(),
+                stdin
+            ),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "│ viewport     scroll {} · text scale {:.0}% · selection {} · welcome {}",
+                scroll_status_fragment(app.body_scroll_lines).trim_start_matches(" · "),
+                app.text_scale * 100.0,
+                selection,
+                if app.is_welcome_timeline_visible() {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            ),
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            "│ tokens       not yet emitted by desktop stream; showing local transcript stats instead",
+            SingleSessionLineStyle::Meta,
+        ),
+    ];
+
+    if let Some(session) = &app.session {
+        if !session.subtitle.trim().is_empty() {
+            lines.push(styled_line(
+                format!(
+                    "│ subtitle     {}",
+                    compact_tool_text(&session.subtitle, 92)
+                ),
+                SingleSessionLineStyle::Meta,
+            ));
+        }
+        if !session.detail.trim().is_empty() {
+            lines.push(styled_line(
+                format!("│ detail       {}", compact_tool_text(&session.detail, 92)),
+                SingleSessionLineStyle::Meta,
+            ));
+        }
+    }
+
+    if let Some(error) = &app.error {
+        lines.push(styled_line(
+            format!("│ error        {}", compact_tool_text(error, 92)),
+            SingleSessionLineStyle::Error,
+        ));
+    }
+
+    lines.push(styled_line(
+        "╰─ /status opens this panel",
+        SingleSessionLineStyle::Overlay,
+    ));
+    lines
+}
+
+fn session_message_role_counts(
+    messages: &[SingleSessionMessage],
+) -> (usize, usize, usize, usize, usize) {
+    let mut user = 0;
+    let mut assistant = 0;
+    let mut tool = 0;
+    let mut system = 0;
+    let mut meta = 0;
+    for message in messages {
+        match message.role {
+            SingleSessionRole::User => user += 1,
+            SingleSessionRole::Assistant => assistant += 1,
+            SingleSessionRole::Tool => tool += 1,
+            SingleSessionRole::System => system += 1,
+            SingleSessionRole::Meta => meta += 1,
+        }
+    }
+    (user, assistant, tool, system, meta)
+}
+
 fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyledLine> {
     let (active_hint, default_hint) = if picker.preview {
         ("↵ open", "")
@@ -2995,6 +3198,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
             ("Ctrl+Shift+M", "open model/account picker"),
             ("Ctrl+M/N", "switch to next/previous model"),
             ("Ctrl+P/O", "open recent session switcher"),
+            ("Ctrl+Shift+S", "toggle inline session info/stats"),
         ],
     },
     HelpSection {

@@ -421,6 +421,69 @@ fn single_session_slash_help_opens_help_without_sending_prompt() {
 }
 
 #[test]
+fn single_session_info_hotkey_toggles_inline_session_stats() {
+    let mut app = SingleSessionApp::new(Some(test_session_card(
+        "session_info_1234567890",
+        "Info Session",
+        "ready",
+    )));
+    app.messages
+        .push(SingleSessionMessage::user("what happened?"));
+    app.messages
+        .push(SingleSessionMessage::assistant("a useful answer"));
+    app.messages.push(SingleSessionMessage::tool("read file"));
+    app.streaming_response = "still streaming".to_string();
+    app.status = Some("receiving".to_string());
+    app.model_picker.current_model = Some("claude-sonnet-4-5".to_string());
+    app.model_picker.provider_name = Some("Claude".to_string());
+
+    assert_eq!(
+        app.handle_key(KeyInput::ToggleSessionInfo),
+        KeyOutcome::Redraw
+    );
+    assert!(app.show_session_info);
+    let info = app
+        .inline_widget_styled_lines()
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(info.contains("session info"));
+    assert!(info.contains("Info Session"));
+    assert!(info.contains("session_info_1234567890"));
+    assert!(info.contains("receiving"));
+    assert!(info.contains("Claude · claude-sonnet-4-5"));
+    assert!(info.contains("3 total · 1 user · 1 assistant · 1 tool"));
+    assert!(info.contains("streaming 15 chars"));
+
+    assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
+    assert!(!app.show_session_info);
+    assert!(app.inline_widget_styled_lines().is_empty());
+}
+
+#[test]
+fn single_session_status_slash_opens_inline_session_info() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/status".to_string()));
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert!(app.show_session_info);
+    assert!(app.draft.is_empty());
+    assert!(
+        app.messages.is_empty(),
+        "/status should not append a transcript meta row"
+    );
+    let info = app
+        .inline_widget_styled_lines()
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(info.contains("fresh / not started"));
+    assert!(info.contains("tokens"));
+}
+
+#[test]
 fn single_session_slash_model_with_argument_requests_model_switch() {
     let mut app = SingleSessionApp::new(None);
     app.draft = "/model gpt-5.5".to_string();
@@ -728,6 +791,17 @@ fn desktop_arrow_word_navigation_maps_common_modifiers() {
     assert_eq!(
         to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::ALT),
         KeyInput::MoveCursorWordRight
+    );
+}
+
+#[test]
+fn desktop_maps_session_info_hotkey() {
+    assert_eq!(
+        to_key_input(
+            &Key::Character("s".into()),
+            ModifiersState::CONTROL | ModifiersState::SHIFT
+        ),
+        KeyInput::ToggleSessionInfo
     );
 }
 
@@ -2541,12 +2615,16 @@ fn fresh_welcome_model_picker_only_reserves_inline_lane() {
     assert_eq!(draft_area.top, fresh_welcome_draft_top(size));
     let inline_area = areas.last().expect("inline model picker text area");
     assert!(
-        inline_area.top > draft_area.top,
-        "fresh inline picker should render below the typed /model command"
+        inline_area.top < draft_area.top,
+        "fresh inline picker should render above the typed /model command"
     );
     assert!(
         inline_area.top > handwritten_welcome_bounds(size).1[1],
         "fresh inline picker must not overlap the handwritten welcome hero"
+    );
+    assert!(
+        inline_area.bounds.bottom > inline_area.bounds.top,
+        "fresh inline picker should keep a visible clipped lane"
     );
 }
 

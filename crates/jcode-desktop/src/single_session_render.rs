@@ -3054,11 +3054,14 @@ pub(crate) fn single_session_text_areas_for_state(
     };
 
     let typography = single_session_typography_for_scale(ui_scale);
-    let composer_line_height = typography.code_size * typography.code_line_height;
-    let inline_widget_below_composer =
+    let line_height = typography.body_size * typography.body_line_height;
+    let inline_widget_in_welcome_gap =
         welcome_chrome_visible && !welcome_handoff_visible && inline_widget_line_count > 0;
-    let inline_widget_top = if inline_widget_below_composer {
-        draft_top + composer_line_height + 8.0
+    let inline_widget_top = if inline_widget_in_welcome_gap {
+        let visual_bottom = version_top + version_font_size * 1.4;
+        let full_height = inline_widget_line_count as f32 * line_height;
+        let preferred_top = draft_top - full_height - 8.0;
+        preferred_top.max(visual_bottom + 8.0)
     } else if inline_widget_line_count > 0 {
         body_bottom as f32 + 8.0
     } else {
@@ -3080,11 +3083,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 left: 0,
                 top: draft_top as i32,
                 right,
-                bottom: if inline_widget_below_composer {
-                    inline_widget_top as i32
-                } else {
-                    bottom
-                },
+                bottom,
             },
             default_color: text_color(STATUS_TEXT_ACCENT_COLOR),
         });
@@ -3098,11 +3097,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 left: 0,
                 top: draft_top as i32,
                 right,
-                bottom: if inline_widget_below_composer {
-                    inline_widget_top as i32
-                } else {
-                    bottom
-                },
+                bottom,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
         });
@@ -3167,11 +3162,10 @@ pub(crate) fn single_session_text_areas_for_state(
     if inline_widget_line_count > 0
         && let Some(buffer) = buffers.get(5)
     {
-        let line_height = typography.body_size * typography.body_line_height;
         let inline_top = inline_widget_top;
         let inline_bottom = inline_top + inline_widget_line_count as f32 * line_height;
-        let inline_bounds_bottom = if inline_widget_below_composer {
-            bottom
+        let inline_bounds_bottom = if inline_widget_in_welcome_gap {
+            draft_top as i32
         } else {
             inline_bottom.min(draft_top) as i32
         };

@@ -95,6 +95,7 @@ pub enum KeyInput {
     SubmitDraft,
     SpawnPanel,
     HotkeyHelp,
+    ToggleSessionInfo,
     RefreshSessions,
     AdjustTextScale(i8),
     ResetTextScale,
@@ -486,6 +487,7 @@ impl Workspace {
             | KeyInput::CycleModel(_)
             | KeyInput::OpenModelPicker
             | KeyInput::OpenSessionSwitcher
+            | KeyInput::ToggleSessionInfo
             | KeyInput::ModelPickerMove(_)
             | KeyInput::AttachClipboardImage
             | KeyInput::ClearAttachedImages
@@ -612,6 +614,7 @@ impl Workspace {
             | KeyInput::CopyLatestResponse
             | KeyInput::OpenModelPicker
             | KeyInput::OpenSessionSwitcher
+            | KeyInput::ToggleSessionInfo
             | KeyInput::ModelPickerMove(_)
             | KeyInput::CycleModel(_)
             | KeyInput::AdjustTextScale(_)
