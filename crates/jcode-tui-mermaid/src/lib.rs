@@ -321,6 +321,14 @@ fn render_svg_for_png(
     )
 }
 
+fn render_size_backend() -> &'static str {
+    if cfg!(all(feature = "mmdr-size-api", mmdr_size_api_available)) {
+        "mmdr-size-api"
+    } else {
+        "svg-retarget-fallback"
+    }
+}
+
 /// Render Mermaid source images a bit denser than the immediate terminal-pixel
 /// target so the terminal image protocol scales down from a sharper PNG.
 /// This especially helps small text remain legible in the pinned side pane.
@@ -686,6 +694,7 @@ pub struct MermaidDebugStats {
     pub cache_entries: usize,
     pub cache_dir: Option<String>,
     pub protocol: Option<String>,
+    pub render_size_backend: &'static str,
     pub last_png_width: Option<u32>,
     pub last_png_height: Option<u32>,
     pub last_measured_width: Option<u32>,

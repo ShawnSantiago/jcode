@@ -71,6 +71,7 @@ pub fn debug_stats() -> MermaidDebugStats {
     }
     out.deferred_epoch = deferred_render_epoch();
     out.protocol = protocol_type().map(|p| format!("{:?}", p));
+    out.render_size_backend = render_size_backend();
     out
 }
 
