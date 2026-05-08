@@ -1,7 +1,10 @@
 use super::{
     DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH, RENDER_SUPERSAMPLE, RENDER_WIDTH_BUCKET_CELLS,
-    RenderConfig, SVG_FONT_DB, Theme, get_font_size,
+    get_font_size,
 };
+#[cfg(feature = "renderer")]
+use super::{RenderConfig, SVG_FONT_DB, Theme};
+#[cfg(feature = "renderer")]
 use std::path::Path;
 
 /// Count nodes and edges in mermaid content (rough estimate)
@@ -191,6 +194,7 @@ pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: 
     updated
 }
 
+#[cfg(feature = "renderer")]
 fn primary_font_family(fonts: &str) -> String {
     fonts
         .split(',')
@@ -200,6 +204,7 @@ fn primary_font_family(fonts: &str) -> String {
         .to_string()
 }
 
+#[cfg(feature = "renderer")]
 fn parse_hex_color_for_png(input: &str) -> Option<resvg::tiny_skia::Color> {
     let color = input.trim();
     let hex = color.strip_prefix('#')?;
@@ -235,6 +240,7 @@ fn parse_hex_color_for_png(input: &str) -> Option<resvg::tiny_skia::Color> {
     resvg::tiny_skia::Color::from_rgba8(r, g, b, a).into()
 }
 
+#[cfg(feature = "renderer")]
 pub(super) fn write_output_png_cached_fonts(
     svg: &str,
     output: &Path,

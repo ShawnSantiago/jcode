@@ -307,6 +307,7 @@ fn svg_dimension_to_u32(value: f32) -> u32 {
     }
 }
 
+#[cfg(feature = "renderer")]
 fn write_output_png_cached_fonts(
     svg: &str,
     output: &Path,
@@ -650,6 +651,21 @@ fn render_mermaid_sized_internal(
         state.stats.last_hash = Some(format!("{:016x}", hash));
     }
 
+    #[cfg(not(feature = "renderer"))]
+    {
+        let msg = "Mermaid rendering is disabled in this build".to_string();
+        if let Ok(mut errors) = RENDER_ERRORS.lock() {
+            errors.insert(hash, msg.clone());
+        }
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.render_errors += 1;
+            state.stats.last_error = Some(msg.clone());
+        }
+        return RenderResult::Error(msg);
+    }
+
+    #[cfg(feature = "renderer")]
+    {
     // Get cache path
     let png_path = {
         let cache = RENDER_CACHE
@@ -853,5 +869,6 @@ fn render_mermaid_sized_internal(
         path: png_path,
         width,
         height,
+    }
     }
 }

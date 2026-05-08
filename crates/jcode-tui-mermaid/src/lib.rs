@@ -22,13 +22,14 @@ mod svg;
 use base64::Engine as _;
 use image::DynamicImage;
 use image::GenericImageView;
-#[cfg(not(all(feature = "mmdr-size-api", mmdr_size_api_available)))]
+#[cfg(all(feature = "renderer", not(all(feature = "mmdr-size-api", mmdr_size_api_available))))]
 use mermaid_rs_renderer::render::render_svg;
-#[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
+#[cfg(all(feature = "renderer", feature = "mmdr-size-api", mmdr_size_api_available))]
 use mermaid_rs_renderer::render::{
     measure_svg_dimensions as mmdr_measure_svg_dimensions,
     render_svg_with_dimensions as mmdr_render_svg_with_dimensions,
 };
+#[cfg(feature = "renderer")]
 use mermaid_rs_renderer::{
     config::{LayoutConfig, RenderConfig},
     layout::{Layout, compute_layout},
@@ -224,8 +225,10 @@ pub use cache_render::{
 pub use content_render::{
     MermaidContent, diagram_placeholder_lines, error_to_lines, estimate_image_height,
     image_widget_placeholder_markdown, parse_image_placeholder, result_to_content, result_to_lines,
-    terminal_theme, write_video_export_marker,
+    write_video_export_marker,
 };
+#[cfg(feature = "renderer")]
+pub use content_render::terminal_theme;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
     is_video_export_mode, protocol_type, register_external_image, register_inline_image,
@@ -253,7 +256,7 @@ struct MeasuredSvgDimensions {
     viewbox_height: f32,
 }
 
-#[cfg(not(all(feature = "mmdr-size-api", mmdr_size_api_available)))]
+#[cfg(all(feature = "renderer", not(all(feature = "mmdr-size-api", mmdr_size_api_available))))]
 fn measure_svg_dimensions_from_svg(
     svg_source: &str,
     output_dimensions: Option<(f32, f32)>,
@@ -292,7 +295,7 @@ fn measure_svg_dimensions_from_svg(
     }
 }
 
-#[cfg(not(all(feature = "mmdr-size-api", mmdr_size_api_available)))]
+#[cfg(all(feature = "renderer", not(all(feature = "mmdr-size-api", mmdr_size_api_available))))]
 fn render_svg_for_png(
     layout: &Layout,
     theme: &Theme,
@@ -309,7 +312,7 @@ fn render_svg_for_png(
     (svg, dimensions)
 }
 
-#[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
+#[cfg(all(feature = "renderer", feature = "mmdr-size-api", mmdr_size_api_available))]
 fn render_svg_for_png(
     layout: &Layout,
     theme: &Theme,
