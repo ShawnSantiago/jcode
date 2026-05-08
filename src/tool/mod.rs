@@ -327,6 +327,7 @@ impl Registry {
             "file_edit" => "edit",
             "file_glob" => "glob",
             "file_grep" => "grep",
+            "skill" | "Skill" => "skill_manage",
             "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
             other => other,
         }
