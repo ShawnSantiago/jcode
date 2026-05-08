@@ -2503,6 +2503,47 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
 }
 
 #[test]
+fn fresh_welcome_model_picker_only_reserves_inline_lane() {
+    let size = PhysicalSize::new(1000, 720);
+    let mut app = SingleSessionApp::new(None);
+
+    assert_eq!(
+        app.handle_key(KeyInput::Character("/model opus".to_string())),
+        KeyOutcome::LoadModelCatalog
+    );
+
+    let key = single_session_text_key(&app, size);
+    assert!(
+        key.fresh_welcome_visible,
+        "inline model picker should not hide the welcome hero"
+    );
+    assert_is_handwritten_welcome_phrase(&key.welcome_hero);
+    assert_visual_text_contains(&key, &key.welcome_hero);
+    assert!(
+        key.body.is_empty(),
+        "model picker status should not become transcript/body text"
+    );
+    assert!(
+        key.inline_widget
+            .iter()
+            .any(|line| line.text.contains("MODEL"))
+    );
+    assert_eq!(
+        single_session_draft_top_for_app(&app, size),
+        fresh_welcome_draft_top(size),
+        "composer/hero placement should stay on the normal fresh-welcome grid"
+    );
+
+    let mut font_system = FontSystem::new();
+    let buffers = single_session_text_buffers(&app, size, &mut font_system);
+    let areas = single_session_text_areas_for_app(&app, &buffers, size);
+    assert_eq!(
+        areas.first().expect("draft text area").top,
+        fresh_welcome_draft_top(size)
+    );
+}
+
+#[test]
 fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
     let size = PhysicalSize::new(1000, 720);
     let mut app = SingleSessionApp::new(None);

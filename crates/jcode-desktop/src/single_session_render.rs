@@ -504,7 +504,7 @@ fn welcome_timeline_visual_offset_pixels_for_total_lines(
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let body_top = single_session_body_top_for_app(app, size);
-    let body_bottom = single_session_body_bottom_for_total_lines(app, size, total_lines);
+    let body_bottom = single_session_body_bottom_base_for_total_lines(app, size, total_lines);
     let visible_lines = (((body_bottom - body_top).max(line_height)) / line_height)
         .floor()
         .max(1.0);

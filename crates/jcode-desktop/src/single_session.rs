@@ -1314,6 +1314,7 @@ impl SingleSessionApp {
         if self.is_welcome_timeline_visible() {
             if let Some(status) = &self.status
                 && self.session.is_none()
+                && !self.model_picker.open
             {
                 return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
             }
@@ -1325,6 +1326,7 @@ impl SingleSessionApp {
 
         if let Some(status) = &self.status
             && self.session.is_none()
+            && !self.model_picker.open
         {
             return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
         }
@@ -1492,7 +1494,6 @@ impl SingleSessionApp {
     pub(crate) fn is_welcome_timeline_visible(&self) -> bool {
         self.welcome_timeline
             && !self.show_help
-            && !self.model_picker.open
             && !self.session_switcher.open
             && self.stdin_response.is_none()
     }
