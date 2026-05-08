@@ -197,6 +197,14 @@ pub use active::{
     set_streaming_preview_diagram, snapshot_active_diagrams,
 };
 
+#[path = "mermaid_model.rs"]
+mod model;
+pub use model::{
+    DiagramBlock, DiagramCacheKey, DiagramId, DiagramOrigin, DiagramRenderProfile,
+    DiagramRenderRequest, MermaidTheme, RenderArtifact, RenderError, RenderMode, RenderPriority,
+    RenderStatus, RenderTarget, normalize_aspect_ratio,
+};
+
 #[path = "mermaid_cache_render.rs"]
 mod cache_render;
 #[path = "mermaid_content.rs"]
