@@ -620,6 +620,25 @@ impl crate::tui::TuiState for App {
         } else {
             self.session.messages.len()
         };
+        let (compaction_count, compaction_summary_chars, is_compacting) = if self.is_remote {
+            (0, 0, false)
+        } else if self.provider.uses_jcode_compaction() {
+            self.registry
+                .compaction()
+                .try_read()
+                .ok()
+                .map(|manager| {
+                    (
+                        manager.compacted_count(),
+                        manager.summary_chars(),
+                        manager.is_compacting(),
+                    )
+                })
+                .unwrap_or((0, 0, false))
+        } else {
+            (0, 0, false)
+        };
+
         if let Ok(cache) = CACHE.lock()
             && let Some((ts, cached)) = &*cache
             && ts.elapsed() < TTL
@@ -627,6 +646,9 @@ impl crate::tui::TuiState for App {
             && cached.is_remote == self.is_remote
             && cached.display_messages_version == self.display_messages_version
             && cached.message_count == message_count
+            && cached.compaction_count == compaction_count
+            && cached.compaction_summary_chars == compaction_summary_chars
+            && cached.is_compacting == is_compacting
         {
             return cached.context_info.clone();
         }
@@ -776,6 +798,9 @@ impl crate::tui::TuiState for App {
                     is_remote: self.is_remote,
                     display_messages_version: self.display_messages_version,
                     message_count,
+                    compaction_count,
+                    compaction_summary_chars,
+                    is_compacting,
                     context_info: info.clone(),
                 },
             ));
@@ -1036,6 +1061,26 @@ impl crate::tui::TuiState for App {
 
         let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
 
+        let compaction_info = if !self.is_remote && self.provider.uses_jcode_compaction() {
+            let compaction = self.registry.compaction();
+            compaction.try_read().ok().and_then(|manager| {
+                let compacted_messages = manager.compacted_count();
+                let summary_chars = manager.summary_chars();
+                let is_compacting = manager.is_compacting();
+                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
+                    crate::tui::info_widget::CompactionInfo {
+                        is_compacting,
+                        compacted_messages,
+                        active_messages: manager.active_messages_count(),
+                        summary_chars,
+                        mode: manager.mode().as_str().to_string(),
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
         crate::tui::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -1070,6 +1115,7 @@ impl crate::tui::TuiState for App {
             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
             observed_context_tokens: self.current_stream_context_tokens(),
             cache_hit_info,
+            compaction_info,
             is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
                 let compaction = self.registry.compaction();
                 compaction

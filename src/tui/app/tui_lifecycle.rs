@@ -124,14 +124,42 @@ impl App {
             }
             Ok((retry_attempts, backoff_secs, retry_at)) => {
                 self.rate_limit_reset = Some(retry_at);
-                self.push_display_message(DisplayMessage::system(format!(
-                    "{} Auto-retrying in {} second{} (attempt {}/{}).",
-                    reason,
-                    backoff_secs,
-                    if backoff_secs == 1 { "" } else { "s" },
+                let content = format!(
+                    "⚡ Connection lost — retrying (attempt {}/{}, in {}s) — {}",
                     retry_attempts,
-                    max_attempts
-                )));
+                    max_attempts,
+                    backoff_secs,
+                    reason
+                        .trim()
+                        .trim_start_matches("⚡ ")
+                        .trim_start_matches("Connection lost")
+                        .trim_start_matches('(')
+                        .trim_end_matches('.')
+                        .trim()
+                );
+                if let Some(idx) = self.display_messages.iter().rposition(|message| {
+                    message.role == "system"
+                        && (message.title.as_deref() == Some("Connection")
+                            || message
+                                .content
+                                .starts_with("⚡ Server reload in progress — waiting for handoff")
+                            || message.content.starts_with("⚡ Connection lost"))
+                }) {
+                    self.replace_display_message_title_and_content(
+                        idx,
+                        Some("Connection".to_string()),
+                        content,
+                    );
+                } else {
+                    self.push_display_message(DisplayMessage {
+                        role: "system".to_string(),
+                        content,
+                        tool_calls: Vec::new(),
+                        duration_secs: None,
+                        title: Some("Connection".to_string()),
+                        tool_data: None,
+                    });
+                }
                 true
             }
         }

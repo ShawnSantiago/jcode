@@ -18,6 +18,9 @@ pub(super) struct CachedContextInfo {
     pub is_remote: bool,
     pub display_messages_version: u64,
     pub message_count: usize,
+    pub compaction_count: usize,
+    pub compaction_summary_chars: usize,
+    pub is_compacting: bool,
     pub context_info: crate::prompt::ContextInfo,
 }
 
