@@ -1176,52 +1176,6 @@ fn format_cache_stats(app: &App) -> String {
     lines.join("\n")
 }
 
-fn format_changelog_fallback_message(limit: usize) -> String {
-    let changelog = env!("JCODE_CHANGELOG");
-    if changelog.is_empty() {
-        return "No changelog entries available in this build.".to_string();
-    }
-
-    let version = env!("JCODE_VERSION")
-        .split_whitespace()
-        .next()
-        .unwrap_or(env!("JCODE_VERSION"));
-    let mut lines = vec![format!("Recent changes for {}:", version), String::new()];
-    let mut count = 0usize;
-
-    for entry in changelog.split('\x1f') {
-        let mut parts = entry.splitn(4, '\x1e');
-        let hash = parts.next().unwrap_or("");
-        let tag = parts.next().unwrap_or("");
-        let _timestamp = parts.next();
-        let subject = parts.next().unwrap_or("").trim();
-        if subject.is_empty() {
-            continue;
-        }
-        if !tag.is_empty() && count > 0 {
-            lines.push(String::new());
-            lines.push(format!("{}:", tag));
-        }
-        if hash.is_empty() {
-            lines.push(format!("- {}", subject));
-        } else {
-            lines.push(format!("- {} ({})", subject, hash));
-        }
-        count += 1;
-        if count >= limit {
-            break;
-        }
-    }
-
-    if count == 0 {
-        "No changelog entries available in this build.".to_string()
-    } else {
-        lines.push(String::new());
-        lines.push("Tip: use an up-to-date client for the scrollable changelog overlay.".to_string());
-        lines.join("\n")
-    }
-}
-
 pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/version" {
         let version = env!("JCODE_VERSION");
@@ -1243,17 +1197,6 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/changelog" {
         app.changelog_scroll = Some(0);
-        // Compatibility fallback: newer clients render `changelog_scroll` as a full-screen
-        // overlay, but older remote clients do not know about that overlay state. Also emit a
-        // normal display message so `/changelog` still shows useful content across version skew.
-        app.push_display_message(DisplayMessage {
-            role: "system".to_string(),
-            content: format_changelog_fallback_message(24),
-            tool_calls: vec![],
-            duration_secs: None,
-            title: Some("Changelog".to_string()),
-            tool_data: None,
-        });
         app.set_status_notice("Changelog");
         return true;
     }
