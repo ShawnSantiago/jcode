@@ -42,6 +42,8 @@ fn session_candidate_window(scan_limit: usize) -> usize {
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
+const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
+const MESSAGE_SEARCH_EXCERPT_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
 struct SessionListCacheEntry {
@@ -118,6 +120,43 @@ pub(super) fn build_search_index(
     }
 
     combined.to_lowercase()
+}
+
+fn push_raw_search_excerpt(dst: &mut String, raw: &str, budget: &mut usize) {
+    if *budget == 0 || raw.is_empty() {
+        return;
+    }
+    dst.push(' ');
+    push_with_byte_budget(dst, raw, budget);
+}
+
+fn read_transcript_search_text(path: &Path) -> String {
+    let Ok(file) = File::open(path) else {
+        return String::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut text = String::new();
+    let mut budget = INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES;
+    let mut line = String::new();
+    while budget > 0 {
+        line.clear();
+        let Ok(read) = reader.read_line(&mut line) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        push_raw_search_excerpt(&mut text, line.trim(), &mut budget);
+    }
+    text
+}
+
+fn raw_value_search_excerpt(raw: &RawValue) -> String {
+    let raw = raw.get();
+    let mut budget = MESSAGE_SEARCH_EXCERPT_BYTES;
+    let mut excerpt = String::new();
+    push_with_byte_budget(&mut excerpt, raw, &mut budget);
+    excerpt
 }
 
 #[cfg(test)]
@@ -246,6 +285,7 @@ fn build_search_index_from_summary(
     title: &str,
     working_dir: Option<&str>,
     save_label: Option<&str>,
+    transcript_search_text: &str,
 ) -> String {
     let mut combined = String::new();
     combined.push_str(title);
@@ -262,6 +302,11 @@ fn build_search_index_from_summary(
     if let Some(label) = save_label {
         combined.push(' ');
         combined.push_str(label);
+    }
+
+    if !transcript_search_text.is_empty() {
+        combined.push(' ');
+        combined.push_str(transcript_search_text);
     }
 
     combined.to_lowercase()
@@ -850,7 +895,7 @@ struct SessionSummary {
     #[serde(default)]
     last_active_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
-    messages: SessionMessageCounts,
+    messages: SessionMessageSummaryData,
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
@@ -871,15 +916,16 @@ struct SessionSummary {
     status: SessionStatus,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct SessionMessageCounts {
+#[derive(Clone, Debug, Default)]
+struct SessionMessageSummaryData {
     visible_message_count: usize,
     user_message_count: usize,
     assistant_message_count: usize,
     estimated_tokens: usize,
+    search_text: String,
 }
 
-impl SessionMessageCounts {
+impl SessionMessageSummaryData {
     fn add_message(&mut self, message: &SessionMessageSummary) {
         if !summary_message_is_visible_conversation(message) {
             return;
@@ -895,6 +941,11 @@ impl SessionMessageCounts {
                 .estimated_tokens
                 .saturating_add(usage.total_tokens() as usize);
         }
+        let mut remaining =
+            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES.saturating_sub(self.search_text.len());
+        if let Some(raw_content) = message.content_raw.as_deref() {
+            push_raw_search_excerpt(&mut self.search_text, raw_content, &mut remaining);
+        }
     }
 
     fn merge(&mut self, other: Self) {
@@ -908,22 +959,25 @@ impl SessionMessageCounts {
             .assistant_message_count
             .saturating_add(other.assistant_message_count);
         self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
+        let mut remaining =
+            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES.saturating_sub(self.search_text.len());
+        push_raw_search_excerpt(&mut self.search_text, &other.search_text, &mut remaining);
     }
 }
 
-impl<'de> Deserialize<'de> for SessionMessageCounts {
+impl<'de> Deserialize<'de> for SessionMessageSummaryData {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_seq(SessionMessageCountsVisitor)
+        deserializer.deserialize_seq(SessionMessageSummaryDataVisitor)
     }
 }
 
-struct SessionMessageCountsVisitor;
+struct SessionMessageSummaryDataVisitor;
 
-impl<'de> Visitor<'de> for SessionMessageCountsVisitor {
-    type Value = SessionMessageCounts;
+impl<'de> Visitor<'de> for SessionMessageSummaryDataVisitor {
+    type Value = SessionMessageSummaryData;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("session message summary array")
@@ -933,7 +987,7 @@ impl<'de> Visitor<'de> for SessionMessageCountsVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut counts = SessionMessageCounts::default();
+        let mut counts = SessionMessageSummaryData::default();
         while let Some(message) = seq.next_element::<SessionMessageSummary>()? {
             counts.add_message(&message);
         }
@@ -948,6 +1002,7 @@ struct SessionMessageSummary {
     // allocating or walking it. After display metadata is known, we inspect only
     // the raw prefix for old snapshots that predate `display_role`.
     content_starts_with_system_reminder: bool,
+    content_raw: Option<String>,
     display_role: Option<StoredDisplayRole>,
     token_usage: Option<SessionTokenUsageSummary>,
 }
@@ -1006,6 +1061,7 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
+            content_raw: content.map(raw_value_search_excerpt),
             display_role,
             token_usage,
         })
@@ -1117,7 +1173,7 @@ struct SessionJournalSummaryMeta {
 struct SessionJournalSummaryEntry {
     meta: SessionJournalSummaryMeta,
     #[serde(default)]
-    append_messages: SessionMessageCounts,
+    append_messages: SessionMessageSummaryData,
 }
 
 fn load_session_summary(path: &Path) -> Result<SessionSummary> {
@@ -1310,6 +1366,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 &title,
                 session.working_dir.as_deref(),
                 session.save_label.as_deref(),
+                &session.messages.search_text,
             );
 
             sessions.push(SessionInfo {
@@ -1395,7 +1452,13 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                 &title,
                 working_dir.as_deref(),
                 None,
-                &[],
+                &[PreviewMessage {
+                    role: "transcript".to_string(),
+                    content: read_transcript_search_text(Path::new(&session.full_path)),
+                    tool_calls: Vec::new(),
+                    tool_data: None,
+                    timestamp: None,
+                }],
             );
 
             SessionInfo {
@@ -1529,13 +1592,20 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .map(|s| s.to_string());
     let short_name = format!("codex {}", &session_id[..session_id.len().min(8)]);
     let title = format!("Codex session {}", &session_id[..session_id.len().min(8)]);
+    let transcript_search_text = read_transcript_search_text(path);
     let search_index = build_search_index(
         &format!("codex:{session_id}"),
         &short_name,
         &title,
         working_dir.as_deref(),
         None,
-        &[],
+        &[PreviewMessage {
+            role: "transcript".to_string(),
+            content: transcript_search_text,
+            tool_calls: Vec::new(),
+            tool_data: None,
+            timestamp: None,
+        }],
     );
 
     Ok(Some(SessionInfo {
@@ -1713,13 +1783,20 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .map(|s| s.to_string());
     let short_name = format!("pi {}", &session_id[..session_id.len().min(8)]);
     let title = format!("Pi session {}", &session_id[..session_id.len().min(8)]);
+    let transcript_search_text = read_transcript_search_text(path);
     let search_index = build_search_index(
         &format!("pi:{session_id}"),
         &short_name,
         &title,
         working_dir.as_deref(),
         None,
-        &[],
+        &[PreviewMessage {
+            role: "transcript".to_string(),
+            content: transcript_search_text,
+            tool_calls: Vec::new(),
+            tool_data: None,
+            timestamp: None,
+        }],
     );
 
     Ok(Some(SessionInfo {
