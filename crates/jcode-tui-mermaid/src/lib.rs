@@ -218,8 +218,8 @@ mod widget_render;
 
 pub use cache_render::{
     RenderResult, deferred_render_epoch, get_cached_path, is_mermaid_lang, render_mermaid,
-    render_mermaid_deferred, render_mermaid_deferred_with_registration, render_mermaid_sized,
-    render_mermaid_untracked,
+    render_mermaid_deferred, render_mermaid_deferred_with_registration,
+    render_mermaid_deferred_with_stream_scope, render_mermaid_sized, render_mermaid_untracked,
 };
 pub use content_render::{
     MermaidContent, diagram_placeholder_lines, error_to_lines, estimate_image_height,
@@ -729,6 +729,7 @@ struct PendingDeferredRender {
     register_active: bool,
     terminal_width: Option<u16>,
     content: String,
+    stream_scope: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

@@ -420,6 +420,23 @@ pub fn render_mermaid_deferred_with_registration(
     terminal_width: Option<u16>,
     register_active: bool,
 ) -> Option<RenderResult> {
+    render_mermaid_deferred_inner(content, terminal_width, register_active, None)
+}
+
+pub fn render_mermaid_deferred_with_stream_scope(
+    content: &str,
+    terminal_width: Option<u16>,
+    stream_scope: u64,
+) -> Option<RenderResult> {
+    render_mermaid_deferred_inner(content, terminal_width, false, Some(stream_scope))
+}
+
+fn render_mermaid_deferred_inner(
+    content: &str,
+    terminal_width: Option<u16>,
+    register_active: bool,
+    stream_scope: Option<u64>,
+) -> Option<RenderResult> {
     let hash = hash_content(content);
     let (node_count, edge_count) = estimate_diagram_size(content);
 
@@ -462,12 +479,15 @@ pub fn render_mermaid_deferred_with_registration(
             Ok(mut pending) => {
                 let mut superseded = 0u64;
                 pending.retain(|(_, pending_width, pending_profile), request| {
+                    let same_stream_scope =
+                        request.stream_scope.is_some() && request.stream_scope == stream_scope;
                     let same_profile = *pending_profile == render_profile;
                     let same_terminal_width = request.terminal_width == terminal_width;
                     let compatible_width =
                         cached_width_satisfies(*pending_width, Some(target_width_u32))
                             || cached_width_satisfies(target_width_u32, Some(*pending_width));
-                    let supersede = same_profile
+                    let supersede = same_stream_scope
+                        && same_profile
                         && same_terminal_width
                         && compatible_width
                         && is_likely_stream_update(&request.content, content);
@@ -513,6 +533,7 @@ pub fn render_mermaid_deferred_with_registration(
                                 register_active,
                                 terminal_width,
                                 content: content.to_string(),
+                                stream_scope,
                             });
                             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                                 state.stats.deferred_enqueued += 1;
