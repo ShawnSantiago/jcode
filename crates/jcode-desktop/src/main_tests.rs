@@ -2906,3 +2906,22 @@ fn terminal_session_events_request_async_session_metadata_refresh() {
     assert!(stats.visible_changed);
     assert!(stats.session_card_refresh_requested);
 }
+
+#[test]
+fn desktop_preferences_save_is_queued_off_ui_thread() {
+    let workspace = Workspace::from_session_cards(vec![workspace::SessionCard {
+        session_id: "session_pref".to_string(),
+        title: "pref".to_string(),
+        subtitle: "active".to_string(),
+        detail: "1 msg".to_string(),
+        preview_lines: Vec::new(),
+        detail_lines: Vec::new(),
+    }]);
+    let expected = workspace.preferences();
+    let (tx, rx) = mpsc::channel();
+
+    queue_desktop_preferences_save(&workspace, &Some(tx));
+
+    assert_eq!(rx.try_recv().ok(), Some(expected));
+    assert!(rx.try_recv().is_err());
+}

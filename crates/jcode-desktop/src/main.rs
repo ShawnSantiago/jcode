@@ -34,12 +34,12 @@ use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -259,6 +259,7 @@ async fn run() -> Result<()> {
     let mut scroll_accumulator = ScrollLineAccumulator::default();
     let mut scroll_metrics_cache = SingleSessionScrollMetricsCache::default();
     let mut hot_reloader = DesktopHotReloader::new();
+    let preferences_save_tx = spawn_desktop_preferences_saver();
     let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
     let (session_event_tx, session_event_rx) = mpsc::channel();
     spawn_session_event_forwarder(session_event_rx, event_loop_proxy.clone());
@@ -470,11 +471,11 @@ async fn run() -> Result<()> {
                     let key_debug = format!("{key_input:?}");
                     interaction_latency.mark("keyboard_input", keyboard_started);
                     if key_input == KeyInput::RefreshSessions && app.is_workspace() {
-                        if let DesktopApp::Workspace(workspace) = &mut app {
-                            workspace.replace_session_cards(load_session_cards_for_desktop());
-                            save_desktop_preferences(workspace);
-                        }
-                        window.set_title(&app.status_title());
+                        spawn_session_cards_load(
+                            DesktopSessionCardsPurpose::WorkspaceRefresh,
+                            event_loop_proxy.clone(),
+                            Duration::ZERO,
+                        );
                         window.request_redraw();
                         return;
                     }
@@ -483,14 +484,14 @@ async fn run() -> Result<()> {
                         KeyOutcome::Exit => target.exit(),
                         KeyOutcome::Redraw => {
                             if let DesktopApp::Workspace(workspace) = &app {
-                                save_desktop_preferences(workspace);
+                                queue_desktop_preferences_save(workspace, &preferences_save_tx);
                             }
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
                         KeyOutcome::OpenSession { session_id, title } => {
                             if let DesktopApp::Workspace(workspace) = &app {
-                                save_desktop_preferences(workspace);
+                                queue_desktop_preferences_save(workspace, &preferences_save_tx);
                             }
                             if let Err(error) =
                                 session_launch::launch_validated_resume_session(&session_id, &title)
@@ -511,12 +512,11 @@ async fn run() -> Result<()> {
                             if let Err(error) = session_launch::launch_new_session() {
                                 eprintln!("jcode-desktop: failed to spawn session: {error:#}");
                             } else {
-                                std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
-                                app.refresh_sessions();
-                                if let DesktopApp::Workspace(workspace) = &app {
-                                    save_desktop_preferences(workspace);
-                                }
-                                window.set_title(&app.status_title());
+                                spawn_session_cards_load(
+                                    DesktopSessionCardsPurpose::WorkspaceRefresh,
+                                    event_loop_proxy.clone(),
+                                    SESSION_SPAWN_REFRESH_DELAY,
+                                );
                                 window.request_redraw();
                             }
                         }
@@ -546,12 +546,11 @@ async fn run() -> Result<()> {
                                     session_event_tx.clone(),
                                 ) {
                                     Ok(_handle) => {
-                                        std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
-                                        app.refresh_sessions();
-                                        if let DesktopApp::Workspace(workspace) = &app {
-                                            save_desktop_preferences(workspace);
-                                        }
-                                        window.set_title(&app.status_title());
+                                        spawn_session_cards_load(
+                                            DesktopSessionCardsPurpose::WorkspaceRefresh,
+                                            event_loop_proxy.clone(),
+                                            SESSION_SPAWN_REFRESH_DELAY,
+                                        );
                                         window.request_redraw();
                                     }
                                     Err(error) => eprintln!(
@@ -567,12 +566,11 @@ async fn run() -> Result<()> {
                                     "jcode-desktop: failed to send draft to {session_id}: {error:#}"
                                 );
                             } else {
-                                std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
-                                app.refresh_sessions();
-                                if let DesktopApp::Workspace(workspace) = &app {
-                                    save_desktop_preferences(workspace);
-                                }
-                                window.set_title(&app.status_title());
+                                spawn_session_cards_load(
+                                    DesktopSessionCardsPurpose::WorkspaceRefresh,
+                                    event_loop_proxy.clone(),
+                                    SESSION_SPAWN_REFRESH_DELAY,
+                                );
                                 window.request_redraw();
                             }
                         }
@@ -631,33 +629,16 @@ async fn run() -> Result<()> {
                             window.request_redraw();
                         }
                         KeyOutcome::LoadSessionSwitcher => {
-                            app.apply_single_session_switcher_cards(load_session_cards_for_desktop());
+                            spawn_session_cards_load(
+                                DesktopSessionCardsPurpose::SingleSessionSwitcher,
+                                event_loop_proxy.clone(),
+                                Duration::ZERO,
+                            );
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
                         KeyOutcome::RestoreCrashedSessions => {
-                            let crashed = load_crashed_session_cards_for_desktop();
-                            if crashed.is_empty() {
-                                apply_single_session_error(
-                                    &mut app,
-                                    anyhow::anyhow!("no crashed sessions found"),
-                                );
-                            } else {
-                                for card in &crashed {
-                                    if let Err(error) = session_launch::launch_validated_resume_session(
-                                        &card.session_id,
-                                        &card.title,
-                                    ) {
-                                        eprintln!(
-                                            "jcode-desktop: failed to restore crashed session {}: {error:#}",
-                                            card.session_id
-                                        );
-                                    }
-                                }
-                                if let DesktopApp::SingleSession(single_session) = &mut app {
-                                    single_session.set_recovery_session_count(0);
-                                }
-                            }
+                            spawn_restore_crashed_sessions(event_loop_proxy.clone());
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
@@ -764,6 +745,35 @@ async fn run() -> Result<()> {
                     window.request_redraw();
                 }
             }
+            Event::UserEvent(DesktopUserEvent::SessionCardsLoaded {
+                purpose,
+                cards,
+                loaded_in,
+            }) => {
+                let card_count = cards.len();
+                let mut applied = false;
+                match purpose {
+                    DesktopSessionCardsPurpose::WorkspaceRefresh => {
+                        if let DesktopApp::Workspace(workspace) = &mut app {
+                            workspace.replace_session_cards(cards);
+                            queue_desktop_preferences_save(workspace, &preferences_save_tx);
+                            applied = true;
+                        }
+                    }
+                    DesktopSessionCardsPurpose::SingleSessionSwitcher => {
+                        if app.is_single_session() {
+                            app.apply_single_session_switcher_cards(cards);
+                            applied = true;
+                        }
+                    }
+                }
+                log_desktop_session_cards_load_profile(purpose, loaded_in, card_count, applied);
+                if applied {
+                    window.set_title(&app.status_title());
+                    interaction_latency.mark("session_cards_load", Instant::now());
+                    window.request_redraw();
+                }
+            }
             Event::UserEvent(DesktopUserEvent::SessionCardLoaded {
                 session_id,
                 card,
@@ -789,6 +799,29 @@ async fn run() -> Result<()> {
                     interaction_latency.mark("session_card_refresh", Instant::now());
                     window.request_redraw();
                 }
+            }
+            Event::UserEvent(DesktopUserEvent::CrashedSessionsRestoreFinished {
+                restored,
+                errors,
+                elapsed,
+            }) => {
+                log_desktop_crashed_sessions_restore_profile(restored, errors.len(), elapsed);
+                if restored == 0 {
+                    let message = if errors.is_empty() {
+                        "no crashed sessions found".to_string()
+                    } else {
+                        format!("failed to restore crashed sessions: {}", errors.join("; "))
+                    };
+                    apply_single_session_error(&mut app, anyhow::anyhow!(message));
+                } else if let DesktopApp::SingleSession(single_session) = &mut app {
+                    single_session.set_recovery_session_count(0);
+                    single_session.apply_session_event(session_launch::DesktopSessionEvent::Status(
+                        format!("restored {restored} crashed session(s)"),
+                    ));
+                }
+                window.set_title(&app.status_title());
+                interaction_latency.mark("restore_crashed_sessions", Instant::now());
+                window.request_redraw();
             }
             Event::UserEvent(DesktopUserEvent::SessionEvents(batch)) => {
                 let ui_received_at = Instant::now();
@@ -982,6 +1015,122 @@ fn spawn_single_session_card_refresh(
     }
 }
 
+fn spawn_session_cards_load(
+    purpose: DesktopSessionCardsPurpose,
+    event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
+    delay: Duration,
+) {
+    if let Err(error) = std::thread::Builder::new()
+        .name(format!("jcode-desktop-session-cards-{purpose:?}"))
+        .spawn(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            let started = Instant::now();
+            let cards = load_session_cards_for_desktop();
+            let loaded_in = started.elapsed();
+            let _ = event_loop_proxy.send_event(DesktopUserEvent::SessionCardsLoaded {
+                purpose,
+                cards,
+                loaded_in,
+            });
+        })
+    {
+        eprintln!("jcode-desktop: failed to start session card load: {error:#}");
+    }
+}
+
+fn spawn_restore_crashed_sessions(event_loop_proxy: EventLoopProxy<DesktopUserEvent>) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("jcode-desktop-restore-crashed-sessions".to_string())
+        .spawn(move || {
+            let started = Instant::now();
+            let crashed = load_crashed_session_cards_for_desktop();
+            let mut restored = 0usize;
+            let mut errors = Vec::new();
+            for card in crashed {
+                match session_launch::launch_validated_resume_session(&card.session_id, &card.title)
+                {
+                    Ok(()) => restored += 1,
+                    Err(error) => errors.push(format!("{}: {error:#}", card.session_id)),
+                }
+            }
+            let _ = event_loop_proxy.send_event(DesktopUserEvent::CrashedSessionsRestoreFinished {
+                restored,
+                errors,
+                elapsed: started.elapsed(),
+            });
+        })
+    {
+        eprintln!("jcode-desktop: failed to start crashed-session restore: {error:#}");
+    }
+}
+
+fn spawn_desktop_preferences_saver() -> Option<mpsc::Sender<workspace::DesktopPreferences>> {
+    let (tx, rx) = mpsc::channel::<workspace::DesktopPreferences>();
+    match std::thread::Builder::new()
+        .name("jcode-desktop-preferences-saver".to_string())
+        .spawn(move || {
+            while let Ok(mut preferences) = rx.recv() {
+                let received_at = Instant::now();
+                let mut coalesced_saves = 1usize;
+                while let Ok(next_preferences) = rx.try_recv() {
+                    preferences = next_preferences;
+                    coalesced_saves += 1;
+                }
+                save_desktop_preferences_off_ui_thread(
+                    preferences,
+                    coalesced_saves,
+                    received_at.elapsed(),
+                );
+            }
+        }) {
+        Ok(_) => Some(tx),
+        Err(error) => {
+            eprintln!("jcode-desktop: failed to start preferences saver: {error:#}");
+            None
+        }
+    }
+}
+
+fn queue_desktop_preferences_save(
+    workspace: &Workspace,
+    preferences_save_tx: &Option<mpsc::Sender<workspace::DesktopPreferences>>,
+) {
+    let preferences = workspace.preferences();
+    if let Some(tx) = preferences_save_tx
+        && tx.send(preferences.clone()).is_ok()
+    {
+        return;
+    }
+
+    if let Err(error) = std::thread::Builder::new()
+        .name("jcode-desktop-preferences-save-once".to_string())
+        .spawn(move || {
+            save_desktop_preferences_off_ui_thread(preferences, 1, Duration::ZERO);
+        })
+    {
+        eprintln!("jcode-desktop: failed to queue preferences save: {error:#}");
+    }
+}
+
+fn save_desktop_preferences_off_ui_thread(
+    preferences: workspace::DesktopPreferences,
+    coalesced_saves: usize,
+    queued_for: Duration,
+) {
+    let started = Instant::now();
+    let error = desktop_prefs::save_preferences(&preferences)
+        .err()
+        .map(|error| format!("{error:#}"));
+    log_desktop_preferences_save_profile(
+        started.elapsed(),
+        queued_for,
+        coalesced_saves,
+        error.as_deref(),
+    );
+}
+
 fn headless_chat_smoke_message(args: &[String]) -> Option<String> {
     args.iter().enumerate().find_map(|(index, arg)| {
         arg.strip_prefix("--headless-chat-smoke=")
@@ -1090,12 +1239,28 @@ impl DesktopStartupTrace {
 #[derive(Debug)]
 enum DesktopUserEvent {
     SessionEvents(DesktopSessionEventBatch),
+    SessionCardsLoaded {
+        purpose: DesktopSessionCardsPurpose,
+        cards: Vec<workspace::SessionCard>,
+        loaded_in: Duration,
+    },
     SessionCardLoaded {
         session_id: String,
         card: Option<workspace::SessionCard>,
         loaded_in: Duration,
     },
+    CrashedSessionsRestoreFinished {
+        restored: usize,
+        errors: Vec<String>,
+        elapsed: Duration,
+    },
     RecoveryCount(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesktopSessionCardsPurpose {
+    WorkspaceRefresh,
+    SingleSessionSwitcher,
 }
 
 #[derive(Debug)]
@@ -3107,16 +3272,6 @@ fn load_desktop_preferences() -> Option<workspace::DesktopPreferences> {
     }
 }
 
-fn save_desktop_preferences(workspace: &Workspace) {
-    if let Err(error) = desktop_prefs::save_preferences(&workspace.preferences()) {
-        eprintln!("jcode-desktop: failed to save desktop preferences: {error:#}");
-    }
-}
-
-fn load_primary_session_card() -> Option<workspace::SessionCard> {
-    load_session_cards_for_desktop().into_iter().next()
-}
-
 fn fresh_single_session_app() -> DesktopApp {
     DesktopApp::SingleSession(SingleSessionApp::new(None))
 }
@@ -3279,15 +3434,6 @@ impl DesktopApp {
         match self {
             Self::SingleSession(app) => app.handle_key(key),
             Self::Workspace(workspace) => workspace.handle_key(key),
-        }
-    }
-
-    fn refresh_sessions(&mut self) {
-        match self {
-            Self::SingleSession(app) => app.replace_session(load_primary_session_card()),
-            Self::Workspace(workspace) => {
-                workspace.replace_session_cards(load_session_cards_for_desktop())
-            }
         }
     }
 
@@ -3780,6 +3926,63 @@ fn log_desktop_session_card_refresh_profile(
             "loaded_in_ms": duration_ms(loaded_in),
             "card_found": card_found,
             "applied": applied,
+            "ui_thread_blocking": false,
+        }),
+    );
+}
+
+fn log_desktop_session_cards_load_profile(
+    purpose: DesktopSessionCardsPurpose,
+    loaded_in: Duration,
+    card_count: usize,
+    applied: bool,
+) {
+    if loaded_in < Duration::from_millis(40) && applied {
+        return;
+    }
+    emit_desktop_profile_event(
+        "jcode-desktop-session-cards-load-profile",
+        serde_json::json!({
+            "purpose": format!("{purpose:?}"),
+            "loaded_in_ms": duration_ms(loaded_in),
+            "card_count": card_count,
+            "applied": applied,
+            "ui_thread_blocking": false,
+        }),
+    );
+}
+
+fn log_desktop_preferences_save_profile(
+    saved_in: Duration,
+    queued_for: Duration,
+    coalesced_saves: usize,
+    error: Option<&str>,
+) {
+    if saved_in < Duration::from_millis(40) && coalesced_saves <= 1 && error.is_none() {
+        return;
+    }
+    emit_desktop_profile_event(
+        "jcode-desktop-preferences-save-profile",
+        serde_json::json!({
+            "saved_in_ms": duration_ms(saved_in),
+            "queued_for_ms": duration_ms(queued_for),
+            "coalesced_saves": coalesced_saves,
+            "error": error,
+            "ui_thread_blocking": false,
+        }),
+    );
+}
+
+fn log_desktop_crashed_sessions_restore_profile(restored: usize, errors: usize, elapsed: Duration) {
+    if elapsed < Duration::from_millis(40) && errors == 0 {
+        return;
+    }
+    emit_desktop_profile_event(
+        "jcode-desktop-crashed-sessions-restore-profile",
+        serde_json::json!({
+            "restored": restored,
+            "errors": errors,
+            "elapsed_ms": duration_ms(elapsed),
             "ui_thread_blocking": false,
         }),
     );
@@ -4700,7 +4903,14 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-static DESKTOP_PROFILE_LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+static DESKTOP_PROFILE_LOG_TX: OnceLock<Option<mpsc::Sender<DesktopProfileLogLine>>> =
+    OnceLock::new();
+
+#[derive(Debug)]
+struct DesktopProfileLogLine {
+    stderr_line: String,
+    jsonl_line: String,
+}
 
 fn desktop_profile_log_path() -> Option<PathBuf> {
     if std::env::var_os("JCODE_DESKTOP_PROFILE_LOG").is_some_and(|value| !env_flag_enabled(value)) {
@@ -4723,44 +4933,65 @@ fn desktop_profile_log_path() -> Option<PathBuf> {
     )
 }
 
-fn desktop_profile_log_file() -> Option<&'static Mutex<File>> {
-    DESKTOP_PROFILE_LOG_FILE
+fn desktop_profile_stderr_enabled() -> bool {
+    std::env::var_os("JCODE_DESKTOP_PROFILE_STDERR").is_none_or(env_flag_enabled)
+}
+
+fn desktop_profile_log_sender() -> Option<&'static mpsc::Sender<DesktopProfileLogLine>> {
+    DESKTOP_PROFILE_LOG_TX
         .get_or_init(|| {
-            let path = desktop_profile_log_path()?;
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+            let path = desktop_profile_log_path();
+            let stderr_enabled = desktop_profile_stderr_enabled();
+            if path.is_none() && !stderr_enabled {
+                return None;
             }
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-                .map(Mutex::new)
+            let (tx, rx) = mpsc::channel::<DesktopProfileLogLine>();
+            match std::thread::Builder::new()
+                .name("jcode-desktop-profile-log".to_string())
+                .spawn(move || {
+                    let mut file = path.and_then(|path| {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        OpenOptions::new().create(true).append(true).open(path).ok()
+                    });
+                    while let Ok(line) = rx.recv() {
+                        if stderr_enabled {
+                            eprintln!("{}", line.stderr_line);
+                        }
+                        if let Some(file) = file.as_mut() {
+                            let _ = writeln!(file, "{}", line.jsonl_line);
+                        }
+                    }
+                }) {
+                Ok(_) => Some(tx),
+                Err(error) => {
+                    eprintln!("jcode-desktop: failed to start profile logger: {error:#}");
+                    None
+                }
+            }
         })
         .as_ref()
 }
 
 fn emit_desktop_profile_event(event: &'static str, payload: serde_json::Value) {
-    eprintln!("{event} {payload}");
-    let Some(file) = desktop_profile_log_file() else {
-        return;
-    };
-    let Ok(mut file) = file.lock() else {
-        return;
-    };
     let timestamp_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default();
-    let _ = writeln!(
-        file,
-        "{}",
-        serde_json::json!({
+    if let Some(tx) = desktop_profile_log_sender() {
+        let stderr_line = format!("{event} {payload}");
+        let jsonl_line = serde_json::json!({
             "timestamp_unix_ms": timestamp_unix_ms,
             "event": event,
             "payload": payload,
         })
-    );
+        .to_string();
+        let _ = tx.send(DesktopProfileLogLine {
+            stderr_line,
+            jsonl_line,
+        });
+    }
 }
 
 fn log_desktop_slow_interaction(
