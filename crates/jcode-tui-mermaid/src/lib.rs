@@ -337,10 +337,10 @@ fn render_size_backend() -> &'static str {
     }
 }
 
-/// Render Mermaid source images a bit denser than the immediate terminal-pixel
-/// target so the terminal image protocol scales down from a sharper PNG.
-/// This especially helps small text remain legible in the pinned side pane.
-const RENDER_SUPERSAMPLE: f64 = 1.5;
+/// Render Mermaid source images slightly denser than the immediate terminal-pixel
+/// target so the terminal image protocol scales down from a sharper PNG without
+/// making SVG-to-PNG rasterization dominate interactive frames.
+const RENDER_SUPERSAMPLE: f64 = 1.1;
 const DEFAULT_RENDER_WIDTH: u32 = 2400;
 const DEFAULT_RENDER_HEIGHT: u32 = 1800;
 const DEFAULT_PICKER_FONT_SIZE: (u16, u16) = (8, 16);
@@ -675,6 +675,7 @@ pub struct MermaidDebugStats {
     pub cache_misses: u64,
     pub deferred_enqueued: u64,
     pub deferred_deduped: u64,
+    pub deferred_superseded: u64,
     pub deferred_worker_renders: u64,
     pub deferred_worker_skips: u64,
     pub deferred_epoch_bumps: u64,
@@ -723,9 +724,11 @@ struct MermaidDebugState {
 static MERMAID_DEBUG: LazyLock<Mutex<MermaidDebugState>> =
     LazyLock::new(|| Mutex::new(MermaidDebugState::default()));
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct PendingDeferredRender {
     register_active: bool,
+    terminal_width: Option<u16>,
+    content: String,
 }
 
 #[derive(Debug, Clone)]

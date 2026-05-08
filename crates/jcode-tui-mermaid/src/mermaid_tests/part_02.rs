@@ -63,6 +63,28 @@ fn preferred_aspect_ratio_adjusts_render_height_without_changing_width_bucket() 
     assert!((profile_width / profile_height - 0.5).abs() < 0.01);
 }
 
+#[test]
+fn deferred_render_supersedes_prefix_stream_updates_only() {
+    let partial = "flowchart TD\nA[Start] --> B[In progress]";
+    let extended = "flowchart TD\nA[Start] --> B[In progress]\nB --> C[Done]";
+
+    assert!(super::cache_render::is_likely_stream_update(
+        partial, extended
+    ));
+    assert!(super::cache_render::is_likely_stream_update(
+        extended, partial
+    ));
+
+    assert!(!super::cache_render::is_likely_stream_update(
+        "flowchart TD\nA[Start] --> B[One]",
+        "flowchart TD\nA[Start] --> C[Different]",
+    ));
+    assert!(!super::cache_render::is_likely_stream_update(
+        "flowchart TD\nA",
+        "flowchart TD\nA[short]",
+    ));
+}
+
 #[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
 #[test]
 fn mmdr_size_api_reports_explicit_png_canvas() {

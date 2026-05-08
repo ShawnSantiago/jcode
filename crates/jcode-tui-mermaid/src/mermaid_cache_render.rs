@@ -397,6 +397,15 @@ fn deferred_render_worker(rx: mpsc::Receiver<DeferredRenderTask>) {
     }
 }
 
+pub(crate) fn is_likely_stream_update(previous: &str, next: &str) -> bool {
+    let previous = previous.trim_end();
+    let next = next.trim_end();
+    if previous == next || previous.len().min(next.len()) < 16 {
+        return false;
+    }
+    next.starts_with(previous) || previous.starts_with(next)
+}
+
 /// Streaming-friendly Mermaid rendering.
 ///
 /// If the diagram is already cached, returns it immediately. Otherwise this
@@ -451,6 +460,29 @@ pub fn render_mermaid_deferred_with_registration(
     let should_enqueue =
         match PENDING_RENDER_REQUESTS.lock() {
             Ok(mut pending) => {
+                let mut superseded = 0u64;
+                pending.retain(|(_, pending_width, pending_profile), request| {
+                    let same_profile = *pending_profile == render_profile;
+                    let same_terminal_width = request.terminal_width == terminal_width;
+                    let compatible_width =
+                        cached_width_satisfies(*pending_width, Some(target_width_u32))
+                            || cached_width_satisfies(target_width_u32, Some(*pending_width));
+                    let supersede = same_profile
+                        && same_terminal_width
+                        && compatible_width
+                        && is_likely_stream_update(&request.content, content);
+                    if supersede {
+                        superseded = superseded.saturating_add(1);
+                    }
+                    !supersede
+                });
+                if superseded > 0
+                    && let Ok(mut state) = MERMAID_DEBUG.lock()
+                {
+                    state.stats.deferred_superseded =
+                        state.stats.deferred_superseded.saturating_add(superseded);
+                }
+
                 if let Some((_, existing_request)) = pending.iter_mut().find(
                     |((pending_hash, pending_width, pending_profile), _)| {
                         *pending_hash == hash
@@ -477,7 +509,11 @@ pub fn render_mermaid_deferred_with_registration(
                             false
                         }
                         Entry::Vacant(vacant) => {
-                            vacant.insert(PendingDeferredRender { register_active });
+                            vacant.insert(PendingDeferredRender {
+                                register_active,
+                                terminal_width,
+                                content: content.to_string(),
+                            });
                             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                                 state.stats.deferred_enqueued += 1;
                             }
