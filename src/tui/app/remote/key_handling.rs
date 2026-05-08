@@ -1521,6 +1521,7 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    crate::tui::session_picker::invalidate_session_list_cache();
                     if app.memory_enabled
                         && let Err(err) = remote.trigger_memory_extraction().await
                     {
@@ -1556,6 +1557,7 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    crate::tui::session_picker::invalidate_session_list_cache();
                     let name = app.session.display_name().to_string();
                     app.push_display_message(DisplayMessage::system(format!(
                         "Removed bookmark from session **{}**.",

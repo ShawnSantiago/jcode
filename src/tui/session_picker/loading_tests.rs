@@ -12,6 +12,12 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, prev }
     }
+
+    fn set_str(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -266,6 +272,64 @@ fn load_sessions_prefers_custom_title_over_generated_title() {
     assert_eq!(loaded.title, "Custom release planning");
     assert!(loaded.search_index.contains("custom release planning"));
     assert!(!loaded.search_index.contains("generated first prompt"));
+}
+
+#[test]
+fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _scan_limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+
+    let mut saved_session = Session::create_with_id(
+        "session_saved_beyond_scan_limit".to_string(),
+        Some("/tmp/saved-beyond-scan".to_string()),
+        Some("Saved Beyond Scan".to_string()),
+    );
+    saved_session.mark_saved(Some("Pinned Session".to_string()));
+    saved_session.append_stored_message(crate::session::StoredMessage {
+        id: "saved-msg".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "keep this bookmarked session visible".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    saved_session.save().expect("save saved session");
+
+    for idx in 0..55 {
+        let mut session = Session::create_with_id(
+            format!("session_newer_unsaved_{idx:03}"),
+            Some(format!("/tmp/newer-unsaved-{idx:03}")),
+            Some(format!("Newer Unsaved {idx:03}")),
+        );
+        session.append_stored_message(crate::session::StoredMessage {
+            id: format!("msg-{idx}"),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: format!("newer unsaved session {idx:03}"),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save().expect("save unsaved session");
+    }
+    invalidate_session_list_cache();
+
+    let sessions = load_sessions().expect("load sessions");
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.id == "session_saved_beyond_scan_limit"),
+        "saved sessions should remain visible even when the recency scan limit is full"
+    );
 }
 
 #[test]

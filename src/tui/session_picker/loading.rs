@@ -708,6 +708,66 @@ fn collect_recent_session_candidates(
     Ok(out.into_iter().map(|(_, _, stem)| stem).collect())
 }
 
+fn session_snapshot_or_journal_has_saved_metadata(snapshot_path: &Path) -> bool {
+    let journal_path = session::session_journal_path_from_snapshot(snapshot_path);
+
+    if let Ok(bytes) = std::fs::read(snapshot_path)
+        && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| value.get("saved").and_then(|saved| saved.as_bool()))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let Ok(file) = File::open(journal_path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    let mut saved = false;
+    for line in reader.lines().map_while(|line| line.ok()) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            break;
+        };
+        if let Some(next_saved) = value
+            .get("meta")
+            .and_then(|meta| meta.get("saved"))
+            .and_then(|saved| saved.as_bool())
+        {
+            saved = next_saved;
+        }
+    }
+    saved
+}
+
+fn collect_saved_session_candidates(sessions_dir: &Path) -> Result<Vec<String>> {
+    let mut saved = Vec::new();
+    for entry in std::fs::read_dir(sessions_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some((stem, has_snapshot)) = session_file_stem_for_candidate(file_name) else {
+            continue;
+        };
+        if !has_snapshot || stem.starts_with("imported_") {
+            continue;
+        }
+        let path = sessions_dir.join(format!("{stem}.json"));
+        if session_snapshot_or_journal_has_saved_metadata(&path) {
+            saved.push(stem.to_string());
+        }
+    }
+    saved.sort();
+    saved.dedup();
+    Ok(saved)
+}
+
 #[cfg(test)]
 pub(super) fn collect_recent_session_stems(
     sessions_dir: &Path,
@@ -1148,14 +1208,25 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         // snapshots/journals, and `load_session_summary` below parses the same files again.
         // Instead, gather a recency-ordered candidate window cheaply from metadata and let the
         // single summary pass filter empty sessions while filling up to `scan_limit` entries.
-        collect_recent_session_candidates(&sessions_dir, session_candidate_window(scan_limit))?
+        let mut candidates =
+            collect_recent_session_candidates(&sessions_dir, session_candidate_window(scan_limit))?;
+        let mut seen: HashSet<String> = candidates.iter().cloned().collect();
+        for stem in collect_saved_session_candidates(&sessions_dir)? {
+            if seen.insert(stem.clone()) {
+                candidates.push(stem);
+            }
+        }
+        candidates
     } else {
         Vec::new()
     };
 
     for stem in candidates {
         if sessions.len() >= scan_limit {
-            break;
+            let saved = sessions_dir.join(format!("{stem}.json"));
+            if !session_snapshot_or_journal_has_saved_metadata(&saved) {
+                continue;
+            }
         }
         if stem.starts_with("imported_cc_")
             || stem.starts_with("imported_codex_")
