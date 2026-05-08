@@ -215,6 +215,15 @@ async fn run() -> Result<()> {
     }
     let fullscreen = args.iter().any(|arg| arg == "--fullscreen");
     let desktop_mode = desktop_mode_from_args(args.iter().map(String::as_str));
+    emit_desktop_profile_event(
+        "jcode-desktop-launch-profile",
+        serde_json::json!({
+            "mode": desktop_mode.as_str(),
+            "version": desktop_header_version_label(),
+            "build_hash": desktop_build_hash_label(),
+            "pid": std::process::id(),
+        }),
+    );
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
@@ -3282,6 +3291,15 @@ enum DesktopMode {
     WorkspacePrototype,
 }
 
+impl DesktopMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleSession => "single_session",
+            Self::WorkspacePrototype => "workspace",
+        }
+    }
+}
+
 fn desktop_mode_from_args<'a>(args: impl IntoIterator<Item = &'a str>) -> DesktopMode {
     if args.into_iter().any(|arg| arg == "--workspace") {
         DesktopMode::WorkspacePrototype
@@ -4905,6 +4923,7 @@ fn duration_ms(duration: Duration) -> f64 {
 
 static DESKTOP_PROFILE_LOG_TX: OnceLock<Option<mpsc::Sender<DesktopProfileLogLine>>> =
     OnceLock::new();
+static DESKTOP_PROFILE_LAUNCH_ID: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug)]
 struct DesktopProfileLogLine {
@@ -4935,6 +4954,18 @@ fn desktop_profile_log_path() -> Option<PathBuf> {
 
 fn desktop_profile_stderr_enabled() -> bool {
     std::env::var_os("JCODE_DESKTOP_PROFILE_STDERR").is_none_or(env_flag_enabled)
+}
+
+fn desktop_profile_launch_id() -> &'static str {
+    DESKTOP_PROFILE_LAUNCH_ID
+        .get_or_init(|| {
+            let timestamp_unix_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+                .unwrap_or_default();
+            format!("{timestamp_unix_ms}-{}", std::process::id())
+        })
+        .as_str()
 }
 
 fn desktop_profile_log_sender() -> Option<&'static mpsc::Sender<DesktopProfileLogLine>> {
@@ -4983,6 +5014,9 @@ fn emit_desktop_profile_event(event: &'static str, payload: serde_json::Value) {
         let stderr_line = format!("{event} {payload}");
         let jsonl_line = serde_json::json!({
             "timestamp_unix_ms": timestamp_unix_ms,
+            "launch_id": desktop_profile_launch_id(),
+            "build_hash": desktop_build_hash_label(),
+            "pid": std::process::id(),
             "event": event,
             "payload": payload,
         })
