@@ -333,6 +333,22 @@ fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
 }
 
 #[test]
+fn saved_metadata_detection_scans_tail_without_full_json_parse() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("session_large_saved.json");
+    let large_messages = "x".repeat((super::SAVED_METADATA_TAIL_SCAN_BYTES as usize) + 16_384);
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"id":"session_large_saved","messages":[{{"role":"user","content":"{large_messages}"}}],"saved"  : true}}"#
+        ),
+    )
+    .expect("write session");
+
+    assert!(super::session_snapshot_or_journal_has_saved_metadata(&path));
+}
+
+#[test]
 fn raw_content_system_reminder_detection_handles_arrays_strings_and_unicode() {
     let raw_string: Box<serde_json::value::RawValue> =
         serde_json::from_str(r#""   <system-reminder>\nlegacy""#).expect("raw string");

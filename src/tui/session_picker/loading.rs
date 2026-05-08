@@ -11,9 +11,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-#[cfg(test)]
-use std::io::Read;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -43,6 +41,7 @@ fn session_candidate_window(scan_limit: usize) -> usize {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
+const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone)]
 struct SessionListCacheEntry {
@@ -708,15 +707,55 @@ fn collect_recent_session_candidates(
     Ok(out.into_iter().map(|(_, _, stem)| stem).collect())
 }
 
+fn json_bytes_saved_true(bytes: &[u8]) -> bool {
+    let mut search_start = 0usize;
+    while let Some(relative_idx) = bytes[search_start..]
+        .windows(b"\"saved\"".len())
+        .position(|window| window == b"\"saved\"")
+    {
+        let key_idx = search_start + relative_idx + b"\"saved\"".len();
+        let mut idx = key_idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if bytes.get(idx) != Some(&b':') {
+            search_start = key_idx;
+            continue;
+        }
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if bytes[idx..].starts_with(b"true") {
+            return true;
+        }
+        search_start = key_idx;
+    }
+    false
+}
+
+fn file_tail_contains_saved_true(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    let read_len = len.min(SAVED_METADATA_TAIL_SCAN_BYTES);
+    if file
+        .seek(SeekFrom::Start(len.saturating_sub(read_len)))
+        .is_err()
+    {
+        return false;
+    }
+    let mut bytes = Vec::with_capacity(read_len as usize);
+    file.take(read_len).read_to_end(&mut bytes).is_ok() && json_bytes_saved_true(&bytes)
+}
+
 fn session_snapshot_or_journal_has_saved_metadata(snapshot_path: &Path) -> bool {
     let journal_path = session::session_journal_path_from_snapshot(snapshot_path);
 
-    if let Ok(bytes) = std::fs::read(snapshot_path)
-        && serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|value| value.get("saved").and_then(|saved| saved.as_bool()))
-            .unwrap_or(false)
-    {
+    if file_tail_contains_saved_true(snapshot_path) {
         return true;
     }
 
