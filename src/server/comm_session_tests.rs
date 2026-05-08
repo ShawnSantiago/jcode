@@ -245,7 +245,8 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
         None,
         false,
         Some(startup),
-        |session_id, _cwd: &std::path::Path, _selfdev| {
+        |session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
+            assert_eq!(provider_key, None);
             let path = crate::storage::jcode_dir()
                 .expect("jcode dir")
                 .join(format!("client-input-{}", session_id));
@@ -288,7 +289,7 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
         None,
         false,
         Some("Do the thing."),
-        |_session_id, _cwd: &std::path::Path, _selfdev| Ok(false),
+        |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(false),
     )
     .expect("visible spawn preparation should succeed even when launch is skipped");
 
@@ -321,7 +322,9 @@ fn prepare_visible_spawn_session_cleans_session_when_launch_errors() {
         None,
         false,
         Some("Do the thing."),
-        |_session_id, _cwd: &std::path::Path, _selfdev| Err(anyhow::anyhow!("launch failed")),
+        |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| {
+            Err(anyhow::anyhow!("launch failed"))
+        },
     )
     .expect_err("visible spawn preparation should surface launch error");
 
@@ -336,6 +339,33 @@ fn prepare_visible_spawn_session_cleans_session_when_launch_errors() {
         remaining_sessions, 0,
         "failed visible launch should not leave orphan prepared sessions"
     );
+
+    crate::env::remove_var("JCODE_HOME");
+}
+
+#[test]
+fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrouter_model() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let worktree = tempfile::TempDir::new().expect("temp worktree");
+    let (session_id, launched) = prepare_visible_spawn_session(
+        Some(worktree.path().to_str().expect("utf8 worktree path")),
+        Some("openai/gpt-5.4@OpenAI"),
+        false,
+        None,
+        |_session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
+            assert_eq!(provider_key, Some("openrouter"));
+            Ok(true)
+        },
+    )
+    .expect("visible spawn preparation should succeed");
+
+    assert!(launched);
+    let session = crate::session::Session::load(&session_id).expect("prepared session should save");
+    assert_eq!(session.model.as_deref(), Some("openai/gpt-5.4@OpenAI"));
+    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
 
     crate::env::remove_var("JCODE_HOME");
 }

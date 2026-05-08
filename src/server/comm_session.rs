@@ -27,6 +27,7 @@ type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<S
 fn create_visible_spawn_session(
     working_dir: Option<&str>,
     model_override: Option<&str>,
+    provider_key_override: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = working_dir
@@ -37,6 +38,9 @@ fn create_visible_spawn_session(
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
+    }
+    if let Some(provider_key) = provider_key_override {
+        session.provider_key = Some(provider_key.to_string());
     }
     if selfdev_requested {
         session.set_canary("self-dev");
@@ -86,16 +90,47 @@ fn spawn_visible_session_window(
     session_id: &str,
     cwd: &std::path::Path,
     selfdev_requested: bool,
+    provider_key: Option<&str>,
 ) -> anyhow::Result<bool> {
     let exe = crate::build::client_update_candidate(selfdev_requested)
         .map(|(path, _label)| path)
         .or_else(|| std::env::current_exe().ok())
         .unwrap_or_else(|| PathBuf::from("jcode"));
     if selfdev_requested {
-        crate::cli::tui_launch::spawn_selfdev_in_new_terminal(&exe, session_id, cwd)
+        crate::cli::tui_launch::spawn_selfdev_in_new_terminal_with_provider(
+            &exe,
+            session_id,
+            cwd,
+            provider_key,
+        )
     } else {
-        crate::cli::tui_launch::spawn_resume_in_new_terminal(&exe, session_id, cwd)
+        crate::cli::tui_launch::spawn_resume_in_new_terminal_with_provider(
+            &exe,
+            session_id,
+            cwd,
+            provider_key,
+        )
     }
+}
+
+fn provider_key_for_spawn_model(model: Option<&str>) -> Option<String> {
+    let model = model?.trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    if let Some((prefix, _rest)) = model.split_once(':') {
+        let prefix = prefix.trim();
+        if crate::provider::provider_from_model_key(prefix).is_some()
+            || crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                .is_some()
+            || crate::config::config().providers.contains_key(prefix)
+        {
+            return Some(prefix.to_string());
+        }
+    }
+
+    crate::provider::provider_for_model(model).map(str::to_string)
 }
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
@@ -131,16 +166,26 @@ fn prepare_visible_spawn_session<F>(
     launch_visible: F,
 ) -> anyhow::Result<(String, bool)>
 where
-    F: FnOnce(&str, &std::path::Path, bool) -> anyhow::Result<bool>,
+    F: FnOnce(&str, &std::path::Path, bool, Option<&str>) -> anyhow::Result<bool>,
 {
-    let (new_session_id, cwd) =
-        create_visible_spawn_session(working_dir, model_override, selfdev_requested)?;
+    let provider_key = provider_key_for_spawn_model(model_override);
+    let (new_session_id, cwd) = create_visible_spawn_session(
+        working_dir,
+        model_override,
+        provider_key.as_deref(),
+        selfdev_requested,
+    )?;
 
     if let Some(message) = startup_message {
         persist_headed_startup_message(&new_session_id, message);
     }
 
-    match launch_visible(&new_session_id, &cwd, selfdev_requested) {
+    match launch_visible(
+        &new_session_id,
+        &cwd,
+        selfdev_requested,
+        provider_key.as_deref(),
+    ) {
         Ok(launched) => {
             if !launched {
                 cleanup_prepared_visible_spawn_session(&new_session_id);
