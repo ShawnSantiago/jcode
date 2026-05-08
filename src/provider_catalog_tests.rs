@@ -91,10 +91,29 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(DEEPSEEK_PROFILE.api_base, "https://api.deepseek.com");
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");
+    assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
+    assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(
+        ALIBABA_CODING_PLAN_PROFILE.api_base,
+        "https://coding-intl.dashscope.aliyuncs.com/v1"
+    );
     assert_eq!(COMTEGRA_PROFILE.api_base, "https://llm.comtegra.cloud/v1");
     assert_eq!(COMTEGRA_PROFILE.default_model, Some("glm-51-nvfp4"));
     assert_eq!(COMTEGRA_PROFILE.api_key_env, "COMTEGRA_API_KEY");
     assert!(!OPENAI_COMPAT_PROFILE.setup_url.contains("opencode.ai"));
+}
+
+#[test]
+fn auth_issue_lan_openai_compatible_bases_are_valid_for_local_model_servers() {
+    assert_eq!(
+        normalize_api_base("http://100.103.78.84:11434/v1").as_deref(),
+        Some("http://100.103.78.84:11434/v1")
+    );
+    assert_eq!(
+        normalize_api_base("http://hsv.local:11434/v1").as_deref(),
+        Some("http://hsv.local:11434/v1")
+    );
+    assert_eq!(normalize_api_base("http://example.com/v1"), None);
 }
 
 #[test]

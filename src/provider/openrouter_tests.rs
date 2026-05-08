@@ -1,7 +1,11 @@
 use super::openrouter_sse_stream::OpenRouterStream;
 use super::*;
 use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::Mutex;
+use std::sync::mpsc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -437,6 +441,99 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         provider_pin: Arc::new(Mutex::new(None)),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
+}
+
+fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
+    let addr = listener.local_addr().expect("fake provider addr");
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fake provider request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut request = vec![0u8; 8192];
+        let n = stream.read(&mut request).unwrap_or(0);
+        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let _ = request_tx.send(request);
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write fake provider response");
+    });
+
+    (format!("http://{addr}/v1"), request_rx)
+}
+
+#[test]
+fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_display() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp home");
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _namespace = EnvVarGuard::set(
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "test-openai-compatible-flow",
+    );
+    let (api_base, request_rx) = spawn_single_response_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "live-login-flow-model", "object": "model"}
+            ]
+        }"#,
+    );
+    let provider = OpenRouterProvider {
+        api_base,
+        auth: ProviderAuth::AuthorizationBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "OPENAI_COMPAT_API_KEY".to_string(),
+        },
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("openai-compatible".to_string()),
+        static_models: vec!["static-login-flow-fallback".to_string()],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let fetched = rt
+        .block_on(provider.refresh_models())
+        .expect("refresh fake model catalog");
+    assert_eq!(fetched[0].id, "live-login-flow-model");
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("GET /v1/models "),
+        "unexpected catalog request: {request}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer sk-live-catalog"),
+        "catalog request should include saved API key auth header: {request}"
+    );
+
+    let display = provider.available_models_display();
+    assert!(display.iter().any(|model| model == "live-login-flow-model"));
+    assert!(
+        display
+            .iter()
+            .any(|model| model == "static-login-flow-fallback"),
+        "static fallback/default models should remain visible alongside live catalog models: {display:?}"
+    );
 }
 
 #[test]

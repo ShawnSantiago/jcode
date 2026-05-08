@@ -87,28 +87,62 @@ fn with_env_var<T>(key: &str, value: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
+fn save_test_openai_compatible_login_config(default_model: &str) {
+    let env_file = crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file;
+    crate::provider_catalog::save_env_value_to_env_file(
+        "JCODE_OPENAI_COMPAT_API_BASE",
+        env_file,
+        Some("https://example-openai-compatible.test/v1"),
+    )
+    .expect("save api base");
+    crate::provider_catalog::save_env_value_to_env_file(
+        "OPENAI_COMPAT_API_KEY",
+        env_file,
+        Some("sk-test-openai-compatible"),
+    )
+    .expect("save api key");
+    crate::provider_catalog::save_env_value_to_env_file(
+        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        env_file,
+        Some(default_model),
+    )
+    .expect("save default model");
+}
+
+fn clear_openai_compatible_runtime_env() {
+    for key in [
+        "JCODE_OPENAI_COMPAT_API_BASE",
+        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "JCODE_OPENAI_COMPAT_ENV_FILE",
+        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "OPENAI_COMPAT_API_KEY",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+    ] {
+        crate::env::remove_var(key);
+    }
+}
+
+fn assert_openai_compatible_route_available(provider: &MultiProvider, model: &str) {
+    let routes = provider.model_routes();
+    assert!(
+        routes.iter().any(|route| {
+            route.provider == "OpenAI-compatible"
+                && matches!(
+                    route.api_method.as_str(),
+                    "openai-compatible" | "openai-compatible:openai-compatible"
+                )
+                && route.model == model
+                && route.available
+        }),
+        "configured OpenAI-compatible model should be immediately visible after API-key setup; routes: {routes:?}"
+    );
+}
+
 #[test]
 fn openai_compatible_api_key_setup_makes_configured_model_route_available() {
     with_clean_provider_test_env(|| {
-        let env_file = crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file;
-        crate::provider_catalog::save_env_value_to_env_file(
-            "JCODE_OPENAI_COMPAT_API_BASE",
-            env_file,
-            Some("https://example-openai-compatible.test/v1"),
-        )
-        .expect("save api base");
-        crate::provider_catalog::save_env_value_to_env_file(
-            "OPENAI_COMPAT_API_KEY",
-            env_file,
-            Some("sk-test-openai-compatible"),
-        )
-        .expect("save api key");
-        crate::provider_catalog::save_env_value_to_env_file(
-            "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-            env_file,
-            Some("glm-test-login-flow"),
-        )
-        .expect("save default model");
+        save_test_openai_compatible_login_config("glm-test-login-flow");
 
         assert!(
             crate::provider_catalog::openai_compatible_profile_is_configured(
@@ -117,19 +151,7 @@ fn openai_compatible_api_key_setup_makes_configured_model_route_available() {
         );
 
         let provider = MultiProvider::new();
-        let routes = provider.model_routes();
-        assert!(
-            routes.iter().any(|route| {
-                route.provider == "OpenAI-compatible"
-                    && matches!(
-                        route.api_method.as_str(),
-                        "openai-compatible" | "openai-compatible:openai-compatible"
-                    )
-                    && route.model == "glm-test-login-flow"
-                    && route.available
-            }),
-            "configured OpenAI-compatible model should be immediately visible after API-key setup; routes: {routes:?}"
-        );
+        assert_openai_compatible_route_available(&provider, "glm-test-login-flow");
 
         provider
             .set_model_on_openai_compatible_profile(
@@ -139,6 +161,44 @@ fn openai_compatible_api_key_setup_makes_configured_model_route_available() {
             .expect("configured OpenAI-compatible model should select without requiring another provider login");
 
         assert_eq!(provider.model(), "glm-test-login-flow");
+    });
+}
+
+#[test]
+fn openai_compatible_api_key_setup_survives_process_restart_without_relogin() {
+    with_clean_provider_test_env(|| {
+        save_test_openai_compatible_login_config("restart-visible-model");
+
+        // Simulate a fresh process: the login command wrote the config file, but
+        // none of the runtime env vars from the login process remain populated.
+        clear_openai_compatible_runtime_env();
+
+        let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
+            crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+        );
+        assert_eq!(
+            resolved.api_base,
+            "https://example-openai-compatible.test/v1"
+        );
+        assert_eq!(
+            resolved.default_model.as_deref(),
+            Some("restart-visible-model")
+        );
+        assert!(
+            crate::provider_catalog::openai_compatible_profile_is_configured(
+                crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+            )
+        );
+
+        let provider = MultiProvider::new();
+        assert_openai_compatible_route_available(&provider, "restart-visible-model");
+        provider
+            .set_model_on_openai_compatible_profile(
+                crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+                "restart-visible-model",
+            )
+            .expect("saved credentials should be selectable after a fresh process restart");
+        assert_eq!(provider.model(), "restart-visible-model");
     });
 }
 
