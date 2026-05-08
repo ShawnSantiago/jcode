@@ -62,3 +62,28 @@ fn preferred_aspect_ratio_adjusts_render_height_without_changing_width_bucket() 
     );
     assert!((profile_width / profile_height - 0.5).abs() < 0.01);
 }
+
+#[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
+#[test]
+fn mmdr_size_api_reports_explicit_png_canvas() {
+    super::reset_debug_stats();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let content = format!("flowchart TD\nA[Start {unique}] --> B[End]");
+
+    let result = super::render_mermaid_untracked(&content, Some(100));
+    let (width, height) = match result {
+        super::RenderResult::Image { width, height, .. } => (width, height),
+        super::RenderResult::Error(error) => panic!("render failed: {error}"),
+    };
+    let stats = super::debug_stats();
+
+    assert_eq!(stats.last_measured_width, stats.last_target_width);
+    assert_eq!(stats.last_measured_height, stats.last_target_height);
+    assert_eq!(Some(width), stats.last_measured_width);
+    assert_eq!(Some(height), stats.last_measured_height);
+    assert!(stats.last_viewbox_width.unwrap_or_default() > 0);
+    assert!(stats.last_viewbox_height.unwrap_or_default() > 0);
+}

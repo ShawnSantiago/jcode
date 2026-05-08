@@ -22,11 +22,17 @@ mod svg;
 use base64::Engine as _;
 use image::DynamicImage;
 use image::GenericImageView;
+#[cfg(not(all(feature = "mmdr-size-api", mmdr_size_api_available)))]
+use mermaid_rs_renderer::render::render_svg;
+#[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
+use mermaid_rs_renderer::render::{
+    measure_svg_dimensions as mmdr_measure_svg_dimensions,
+    render_svg_with_dimensions as mmdr_render_svg_with_dimensions,
+};
 use mermaid_rs_renderer::{
     config::{LayoutConfig, RenderConfig},
-    layout::compute_layout,
+    layout::{Layout, compute_layout},
     parser::parse_mermaid,
-    render::render_svg,
     theme::Theme,
 };
 use ratatui::prelude::*;
@@ -222,25 +228,98 @@ pub use viewport_render::{
 };
 pub use widget_render::{render_image_widget, render_image_widget_fit, render_image_widget_scale};
 
+#[cfg(test)]
+use cache_render::calculate_render_size;
 use cache_render::{
     CachedDiagram, MermaidCache, RENDER_CACHE_MAX, RENDER_WIDTH_BUCKET_CELLS,
     bump_deferred_render_epoch, get_cached_diagram,
 };
-#[cfg(test)]
-use cache_render::{
-    cached_width_satisfies, calculate_render_size, estimate_diagram_size, parse_cache_filename,
-    retarget_svg_for_png,
-};
-#[cfg(test)]
-use content_render::image_widget_placeholder;
-#[cfg(test)]
-use runtime::{PickerInitMode, infer_protocol_from_env, picker_init_mode_from_probe_env};
 use viewport_render::clear_image_area;
-#[cfg(test)]
-use viewport_render::{ensure_kitty_viewport_state, render_kitty_virtual_viewport};
-#[cfg(test)]
-use widget_render::set_cell_if_visible;
 use widget_render::{BORDER_WIDTH, draw_left_border, render_stateful_image_safe};
+
+#[derive(Debug, Clone, Copy)]
+struct MeasuredSvgDimensions {
+    width: f32,
+    height: f32,
+    viewbox_width: f32,
+    viewbox_height: f32,
+}
+
+#[cfg(not(all(feature = "mmdr-size-api", mmdr_size_api_available)))]
+fn measure_svg_dimensions_from_svg(
+    svg_source: &str,
+    output_dimensions: Option<(f32, f32)>,
+) -> MeasuredSvgDimensions {
+    let root_tag = svg_source
+        .find("<svg")
+        .and_then(|start| {
+            let end = svg_source[start..].find('>')? + start;
+            Some(&svg_source[start..=end])
+        })
+        .unwrap_or("");
+
+    let (viewbox_width, viewbox_height) = svg::parse_svg_viewbox_size(root_tag)
+        .or_else(|| svg::parse_svg_explicit_size(root_tag))
+        .unwrap_or((DEFAULT_RENDER_WIDTH as f32, DEFAULT_RENDER_HEIGHT as f32));
+
+    let (width, height) = if let Some((target_width, target_height)) = output_dimensions {
+        let target_width = target_width.max(1.0);
+        let target_height = target_height.max(1.0);
+        let scale = (target_width / viewbox_width.max(1.0))
+            .min(target_height / viewbox_height.max(1.0))
+            .max(0.0001);
+        (
+            (viewbox_width * scale).max(1.0),
+            (viewbox_height * scale).max(1.0),
+        )
+    } else {
+        svg::parse_svg_explicit_size(root_tag).unwrap_or((viewbox_width, viewbox_height))
+    };
+
+    MeasuredSvgDimensions {
+        width,
+        height,
+        viewbox_width,
+        viewbox_height,
+    }
+}
+
+#[cfg(not(all(feature = "mmdr-size-api", mmdr_size_api_available)))]
+fn render_svg_for_png(
+    layout: &Layout,
+    theme: &Theme,
+    layout_config: &LayoutConfig,
+    output_dimensions: Option<(f32, f32)>,
+) -> (String, MeasuredSvgDimensions) {
+    let svg_source = render_svg(layout, theme, layout_config);
+    let dimensions = measure_svg_dimensions_from_svg(&svg_source, output_dimensions);
+    let svg = if let Some((target_width, target_height)) = output_dimensions {
+        svg::retarget_svg_for_png(&svg_source, target_width as f64, target_height as f64)
+    } else {
+        svg_source
+    };
+    (svg, dimensions)
+}
+
+#[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
+fn render_svg_for_png(
+    layout: &Layout,
+    theme: &Theme,
+    layout_config: &LayoutConfig,
+    output_dimensions: Option<(f32, f32)>,
+) -> (String, MeasuredSvgDimensions) {
+    let dimensions = mmdr_measure_svg_dimensions(layout, layout_config, output_dimensions);
+    let svg = mmdr_render_svg_with_dimensions(layout, theme, layout_config, output_dimensions);
+    (
+        svg,
+        MeasuredSvgDimensions {
+            width: dimensions.width,
+            height: dimensions.height,
+            viewbox_width: dimensions.viewbox_width,
+            viewbox_height: dimensions.viewbox_height,
+        },
+    )
+}
 
 /// Render Mermaid source images a bit denser than the immediate terminal-pixel
 /// target so the terminal image protocol scales down from a sharper PNG.
@@ -609,6 +688,10 @@ pub struct MermaidDebugStats {
     pub protocol: Option<String>,
     pub last_png_width: Option<u32>,
     pub last_png_height: Option<u32>,
+    pub last_measured_width: Option<u32>,
+    pub last_measured_height: Option<u32>,
+    pub last_viewbox_width: Option<u32>,
+    pub last_viewbox_height: Option<u32>,
     pub last_target_width: Option<u32>,
     pub last_target_height: Option<u32>,
     pub deferred_pending: usize,
@@ -641,6 +724,10 @@ struct RenderStageBreakdown {
     layout_ms: f32,
     svg_ms: f32,
     png_ms: f32,
+    measured_width: u32,
+    measured_height: u32,
+    viewbox_width: u32,
+    viewbox_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -763,6 +850,7 @@ pub fn debug_flicker_benchmark(steps: usize) -> MermaidFlickerBenchmark {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
     debug_support::parse_proc_status_value_bytes(status, key)
 }

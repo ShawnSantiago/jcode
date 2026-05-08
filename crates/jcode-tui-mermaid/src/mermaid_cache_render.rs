@@ -299,8 +299,12 @@ pub(super) fn calculate_render_size(
     }
 }
 
-pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: f64) -> String {
-    svg::retarget_svg_for_png(svg, target_width, target_height)
+fn svg_dimension_to_u32(value: f32) -> u32 {
+    if value.is_finite() && value > 0.0 {
+        value.round().clamp(1.0, u32::MAX as f32) as u32
+    } else {
+        1
+    }
 }
 
 fn write_output_png_cached_fonts(
@@ -660,15 +664,18 @@ fn render_mermaid_sized_internal(
         let layout_ms = layout_start.elapsed().as_secs_f32() * 1000.0;
 
         let svg_start = Instant::now();
-        // Render to SVG
-        let svg = render_svg(&layout, &theme, &layout_config);
-        let svg = retarget_svg_for_png(&svg, target_width, target_height);
+        let output_dimensions = Some((target_width as f32, target_height as f32));
+        // Render and collect size metadata. With the mmdr size API enabled this
+        // comes directly from the renderer; the default compatibility path keeps
+        // the old SVG retargeting behavior until the dependency is updated.
+        let (svg, dimensions) =
+            render_svg_for_png(&layout, &theme, &layout_config, output_dimensions);
         let svg_ms = svg_start.elapsed().as_secs_f32() * 1000.0;
 
         // Convert SVG to PNG with adaptive dimensions
         let render_config = RenderConfig {
-            width: target_width as f32,
-            height: target_height as f32,
+            width: dimensions.width,
+            height: dimensions.height,
             background: theme.background.clone(),
         };
 
@@ -688,6 +695,10 @@ fn render_mermaid_sized_internal(
             layout_ms,
             svg_ms,
             png_ms,
+            measured_width: svg_dimension_to_u32(dimensions.width),
+            measured_height: svg_dimension_to_u32(dimensions.height),
+            viewbox_width: svg_dimension_to_u32(dimensions.viewbox_width),
+            viewbox_height: svg_dimension_to_u32(dimensions.viewbox_height),
         })
     });
 
@@ -696,7 +707,7 @@ fn render_mermaid_sized_internal(
 
     // Handle the result
     let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
-    match render_result {
+    let stage_breakdown = match render_result {
         Ok(Ok(stage_breakdown)) => {
             if let Ok(mut errors) = RENDER_ERRORS.lock() {
                 errors.remove(&hash);
@@ -708,7 +719,12 @@ fn render_mermaid_sized_internal(
                 state.stats.last_layout_ms = Some(stage_breakdown.layout_ms);
                 state.stats.last_svg_ms = Some(stage_breakdown.svg_ms);
                 state.stats.last_png_ms = Some(stage_breakdown.png_ms);
+                state.stats.last_measured_width = Some(stage_breakdown.measured_width);
+                state.stats.last_measured_height = Some(stage_breakdown.measured_height);
+                state.stats.last_viewbox_width = Some(stage_breakdown.viewbox_width);
+                state.stats.last_viewbox_height = Some(stage_breakdown.viewbox_height);
             }
+            stage_breakdown
         }
         Ok(Err(e)) => {
             if let Ok(mut errors) = RENDER_ERRORS.lock() {
@@ -739,11 +755,13 @@ fn render_mermaid_sized_internal(
             }
             return RenderResult::Error(format!("Renderer panic: {}", msg));
         }
-    }
+    };
 
     // Get actual dimensions from rendered PNG
-    let (width, height) =
-        get_png_dimensions(&png_path).unwrap_or((target_width_u32, target_height as u32));
+    let (width, height) = get_png_dimensions(&png_path).unwrap_or((
+        stage_breakdown.measured_width,
+        stage_breakdown.measured_height,
+    ));
 
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
         state.stats.last_png_width = Some(width);

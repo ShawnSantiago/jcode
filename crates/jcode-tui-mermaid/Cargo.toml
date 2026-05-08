@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+# Enables the renderer size API path when the patched/upgraded mmdr crate is available.
+# Until the dependency is bumped, set JCODE_MMDR_SIZE_API_AVAILABLE=1 with a Cargo patch.
+mmdr-size-api = []
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
