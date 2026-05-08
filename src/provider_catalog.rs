@@ -201,6 +201,11 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("gte-qwen2-7b");
             push("glm-51-nvfp4");
         }
+        "fpt" => {
+            push("GLM-5.1");
+            push("GLM-4.7");
+            push("Llama-3.3-70B-Instruct");
+        }
         "kimi" => {
             push("kimi-for-coding");
         }
