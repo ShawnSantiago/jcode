@@ -3053,6 +3053,18 @@ pub(crate) fn single_session_text_areas_for_state(
         64
     };
 
+    let typography = single_session_typography_for_scale(ui_scale);
+    let composer_line_height = typography.code_size * typography.code_line_height;
+    let inline_widget_below_composer =
+        welcome_chrome_visible && !welcome_handoff_visible && inline_widget_line_count > 0;
+    let inline_widget_top = if inline_widget_below_composer {
+        draft_top + composer_line_height + 8.0
+    } else if inline_widget_line_count > 0 {
+        body_bottom as f32 + 8.0
+    } else {
+        0.0
+    };
+
     let mut areas = Vec::new();
 
     // Keep the composer lane first in glyphon preparation order. The visual
@@ -3068,7 +3080,11 @@ pub(crate) fn single_session_text_areas_for_state(
                 left: 0,
                 top: draft_top as i32,
                 right,
-                bottom,
+                bottom: if inline_widget_below_composer {
+                    inline_widget_top as i32
+                } else {
+                    bottom
+                },
             },
             default_color: text_color(STATUS_TEXT_ACCENT_COLOR),
         });
@@ -3082,7 +3098,11 @@ pub(crate) fn single_session_text_areas_for_state(
                 left: 0,
                 top: draft_top as i32,
                 right,
-                bottom,
+                bottom: if inline_widget_below_composer {
+                    inline_widget_top as i32
+                } else {
+                    bottom
+                },
             },
             default_color: text_color(PANEL_SECTION_COLOR),
         });
@@ -3147,10 +3167,14 @@ pub(crate) fn single_session_text_areas_for_state(
     if inline_widget_line_count > 0
         && let Some(buffer) = buffers.get(5)
     {
-        let typography = single_session_typography_for_scale(ui_scale);
         let line_height = typography.body_size * typography.body_line_height;
-        let inline_top = body_bottom as f32 + 8.0;
+        let inline_top = inline_widget_top;
         let inline_bottom = inline_top + inline_widget_line_count as f32 * line_height;
+        let inline_bounds_bottom = if inline_widget_below_composer {
+            bottom
+        } else {
+            inline_bottom.min(draft_top) as i32
+        };
         areas.push(TextArea {
             buffer,
             left,
@@ -3160,7 +3184,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 left: 0,
                 top: inline_top as i32,
                 right,
-                bottom: inline_bottom.min(draft_top) as i32,
+                bottom: inline_bounds_bottom,
             },
             default_color: text_color(ASSISTANT_TEXT_COLOR),
         });

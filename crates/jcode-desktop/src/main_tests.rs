@@ -2537,9 +2537,16 @@ fn fresh_welcome_model_picker_only_reserves_inline_lane() {
     let mut font_system = FontSystem::new();
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
     let areas = single_session_text_areas_for_app(&app, &buffers, size);
-    assert_eq!(
-        areas.first().expect("draft text area").top,
-        fresh_welcome_draft_top(size)
+    let draft_area = areas.first().expect("draft text area");
+    assert_eq!(draft_area.top, fresh_welcome_draft_top(size));
+    let inline_area = areas.last().expect("inline model picker text area");
+    assert!(
+        inline_area.top > draft_area.top,
+        "fresh inline picker should render below the typed /model command"
+    );
+    assert!(
+        inline_area.top > handwritten_welcome_bounds(size).1[1],
+        "fresh inline picker must not overlap the handwritten welcome hero"
     );
 }
 
