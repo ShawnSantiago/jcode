@@ -2,7 +2,7 @@ use super::*;
 
 fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
-        client: reqwest::Client::new(),
+        client: crate::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         github_token: "test-token".to_string(),
         bearer_token: Arc::new(tokio::sync::RwLock::new(None)),

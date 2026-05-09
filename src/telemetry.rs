@@ -784,6 +784,7 @@ pub fn record_command_family(command: &str) {
 
 fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = match reqwest::blocking::Client::builder()
+        .user_agent(crate::provider::JCODE_USER_AGENT)
         .timeout(timeout)
         .build()
     {

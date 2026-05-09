@@ -38,12 +38,12 @@ use std::sync::{Arc, RwLock};
 
 pub use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHEAPNESS_REFERENCE_INPUT_TOKENS,
-    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, DEFAULT_CONTEXT_LIMIT, EventStream, ModelCapabilities,
-    ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult, NativeToolResult,
-    NativeToolResultSender, PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate,
-    RouteCostConfidence, RouteCostSource, dedupe_model_routes, explicit_model_provider_prefix,
-    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
-    shared_http_client, summarize_model_catalog_refresh,
+    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT,
+    ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult,
+    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
+    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, dedupe_model_routes,
+    explicit_model_provider_prefix, model_name_for_provider, normalize_copilot_model_name,
+    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
 pub(crate) use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
 pub use route_builders::{

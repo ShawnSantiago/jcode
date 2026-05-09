@@ -363,10 +363,10 @@ pub async fn ensure_browser_setup() -> Result<String> {
 
 async fn download_browser_binary() -> Result<()> {
     let asset_name = get_platform_asset_name();
+    let client = crate::provider::shared_http_client();
 
-    let release_info: serde_json::Value = reqwest::Client::new()
+    let release_info: serde_json::Value = client
         .get(GITHUB_API_LATEST)
-        .header("User-Agent", "jcode")
         .send()
         .await?
         .json()
@@ -409,9 +409,8 @@ async fn download_browser_binary() -> Result<()> {
         .find(|a| a["name"].as_str() == Some(&host_asset_name));
 
     // Download browser CLI
-    let browser_bytes = reqwest::Client::new()
+    let browser_bytes = client
         .get(download_url)
-        .header("User-Agent", "jcode")
         .send()
         .await?
         .bytes()
@@ -422,9 +421,8 @@ async fn download_browser_binary() -> Result<()> {
     write_file_atomically(&bin_path, &browser_bytes, true)?;
 
     // Download XPI
-    let xpi_bytes = reqwest::Client::new()
+    let xpi_bytes = client
         .get(xpi_url)
-        .header("User-Agent", "jcode")
         .send()
         .await?
         .bytes()
@@ -437,9 +435,8 @@ async fn download_browser_binary() -> Result<()> {
     if let Some(host) = host_asset
         && let Some(host_url) = host["browser_download_url"].as_str()
     {
-        let host_bytes = reqwest::Client::new()
+        let host_bytes = client
             .get(host_url)
-            .header("User-Agent", "jcode")
             .send()
             .await?
             .bytes()

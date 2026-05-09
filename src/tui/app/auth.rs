@@ -975,7 +975,7 @@ impl App {
         self.begin_pending_login(PendingLogin::Copilot);
 
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = crate::provider::shared_http_client();
 
             let device_resp = match crate::auth::copilot::initiate_device_flow(&client).await {
                 Ok(resp) => resp,
