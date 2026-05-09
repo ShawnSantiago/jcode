@@ -364,5 +364,43 @@ fn redact_auth_field(key: &str, value: &str) -> String {
 
 fn sanitize_log_value(value: &str) -> String {
     let value = value.replace(['\n', '\r', '\t'], " ");
+    let value = redact_url_queries(&value);
     truncate(&value, 160)
+}
+
+fn redact_url_queries(value: &str) -> String {
+    value
+        .split(' ')
+        .map(|word| {
+            if (word.starts_with("http://") || word.starts_with("https://")) && word.contains('?') {
+                let (base, _) = word.split_once('?').unwrap_or((word, ""));
+                format!("{}?<redacted>", base)
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_log_redacts_secret_like_fields() {
+        assert_eq!(redact_auth_field("api_key", "sk-secret"), "<redacted>");
+        assert_eq!(
+            redact_auth_field("callback_url", "https://example.com/?code=secret"),
+            "<redacted>"
+        );
+    }
+
+    #[test]
+    fn auth_log_sanitizes_urls_and_control_characters() {
+        assert_eq!(
+            sanitize_log_value("failed\nhttps://login.example.com/cb?code=secret&state=abc"),
+            "failed https://login.example.com/cb?<redacted>"
+        );
+    }
 }

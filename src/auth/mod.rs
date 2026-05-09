@@ -74,6 +74,40 @@ fn openai_api_key_configured() -> bool {
         .unwrap_or(false)
 }
 
+fn auth_state_label(state: AuthState) -> &'static str {
+    match state {
+        AuthState::Available => "available",
+        AuthState::Expired => "expired",
+        AuthState::NotConfigured => "not_configured",
+    }
+}
+
+fn bool_label(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+fn log_auth_status_snapshot(event: &str, status: &AuthStatus) {
+    crate::logging::auth_event(
+        event,
+        "all",
+        &[
+            ("jcode", auth_state_label(status.jcode)),
+            ("claude", auth_state_label(status.anthropic.state)),
+            ("openai", auth_state_label(status.openai)),
+            ("openrouter", auth_state_label(status.openrouter)),
+            ("azure", auth_state_label(status.azure)),
+            ("azure_api_auth", bool_label(status.azure_has_api_key)),
+            ("azure_entra", bool_label(status.azure_uses_entra)),
+            ("bedrock", auth_state_label(status.bedrock)),
+            ("copilot", auth_state_label(status.copilot)),
+            ("antigravity", auth_state_label(status.antigravity)),
+            ("gemini", auth_state_label(status.gemini)),
+            ("cursor", auth_state_label(status.cursor)),
+            ("google", auth_state_label(status.google)),
+        ],
+    );
+}
+
 fn copilot_auth_state_from_credentials() -> (AuthState, bool) {
     if !copilot::has_copilot_credentials_fast() {
         return (AuthState::NotConfigured, false);
@@ -546,6 +580,7 @@ impl AuthStatus {
             *cache = None;
         }
         crate::auth::copilot::invalidate_github_token_cache();
+        crate::logging::auth_event("auth_status_cache_invalidated", "all", &[]);
     }
 
     fn check_uncached() -> Self {
@@ -685,6 +720,7 @@ impl AuthStatus {
             }
         }
 
+        log_auth_status_snapshot("auth_status_check", &status);
         status
     }
 
@@ -831,6 +867,7 @@ impl AuthStatus {
             ));
         }
 
+        log_auth_status_snapshot("auth_status_check_fast", &status);
         status
     }
 }

@@ -61,6 +61,11 @@ pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Resu
         Ok(()) => Ok(()),
         Err(first_err) => {
             let first_message = first_err.to_string();
+            crate::logging::auth_event(
+                "auth_changed_retry_after_set_model_failure",
+                provider.name(),
+                &[("reason", first_message.as_str())],
+            );
             provider.on_auth_changed();
             provider.set_model(model).map_err(|second_err| {
                 anyhow::anyhow!(
@@ -1218,6 +1223,7 @@ impl Provider for MultiProvider {
     }
 
     fn on_auth_changed(&self) {
+        crate::logging::auth_event("auth_changed_received", "multi-provider", &[]);
         // Auth just changed, so discard any stale full/fast snapshots before
         // using cheap local probes to hot-initialize newly configured providers.
         crate::auth::AuthStatus::invalidate_cache();
@@ -1370,6 +1376,7 @@ impl Provider for MultiProvider {
         if let Some(bedrock) = self.bedrock_provider() {
             Self::spawn_post_auth_model_refresh(bedrock, "AWS Bedrock");
         }
+        crate::logging::auth_event("auth_changed_completed", "multi-provider", &[]);
     }
 
     async fn invalidate_credentials(&self) {

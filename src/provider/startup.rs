@@ -6,16 +6,33 @@ impl MultiProvider {
         provider_label: &'static str,
     ) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            crate::logging::auth_event(
+                "post_auth_model_refresh_skipped",
+                provider_label,
+                &[("reason", "no_tokio_runtime")],
+            );
             return;
         };
 
         handle.spawn(async move {
+            crate::logging::auth_event("post_auth_model_refresh_started", provider_label, &[]);
             provider.invalidate_credentials().await;
             match provider.prefetch_models().await {
                 Ok(()) => {
+                    crate::logging::auth_event(
+                        "post_auth_model_refresh_completed",
+                        provider_label,
+                        &[],
+                    );
                     crate::bus::Bus::global().publish_models_updated();
                 }
                 Err(err) => {
+                    let reason = err.to_string();
+                    crate::logging::auth_event(
+                        "post_auth_model_refresh_failed",
+                        provider_label,
+                        &[("reason", reason.as_str())],
+                    );
                     crate::logging::info(&format!(
                         "Failed to refresh {} models after auth change: {}",
                         provider_label, err

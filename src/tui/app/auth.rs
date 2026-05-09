@@ -1874,6 +1874,11 @@ impl App {
     }
 
     fn trigger_provider_auth_changed(&self) {
+        crate::logging::auth_event(
+            "auth_changed_triggered",
+            self.provider.name(),
+            &[("surface", "tui")],
+        );
         let provider = Arc::clone(&self.provider);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
