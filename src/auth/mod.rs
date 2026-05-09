@@ -805,7 +805,8 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
         AuthProbeMode::Full => {
             let cursor_has_api_key = cursor::has_cursor_api_key();
             let cursor_has_native_auth = cursor::has_cursor_native_auth();
-            let cursor_has_cli_auth = cursor::has_authenticated_cli_session();
+            let cursor_has_cli_auth =
+                !cursor_has_native_auth && cursor::has_authenticated_cli_session();
             status.cursor = if cursor_has_native_auth || cursor_has_cli_auth {
                 AuthState::Available
             } else if cursor_has_api_key {

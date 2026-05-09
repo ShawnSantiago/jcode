@@ -79,6 +79,180 @@ fn auth_status_check_fast_includes_bedrock_probe() {
 }
 
 #[test]
+fn full_and_fast_auth_status_match_for_shared_probe_fields() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    std::fs::create_dir_all(&home).expect("create temp home");
+    std::fs::create_dir_all(&xdg).expect("create temp xdg config");
+    let saved = [
+        "JCODE_HOME",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        crate::subscription_catalog::JCODE_API_KEY_ENV,
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        crate::auth::azure::ENDPOINT_ENV,
+        crate::auth::azure::API_KEY_ENV,
+        crate::auth::azure::MODEL_ENV,
+        crate::auth::azure::USE_ENTRA_ENV,
+        "JCODE_BEDROCK_ENABLE",
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "CURSOR_API_KEY",
+        "CURSOR_ACCESS_TOKEN",
+        "CURSOR_REFRESH_TOKEN",
+        "JCODE_CURSOR_CLI_PATH",
+    ]
+    .into_iter()
+    .map(|key| (key, std::env::var_os(key)))
+    .collect::<Vec<_>>();
+
+    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("XDG_CONFIG_HOME", &xdg);
+    crate::env::set_var("HOME", &home);
+    crate::env::set_var(
+        crate::subscription_catalog::JCODE_API_KEY_ENV,
+        "jcode-test-key",
+    );
+    crate::env::set_var("ANTHROPIC_API_KEY", "anthropic-test-key");
+    crate::env::set_var("OPENAI_API_KEY", "openai-test-key");
+    crate::env::set_var("OPENROUTER_API_KEY", "openrouter-test-key");
+    crate::env::set_var(
+        crate::auth::azure::ENDPOINT_ENV,
+        "https://example.openai.azure.com",
+    );
+    crate::env::set_var(crate::auth::azure::API_KEY_ENV, "azure-test-key");
+    crate::env::set_var(crate::auth::azure::MODEL_ENV, "gpt-test-deployment");
+    crate::env::remove_var(crate::auth::azure::USE_ENTRA_ENV);
+    crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+    crate::env::set_var("COPILOT_GITHUB_TOKEN", "gho_test_token");
+    crate::env::remove_var("GH_TOKEN");
+    crate::env::remove_var("GITHUB_TOKEN");
+    crate::env::set_var("CURSOR_API_KEY", "cursor-test-key");
+    crate::env::remove_var("CURSOR_ACCESS_TOKEN");
+    crate::env::remove_var("CURSOR_REFRESH_TOKEN");
+    crate::env::set_var(
+        "JCODE_CURSOR_CLI_PATH",
+        temp.path().join("missing-cursor-agent"),
+    );
+    AuthStatus::invalidate_cache();
+
+    let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
+    let (fast, _) = build_auth_status_uncached(AuthProbeMode::Fast);
+
+    assert_auth_status_shared_fields_match(&full, &fast);
+    assert_eq!(full.jcode, AuthState::Available);
+    assert_eq!(full.anthropic.state, AuthState::Available);
+    assert_eq!(full.openai, AuthState::Available);
+    assert_eq!(full.openrouter, AuthState::Available);
+    assert_eq!(full.azure, AuthState::Available);
+    assert_eq!(full.bedrock, AuthState::Available);
+    assert_eq!(full.copilot, AuthState::Available);
+    assert_eq!(full.cursor, AuthState::Available);
+
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
+    AuthStatus::invalidate_cache();
+}
+
+#[cfg(unix)]
+#[test]
+fn full_and_fast_auth_status_document_cursor_cli_exception() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    std::fs::create_dir_all(&home).expect("create temp home");
+    std::fs::create_dir_all(&xdg).expect("create temp xdg config");
+    let saved = [
+        "JCODE_HOME",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        "CURSOR_API_KEY",
+        "CURSOR_ACCESS_TOKEN",
+        "CURSOR_REFRESH_TOKEN",
+        "JCODE_CURSOR_CLI_PATH",
+    ]
+    .into_iter()
+    .map(|key| (key, std::env::var_os(key)))
+    .collect::<Vec<_>>();
+    let mock_cli = write_mock_cursor_agent(
+        temp.path(),
+        "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo \"Authenticated\\nAccount: test@example.com\"\n  exit 0\nfi\nexit 1\n",
+    );
+
+    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("XDG_CONFIG_HOME", &xdg);
+    crate::env::set_var("HOME", &home);
+    crate::env::remove_var("CURSOR_API_KEY");
+    crate::env::remove_var("CURSOR_ACCESS_TOKEN");
+    crate::env::remove_var("CURSOR_REFRESH_TOKEN");
+    crate::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
+    AuthStatus::invalidate_cache();
+
+    let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
+    let (fast, _) = build_auth_status_uncached(AuthProbeMode::Fast);
+
+    assert_eq!(full.cursor, AuthState::Available);
+    assert_eq!(fast.cursor, AuthState::NotConfigured);
+    assert_eq!(
+        full.cursor,
+        AuthState::Available,
+        "Full auth probes cursor-agent status; fast auth intentionally skips CLI/vscdb probes"
+    );
+
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
+    AuthStatus::invalidate_cache();
+}
+
+fn assert_auth_status_shared_fields_match(full: &AuthStatus, fast: &AuthStatus) {
+    assert_eq!(full.jcode, fast.jcode, "jcode");
+    assert_eq!(
+        full.anthropic.state, fast.anthropic.state,
+        "anthropic.state"
+    );
+    assert_eq!(
+        full.anthropic.has_oauth, fast.anthropic.has_oauth,
+        "anthropic.has_oauth"
+    );
+    assert_eq!(
+        full.anthropic.has_api_key, fast.anthropic.has_api_key,
+        "anthropic.has_api_key"
+    );
+    assert_eq!(full.openrouter, fast.openrouter, "openrouter");
+    assert_eq!(full.azure, fast.azure, "azure");
+    assert_eq!(
+        full.azure_has_api_key, fast.azure_has_api_key,
+        "azure api key"
+    );
+    assert_eq!(full.azure_uses_entra, fast.azure_uses_entra, "azure entra");
+    assert_eq!(full.bedrock, fast.bedrock, "bedrock");
+    assert_eq!(full.openai, fast.openai, "openai");
+    assert_eq!(full.openai_has_oauth, fast.openai_has_oauth, "openai oauth");
+    assert_eq!(
+        full.openai_has_api_key, fast.openai_has_api_key,
+        "openai api key"
+    );
+    assert_eq!(full.copilot, fast.copilot, "copilot");
+    assert_eq!(
+        full.copilot_has_api_token, fast.copilot_has_api_token,
+        "copilot api token"
+    );
+    assert_eq!(full.antigravity, fast.antigravity, "antigravity");
+    assert_eq!(full.gemini, fast.gemini, "gemini");
+    assert_eq!(full.cursor, fast.cursor, "cursor");
+    assert_eq!(full.google, fast.google, "google");
+    assert_eq!(full.google_can_send, fast.google_can_send, "google send");
+}
+
+#[test]
 fn provider_auth_default() {
     let auth = ProviderAuth::default();
     assert_eq!(auth.state, AuthState::NotConfigured);
