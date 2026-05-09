@@ -49,7 +49,7 @@ impl Tool for McpManagementTool {
     }
 
     fn description(&self) -> &str {
-        "Manage MCP servers."
+        "Manage MCP (Model Context Protocol) servers."
     }
 
     fn parameters_schema(&self) -> Value {
