@@ -71,6 +71,7 @@ fn partition_queued_messages_moves_system_messages_into_reminders() {
 #[cfg(unix)]
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
+    let _env_lock = crate::storage::lock_test_env();
     let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
     assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
 }
@@ -183,6 +184,7 @@ fn format_countdown_until_handles_subminute_and_minutes() {
 
 #[test]
 fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
+    let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
