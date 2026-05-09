@@ -1,5 +1,6 @@
 pub use jcode_auth_types::{
-    AuthCredentialSource, AuthExpiryConfidence, AuthRefreshSupport, AuthState, AuthValidationMethod,
+    AuthCredentialSource, AuthExpiryConfidence, AuthReadinessLevel, AuthRefreshSupport, AuthState,
+    AuthValidationMethod,
 };
 
 use serde::Serialize;
@@ -57,6 +58,7 @@ pub struct ProviderAuth {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderAuthAssessment {
     pub state: AuthState,
+    pub readiness: AuthReadinessLevel,
     pub method_detail: String,
     pub credential_source: AuthCredentialSource,
     pub credential_source_detail: String,
@@ -70,6 +72,7 @@ pub struct ProviderAuthAssessment {
 impl ProviderAuthAssessment {
     pub fn health_summary(&self) -> String {
         let mut parts = vec![
+            format!("readiness: {}", self.readiness.label()),
             format!("source: {}", self.credential_source_detail),
             format!("expiry: {}", self.expiry_confidence.label()),
             format!("refresh: {}", self.refresh_support.label()),

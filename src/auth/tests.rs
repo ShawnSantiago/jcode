@@ -313,6 +313,80 @@ fn openrouter_like_status_is_provider_specific() {
     AuthStatus::invalidate_cache();
 }
 
+#[test]
+fn azure_readiness_distinguishes_credentials_from_deployment_validation() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let saved = [
+        "JCODE_HOME",
+        crate::auth::azure::ENDPOINT_ENV,
+        crate::auth::azure::API_KEY_ENV,
+        crate::auth::azure::MODEL_ENV,
+        crate::auth::azure::USE_ENTRA_ENV,
+    ]
+    .into_iter()
+    .map(|key| (key, std::env::var_os(key)))
+    .collect::<Vec<_>>();
+
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(
+        crate::auth::azure::ENDPOINT_ENV,
+        "https://example.openai.azure.com",
+    );
+    crate::env::set_var(crate::auth::azure::API_KEY_ENV, "azure-test-key");
+    crate::env::set_var(crate::auth::azure::MODEL_ENV, "gpt-test-deployment");
+    crate::env::remove_var(crate::auth::azure::USE_ENTRA_ENV);
+    AuthStatus::invalidate_cache();
+
+    let status = AuthStatus::check_fast();
+    let assessment = status.assessment_for_provider(crate::provider_catalog::AZURE_LOGIN_PROVIDER);
+    assert_eq!(assessment.state, AuthState::Available);
+    assert_eq!(assessment.readiness, AuthReadinessLevel::CredentialPresent);
+    assert!(
+        assessment
+            .health_summary()
+            .contains("readiness: credential present")
+    );
+
+    crate::auth::validation::save(
+        "azure",
+        crate::auth::validation::ProviderValidationRecord {
+            checked_at_ms: chrono::Utc::now().timestamp_millis(),
+            success: false,
+            provider_smoke_ok: Some(false),
+            tool_smoke_ok: None,
+            summary: "provider_smoke: deployment not found".to_string(),
+        },
+    )
+    .expect("save failed validation");
+    let assessment = status.assessment_for_provider(crate::provider_catalog::AZURE_LOGIN_PROVIDER);
+    assert_eq!(assessment.readiness, AuthReadinessLevel::CredentialPresent);
+
+    crate::auth::validation::save(
+        "azure",
+        crate::auth::validation::ProviderValidationRecord {
+            checked_at_ms: chrono::Utc::now().timestamp_millis(),
+            success: true,
+            provider_smoke_ok: Some(true),
+            tool_smoke_ok: None,
+            summary: "provider_smoke: ok".to_string(),
+        },
+    )
+    .expect("save successful validation");
+    let assessment = status.assessment_for_provider(crate::provider_catalog::AZURE_LOGIN_PROVIDER);
+    assert_eq!(assessment.readiness, AuthReadinessLevel::DeploymentValid);
+    assert!(
+        assessment
+            .health_summary()
+            .contains("readiness: deployment valid")
+    );
+
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
+    AuthStatus::invalidate_cache();
+}
+
 #[cfg(unix)]
 #[test]
 fn cursor_status_is_available_when_api_key_exists_without_cli() {

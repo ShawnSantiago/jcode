@@ -26,8 +26,8 @@ pub(crate) use commands::{
 };
 
 pub use status_types::{
-    AuthCredentialSource, AuthExpiryConfidence, AuthRefreshSupport, AuthState, AuthStatus,
-    AuthValidationMethod, ProviderAuth, ProviderAuthAssessment,
+    AuthCredentialSource, AuthExpiryConfidence, AuthReadinessLevel, AuthRefreshSupport, AuthState,
+    AuthStatus, AuthValidationMethod, ProviderAuth, ProviderAuthAssessment,
 };
 
 use crate::provider_catalog::LoginProviderAuthStateKey;
@@ -107,6 +107,45 @@ fn log_auth_status_snapshot(event: &str, status: &AuthStatus) {
             ("google", auth_state_label(status.google)),
         ],
     );
+}
+
+fn auth_readiness_for_provider(
+    provider: LoginProviderDescriptor,
+    state: AuthState,
+    last_validation: Option<&crate::auth::validation::ProviderValidationRecord>,
+) -> AuthReadinessLevel {
+    match state {
+        AuthState::NotConfigured => AuthReadinessLevel::None,
+        AuthState::Expired => AuthReadinessLevel::CredentialPresent,
+        AuthState::Available => {
+            if last_validation.and_then(|record| record.provider_smoke_ok) == Some(true) {
+                return model_smoke_readiness_for_provider(provider);
+            }
+
+            available_provider_base_readiness(provider)
+        }
+    }
+}
+
+fn available_provider_base_readiness(provider: LoginProviderDescriptor) -> AuthReadinessLevel {
+    match provider.target {
+        crate::provider_catalog::LoginProviderTarget::Claude
+        | crate::provider_catalog::LoginProviderTarget::OpenAi
+        | crate::provider_catalog::LoginProviderTarget::Copilot
+        | crate::provider_catalog::LoginProviderTarget::Gemini
+        | crate::provider_catalog::LoginProviderTarget::Antigravity
+        | crate::provider_catalog::LoginProviderTarget::Google => AuthReadinessLevel::Authenticated,
+        _ => AuthReadinessLevel::CredentialPresent,
+    }
+}
+
+fn model_smoke_readiness_for_provider(provider: LoginProviderDescriptor) -> AuthReadinessLevel {
+    match provider.target {
+        // Azure model names are deployment IDs. A successful smoke call proves the
+        // resource, auth, and selected deployment all work together.
+        crate::provider_catalog::LoginProviderTarget::Azure => AuthReadinessLevel::DeploymentValid,
+        _ => AuthReadinessLevel::RequestValid,
+    }
 }
 
 fn copilot_auth_state_from_credentials() -> (AuthState, bool) {
@@ -561,6 +600,7 @@ impl AuthStatus {
 
         ProviderAuthAssessment {
             state,
+            readiness: auth_readiness_for_provider(provider, state, last_validation.as_ref()),
             method_detail,
             credential_source,
             credential_source_detail,
