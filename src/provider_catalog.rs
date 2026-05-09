@@ -187,10 +187,6 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         }
     };
 
-    if let Some(default_model) = profile.default_model {
-        push(default_model);
-    }
-
     match profile.id {
         // Issue #79: DeepSeek's live model catalog is not always available during
         // TUI startup, but both models should still be selectable once the direct
@@ -218,6 +214,7 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         // before the picker/routes are rebuilt. Keep the documented text models
         // selectable immediately after saving a key.
         "minimax" => {
+            push("MiniMax-M2.7");
             push("MiniMax-M2.7-highspeed");
             push("MiniMax-M2.5");
             push("MiniMax-M2.5-highspeed");

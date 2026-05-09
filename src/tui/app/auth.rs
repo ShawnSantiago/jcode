@@ -1559,14 +1559,6 @@ impl App {
                             crate::provider_catalog::apply_openai_compatible_profile_env(Some(
                                 profile,
                             ));
-                            crate::cli::provider_init::lock_model_provider("openrouter");
-                            if let Some(default_model) = resolved_openai_compatible
-                                .as_ref()
-                                .and_then(|resolved| resolved.default_model.as_deref())
-                                .or(default_model.as_deref())
-                            {
-                                crate::env::set_var("JCODE_OPENROUTER_MODEL", default_model);
-                            }
                             self.start_openai_compatible_post_login_activation(provider.clone());
                         }
 
@@ -1961,7 +1953,7 @@ impl App {
         }
     }
 
-    fn start_openai_compatible_post_login_activation(&mut self, provider_label: String) {
+    pub(super) fn start_openai_compatible_post_login_activation(&mut self, provider_label: String) {
         self.set_status_notice(format!("{}: fetching models...", provider_label));
         self.invalidate_model_picker_cache();
         self.open_model_picker();
@@ -1987,13 +1979,6 @@ impl App {
                                     && route.provider == provider_label
                                     && route.api_method.starts_with("openai-compatible")
                                     && crate::provider::is_listable_model_name(&route.model)
-                            })
-                            .or_else(|| {
-                                routes.iter().find(|route| {
-                                    route.available
-                                        && route.api_method.starts_with("openai-compatible")
-                                        && crate::provider::is_listable_model_name(&route.model)
-                                })
                             })
                             .or_else(|| {
                                 routes.iter().find(|route| {
@@ -2039,46 +2024,6 @@ impl App {
                                     );
                                 }
                             }
-                        } else if let Some(default_model) = crate::provider_catalog::openai_compatible_profiles()
-                            .iter()
-                            .copied()
-                            .find(|profile| {
-                                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(*profile);
-                                resolved.display_name == provider_label
-                            })
-                            .and_then(|profile| crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model)
-                        {
-                            match provider.set_model(&default_model) {
-                                Ok(()) => {
-                                    crate::bus::Bus::global().publish_models_updated();
-                                    crate::bus::Bus::global().publish(
-                                        crate::bus::BusEvent::ProviderModelActivated {
-                                            session_id,
-                                            model: default_model.clone(),
-                                            message: format!(
-                                                "**{} is ready.**\n\nThe live model catalog did not produce a selectable route yet, so Jcode selected the documented default `{}`. Run `/refresh-model-list` later to retry live discovery.",
-                                                provider_label,
-                                                default_model
-                                            ),
-                                            open_picker: true,
-                                        },
-                                    );
-                                }
-                                Err(error) => {
-                                    crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                                        crate::bus::LoginCompleted {
-                                            provider: provider_label.clone(),
-                                            success: false,
-                                            message: format!(
-                                                "Fetched the model catalog, but it contained no selectable {} models and failed to switch to the documented default `{}`: {}\n\nRun `/refresh-model-list` to retry model discovery, then `jcode auth status` and `jcode auth doctor` for a structured diagnosis.",
-                                                provider_label,
-                                                default_model,
-                                                error
-                                            ),
-                                        },
-                                    ));
-                                }
-                            }
                         } else {
                             crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
                                 crate::bus::LoginCompleted {
@@ -2086,7 +2031,7 @@ impl App {
                                     success: false,
                                     message:
                                         format!(
-                                            "Fetched the model catalog, but it contained no selectable {} models. Run `/refresh-model-list` to retry model discovery, then `jcode auth status` and `jcode auth doctor` for a structured diagnosis.",
+                                            "Saved the API key and fetched the model catalog, but it contained no selectable {} models. Jcode did not switch models.\n\nRun `/refresh-model-list` to retry model discovery, then `jcode auth status` and `jcode auth doctor` for a structured diagnosis.",
                                             provider_label
                                         ),
                                 },

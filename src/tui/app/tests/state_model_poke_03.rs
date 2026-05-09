@@ -65,6 +65,157 @@ struct CountingModelRoutesProvider {
     delay: Duration,
 }
 
+#[derive(Clone)]
+struct AuthUxStateSpaceProvider {
+    authed: StdArc<AtomicBool>,
+    refreshes: StdArc<AtomicUsize>,
+    model: StdArc<StdMutex<String>>,
+}
+
+#[derive(Clone)]
+struct EmptyPostLoginCatalogProvider {
+    refreshes: StdArc<AtomicUsize>,
+    set_model_attempts: StdArc<AtomicUsize>,
+}
+
+impl AuthUxStateSpaceProvider {
+    fn routes(&self) -> Vec<crate::provider::ModelRoute> {
+        let authed = self.authed.load(Ordering::SeqCst);
+        ["state-space-alpha", "state-space-beta"]
+            .into_iter()
+            .map(|model| crate::provider::ModelRoute {
+                model: model.to_string(),
+                provider: "StateSpace".to_string(),
+                api_method: "openai-compatible-test".to_string(),
+                available: authed,
+                detail: if authed {
+                    "fresh catalog route".to_string()
+                } else {
+                    "no API key".to_string()
+                },
+                cheapness: None,
+            })
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for AuthUxStateSpaceProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("AuthUxStateSpaceProvider")
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        self.routes()
+            .into_iter()
+            .filter(|route| route.available)
+            .map(|route| route.model)
+            .collect()
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        self.routes()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let found = self
+            .routes()
+            .into_iter()
+            .any(|route| route.available && route.model == model);
+        if !found {
+            anyhow::bail!("model {model} is not available in the refreshed catalog");
+        }
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
+    }
+
+    fn on_auth_changed(&self) {
+        self.authed.store(true, Ordering::SeqCst);
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<crate::provider::ModelCatalogRefreshSummary> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::provider::ModelCatalogRefreshSummary {
+            model_count_before: 0,
+            model_count_after: 2,
+            models_added: 2,
+            models_removed: 0,
+            route_count_before: 0,
+            route_count_after: 2,
+            routes_added: 2,
+            routes_removed: 0,
+            routes_changed: 0,
+        })
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for EmptyPostLoginCatalogProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("EmptyPostLoginCatalogProvider")
+    }
+
+    fn name(&self) -> &str {
+        "empty-catalog"
+    }
+
+    fn model(&self) -> String {
+        "pre-auth-model".to_string()
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![]
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        self.set_model_attempts.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("unexpected attempt to switch to {model}")
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<crate::provider::ModelCatalogRefreshSummary> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::provider::ModelCatalogRefreshSummary {
+            model_count_before: 0,
+            model_count_after: 0,
+            models_added: 0,
+            models_removed: 0,
+            route_count_before: 0,
+            route_count_after: 0,
+            routes_added: 0,
+            routes_removed: 0,
+            routes_changed: 0,
+        })
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for CountingModelRoutesProvider {
     async fn complete(
@@ -146,6 +297,110 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
         2,
         "invalidating should force rebuilding provider routes"
     );
+}
+
+#[test]
+fn test_tui_api_key_auth_refreshes_catalog_opens_picker_and_allows_model_switch() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider = AuthUxStateSpaceProvider {
+        authed: StdArc::new(AtomicBool::new(false)),
+        refreshes: StdArc::new(AtomicUsize::new(0)),
+        model: StdArc::new(StdMutex::new("pre-auth-model".to_string())),
+    };
+    let refreshes = provider.refreshes.clone();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    let _guard = rt.enter();
+    app.start_openai_compatible_post_login_activation("StateSpace".to_string());
+    assert_eq!(app.status_notice(), Some("Updating model routes…".to_string()));
+
+    let activation = rt.block_on(async {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
+                Ok(Ok(event @ crate::bus::BusEvent::ProviderModelActivated { .. })) => break event,
+                Ok(Ok(_)) => continue,
+                other => panic!("expected ProviderModelActivated event, got {other:?}"),
+            }
+        }
+    });
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1, "auth completion must refresh the model catalog exactly once");
+
+    super::local::handle_bus_event(&mut app, Ok(activation));
+    wait_for_model_picker_load(&mut app);
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("post-auth model picker should be open");
+    let names: Vec<_> = picker.entries.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(names.contains(&"state-space-alpha"), "refreshed catalog model missing from picker: {names:?}");
+    assert!(names.contains(&"state-space-beta"), "second refreshed catalog model missing from picker: {names:?}");
+    assert_eq!(app.session.model.as_deref(), Some("state-space-alpha"));
+
+    assert!(super::model_context::handle_model_command(&mut app, "/model state-space-beta"));
+    assert_eq!(app.session.model.as_deref(), Some("state-space-beta"));
+    assert_eq!(app.status_notice(), Some("Model → state-space-beta".to_string()));
+}
+
+#[test]
+fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let refreshes = StdArc::new(AtomicUsize::new(0));
+    let set_model_attempts = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(EmptyPostLoginCatalogProvider {
+        refreshes: StdArc::clone(&refreshes),
+        set_model_attempts: StdArc::clone(&set_model_attempts),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    let _guard = rt.enter();
+    app.start_openai_compatible_post_login_activation("Cerebras".to_string());
+
+    let login = rt.block_on(async {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
+                Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
+                    panic!("empty catalog must not activate a provider model")
+                }
+                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => break login,
+                Ok(Ok(_)) => continue,
+                other => panic!("expected LoginCompleted event, got {other:?}"),
+            }
+        }
+    });
+
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        set_model_attempts.load(Ordering::SeqCst),
+        0,
+        "post-login activation must not try the metadata default when the catalog has no selectable route"
+    );
+    assert!(!login.success);
+    assert!(login.message.contains("no selectable Cerebras models"));
+    assert!(login.message.contains("did not switch models"));
+    assert!(!login.message.contains("documented default"));
+    assert!(!login.message.contains("qwen-3-coder-480b"));
 }
 
 #[test]
