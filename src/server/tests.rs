@@ -689,6 +689,7 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     );
 
     let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![StreamEvent::MessageEnd { stop_reason: None }]);
     let server = Server::new(provider);
 
     let mut ready_fds = [0; 2];
