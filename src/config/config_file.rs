@@ -196,7 +196,20 @@ impl Config {
             return false;
         };
 
-        config()
+        if config()
+            .auth
+            .trusted_external_source_paths
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+        {
+            return true;
+        }
+
+        // The global config snapshot can be initialized before an auth flow saves
+        // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
+        // back to a fresh load on cache misses so fast auth probes remain correct
+        // without penalizing the common already-trusted path.
+        Self::load()
             .auth
             .trusted_external_source_paths
             .iter()

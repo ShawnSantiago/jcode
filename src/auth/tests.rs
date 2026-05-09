@@ -64,6 +64,21 @@ fn auth_status_default_all_not_configured() {
 }
 
 #[test]
+fn auth_status_check_fast_includes_bedrock_probe() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_bedrock_enable = std::env::var_os("JCODE_BEDROCK_ENABLE");
+
+    crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+    AuthStatus::invalidate_cache();
+
+    let status = AuthStatus::check_fast();
+    assert_eq!(status.bedrock, AuthState::Available);
+
+    restore_env_var("JCODE_BEDROCK_ENABLE", prev_bedrock_enable);
+    AuthStatus::invalidate_cache();
+}
+
+#[test]
 fn provider_auth_default() {
     let auth = ProviderAuth::default();
     assert_eq!(auth.state, AuthState::NotConfigured);

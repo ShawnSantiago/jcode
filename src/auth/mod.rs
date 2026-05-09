@@ -51,6 +51,12 @@ const AUTH_STATUS_FAST_CACHE_TTL_SECS: u64 = 5;
 static COMMAND_EXISTS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, bool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthProbeMode {
+    Full,
+    Fast,
+}
+
 pub fn browser_suppressed(cli_no_browser: bool) -> bool {
     cli_no_browser || env_truthy("NO_BROWSER") || env_truthy("JCODE_NO_BROWSER")
 }
@@ -625,275 +631,14 @@ impl AuthStatus {
     }
 
     fn check_uncached() -> Self {
-        let mut status = Self::default();
-
-        if crate::subscription_catalog::has_credentials() {
-            status.jcode = AuthState::Available;
-        }
-
-        // Check Anthropic (OAuth or API key)
-        let mut anthropic = ProviderAuth::default();
-
-        // Check OAuth
-        if let Ok(creds) = claude::load_credentials() {
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            anthropic.has_oauth = true;
-            if creds.expires_at > now_ms {
-                anthropic.state = AuthState::Available;
-            } else {
-                anthropic.state = AuthState::Expired;
-            }
-        }
-
-        // Check API key (overrides expired OAuth)
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            anthropic.has_api_key = true;
-            anthropic.state = AuthState::Available;
-        }
-
-        status.anthropic = anthropic;
-
-        // Check OpenRouter/OpenAI-compatible API keys (env var or config file)
-        let openrouter_available =
-            crate::provider::openrouter::OpenRouterProvider::has_credentials();
-
-        if openrouter_available {
-            status.openrouter = AuthState::Available;
-        }
-
-        status.azure_has_api_key = crate::auth::azure::has_api_key();
-        status.azure_uses_entra = crate::auth::azure::uses_entra_id();
-        if crate::auth::azure::has_configuration() {
-            status.azure = AuthState::Available;
-        }
-
-        if crate::provider::bedrock::BedrockProvider::has_credentials() {
-            status.bedrock = AuthState::Available;
-        }
-
-        if crate::provider::bedrock::BedrockProvider::has_credentials() {
-            status.bedrock = AuthState::Available;
-        }
-
-        // Check OpenAI (Codex OAuth or API key)
-        if let Ok(creds) = codex::load_credentials() {
-            // Check if we have OAuth tokens (not just API key fallback)
-            if !creds.refresh_token.is_empty() {
-                status.openai_has_oauth = true;
-                // Has OAuth - check expiry if available
-                if let Some(expires_at) = creds.expires_at {
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    if expires_at > now_ms {
-                        status.openai = AuthState::Available;
-                    } else {
-                        status.openai = AuthState::Expired;
-                    }
-                } else {
-                    // No expiry info, assume available
-                    status.openai = AuthState::Available;
-                }
-            } else if !creds.access_token.is_empty() {
-                // API key fallback
-                status.openai_has_api_key = true;
-                status.openai = AuthState::Available;
-            }
-        }
-
-        // Fall back to env var (or combine with OAuth)
-        if openai_api_key_configured() {
-            status.openai_has_api_key = true;
-            status.openai = AuthState::Available;
-        }
-
-        // Check external/CLI auth providers (presence of installed CLI tooling).
-        // If auth-test recently proved that the local Copilot OAuth token cannot
-        // be exchanged, keep it visible as expired for diagnostics but do not let
-        // startup/default-provider selection treat it as a usable API token.
-        let (copilot_state, copilot_has_api_token) = copilot_auth_state_from_credentials();
-        status.copilot = copilot_state;
-        status.copilot_has_api_token = copilot_has_api_token;
-
-        status.antigravity = match antigravity::load_tokens() {
-            Ok(tokens) => {
-                if tokens.is_expired() {
-                    AuthState::Expired
-                } else {
-                    AuthState::Available
-                }
-            }
-            Err(_) => AuthState::NotConfigured,
-        };
-
-        status.gemini = match gemini::load_tokens() {
-            Ok(tokens) => {
-                if tokens.is_expired() {
-                    AuthState::Expired
-                } else {
-                    AuthState::Available
-                }
-            }
-            Err(_) => AuthState::NotConfigured,
-        };
-
-        let cursor_has_api_key = cursor::has_cursor_api_key();
-        let cursor_has_native_auth = cursor::has_cursor_native_auth();
-
-        status.cursor = if cursor_has_native_auth {
-            AuthState::Available
-        } else if cursor_has_api_key {
-            AuthState::Expired
-        } else {
-            AuthState::NotConfigured
-        };
-
-        // Check Google/Gmail OAuth
-        match google::load_tokens() {
-            Ok(tokens) => {
-                if tokens.is_expired() {
-                    status.google = AuthState::Expired;
-                } else {
-                    status.google = AuthState::Available;
-                }
-                status.google_can_send = tokens.tier.can_send();
-            }
-            Err(_) => {
-                status.google = AuthState::NotConfigured;
-            }
-        }
-
+        let (status, _) = build_auth_status_uncached(AuthProbeMode::Full);
         log_auth_status_snapshot("auth_status_check", &status);
         status
     }
 
     fn check_uncached_fast() -> Self {
         let total_start = Instant::now();
-        let mut status = Self::default();
-        let mut timings = Vec::new();
-
-        let step_start = Instant::now();
-        if crate::subscription_catalog::has_credentials() {
-            status.jcode = AuthState::Available;
-        }
-        timings.push(("jcode", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        let mut anthropic = ProviderAuth::default();
-        if let Ok(creds) = claude::load_credentials() {
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            anthropic.has_oauth = true;
-            if creds.expires_at > now_ms {
-                anthropic.state = AuthState::Available;
-            } else {
-                anthropic.state = AuthState::Expired;
-            }
-        }
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            anthropic.has_api_key = true;
-            anthropic.state = AuthState::Available;
-        }
-        status.anthropic = anthropic;
-        timings.push(("anthropic", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        let openrouter_available =
-            crate::provider::openrouter::OpenRouterProvider::has_credentials();
-        if openrouter_available {
-            status.openrouter = AuthState::Available;
-        }
-        timings.push(("openrouter", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        status.azure_has_api_key = crate::auth::azure::has_api_key();
-        status.azure_uses_entra = crate::auth::azure::uses_entra_id();
-        if crate::auth::azure::has_configuration() {
-            status.azure = AuthState::Available;
-        }
-        timings.push(("azure", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        if let Ok(creds) = codex::load_credentials() {
-            if !creds.refresh_token.is_empty() {
-                status.openai_has_oauth = true;
-                if let Some(expires_at) = creds.expires_at {
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    if expires_at > now_ms {
-                        status.openai = AuthState::Available;
-                    } else {
-                        status.openai = AuthState::Expired;
-                    }
-                } else {
-                    status.openai = AuthState::Available;
-                }
-            } else if !creds.access_token.is_empty() {
-                status.openai_has_api_key = true;
-                status.openai = AuthState::Available;
-            }
-        }
-        if openai_api_key_configured() {
-            status.openai_has_api_key = true;
-            status.openai = AuthState::Available;
-        }
-        timings.push(("openai", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        let (copilot_state, copilot_has_api_token) = copilot_auth_state_from_credentials();
-        status.copilot = copilot_state;
-        status.copilot_has_api_token = copilot_has_api_token;
-        timings.push(("copilot", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        status.antigravity = match antigravity::load_tokens() {
-            Ok(tokens) => {
-                if tokens.is_expired() {
-                    AuthState::Expired
-                } else {
-                    AuthState::Available
-                }
-            }
-            Err(_) => AuthState::NotConfigured,
-        };
-        timings.push(("antigravity", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        status.gemini = match gemini::load_tokens() {
-            Ok(tokens) => {
-                if tokens.is_expired() {
-                    AuthState::Expired
-                } else {
-                    AuthState::Available
-                }
-            }
-            Err(_) => AuthState::NotConfigured,
-        };
-        timings.push(("gemini", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        let cursor_has_api_key = cursor::has_cursor_api_key();
-        let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
-
-        status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
-            AuthState::Available
-        } else {
-            AuthState::NotConfigured
-        };
-        timings.push(("cursor", step_start.elapsed().as_millis()));
-
-        let step_start = Instant::now();
-        match google::load_tokens() {
-            Ok(tokens) => {
-                if tokens.is_expired() {
-                    status.google = AuthState::Expired;
-                } else {
-                    status.google = AuthState::Available;
-                }
-                status.google_can_send = tokens.tier.can_send();
-            }
-            Err(_) => {
-                status.google = AuthState::NotConfigured;
-            }
-        }
-
-        timings.push(("google", step_start.elapsed().as_millis()));
+        let (status, timings) = build_auth_status_uncached(AuthProbeMode::Fast);
 
         let nonzero: Vec<String> = timings
             .iter()
@@ -910,6 +655,191 @@ impl AuthStatus {
 
         log_auth_status_snapshot("auth_status_check_fast", &status);
         status
+    }
+}
+
+fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static str, u128)>) {
+    let mut status = AuthStatus::default();
+    let mut timings = Vec::new();
+
+    record_auth_probe_step(&mut timings, "jcode", || probe_jcode_status(&mut status));
+    record_auth_probe_step(&mut timings, "anthropic", || {
+        probe_anthropic_status(&mut status)
+    });
+    record_auth_probe_step(&mut timings, "openrouter", || {
+        probe_openrouter_status(&mut status)
+    });
+    record_auth_probe_step(&mut timings, "azure", || probe_azure_status(&mut status));
+    record_auth_probe_step(&mut timings, "bedrock", || {
+        probe_bedrock_status(&mut status)
+    });
+    record_auth_probe_step(&mut timings, "openai", || probe_openai_status(&mut status));
+    record_auth_probe_step(&mut timings, "copilot", || {
+        probe_copilot_status(&mut status)
+    });
+    record_auth_probe_step(&mut timings, "antigravity", || {
+        status.antigravity =
+            token_state(antigravity::load_tokens().map(|tokens| tokens.is_expired()))
+    });
+    record_auth_probe_step(&mut timings, "gemini", || {
+        status.gemini = token_state(gemini::load_tokens().map(|tokens| tokens.is_expired()))
+    });
+    record_auth_probe_step(&mut timings, "cursor", || {
+        probe_cursor_status(&mut status, mode)
+    });
+    record_auth_probe_step(&mut timings, "google", || probe_google_status(&mut status));
+
+    (status, timings)
+}
+
+fn record_auth_probe_step(
+    timings: &mut Vec<(&'static str, u128)>,
+    name: &'static str,
+    probe: impl FnOnce(),
+) {
+    let step_start = Instant::now();
+    probe();
+    timings.push((name, step_start.elapsed().as_millis()));
+}
+
+fn token_state(result: anyhow::Result<bool>) -> AuthState {
+    match result {
+        Ok(is_expired) => {
+            if is_expired {
+                AuthState::Expired
+            } else {
+                AuthState::Available
+            }
+        }
+        Err(_) => AuthState::NotConfigured,
+    }
+}
+
+fn probe_jcode_status(status: &mut AuthStatus) {
+    if crate::subscription_catalog::has_credentials() {
+        status.jcode = AuthState::Available;
+    }
+}
+
+fn probe_anthropic_status(status: &mut AuthStatus) {
+    let mut anthropic = ProviderAuth::default();
+
+    if let Ok(creds) = claude::load_credentials() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        anthropic.has_oauth = true;
+        if creds.expires_at > now_ms {
+            anthropic.state = AuthState::Available;
+        } else {
+            anthropic.state = AuthState::Expired;
+        }
+    }
+
+    // API key overrides expired OAuth.
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        anthropic.has_api_key = true;
+        anthropic.state = AuthState::Available;
+    }
+
+    status.anthropic = anthropic;
+}
+
+fn probe_openrouter_status(status: &mut AuthStatus) {
+    if crate::provider::openrouter::OpenRouterProvider::has_credentials() {
+        status.openrouter = AuthState::Available;
+    }
+}
+
+fn probe_azure_status(status: &mut AuthStatus) {
+    status.azure_has_api_key = crate::auth::azure::has_api_key();
+    status.azure_uses_entra = crate::auth::azure::uses_entra_id();
+    if crate::auth::azure::has_configuration() {
+        status.azure = AuthState::Available;
+    }
+}
+
+fn probe_bedrock_status(status: &mut AuthStatus) {
+    if crate::provider::bedrock::BedrockProvider::has_credentials() {
+        status.bedrock = AuthState::Available;
+    }
+}
+
+fn probe_openai_status(status: &mut AuthStatus) {
+    if let Ok(creds) = codex::load_credentials() {
+        if !creds.refresh_token.is_empty() {
+            status.openai_has_oauth = true;
+            if let Some(expires_at) = creds.expires_at {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                if expires_at > now_ms {
+                    status.openai = AuthState::Available;
+                } else {
+                    status.openai = AuthState::Expired;
+                }
+            } else {
+                // No expiry info, assume available.
+                status.openai = AuthState::Available;
+            }
+        } else if !creds.access_token.is_empty() {
+            status.openai_has_api_key = true;
+            status.openai = AuthState::Available;
+        }
+    }
+
+    // Fall back to env/config API key, or combine with OAuth.
+    if openai_api_key_configured() {
+        status.openai_has_api_key = true;
+        status.openai = AuthState::Available;
+    }
+}
+
+fn probe_copilot_status(status: &mut AuthStatus) {
+    // If auth-test recently proved that the local Copilot OAuth token cannot
+    // be exchanged, keep it visible as expired for diagnostics but do not let
+    // startup/default-provider selection treat it as a usable API token.
+    let (copilot_state, copilot_has_api_token) = copilot_auth_state_from_credentials();
+    status.copilot = copilot_state;
+    status.copilot_has_api_token = copilot_has_api_token;
+}
+
+fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
+    match mode {
+        AuthProbeMode::Full => {
+            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_native_auth = cursor::has_cursor_native_auth();
+            let cursor_has_cli_auth = cursor::has_authenticated_cli_session();
+            status.cursor = if cursor_has_native_auth || cursor_has_cli_auth {
+                AuthState::Available
+            } else if cursor_has_api_key {
+                AuthState::Expired
+            } else {
+                AuthState::NotConfigured
+            };
+        }
+        AuthProbeMode::Fast => {
+            // Avoid the vscdb/sqlite and CLI probes in fast UI paths.
+            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
+            status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
+                AuthState::Available
+            } else {
+                AuthState::NotConfigured
+            };
+        }
+    }
+}
+
+fn probe_google_status(status: &mut AuthStatus) {
+    match google::load_tokens() {
+        Ok(tokens) => {
+            if tokens.is_expired() {
+                status.google = AuthState::Expired;
+            } else {
+                status.google = AuthState::Available;
+            }
+            status.google_can_send = tokens.tier.can_send();
+        }
+        Err(_) => {
+            status.google = AuthState::NotConfigured;
+        }
     }
 }
 
