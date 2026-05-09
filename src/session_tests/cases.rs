@@ -201,6 +201,7 @@ fn initial_session_context_is_persisted_once_and_not_overwritten() {
 }
 
 #[test]
+#[allow(clippy::redundant_closure_call)]
 fn initial_session_context_uses_current_cwd_when_inserted() -> Result<()> {
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
@@ -248,6 +249,7 @@ fn initial_session_context_uses_current_cwd_when_inserted() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::redundant_closure_call)]
 fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> {
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
@@ -296,6 +298,7 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
 }
 
 #[test]
+#[allow(clippy::redundant_closure_call)]
 fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<()> {
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;

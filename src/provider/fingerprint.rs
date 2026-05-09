@@ -59,6 +59,7 @@ fn common_prefix_len(current: &[u64], previous: &[u64]) -> usize {
 /// normalization, not the high-level Jcode message list. Do not include volatile transport
 /// IDs unless they are intentionally part of the cache key. `items` should be the ordered
 /// provider-visible message/content array so prefix drift can be diagnosed by index.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn log_provider_canonical_input(
     provider: &str,
     model: &str,

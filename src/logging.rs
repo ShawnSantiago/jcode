@@ -252,10 +252,6 @@ pub fn debug(message: &str) {
 /// Callers should pass only non-secret metadata. This function still redacts any
 /// field whose key looks credential-like so accidental tokens/keys do not land in
 /// logs.
-#[expect(
-    clippy::collapsible_if,
-    reason = "Logger lock + optional logger branching is intentionally straightforward"
-)]
 pub fn auth_event(event: &str, provider: &str, fields: &[(&str, &str)]) {
     let mut parts = vec![
         format!("event={}", sanitize_log_value(event)),

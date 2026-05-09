@@ -234,6 +234,7 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn rename_session_event_uses_agent_session_id_even_when_client_id_is_stale() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");

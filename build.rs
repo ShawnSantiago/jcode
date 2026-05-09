@@ -338,10 +338,10 @@ fn metadata_value(key: &str) -> Option<String> {
             continue;
         }
 
-        if let Some((entry_key, entry_value)) = line.split_once('=') {
-            if entry_key == key {
-                return Some(entry_value.to_string());
-            }
+        if let Some((entry_key, entry_value)) = line.split_once('=')
+            && entry_key == key
+        {
+            return Some(entry_value.to_string());
         }
     }
     None

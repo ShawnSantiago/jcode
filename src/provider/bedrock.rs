@@ -1015,6 +1015,12 @@ impl BedrockProvider {
     }
 }
 
+impl Default for BedrockProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Provider for BedrockProvider {
     async fn complete(
