@@ -1182,6 +1182,19 @@ pub(in crate::tui::app) fn handle_server_event(
                 } if scope == "background_task"
             );
 
+            let runtime_activity_scope = match &notification_type {
+                crate::protocol::NotificationType::Message {
+                    scope: Some(scope), ..
+                } if matches!(
+                    scope.as_str(),
+                    "auth_activity" | "catalog_activity" | "background_activity"
+                ) =>
+                {
+                    Some(scope.as_str())
+                }
+                _ => None,
+            };
+
             if background_task_scope {
                 let presentation =
                     present_swarm_notification(&sender, &notification_type, &message);
@@ -1194,6 +1207,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 persist_replay_display_message(app, "background_task", None, &message);
                 app.set_status_notice(presentation.status_notice);
+                return false;
+            }
+
+            if let Some(scope) = runtime_activity_scope {
+                if scope == "background_activity" {
+                    app.push_display_message(DisplayMessage::background_task(message.clone()));
+                    persist_replay_display_message(app, "background_task", None, &message);
+                } else {
+                    app.push_display_message(DisplayMessage::system(message.clone()));
+                    persist_replay_display_message(app, "system", None, &message);
+                }
+                app.set_status_notice(runtime_activity_status_notice(&message));
                 return false;
             }
 
@@ -1365,4 +1390,18 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         _ => false,
     }
+}
+
+fn runtime_activity_status_notice(message: &str) -> String {
+    message
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then_some(line)
+        })
+        .unwrap_or("Jcode activity")
+        .trim_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
 }

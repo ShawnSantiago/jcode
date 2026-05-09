@@ -170,6 +170,83 @@ pub struct ModelRefreshCompleted {
     pub result: std::result::Result<crate::provider::ModelCatalogRefreshSummary, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiActivityKind {
+    Auth,
+    Catalog,
+    Background,
+}
+
+impl UiActivityKind {
+    pub fn scope(&self) -> &'static str {
+        match self {
+            Self::Auth => "auth_activity",
+            Self::Catalog => "catalog_activity",
+            Self::Background => "background_activity",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UiActivity {
+    pub session_id: Option<String>,
+    pub kind: UiActivityKind,
+    pub message: String,
+    pub status_notice: Option<String>,
+}
+
+impl UiActivity {
+    pub fn new(
+        session_id: Option<String>,
+        kind: UiActivityKind,
+        message: impl Into<String>,
+        status_notice: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            session_id,
+            kind,
+            message: message.into(),
+            status_notice: status_notice.map(Into::into),
+        }
+    }
+
+    pub fn auth(
+        session_id: Option<String>,
+        message: impl Into<String>,
+        status_notice: Option<impl Into<String>>,
+    ) -> Self {
+        Self::new(session_id, UiActivityKind::Auth, message, status_notice)
+    }
+
+    pub fn catalog(
+        session_id: Option<String>,
+        message: impl Into<String>,
+        status_notice: Option<impl Into<String>>,
+    ) -> Self {
+        Self::new(session_id, UiActivityKind::Catalog, message, status_notice)
+    }
+
+    pub fn background(
+        session_id: Option<String>,
+        message: impl Into<String>,
+        status_notice: Option<impl Into<String>>,
+    ) -> Self {
+        Self::new(
+            session_id,
+            UiActivityKind::Background,
+            message,
+            status_notice,
+        )
+    }
+
+    pub fn is_visible_to_session(&self, session_id: &str) -> bool {
+        match self.session_id.as_deref() {
+            Some(target) => target == session_id,
+            None => true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GitStatusCompleted {
     pub session_id: String,
@@ -263,6 +340,8 @@ pub enum BusEvent {
     ClipboardPasteCompleted(ClipboardPasteCompleted),
     /// Local model catalog refresh completed off the UI thread
     ModelRefreshCompleted(ModelRefreshCompleted),
+    /// UI-visible runtime activity from auth/catalog/background operations.
+    UiActivity(UiActivity),
     /// Local git status command completed off the UI thread
     GitStatusCompleted(GitStatusCompleted),
     /// Update check status from background thread

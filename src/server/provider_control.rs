@@ -493,6 +493,17 @@ pub(super) async fn handle_notify_auth_changed(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     crate::auth::AuthStatus::invalidate_cache();
+    let session_id = {
+        let agent_guard = agent.lock().await;
+        agent_guard.session_id().to_string()
+    };
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+        crate::bus::UiActivity::auth(
+            Some(session_id.clone()),
+            "**Auth Change Received**\n\nThe server is reloading provider credentials and refreshing model route availability for this session.",
+            Some("Auth: refreshing providers..."),
+        ),
+    ));
     let targets = auth_refresh_targets(provider_template, provider, sessions).await;
     let client_event_tx_clone = client_event_tx.clone();
     let agent_clone = agent.clone();
@@ -511,6 +522,13 @@ pub(super) async fn handle_notify_auth_changed(
         .await;
 
         crate::bus::Bus::global().publish_models_updated();
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(session_id.clone()),
+                "**Auth Model Routes Updating**\n\nCredentials are reloaded. Jcode is pushing an updated model catalog snapshot to connected clients.",
+                Some("Auth: model routes updating..."),
+            ),
+        ));
 
         spawn_deferred_auth_refreshes(targets.deferred_agents);
 

@@ -43,7 +43,7 @@ mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
-    dispatch_background_task_completion, dispatch_background_task_progress,
+    dispatch_background_task_completion, dispatch_background_task_progress, dispatch_ui_activity,
 };
 use self::debug::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
@@ -1654,6 +1654,9 @@ impl Server {
                 }
                 Ok(BusEvent::BackgroundTaskProgress(task)) => {
                     dispatch_background_task_progress(&task, &swarm_members).await;
+                }
+                Ok(BusEvent::UiActivity(activity)) => {
+                    dispatch_ui_activity(&activity, &swarm_members).await;
                 }
                 // Session todos are private. Swarm plans are updated via explicit
                 // communication actions (comm_propose_plan / comm_approve_plan), not

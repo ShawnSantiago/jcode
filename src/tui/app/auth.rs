@@ -1871,6 +1871,13 @@ impl App {
             self.provider.name(),
             &[("surface", "tui")],
         );
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::auth(
+                Some(self.session.id.clone()),
+                "**Auth State Changed**\n\nRefreshing provider credentials and model route availability for this session.",
+                Some("Auth: refreshing model routes..."),
+            ),
+        ));
         let provider = Arc::clone(&self.provider);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -1954,6 +1961,16 @@ impl App {
     }
 
     pub(super) fn start_openai_compatible_post_login_activation(&mut self, provider_label: String) {
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(self.session.id.clone()),
+                format!(
+                    "**{} Model Discovery Started**\n\nSaved credentials are active. Jcode is fetching the live model catalog and will only switch to a model returned by that catalog.",
+                    provider_label
+                ),
+                Some(format!("{}: fetching models...", provider_label)),
+            ),
+        ));
         self.set_status_notice(format!("{}: fetching models...", provider_label));
         self.invalidate_model_picker_cache();
         self.open_model_picker();

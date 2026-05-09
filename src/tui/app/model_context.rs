@@ -993,12 +993,19 @@ impl App {
 
 pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if is_refresh_model_list_command(trimmed) {
-        app.set_status_notice("Refreshing model list...");
-        let provider = app.provider.clone();
         let session_id = app
             .active_client_session_id()
             .unwrap_or(app.session.id.as_str())
             .to_string();
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(session_id.clone()),
+                "**Model List Refresh Started**\n\nFetching the provider model catalog now. Jcode will show the discovered model and route changes when the refresh completes.",
+                Some("Refreshing model list..."),
+            ),
+        ));
+        app.set_status_notice("Refreshing model list...");
+        let provider = app.provider.clone();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {

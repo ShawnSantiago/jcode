@@ -812,6 +812,16 @@ async fn handle_remote_key_internal(
                         app.remote_available_entries.clone(),
                         app.remote_model_options.clone(),
                     ));
+                    super::super::local::handle_ui_activity(
+                        app,
+                        crate::bus::UiActivity::catalog(
+                            app.remote_session_id
+                                .clone()
+                                .or_else(|| Some(app.session.id.clone())),
+                            "**Model List Refresh Started**\n\nAsked the remote server to refresh the provider model catalog. Jcode will show the discovered model and route changes when the server responds.",
+                            Some("Refreshing model list..."),
+                        ),
+                    );
                     match remote.refresh_models().await {
                         Ok(()) => app.set_status_notice("Refreshing model list..."),
                         Err(error) => {
