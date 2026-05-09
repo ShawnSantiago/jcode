@@ -218,14 +218,28 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     notes
 }
 
+pub(super) fn resolve_selfdev_reload_repo_dir(
+    working_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    resolve_selfdev_reload_repo_dir_from(build::get_repo_dir(), working_dir)
+}
+
+pub(super) fn resolve_selfdev_reload_repo_dir_from(
+    primary: Option<std::path::PathBuf>,
+    working_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    primary.or_else(|| working_dir.and_then(build::find_repo_in_ancestors))
+}
+
 impl SelfDevTool {
     pub(super) async fn do_reload(
         &self,
         context: Option<String>,
         session_id: &str,
         execution_mode: ToolExecutionMode,
+        working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
-        let repo_dir = build::get_repo_dir()
+        let repo_dir = resolve_selfdev_reload_repo_dir(working_dir)
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
         let target_binary = build::find_dev_binary(&repo_dir)
