@@ -211,16 +211,7 @@ impl App {
                 self.start_openrouter_login()
             }
             crate::provider_catalog::LoginProviderTarget::Bedrock => self.start_bedrock_login(),
-            crate::provider_catalog::LoginProviderTarget::Azure => {
-                crate::telemetry::record_auth_surface_blocked(
-                    provider.id,
-                    provider.auth_kind.label(),
-                );
-                self.push_display_message(DisplayMessage::error(
-                    "Azure OpenAI login is currently CLI-only. Run `jcode login --provider azure`."
-                        .to_string(),
-                ));
-            }
+            crate::provider_catalog::LoginProviderTarget::Azure => self.start_azure_login(),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 self.start_openai_compatible_profile_login(profile)
             }
@@ -953,6 +944,17 @@ impl App {
         });
     }
 
+    fn start_azure_login(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "**Azure OpenAI Login**\n\n\
+             jcode uses Azure OpenAI's `/openai/v1` API with either Microsoft Entra ID or an API key.\n\n\
+             Enter your Azure OpenAI endpoint, for example `https://your-resource.openai.azure.com`, or type `/cancel` to abort."
+                .to_string(),
+        ));
+        self.set_status_notice("Login: Azure endpoint...");
+        self.begin_pending_login(PendingLogin::AzureEndpoint);
+    }
+
     fn start_cursor_login(&mut self) {
         crate::telemetry::record_auth_started("cursor", "api_key");
 
@@ -1680,6 +1682,109 @@ impl App {
                 }
                 self.start_openai_compatible_key_login(profile);
             }
+            PendingLogin::AzureEndpoint => {
+                let endpoint_raw = input.trim();
+                let Some(endpoint) = crate::auth::azure::normalize_endpoint(endpoint_raw) else {
+                    self.push_display_message(DisplayMessage::error(
+                        "Invalid Azure OpenAI endpoint. Use `https://<resource>.openai.azure.com` or the full `/openai/v1` URL."
+                            .to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AzureEndpoint);
+                    return;
+                };
+                self.push_display_message(DisplayMessage::system(
+                    "Azure endpoint accepted. Now enter the Azure deployment/model name, for example `gpt-4.1-nano`."
+                        .to_string(),
+                ));
+                self.set_status_notice("Login: Azure model...");
+                self.pending_login = Some(PendingLogin::AzureModel { endpoint });
+            }
+            PendingLogin::AzureModel { endpoint } => {
+                let model = input.trim().to_string();
+                if model.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "Azure deployment/model name cannot be empty.".to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AzureModel { endpoint });
+                    return;
+                }
+                self.push_display_message(DisplayMessage::system(
+                    "Authentication method:\n\n\
+                     `1` Microsoft Entra ID via DefaultAzureCredential, for example `az login`\n\
+                     `2` Azure OpenAI API key\n\n\
+                     Enter `1` or `2` [1]."
+                        .to_string(),
+                ));
+                self.set_status_notice("Login: Azure auth method...");
+                self.pending_login = Some(PendingLogin::AzureAuthChoice { endpoint, model });
+            }
+            PendingLogin::AzureAuthChoice { endpoint, model } => {
+                let choice = input.trim();
+                let use_entra = match choice {
+                    "" | "1" => true,
+                    "2" => false,
+                    other
+                        if other.eq_ignore_ascii_case("entra")
+                            || other.eq_ignore_ascii_case("oauth") =>
+                    {
+                        true
+                    }
+                    other
+                        if other.eq_ignore_ascii_case("key")
+                            || other.eq_ignore_ascii_case("api-key") =>
+                    {
+                        false
+                    }
+                    _ => {
+                        self.push_display_message(DisplayMessage::error(
+                            "Invalid auth choice. Enter `1` for Entra ID or `2` for API key."
+                                .to_string(),
+                        ));
+                        self.pending_login =
+                            Some(PendingLogin::AzureAuthChoice { endpoint, model });
+                        return;
+                    }
+                };
+                if use_entra {
+                    match Self::save_azure_config(&endpoint, &model, true, None) {
+                        Ok(()) => self.finish_azure_login(true),
+                        Err(err) => {
+                            self.push_display_message(DisplayMessage::error(format!(
+                                "Failed to save Azure OpenAI configuration: {}",
+                                err
+                            )));
+                            self.pending_login =
+                                Some(PendingLogin::AzureAuthChoice { endpoint, model });
+                        }
+                    }
+                } else {
+                    self.push_display_message(DisplayMessage::system(
+                        "Paste your Azure OpenAI API key, or type `/cancel` to abort.".to_string(),
+                    ));
+                    self.set_status_notice("Login: Azure API key...");
+                    self.pending_login = Some(PendingLogin::AzureApiKey { endpoint, model });
+                }
+            }
+            PendingLogin::AzureApiKey { endpoint, model } => {
+                let key = input.trim().to_string();
+                if key.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "Azure OpenAI API key cannot be empty.".to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AzureApiKey { endpoint, model });
+                    return;
+                }
+                match Self::save_azure_config(&endpoint, &model, false, Some(&key)) {
+                    Ok(()) => self.finish_azure_login(false),
+                    Err(err) => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Failed to save Azure OpenAI configuration: {}",
+                            err
+                        )));
+                        self.pending_login = Some(PendingLogin::AzureApiKey { endpoint, model });
+                    }
+                }
+            }
             PendingLogin::CursorApiKey => {
                 let key = input.trim().to_string();
                 if key.is_empty() {
@@ -2050,6 +2155,69 @@ impl App {
         crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
         crate::env::set_var(key_name, key);
         Ok(())
+    }
+
+    fn save_azure_config(
+        endpoint: &str,
+        model: &str,
+        use_entra: bool,
+        api_key: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use crate::auth::azure;
+
+        crate::provider_catalog::save_env_value_to_env_file(
+            azure::ENDPOINT_ENV,
+            azure::ENV_FILE,
+            Some(endpoint),
+        )?;
+        crate::provider_catalog::save_env_value_to_env_file(
+            azure::MODEL_ENV,
+            azure::ENV_FILE,
+            Some(model),
+        )?;
+        crate::provider_catalog::save_env_value_to_env_file(
+            azure::USE_ENTRA_ENV,
+            azure::ENV_FILE,
+            Some(if use_entra { "1" } else { "0" }),
+        )?;
+        if let Some(api_key) = api_key {
+            crate::provider_catalog::save_env_value_to_env_file(
+                azure::API_KEY_ENV,
+                azure::ENV_FILE,
+                Some(api_key),
+            )?;
+        }
+        azure::apply_runtime_env()?;
+        Ok(())
+    }
+
+    fn finish_azure_login(&mut self, use_entra: bool) {
+        crate::auth::AuthStatus::invalidate_cache();
+        crate::cli::provider_init::lock_model_provider("openrouter");
+        if let Some(model) = crate::auth::azure::load_model() {
+            crate::env::set_var("JCODE_OPENROUTER_MODEL", model);
+        }
+        crate::telemetry::record_auth_success(
+            "azure",
+            if use_entra { "entra_id" } else { "api_key" },
+        );
+        let auth_note = if use_entra {
+            "Using Microsoft Entra ID through Azure DefaultAzureCredential. If you use Azure CLI auth, run `az login` and make sure the identity has the Cognitive Services OpenAI User role."
+        } else {
+            "Using the saved Azure OpenAI API key."
+        };
+        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+            provider: "Azure OpenAI".to_string(),
+            success: true,
+            message: format!(
+                "**Azure OpenAI configuration saved.**\n\n\
+                 Stored at `~/.config/jcode/{}`.\n\
+                 {}\n\n\
+                 Use `/model` after your Azure deployment exists. If the model list looks stale, run `/refresh-model-list`.",
+                crate::auth::azure::ENV_FILE,
+                auth_note,
+            ),
+        }));
     }
 }
 
