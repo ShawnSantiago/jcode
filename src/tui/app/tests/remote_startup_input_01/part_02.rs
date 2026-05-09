@@ -52,6 +52,12 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
         model_count_after: 15,
         models_added: 3,
         models_removed: 0,
+        models_added_names: vec![
+            "cerebras-fast".to_string(),
+            "cerebras-large".to_string(),
+            "cerebras-reasoning".to_string(),
+        ],
+        models_removed_names: Vec::new(),
         route_count_before: 20,
         route_count_after: 29,
         routes_added: 9,
@@ -92,6 +98,10 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     assert!(last.content.contains("**Model List Refresh Complete**"));
     assert!(last.content.contains("Models: 12 → 15  (+3 / -0)"));
     assert!(last.content.contains("Routes: 20 → 29  (+9 / -0 / ~2)"));
+    assert!(last.content.contains("Added models:"));
+    assert!(last.content.contains("`cerebras-fast`"));
+    assert!(last.content.contains("`cerebras-large`"));
+    assert!(last.content.contains("`cerebras-reasoning`"));
     assert!(app.display_messages.iter().any(|message| {
         message.role == "system" && message.content.contains("**Model List Refresh Started**")
     }));
@@ -160,6 +170,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     assert!(last.content.contains("**Model List Refresh Complete**"));
     assert!(last.content.contains("Models: 1 → 2  (+1 / -0)"));
     assert!(last.content.contains("Routes: 1 → 2  (+1 / -0 / ~1)"));
+    assert!(last.content.contains("Added models: `new-model`"));
 }
 
 #[test]

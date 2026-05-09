@@ -1351,7 +1351,7 @@ pub(super) fn is_refresh_model_list_command(trimmed: &str) -> bool {
 pub(super) fn format_model_refresh_summary(
     summary: &crate::provider::ModelCatalogRefreshSummary,
 ) -> String {
-    format!(
+    let mut message = format!(
         "**Model List Refresh Complete**\n\nModels: {} → {}  (+{} / -{})\nRoutes: {} → {}  (+{} / -{} / ~{})",
         summary.model_count_before,
         summary.model_count_after,
@@ -1362,7 +1362,37 @@ pub(super) fn format_model_refresh_summary(
         summary.routes_added,
         summary.routes_removed,
         summary.routes_changed,
-    )
+    );
+    append_model_name_diff(&mut message, summary);
+    message
+}
+
+pub(super) fn append_model_name_diff(
+    message: &mut String,
+    summary: &crate::provider::ModelCatalogRefreshSummary,
+) {
+    if !summary.models_added_names.is_empty() {
+        message.push_str("\nAdded models: ");
+        message.push_str(&format_model_name_list(&summary.models_added_names, 12));
+    }
+    if !summary.models_removed_names.is_empty() {
+        message.push_str("\nRemoved models: ");
+        message.push_str(&format_model_name_list(&summary.models_removed_names, 12));
+    }
+}
+
+pub(super) fn format_model_name_list(models: &[String], limit: usize) -> String {
+    let shown = models
+        .iter()
+        .take(limit)
+        .map(|model| format!("`{}`", model))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if models.len() > limit {
+        format!("{} … and {} more", shown, models.len() - limit)
+    } else {
+        shown
+    }
 }
 
 pub(super) fn no_models_available_message(is_remote: bool) -> String {

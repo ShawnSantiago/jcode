@@ -154,6 +154,8 @@ impl Provider for AuthUxStateSpaceProvider {
             model_count_after: 2,
             models_added: 2,
             models_removed: 0,
+            models_added_names: Vec::new(),
+            models_removed_names: Vec::new(),
             route_count_before: 0,
             route_count_after: 2,
             routes_added: 2,
@@ -203,6 +205,8 @@ impl Provider for EmptyPostLoginCatalogProvider {
             model_count_after: 0,
             models_added: 0,
             models_removed: 0,
+            models_added_names: Vec::new(),
+            models_removed_names: Vec::new(),
             route_count_before: 0,
             route_count_after: 0,
             routes_added: 0,
@@ -300,7 +304,7 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
 }
 
 #[test]
-fn test_tui_api_key_auth_refreshes_catalog_opens_picker_and_allows_model_switch() {
+fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
@@ -323,7 +327,14 @@ fn test_tui_api_key_auth_refreshes_catalog_opens_picker_and_allows_model_switch(
 
     let _guard = rt.enter();
     app.start_openai_compatible_post_login_activation("StateSpace".to_string());
-    assert_eq!(app.status_notice(), Some("Updating model routes…".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("StateSpace: fetching models...".to_string())
+    );
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "auth-triggered discovery should not open /model automatically"
+    );
 
     let activation = rt.block_on(async {
         loop {
@@ -337,16 +348,17 @@ fn test_tui_api_key_auth_refreshes_catalog_opens_picker_and_allows_model_switch(
     assert_eq!(refreshes.load(Ordering::SeqCst), 1, "auth completion must refresh the model catalog exactly once");
 
     super::local::handle_bus_event(&mut app, Ok(activation));
-    wait_for_model_picker_load(&mut app);
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("post-auth model picker should be open");
-    let names: Vec<_> = picker.entries.iter().map(|entry| entry.name.as_str()).collect();
-    assert!(names.contains(&"state-space-alpha"), "refreshed catalog model missing from picker: {names:?}");
-    assert!(names.contains(&"state-space-beta"), "second refreshed catalog model missing from picker: {names:?}");
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "activation completion should still not open /model automatically"
+    );
     assert_eq!(app.session.model.as_deref(), Some("state-space-alpha"));
+    let last = app.display_messages.last().expect("activation message");
+    assert!(last.content.contains("Added models:"));
+    assert!(last.content.contains("`state-space-alpha`"));
+    assert!(last.content.contains("`state-space-beta`"));
+    assert!(last.content.contains("Use `/model`"));
+    assert!(!last.content.contains("model picker is open"));
 
     assert!(super::model_context::handle_model_command(&mut app, "/model state-space-beta"));
     assert_eq!(app.session.model.as_deref(), Some("state-space-beta"));

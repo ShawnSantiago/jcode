@@ -161,6 +161,8 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
         Arc::clone(&agent),
     )])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
 
     handle_notify_auth_changed(
         42,
@@ -218,6 +220,31 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
             && route.provider == "MockAuth"
             && route.api_method == "mock-auth"
     }));
+
+    let final_activity = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match bus_rx.recv().await.expect("bus should stay open") {
+                crate::bus::BusEvent::UiActivity(activity)
+                    if activity.kind == crate::bus::UiActivityKind::Catalog
+                        && activity.message.contains("Auth Model Catalog Updated") =>
+                {
+                    break activity;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("expected final auth catalog activity");
+    assert!(final_activity.message.contains("Added models:"));
+    assert!(final_activity.message.contains("`logged-in-model`"));
+    assert!(final_activity.message.contains("`second-model`"));
+    assert!(
+        final_activity
+            .message
+            .contains("Selected model: `logged-in-model`")
+    );
+    assert!(final_activity.message.contains("Use `/model`"));
 }
 
 #[tokio::test]

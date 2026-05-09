@@ -1577,10 +1577,10 @@ impl App {
                             )
                         } else if let Some(resolved) = resolved_openai_compatible.as_ref() {
                             if resolved.requires_api_key {
-                                "Fetching models now. Jcode will switch to an accessible model and open `/model` when the catalog is ready. If the model list looks stale, run `/refresh-model-list`.".to_string()
+                                "Fetching models now. Jcode will switch to an accessible model returned by the live catalog and show the catalog diff when discovery finishes. If the model list looks stale, run `/refresh-model-list`.".to_string()
                             } else {
                                 format!(
-                                    "Local endpoint configured at `{}`. Fetching models now; Jcode will switch to an accessible model and open `/model` when the catalog is ready. If the model list looks stale, run `/refresh-model-list`.",
+                                    "Local endpoint configured at `{}`. Fetching models now; Jcode will switch to an accessible model returned by the live catalog and show the catalog diff when discovery finishes. If the model list looks stale, run `/refresh-model-list`.",
                                     endpoint.as_deref().unwrap_or(resolved.api_base.as_str()),
                                 )
                             }
@@ -1965,7 +1965,7 @@ impl App {
             crate::bus::UiActivity::catalog(
                 Some(self.session.id.clone()),
                 format!(
-                    "**{} Model Discovery Started**\n\nSaved credentials are active. Jcode is fetching the live model catalog and will only switch to a model returned by that catalog.",
+                    "**{} Model Discovery Started**\n\nSaved credentials are active. Jcode is fetching the live model catalog, will only switch to a model returned by that catalog, and will show what changed when discovery finishes.",
                     provider_label
                 ),
                 Some(format!("{}: fetching models...", provider_label)),
@@ -1973,22 +1973,30 @@ impl App {
         ));
         self.set_status_notice(format!("{}: fetching models...", provider_label));
         self.invalidate_model_picker_cache();
-        self.open_model_picker();
 
         // Make the newly saved OpenAI-compatible credentials usable in this
         // session immediately. The normal LoginCompleted path also calls this,
         // but doing it here lets the refresh task see the hot-added provider
         // without requiring a restart or a second user action.
-        self.provider.on_auth_changed();
-
         let provider = Arc::clone(&self.provider);
         let session_id = self.session.id.clone();
+        let before_models = provider.available_models_display();
+        let before_routes = provider.model_routes();
+        self.provider.on_auth_changed();
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let result = provider.refresh_model_catalog().await;
                 match result {
-                    Ok(summary) => {
+                    Ok(_summary) => {
+                        let after_models = provider.available_models_display();
                         let routes = provider.model_routes();
+                        let summary = crate::provider::summarize_model_catalog_refresh(
+                            before_models,
+                            after_models,
+                            before_routes,
+                            routes.clone(),
+                        );
                         let selected = routes
                             .iter()
                             .find(|route| {
@@ -2015,14 +2023,19 @@ impl App {
                                             session_id,
                                             model: model.clone(),
                                             message: format!(
-                                                "**{} is ready.**\n\nFetched model catalog: +{} models, +{} routes, ~{} changed.\nSwitched to `{}`. The model picker is open so you can choose another accessible model.\n\nIf the model list ever looks stale, run `/refresh-model-list`.",
+                                                "**{} is ready.**\n\nFetched model catalog: +{} models, +{} routes, ~{} changed.{}\n\nSwitched to `{}`. Use `/model` if you want to choose a different accessible model.\n\nIf the model list ever looks stale, run `/refresh-model-list`.",
                                                 provider_label,
                                                 summary.models_added,
                                                 summary.routes_added,
                                                 summary.routes_changed,
+                                                {
+                                                    let mut details = String::new();
+                                                    super::model_context::append_model_name_diff(&mut details, &summary);
+                                                    if details.is_empty() { String::new() } else { format!("\n{}", details) }
+                                                },
                                                 model
                                             ),
-                                            open_picker: true,
+                                            open_picker: false,
                                         },
                                     );
                                 }

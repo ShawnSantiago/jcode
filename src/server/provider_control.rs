@@ -2,7 +2,7 @@
 
 use crate::agent::Agent;
 use crate::protocol::ServerEvent;
-use crate::provider::Provider;
+use crate::provider::{ModelCatalogRefreshSummary, ModelRoute, Provider};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -14,13 +14,41 @@ struct AuthRefreshTargets {
     deferred_agents: Vec<Arc<Mutex<Agent>>>,
 }
 
-fn available_models_updated_event_from_agent(agent: &Agent) -> ServerEvent {
-    ServerEvent::AvailableModelsUpdated {
-        provider_name: Some(agent.provider_name()),
-        provider_model: Some(agent.provider_model()),
-        available_models: agent.available_models_display(),
-        available_model_routes: agent.model_routes(),
+#[derive(Clone)]
+struct AvailableModelsSnapshot {
+    provider_name: Option<String>,
+    provider_model: Option<String>,
+    available_models: Vec<String>,
+    available_model_routes: Vec<ModelRoute>,
+}
+
+impl AvailableModelsSnapshot {
+    fn from_agent(agent: &Agent) -> Self {
+        Self {
+            provider_name: Some(agent.provider_name()),
+            provider_model: Some(agent.provider_model()),
+            available_models: agent.available_models_display(),
+            available_model_routes: agent.model_routes(),
+        }
     }
+
+    fn into_event(self) -> ServerEvent {
+        ServerEvent::AvailableModelsUpdated {
+            provider_name: self.provider_name,
+            provider_model: self.provider_model,
+            available_models: self.available_models,
+            available_model_routes: self.available_model_routes,
+        }
+    }
+}
+
+fn available_models_updated_event_from_agent(agent: &Agent) -> ServerEvent {
+    AvailableModelsSnapshot::from_agent(agent).into_event()
+}
+
+async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> AvailableModelsSnapshot {
+    let agent_guard = agent.lock().await;
+    AvailableModelsSnapshot::from_agent(&agent_guard)
 }
 
 pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> ServerEvent {
@@ -31,6 +59,62 @@ pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) ->
 pub(super) fn try_available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> Option<ServerEvent> {
     let agent_guard = agent.try_lock().ok()?;
     Some(available_models_updated_event_from_agent(&agent_guard))
+}
+
+fn format_model_name_list(models: &[String], limit: usize) -> String {
+    let shown = models
+        .iter()
+        .take(limit)
+        .map(|model| format!("`{}`", model))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if models.len() > limit {
+        format!("{} … and {} more", shown, models.len() - limit)
+    } else {
+        shown
+    }
+}
+
+fn format_auth_catalog_refresh_complete(
+    provider_name: Option<&str>,
+    provider_model: Option<&str>,
+    summary: &ModelCatalogRefreshSummary,
+) -> String {
+    let provider_label = provider_name.unwrap_or("provider");
+    let mut message = format!(
+        "**Auth Model Catalog Updated**\n\n{} credentials are active. Catalog diff:\n\nModels: {} → {}  (+{} / -{})\nRoutes: {} → {}  (+{} / -{} / ~{})",
+        provider_label,
+        summary.model_count_before,
+        summary.model_count_after,
+        summary.models_added,
+        summary.models_removed,
+        summary.route_count_before,
+        summary.route_count_after,
+        summary.routes_added,
+        summary.routes_removed,
+        summary.routes_changed,
+    );
+    if !summary.models_added_names.is_empty() {
+        message.push_str("\nAdded models: ");
+        message.push_str(&format_model_name_list(&summary.models_added_names, 12));
+    }
+    if !summary.models_removed_names.is_empty() {
+        message.push_str("\nRemoved models: ");
+        message.push_str(&format_model_name_list(&summary.models_removed_names, 12));
+    }
+    if let Some(model) = provider_model {
+        message.push_str(&format!("\n\nSelected model: `{}`.", model));
+    }
+    message.push_str("\n\nUse `/model` if you want to choose a different accessible model.");
+    message
+}
+
+fn auth_model_refresh_quiet_period() -> std::time::Duration {
+    if cfg!(test) {
+        std::time::Duration::from_millis(20)
+    } else {
+        std::time::Duration::from_millis(750)
+    }
 }
 
 async fn auth_refresh_targets(
@@ -507,6 +591,7 @@ pub(super) async fn handle_notify_auth_changed(
     let targets = auth_refresh_targets(provider_template, provider, sessions).await;
     let client_event_tx_clone = client_event_tx.clone();
     let agent_clone = agent.clone();
+    let before_snapshot = available_models_snapshot(agent).await;
     tokio::spawn(async move {
         let activated_model = apply_auth_provider_runtime_hint(provider_hint.as_deref());
         let mut bus_rx = crate::bus::Bus::global().subscribe();
@@ -536,26 +621,50 @@ pub(super) async fn handle_notify_auth_changed(
         // continue refreshing in the background. Push an immediate snapshot so
         // the model picker/header stop looking stale right after login, then
         // push another snapshot when the background refresh announces itself.
-        let event = available_models_updated_event(&agent_clone).await;
-        let _ = client_event_tx_clone.send(event);
+        let mut latest_snapshot = available_models_snapshot(&agent_clone).await;
+        let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let quiet_period = auth_model_refresh_quiet_period();
+        let mut quiet_deadline: Option<tokio::time::Instant> = None;
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let now = tokio::time::Instant::now();
+            let deadline = quiet_deadline
+                .map(|quiet| std::cmp::min(max_deadline, quiet))
+                .unwrap_or(max_deadline);
+            let remaining = deadline.saturating_duration_since(now);
             if remaining.is_zero() {
                 break;
             }
             tokio::select! {
                 event = bus_rx.recv() => {
                     if matches!(event, Ok(crate::bus::BusEvent::ModelsUpdated)) {
-                        let event = available_models_updated_event(&agent_clone).await;
-                        let _ = client_event_tx_clone.send(event);
-                        break;
+                        latest_snapshot = available_models_snapshot(&agent_clone).await;
+                        let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
+                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_period);
                     }
                 }
                 _ = tokio::time::sleep(remaining) => break,
             }
         }
+
+        let summary = crate::provider::summarize_model_catalog_refresh(
+            before_snapshot.available_models,
+            latest_snapshot.available_models.clone(),
+            before_snapshot.available_model_routes,
+            latest_snapshot.available_model_routes.clone(),
+        );
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(session_id),
+                format_auth_catalog_refresh_complete(
+                    latest_snapshot.provider_name.as_deref(),
+                    latest_snapshot.provider_model.as_deref(),
+                    &summary,
+                ),
+                Some("Auth: model catalog updated"),
+            ),
+        ));
     });
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
