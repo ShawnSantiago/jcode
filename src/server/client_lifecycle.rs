@@ -1834,9 +1834,13 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::NotifyAuthChanged { id } => {
+            Request::NotifyAuthChanged {
+                id,
+                provider: provider_hint,
+            } => {
                 handle_notify_auth_changed(
                     id,
+                    provider_hint,
                     &provider,
                     &provider_template,
                     &sessions,

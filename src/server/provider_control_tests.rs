@@ -6,10 +6,14 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
 
 #[derive(Default)]
 struct AuthChangeMockState {
     logged_in: StdRwLock<bool>,
+    selected_model: StdRwLock<Option<String>>,
+    complete_calls: AtomicUsize,
 }
 
 struct AuthChangeMockProvider {
@@ -33,6 +37,7 @@ impl Provider for AuthChangeMockProvider {
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> anyhow::Result<EventStream> {
+        self.state.complete_calls.fetch_add(1, Ordering::SeqCst);
         let stream = futures::stream::empty::<anyhow::Result<StreamEvent>>();
         Ok(Box::pin(stream) as Pin<Box<dyn futures::Stream<Item = _> + Send>>)
     }
@@ -42,6 +47,10 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn model(&self) -> String {
+        if let Some(model) = self.state.selected_model.read().unwrap().clone() {
+            return model;
+        }
+
         if *self.state.logged_in.read().unwrap() {
             "logged-in-model".to_string()
         } else {
@@ -50,11 +59,33 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        if *self.state.logged_in.read().unwrap() {
+        let mut models = if *self.state.logged_in.read().unwrap() {
             vec!["logged-in-model".to_string(), "second-model".to_string()]
         } else {
             vec!["logged-out-model".to_string()]
+        };
+
+        if let Some(model) = self.state.selected_model.read().unwrap().clone()
+            && !models.iter().any(|candidate| candidate == &model)
+        {
+            models.insert(0, model);
         }
+
+        models
+    }
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let model = model
+            .trim()
+            .strip_prefix("openrouter:")
+            .unwrap_or_else(|| model.trim())
+            .trim();
+        if model.is_empty() {
+            anyhow::bail!("model cannot be empty");
+        }
+
+        *self.state.selected_model.write().unwrap() = Some(model.to_string());
+        Ok(())
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
@@ -83,6 +114,42 @@ impl Provider for AuthChangeMockProvider {
     }
 }
 
+fn lock_env() -> StdMutexGuard<'static, ()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
+}
+
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+    _lock: StdMutexGuard<'static, ()>,
+}
+
+impl EnvGuard {
+    fn save(keys: &[&'static str]) -> Self {
+        let lock = lock_env();
+        let saved = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        for key in keys {
+            crate::env::remove_var(key);
+        }
+        Self { saved, _lock: lock }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn notify_auth_changed_emits_available_models_updated_after_provider_update() {
     crate::bus::reset_models_updated_publish_state_for_tests();
@@ -97,6 +164,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
 
     handle_notify_auth_changed(
         42,
+        None,
         &provider,
         &provider,
         &sessions,
@@ -174,6 +242,7 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
 
     handle_notify_auth_changed(
         43,
+        None,
         &current_provider,
         &current_provider,
         &sessions,
@@ -205,6 +274,102 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
     }
 
     panic!("busy session provider was not refreshed after it became idle");
+}
+
+#[tokio::test]
+async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_completion() {
+    let _guard = EnvGuard::save(&[
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_MODEL",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_USE_ENTRA",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+    crate::env::set_var("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+    crate::env::set_var("AZURE_OPENAI_MODEL", "azure-deployment");
+    crate::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+    crate::env::set_var("AZURE_OPENAI_USE_ENTRA", "0");
+
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let provider = Arc::new(AuthChangeMockProvider::new());
+    let state = Arc::clone(&provider.state);
+    let provider: Arc<dyn Provider> = provider;
+    let registry = Registry::empty();
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed(
+        44,
+        Some("Azure OpenAI".to_string()),
+        &provider,
+        &provider,
+        &sessions,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    let mut saw_done = false;
+    let mut saw_models = None;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, client_event_rx.recv())
+            .await
+            .expect("receive server event before timeout");
+        match event.expect("channel open") {
+            ServerEvent::Done { id } => {
+                assert_eq!(id, 44);
+                saw_done = true;
+            }
+            ServerEvent::AvailableModelsUpdated {
+                provider_model,
+                available_models,
+                ..
+            } => {
+                saw_models = Some((provider_model, available_models));
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_done, "expected immediate Done ack");
+    let (provider_model, available_models) = saw_models.expect("expected model refresh event");
+    assert_eq!(provider_model.as_deref(), Some("azure-deployment"));
+    assert!(
+        available_models
+            .iter()
+            .any(|model| model == "azure-deployment")
+    );
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+        Ok("azure-openai")
+    );
+    assert_eq!(
+        std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+        Ok("openrouter")
+    );
+    assert_eq!(
+        state.complete_calls.load(Ordering::SeqCst),
+        0,
+        "auth refresh must not issue a completion with the old prompt/model"
+    );
 }
 
 #[tokio::test]

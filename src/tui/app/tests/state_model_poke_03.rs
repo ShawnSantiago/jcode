@@ -343,6 +343,170 @@ fn test_login_completed_surfaces_new_provider_models_in_local_model_picker() {
     );
 }
 
+#[derive(Clone)]
+struct AzureLoginMockProvider {
+    model: StdArc<StdMutex<String>>,
+    auth_changed: StdArc<AtomicUsize>,
+    complete_calls: StdArc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Provider for AzureLoginMockProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        self.complete_calls.fetch_add(1, Ordering::SeqCst);
+        let stream = futures::stream::empty::<Result<crate::message::StreamEvent>>();
+        Ok(Box::pin(stream) as crate::provider::EventStream)
+    }
+
+    fn name(&self) -> &str {
+        "OpenRouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let model = model
+            .trim()
+            .strip_prefix("openrouter:")
+            .unwrap_or_else(|| model.trim())
+            .trim();
+        if model.is_empty() {
+            anyhow::bail!("model cannot be empty");
+        }
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec![self.model()]
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![crate::provider::ModelRoute {
+            model: self.model(),
+            provider: "Azure OpenAI".to_string(),
+            api_method: "openai-compatible".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }]
+    }
+
+    fn on_auth_changed(&self) {
+        self.auth_changed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+struct AzureLoginEnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl AzureLoginEnvGuard {
+    fn save(keys: &[&'static str]) -> Self {
+        let saved = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        for key in keys {
+            crate::env::remove_var(key);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for AzureLoginEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_azure_login_completion_switches_local_model_without_completion() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _guard = AzureLoginEnvGuard::save(&[
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_MODEL",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_USE_ENTRA",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+    crate::env::set_var("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
+    crate::env::set_var("AZURE_OPENAI_MODEL", "azure-deployment");
+    crate::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+    crate::env::set_var("AZURE_OPENAI_USE_ENTRA", "0");
+
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let model = StdArc::new(StdMutex::new("old-model".to_string()));
+    let auth_changed = StdArc::new(AtomicUsize::new(0));
+    let complete_calls = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(AzureLoginMockProvider {
+        model: StdArc::clone(&model),
+        auth_changed: StdArc::clone(&auth_changed),
+        complete_calls: StdArc::clone(&complete_calls),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.provider_session_id = Some("stale-upstream".to_string());
+    app.session.provider_session_id = Some("stale-upstream".to_string());
+    app.session.model = Some("old-model".to_string());
+
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "Azure OpenAI".to_string(),
+        success: true,
+        message: "Azure OpenAI ready".to_string(),
+    });
+
+    assert_eq!(&*model.lock().unwrap(), "azure-deployment");
+    assert_eq!(app.session.model.as_deref(), Some("azure-deployment"));
+    assert_eq!(app.provider_session_id, None);
+    assert_eq!(app.session.provider_session_id, None);
+    assert_eq!(auth_changed.load(Ordering::SeqCst), 1);
+    assert_eq!(complete_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+        Ok("azure-openai")
+    );
+    assert_eq!(
+        app.status_notice(),
+        Some("Login: Azure OpenAI ready (azure-deployment)".to_string())
+    );
+}
+
 #[test]
 fn test_local_model_picker_surfaces_antigravity_models_from_multiprovider() {
     let mut app = create_antigravity_picker_test_app();

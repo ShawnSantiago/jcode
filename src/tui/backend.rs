@@ -735,14 +735,26 @@ impl RemoteConnection {
     pub async fn notify_auth_changed(&mut self) -> Result<()> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::NotifyAuthChanged { id }).await
+        self.send_request(Request::NotifyAuthChanged { id, provider: None })
+            .await
     }
 
     /// Notify the server about auth changes without blocking the caller.
     pub fn notify_auth_changed_detached(&mut self) {
+        self.notify_auth_changed_for_provider_detached(None);
+    }
+
+    /// Notify the server about a provider-specific auth change without blocking the caller.
+    pub fn notify_auth_changed_for_provider_detached(&mut self, provider: Option<&str>) {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request_detached(Request::NotifyAuthChanged { id }, "notify_auth_changed");
+        self.send_request_detached(
+            Request::NotifyAuthChanged {
+                id,
+                provider: provider.map(str::to_string),
+            },
+            "notify_auth_changed",
+        );
     }
 
     /// Ask server to switch active Anthropic account for this process/session.
@@ -1012,6 +1024,34 @@ mod tests {
             elapsed
         );
         assert_eq!(remote.next_request_id, 2);
+    }
+
+    #[tokio::test]
+    async fn detached_auth_changed_notification_sends_provider_hint() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        remote.notify_auth_changed_for_provider_detached(Some("azure-openai"));
+
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+            .await
+            .expect("auth changed request should be sent before timeout")
+            .expect("auth changed request should be readable by peer");
+
+        assert_eq!(remote.next_request_id, 2);
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).expect("auth changed request should deserialize"),
+            Request::NotifyAuthChanged {
+                id: 1,
+                provider: Some(provider),
+            } if provider == "azure-openai"
+        ));
     }
 
     #[tokio::test]

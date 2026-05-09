@@ -88,6 +88,88 @@ fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     }
 }
 
+fn normalized_auth_provider_hint(provider_hint: Option<&str>) -> Option<&'static str> {
+    let provider = provider_hint?.trim();
+    if provider.eq_ignore_ascii_case("azure")
+        || provider.eq_ignore_ascii_case("azure-openai")
+        || provider.eq_ignore_ascii_case("azure openai")
+    {
+        Some("azure-openai")
+    } else {
+        None
+    }
+}
+
+fn apply_auth_provider_runtime_hint(provider_hint: Option<&str>) -> Option<String> {
+    match normalized_auth_provider_hint(provider_hint) {
+        Some("azure-openai") => match crate::provider::activation::apply_azure_openai_runtime() {
+            Ok(model) => model,
+            Err(error) => {
+                let message = error.to_string();
+                crate::logging::auth_event(
+                    "auth_changed_runtime_activation_failed",
+                    "azure-openai",
+                    &[("reason", message.as_str())],
+                );
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+fn model_switch_request_for_runtime_hint(
+    provider_hint: Option<&str>,
+    provider_name: &str,
+    model: &str,
+) -> String {
+    match normalized_auth_provider_hint(provider_hint) {
+        Some("azure-openai") if !provider_name.eq_ignore_ascii_case("openrouter") => {
+            format!("openrouter:{}", model)
+        }
+        _ => model.to_string(),
+    }
+}
+
+async fn apply_auth_runtime_model_to_agent(
+    provider_hint: Option<&str>,
+    model: Option<&str>,
+    agent: &Arc<Mutex<Agent>>,
+) {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return;
+    };
+
+    let provider = normalized_auth_provider_hint(provider_hint).unwrap_or("auth");
+    let result = {
+        let mut agent_guard = agent.lock().await;
+        let provider_name = agent_guard.provider_handle().name().to_string();
+        let model_request =
+            model_switch_request_for_runtime_hint(provider_hint, &provider_name, model);
+        let result = agent_guard.set_model(&model_request);
+        if result.is_ok() {
+            agent_guard.reset_provider_session();
+        }
+        result.map(|_| agent_guard.provider_model())
+    };
+
+    match result {
+        Ok(_) => crate::logging::auth_event(
+            "auth_changed_runtime_model_applied",
+            provider,
+            &[("provider_session", "reset")],
+        ),
+        Err(error) => {
+            let message = error.to_string();
+            crate::logging::auth_event(
+                "auth_changed_runtime_model_failed",
+                provider,
+                &[("reason", message.as_str())],
+            );
+        }
+    }
+}
+
 async fn model_switching_available(agent: &Arc<Mutex<Agent>>) -> Option<String> {
     let models = {
         let agent_guard = agent.lock().await;
@@ -403,6 +485,7 @@ pub(super) async fn handle_set_compaction_mode(
 
 pub(super) async fn handle_notify_auth_changed(
     id: u64,
+    provider_hint: Option<String>,
     provider: &Arc<dyn Provider>,
     provider_template: &Arc<dyn Provider>,
     sessions: &SessionAgents,
@@ -414,10 +497,18 @@ pub(super) async fn handle_notify_auth_changed(
     let client_event_tx_clone = client_event_tx.clone();
     let agent_clone = agent.clone();
     tokio::spawn(async move {
+        let activated_model = apply_auth_provider_runtime_hint(provider_hint.as_deref());
         let mut bus_rx = crate::bus::Bus::global().subscribe();
         for provider in targets.providers {
             provider.on_auth_changed();
         }
+
+        apply_auth_runtime_model_to_agent(
+            provider_hint.as_deref(),
+            activated_model.as_deref(),
+            &agent_clone,
+        )
+        .await;
 
         crate::bus::Bus::global().publish_models_updated();
 

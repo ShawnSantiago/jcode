@@ -367,9 +367,10 @@ pub(super) async fn handle_bus_event(
         }
         Ok(BusEvent::LoginCompleted(login)) => {
             let success = login.success && login.provider != "copilot_code";
+            let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
             app.handle_login_completed(login);
             if success {
-                remote.notify_auth_changed_detached();
+                remote.notify_auth_changed_for_provider_detached(provider_hint);
             }
         }
         Ok(BusEvent::UpdateStatus(status)) => {
@@ -403,6 +404,18 @@ pub(super) async fn handle_bus_event(
             app.handle_dictation_failure(message);
         }
         _ => {}
+    }
+}
+
+fn auth_provider_hint_for_login_provider(provider: &str) -> Option<&'static str> {
+    let provider = provider.trim();
+    if provider.eq_ignore_ascii_case("azure")
+        || provider.eq_ignore_ascii_case("azure-openai")
+        || provider.eq_ignore_ascii_case("azure openai")
+    {
+        Some("azure-openai")
+    } else {
+        None
     }
 }
 
