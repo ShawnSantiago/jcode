@@ -143,6 +143,31 @@ pub(crate) struct SingleSessionStyledLine {
     pub(crate) style: SingleSessionLineStyle,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReadOnlyInlineWidget {
+    pub(crate) title: String,
+    pub(crate) lines: Vec<SingleSessionStyledLine>,
+}
+
+impl ReadOnlyInlineWidget {
+    fn new(title: impl Into<String>, lines: Vec<SingleSessionStyledLine>) -> Self {
+        Self {
+            title: title.into(),
+            lines,
+        }
+    }
+
+    fn styled_lines(self) -> Vec<SingleSessionStyledLine> {
+        let mut styled = Vec::with_capacity(self.lines.len().saturating_add(2));
+        styled.push(styled_line(self.title, SingleSessionLineStyle::OverlayTitle));
+        if !self.lines.is_empty() {
+            styled.push(blank_styled_line());
+            styled.extend(self.lines);
+        }
+        styled
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SingleSessionLineStyle {
     Assistant,
@@ -846,6 +871,8 @@ impl SingleSessionApp {
                 self.show_help = !self.show_help;
                 if self.show_help {
                     self.show_session_info = false;
+                    self.model_picker.close();
+                    self.session_switcher.close();
                 }
                 self.scroll_body_to_bottom();
                 KeyOutcome::Redraw
@@ -1313,6 +1340,9 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn inline_widget_styled_lines(&self) -> Vec<SingleSessionStyledLine> {
+        if self.show_help {
+            return hotkey_help_inline_widget().styled_lines();
+        }
         if self.model_picker.open {
             return model_picker_inline_styled_lines(&self.model_picker);
         }
@@ -1323,6 +1353,9 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn inline_widget_line_count(&self) -> usize {
+        if self.show_help {
+            return hotkey_help_inline_widget().styled_lines().len();
+        }
         if self.model_picker.open {
             return model_picker_inline_styled_lines(&self.model_picker).len();
         }
@@ -1333,9 +1366,6 @@ impl SingleSessionApp {
     }
 
     fn body_styled_lines_without_inline_widgets(&self) -> Vec<SingleSessionStyledLine> {
-        if self.show_help {
-            return single_session_help_styled_lines();
-        }
         if !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
         {
             return self.transcript_styled_lines(true);
@@ -3236,10 +3266,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
 ];
 
 fn single_session_help_styled_lines() -> Vec<SingleSessionStyledLine> {
-    let mut lines = vec![
-        styled_line("desktop shortcuts", SingleSessionLineStyle::OverlayTitle),
-        blank_styled_line(),
-    ];
+    let mut lines = Vec::new();
 
     lines.push(styled_line(
         "slash commands",
@@ -3270,6 +3297,10 @@ fn single_session_help_styled_lines() -> Vec<SingleSessionStyledLine> {
     }
 
     lines
+}
+
+fn hotkey_help_inline_widget() -> ReadOnlyInlineWidget {
+    ReadOnlyInlineWidget::new("desktop shortcuts", single_session_help_styled_lines())
 }
 
 fn append_chat_message_lines(

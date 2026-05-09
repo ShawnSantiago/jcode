@@ -1451,7 +1451,11 @@ fn single_session_hotkey_help_toggles_discoverable_shortcuts() {
 
     assert_eq!(app.handle_key(KeyInput::HotkeyHelp), KeyOutcome::Redraw);
     assert!(app.show_help);
-    let help = app.body_lines();
+    let help = app
+        .inline_widget_styled_lines()
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>();
     assert!(help.iter().any(|line| line == "desktop shortcuts"));
     assert!(help_has_shortcut(
         &help,
@@ -1476,9 +1480,11 @@ fn single_session_hotkey_help_toggles_discoverable_shortcuts() {
     let help_text = help.join("\n");
     assert!(!help_text.contains("desktop queue follow-up pending"));
     assert!(!help_text.contains("1  question"));
+    assert!(app.body_lines().join("\n").contains("1  question"));
 
     assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
     assert!(!app.show_help);
+    assert!(app.inline_widget_styled_lines().is_empty());
     assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::None);
     assert!(app.body_lines().join("\n").contains("1  question"));
 }
