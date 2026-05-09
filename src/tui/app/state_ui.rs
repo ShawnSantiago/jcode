@@ -837,12 +837,45 @@ fn push_cache_signature(
             label, signature.messages_hash
         ));
         lines.push(format!(
+            "- {}.message_hashes_len: **{}**",
+            label,
+            signature.message_hashes.len()
+        ));
+        lines.push(format!(
             "- {}.message_count: **{}**",
             label, signature.message_count
         ));
         lines.push(format!(
             "- {}.tool_count: **{}**",
             label, signature.tool_count
+        ));
+        lines.push(format!(
+            "- {}.system_static_chars: **{}**",
+            label, signature.system_static_chars
+        ));
+        lines.push(format!(
+            "- {}.tools_json_chars: **{}**",
+            label, signature.tools_json_chars
+        ));
+        lines.push(format!(
+            "- {}.messages_json_chars: **{}**",
+            label, signature.messages_json_chars
+        ));
+        lines.push(format!(
+            "- {}.ephemeral_hash: {}",
+            label,
+            signature
+                .ephemeral_hash
+                .map(|hash| format!("`{:016x}`", hash))
+                .unwrap_or_else(|| "None".to_string())
+        ));
+        lines.push(format!(
+            "- {}.ephemeral_chars: **{}**",
+            label, signature.ephemeral_chars
+        ));
+        lines.push(format!(
+            "- {}.ephemeral_message_count: **{}**",
+            label, signature.ephemeral_message_count
         ));
     } else {
         lines.push(format!("- {}: None", label));

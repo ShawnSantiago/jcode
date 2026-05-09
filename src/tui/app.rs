@@ -133,12 +133,19 @@ struct PendingRemoteRewindNotice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct KvCacheRequestSignature {
-    system_static_hash: u64,
-    tools_hash: u64,
-    messages_hash: u64,
-    message_count: usize,
-    tool_count: usize,
+pub(in crate::tui::app) struct KvCacheRequestSignature {
+    pub(in crate::tui::app) system_static_hash: u64,
+    pub(in crate::tui::app) tools_hash: u64,
+    pub(in crate::tui::app) messages_hash: u64,
+    pub(in crate::tui::app) message_hashes: Vec<u64>,
+    pub(in crate::tui::app) message_count: usize,
+    pub(in crate::tui::app) tool_count: usize,
+    pub(in crate::tui::app) system_static_chars: usize,
+    pub(in crate::tui::app) tools_json_chars: usize,
+    pub(in crate::tui::app) messages_json_chars: usize,
+    pub(in crate::tui::app) ephemeral_hash: Option<u64>,
+    pub(in crate::tui::app) ephemeral_chars: usize,
+    pub(in crate::tui::app) ephemeral_message_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1034,6 +1041,7 @@ impl App {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
+        system_dynamic: &str,
     ) {
         let turn_number = self
             .display_messages
@@ -1049,12 +1057,47 @@ impl App {
         }
 
         let baseline = self.kv_cache_baseline.clone();
-        let signature = Self::kv_cache_request_signature(messages, tools, system_static);
+        let signature =
+            Self::kv_cache_request_signature(messages, tools, system_static, system_dynamic);
         let baseline_messages_prefix_matches = baseline
             .as_ref()
             .and_then(|baseline| baseline.signature.as_ref())
-            .map(|previous| Self::kv_cache_messages_prefix_matches(messages, previous));
+            .map(|previous| Self::kv_cache_signatures_prefix_match(&signature, previous));
 
+        self.pending_kv_cache_request = Some(PendingKvCacheRequest {
+            turn_number,
+            call_index: self.kv_cache_turn_call_index,
+            provider: self.kv_cache_provider_name(),
+            model: self.kv_cache_provider_model(),
+            upstream_provider: self.upstream_provider.clone(),
+            signature: Some(signature),
+            baseline_messages_prefix_matches,
+            baseline,
+        });
+    }
+
+    pub(in crate::tui::app) fn begin_remote_kv_cache_request(
+        &mut self,
+        signature: KvCacheRequestSignature,
+    ) {
+        let turn_number = self
+            .display_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .count()
+            .max(1);
+        if self.kv_cache_turn_number == Some(turn_number) {
+            self.kv_cache_turn_call_index = self.kv_cache_turn_call_index.saturating_add(1).max(1);
+        } else {
+            self.kv_cache_turn_number = Some(turn_number);
+            self.kv_cache_turn_call_index = 1;
+        }
+
+        let baseline = self.kv_cache_baseline.clone();
+        let baseline_messages_prefix_matches = baseline
+            .as_ref()
+            .and_then(|baseline| baseline.signature.as_ref())
+            .map(|previous| Self::kv_cache_signatures_prefix_match(&signature, previous));
         self.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache_turn_call_index,
@@ -1177,6 +1220,14 @@ impl App {
             .baseline
             .as_ref()
             .map(|baseline| baseline.input_tokens);
+        let missed_tokens =
+            baseline_input_tokens.map(|baseline| baseline.saturating_sub(read_tokens));
+        let ttl_secs = request.baseline.as_ref().and_then(|baseline| {
+            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
+        });
+        let ttl_remaining_secs = ttl_secs
+            .zip(baseline_age_secs)
+            .map(|(ttl, age)| ttl.saturating_sub(age));
         let current_signature = request.signature.as_ref();
         let baseline_signature = request
             .baseline
@@ -1188,23 +1239,64 @@ impl App {
         let tools_hash_changed = current_signature
             .zip(baseline_signature)
             .map(|(current, baseline)| current.tools_hash != baseline.tools_hash);
-        let message_prefix_hash_changed = current_signature
+        let message_full_hash_changed = current_signature
             .zip(baseline_signature)
             .map(|(current, baseline)| current.messages_hash != baseline.messages_hash);
+        let message_prefix_changed = request
+            .baseline_messages_prefix_matches
+            .map(|matches| !matches);
+        let common_prefix_messages = current_signature
+            .zip(baseline_signature)
+            .map(|(current, baseline)| Self::kv_cache_common_prefix_messages(current, baseline));
+        let first_changed_message_index = common_prefix_messages
+            .zip(baseline_signature.map(|signature| signature.message_count))
+            .and_then(|(common, baseline_count)| (common < baseline_count).then_some(common));
+        let dynamic_hash_changed = current_signature
+            .zip(baseline_signature)
+            .map(|(current, baseline)| current.ephemeral_hash != baseline.ephemeral_hash);
         let current_message_count = current_signature.map(|signature| signature.message_count);
         let baseline_message_count = baseline_signature.map(|signature| signature.message_count);
         let current_tool_count = current_signature.map(|signature| signature.tool_count);
         let baseline_tool_count = baseline_signature.map(|signature| signature.tool_count);
+        let current_system_chars = current_signature.map(|signature| signature.system_static_chars);
+        let baseline_system_chars =
+            baseline_signature.map(|signature| signature.system_static_chars);
+        let current_tools_json_chars =
+            current_signature.map(|signature| signature.tools_json_chars);
+        let baseline_tools_json_chars =
+            baseline_signature.map(|signature| signature.tools_json_chars);
+        let current_messages_json_chars =
+            current_signature.map(|signature| signature.messages_json_chars);
+        let baseline_messages_json_chars =
+            baseline_signature.map(|signature| signature.messages_json_chars);
+        let current_ephemeral_chars = current_signature.map(|signature| signature.ephemeral_chars);
+        let baseline_ephemeral_chars =
+            baseline_signature.map(|signature| signature.ephemeral_chars);
+        let current_ephemeral_message_count =
+            current_signature.map(|signature| signature.ephemeral_message_count);
+        let baseline_ephemeral_message_count =
+            baseline_signature.map(|signature| signature.ephemeral_message_count);
+        let current_hashes_present = current_signature
+            .map(|signature| !signature.message_hashes.is_empty())
+            .unwrap_or(false);
+        let baseline_hashes_present = baseline_signature
+            .map(|signature| !signature.message_hashes.is_empty())
+            .unwrap_or(false);
 
         crate::logging::info(&format!(
             "KV_CACHE_USAGE: turn={} call={} provider={} upstream={:?} model={} \
              input={} cache_read={} cache_write={} read_pct={} write_pct={} \
-             optimal_input={:?} optimal_read_pct={:?} miss={} \
+             optimal_input={:?} optimal_read_pct={:?} missed_tokens={:?} miss={} \
              session_input={} session_read={} session_write={} session_read_pct={} \
              session_optimal_input={} session_optimal_read_pct={:?} \
-             baseline_input={:?} baseline_age_secs={:?} prefix_matches={:?} \
-             system_changed={:?} tools_changed={:?} message_prefix_changed={:?} \
-             message_count={:?} baseline_message_count={:?} tool_count={:?} baseline_tool_count={:?}",
+             baseline_input={:?} baseline_age_secs={:?} ttl_secs={:?} ttl_remaining_secs={:?} \
+             prefix_matches={:?} common_prefix_messages={:?} first_changed_message_index={:?} \
+             system_changed={:?} tools_changed={:?} message_prefix_changed={:?} message_full_hash_changed={:?} dynamic_changed={:?} \
+             message_count={:?} baseline_message_count={:?} tool_count={:?} baseline_tool_count={:?} \
+             system_chars={:?} baseline_system_chars={:?} tools_json_chars={:?} baseline_tools_json_chars={:?} \
+             messages_json_chars={:?} baseline_messages_json_chars={:?} ephemeral_chars={:?} baseline_ephemeral_chars={:?} \
+             ephemeral_message_count={:?} baseline_ephemeral_message_count={:?} message_hashes_present={} baseline_message_hashes_present={} \
+             connection={:?} status_detail={:?}",
             request.turn_number,
             request.call_index,
             request.provider,
@@ -1217,6 +1309,7 @@ impl App {
             creation_pct,
             optimal_input_tokens,
             optimal_read_pct,
+            missed_tokens,
             miss,
             self.total_cache_reported_input_tokens,
             self.total_cache_read_tokens,
@@ -1226,14 +1319,34 @@ impl App {
             session_optimal_read_pct,
             baseline_input_tokens,
             baseline_age_secs,
+            ttl_secs,
+            ttl_remaining_secs,
             request.baseline_messages_prefix_matches,
+            common_prefix_messages,
+            first_changed_message_index,
             system_static_hash_changed,
             tools_hash_changed,
-            message_prefix_hash_changed,
+            message_prefix_changed,
+            message_full_hash_changed,
+            dynamic_hash_changed,
             current_message_count,
             baseline_message_count,
             current_tool_count,
             baseline_tool_count,
+            current_system_chars,
+            baseline_system_chars,
+            current_tools_json_chars,
+            baseline_tools_json_chars,
+            current_messages_json_chars,
+            baseline_messages_json_chars,
+            current_ephemeral_chars,
+            baseline_ephemeral_chars,
+            current_ephemeral_message_count,
+            baseline_ephemeral_message_count,
+            current_hashes_present,
+            baseline_hashes_present,
+            self.connection_type.as_deref(),
+            self.status_detail.as_deref(),
         ));
     }
 
@@ -1378,24 +1491,58 @@ impl App {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
+        system_dynamic: &str,
     ) -> KvCacheRequestSignature {
+        let dynamic_trimmed = system_dynamic.trim();
         KvCacheRequestSignature {
             system_static_hash: stable_hash_str(system_static),
             tools_hash: stable_hash_json(tools),
             messages_hash: stable_hash_json(messages),
+            message_hashes: message_hashes(messages),
             message_count: messages.len(),
             tool_count: tools.len(),
+            system_static_chars: system_static.chars().count(),
+            tools_json_chars: stable_json_len(tools),
+            messages_json_chars: stable_json_len(messages),
+            ephemeral_hash: if dynamic_trimmed.is_empty() {
+                None
+            } else {
+                Some(stable_hash_str(dynamic_trimmed))
+            },
+            ephemeral_chars: dynamic_trimmed.chars().count(),
+            ephemeral_message_count: usize::from(!dynamic_trimmed.is_empty()),
         }
     }
 
-    fn kv_cache_messages_prefix_matches(
-        messages: &[Message],
+    fn kv_cache_signatures_prefix_match(
+        current: &KvCacheRequestSignature,
         previous: &KvCacheRequestSignature,
     ) -> bool {
-        if previous.message_count > messages.len() {
+        if previous.message_count > current.message_count {
             return false;
         }
-        stable_hash_json(&messages[..previous.message_count]) == previous.messages_hash
+        if !previous.message_hashes.is_empty() && !current.message_hashes.is_empty() {
+            return current.message_hashes.len() >= previous.message_hashes.len()
+                && current.message_hashes[..previous.message_hashes.len()]
+                    == previous.message_hashes;
+        }
+        if previous.message_count == current.message_count {
+            current.messages_hash == previous.messages_hash
+        } else {
+            false
+        }
+    }
+
+    fn kv_cache_common_prefix_messages(
+        current: &KvCacheRequestSignature,
+        previous: &KvCacheRequestSignature,
+    ) -> usize {
+        current
+            .message_hashes
+            .iter()
+            .zip(previous.message_hashes.iter())
+            .take_while(|(current, previous)| current == previous)
+            .count()
     }
 }
 
@@ -1408,6 +1555,16 @@ fn stable_hash_str(value: &str) -> u64 {
 fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
     let encoded = serde_json::to_string(value).unwrap_or_default();
     stable_hash_str(&encoded)
+}
+
+fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|encoded| encoded.len())
+        .unwrap_or_default()
+}
+
+fn message_hashes(messages: &[Message]) -> Vec<u64> {
+    messages.iter().map(stable_hash_json).collect()
 }
 
 fn ratio_pct(numerator: u64, denominator: u64) -> u8 {

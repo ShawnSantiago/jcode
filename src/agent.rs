@@ -38,6 +38,7 @@ use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
@@ -66,6 +67,54 @@ static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyL
 static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitState>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
+
+fn stable_hash_str(value: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
+    let encoded = serde_json::to_string(value).unwrap_or_default();
+    stable_hash_str(&encoded)
+}
+
+fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|encoded| encoded.len())
+        .unwrap_or_default()
+}
+
+fn message_hashes(messages: &[Message]) -> Vec<u64> {
+    messages.iter().map(stable_hash_json).collect()
+}
+
+fn kv_cache_request_event(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    system_static: &str,
+    ephemeral_messages: &[Message],
+) -> ServerEvent {
+    let ephemeral_hash = if ephemeral_messages.is_empty() {
+        None
+    } else {
+        Some(stable_hash_json(ephemeral_messages))
+    };
+    ServerEvent::KvCacheRequest {
+        system_static_hash: stable_hash_str(system_static),
+        tools_hash: stable_hash_json(tools),
+        messages_hash: stable_hash_json(messages),
+        message_hashes: message_hashes(messages),
+        message_count: messages.len(),
+        tool_count: tools.len(),
+        system_static_chars: system_static.chars().count(),
+        tools_json_chars: stable_json_len(tools),
+        messages_json_chars: stable_json_len(messages),
+        ephemeral_hash,
+        ephemeral_chars: stable_json_len(ephemeral_messages),
+        ephemeral_message_count: ephemeral_messages.len(),
+    }
+}
 
 /// Token usage from the last API request
 #[derive(Debug, Clone, Default, serde::Serialize)]

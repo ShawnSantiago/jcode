@@ -65,6 +65,13 @@ impl Agent {
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
             self.record_client_cache_request(&messages);
 
+            let cache_signature_messages = if crate::config::config().features.message_timestamps {
+                Message::with_timestamps(&messages)
+            } else {
+                messages.iter().cloned().collect()
+            };
+            let mut ephemeral_signature_messages = Vec::new();
+
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
             if let Some(memory) = memory_pending.as_ref() {
@@ -83,9 +90,12 @@ impl Agent {
                     prompt_chars: memory.prompt.chars().count(),
                     computed_age_ms,
                 });
-                let memory_msg =
-                    format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
-                messages_with_memory.push(Message::user(&memory_msg));
+                let memory_msg = Message::user(&format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    memory.prompt
+                ));
+                ephemeral_signature_messages.push(memory_msg.clone());
+                messages_with_memory.push(memory_msg);
             }
 
             logging::info(&format!(
@@ -105,6 +115,12 @@ impl Agent {
             let provider = Arc::clone(&self.provider);
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
+            let _ = event_tx.send(kv_cache_request_event(
+                &cache_signature_messages,
+                &tools,
+                &split_prompt.static_part,
+                &ephemeral_signature_messages,
+            ));
             let mut keepalive = stream_keepalive_ticker();
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
