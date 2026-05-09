@@ -504,6 +504,39 @@ fn test_openai_compatible_login_preserves_profile_for_runtime_activation() {
 }
 
 #[test]
+fn test_tui_login_providers_have_real_tui_handlers() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _guard = runtime.enter();
+    let unsupported_needles = [
+        "CLI-only",
+        "only available from the CLI",
+        "currently CLI-only",
+    ];
+
+    for provider in crate::provider_catalog::tui_login_providers() {
+        let mut app = create_test_app();
+
+        app.start_login_provider(provider);
+
+        let rendered_messages = app
+            .display_messages()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in unsupported_needles {
+            assert!(
+                !rendered_messages.contains(needle),
+                "TUI-visible login provider `{}` emitted unsupported surface message `{}`: {}",
+                provider.id,
+                needle,
+                rendered_messages
+            );
+        }
+    }
+}
+
+#[test]
 fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
     let mut app = create_test_app();
     app.is_remote = true;
