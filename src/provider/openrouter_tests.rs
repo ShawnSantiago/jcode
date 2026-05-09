@@ -177,13 +177,24 @@ fn minimax_profile_exposes_static_models_before_catalog_refresh() {
 }
 
 #[test]
-fn cerebras_profile_default_is_not_a_static_selectable_model() {
+fn cerebras_profile_default_tracks_live_catalog_and_is_not_static() {
+    assert_eq!(
+        jcode_provider_metadata::CEREBRAS_PROFILE.default_model,
+        Some("qwen-3-235b-a22b-instruct-2507")
+    );
+
     let models = crate::provider_catalog::openai_compatible_profile_static_models(
         jcode_provider_metadata::CEREBRAS_PROFILE,
     );
 
     assert!(
         !models.iter().any(|model| model == "qwen-3-coder-480b"),
+        "old Cerebras default is no longer returned by the live /models catalog"
+    );
+    assert!(
+        !models
+            .iter()
+            .any(|model| model == "qwen-3-235b-a22b-instruct-2507"),
         "metadata default is only a suggestion; Cerebras selectable models must come from the live /models catalog"
     );
 }
@@ -536,6 +547,10 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
             .to_ascii_lowercase()
             .contains("authorization: bearer sk-live-catalog"),
         "catalog request should include saved API key auth header: {request}"
+    );
+    assert!(
+        request.to_ascii_lowercase().contains("user-agent: jcode/"),
+        "catalog requests must include a User-Agent because providers like Cerebras reject bare HTTP clients: {request}"
     );
 
     let display = provider.available_models_display();

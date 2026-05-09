@@ -100,6 +100,11 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(COMTEGRA_PROFILE.api_base, "https://llm.comtegra.cloud/v1");
     assert_eq!(COMTEGRA_PROFILE.default_model, Some("glm-51-nvfp4"));
     assert_eq!(COMTEGRA_PROFILE.api_key_env, "COMTEGRA_API_KEY");
+    assert_eq!(CEREBRAS_PROFILE.api_base, "https://api.cerebras.ai/v1");
+    assert_eq!(
+        CEREBRAS_PROFILE.default_model,
+        Some("qwen-3-235b-a22b-instruct-2507")
+    );
     assert!(!OPENAI_COMPAT_PROFILE.setup_url.contains("opencode.ai"));
 }
 
