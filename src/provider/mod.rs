@@ -9,6 +9,7 @@ pub mod copilot;
 pub mod cursor;
 mod dispatch;
 mod failover;
+mod fingerprint;
 pub mod gemini;
 pub mod jcode;
 pub mod models;

@@ -335,6 +335,58 @@ pub(super) async fn try_persistent_ws_continuation(
     continuation_request["store"] = serde_json::json!(false);
     continuation_request["parallel_tool_calls"] = serde_json::json!(false);
 
+    let continuation_tools = continuation_request
+        .get("tools")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let continuation_instructions = continuation_request.get("instructions").cloned();
+    let continuation_tool_count = continuation_tools
+        .as_array()
+        .map(|tools| tools.len())
+        .unwrap_or(0);
+    let model_for_fingerprint = continuation_request
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let continuation_payload = serde_json::json!({
+        "type": continuation_request.get("type"),
+        "previous_response_id_hash": crate::provider::fingerprint::stable_hash_str(&previous_response_id),
+        "model": continuation_request.get("model"),
+        "instructions": continuation_request.get("instructions"),
+        "input": &incremental_items,
+        "tools": continuation_request.get("tools"),
+        "tool_choice": continuation_request.get("tool_choice"),
+        "parallel_tool_calls": continuation_request.get("parallel_tool_calls"),
+        "reasoning": continuation_request.get("reasoning"),
+        "context_management": continuation_request.get("context_management"),
+        "include": continuation_request.get("include"),
+    });
+    crate::provider::fingerprint::log_provider_canonical_input(
+        "openai",
+        model_for_fingerprint,
+        "openai_responses_ws_delta",
+        &continuation_payload,
+        &incremental_items,
+        continuation_instructions.as_ref(),
+        Some(&continuation_tools),
+        Some(continuation_tool_count),
+        &[
+            (
+                "previous_response_id_present",
+                (!previous_response_id.is_empty()).to_string(),
+            ),
+            ("input_item_count", input_item_count.to_string()),
+            (
+                "last_input_item_count",
+                state.last_input_item_count.to_string(),
+            ),
+            (
+                "incremental_item_count",
+                incremental_items.len().to_string(),
+            ),
+        ],
+    );
+
     let request_text = match serde_json::to_string(&continuation_request) {
         Ok(t) => t,
         Err(e) => return PersistentWsResult::Failed(format!("serialize error: {}", e)),

@@ -573,6 +573,45 @@ impl Provider for OpenRouterProvider {
             request["provider"] = obj;
         }
 
+        let message_items = request
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tools_value = request.get("tools").cloned();
+        let system_value = message_items
+            .first()
+            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
+            .cloned();
+        let tool_count = tools_value
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .map(|tools| tools.len())
+            .unwrap_or(0);
+        crate::provider::fingerprint::log_provider_canonical_input(
+            if self.supports_provider_features {
+                "openrouter"
+            } else {
+                "openai-compatible"
+            },
+            &model,
+            "chat_completions",
+            &request,
+            &message_items,
+            system_value.as_ref(),
+            tools_value.as_ref(),
+            Some(tool_count),
+            &[
+                ("cache_supported", cache_supported.to_string()),
+                ("cache_control_added", cache_control_added.to_string()),
+                ("thinking_enabled", format!("{:?}", thinking_enabled)),
+                (
+                    "provider_features",
+                    self.supports_provider_features.to_string(),
+                ),
+            ],
+        );
+
         // OpenRouter uses HTTPS/SSE transport only
         crate::logging::info("OpenRouter transport: HTTPS (SSE)");
 

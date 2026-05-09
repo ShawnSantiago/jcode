@@ -105,6 +105,12 @@ fn task_context_snapshot() -> Option<LogContext> {
     contexts.get(&task_id).cloned()
 }
 
+/// Snapshot the current logging context for diagnostics that need stable,
+/// session-scoped in-memory keys in addition to the rendered log prefix.
+pub fn current_context_snapshot() -> LogContext {
+    task_context_snapshot().unwrap_or_else(|| LOG_CONTEXT.with(|c| c.borrow().clone()))
+}
+
 fn context_prefix_for(ctx: &LogContext) -> String {
     let mut parts = Vec::new();
 

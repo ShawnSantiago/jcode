@@ -1005,6 +1005,33 @@ impl Provider for CopilotApiProvider {
         }
         let built_messages = Self::build_messages(system, messages);
         let built_tools = Self::build_tools(tools);
+        let model_for_fingerprint = self.model();
+        let canonical_payload = json!({
+            "model": &model_for_fingerprint,
+            "messages": &built_messages,
+            "tools": &built_tools,
+            "max_tokens": 32_768u32,
+        });
+        let system_value = built_messages
+            .first()
+            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
+            .cloned();
+        let tools_value = if built_tools.is_empty() {
+            None
+        } else {
+            Some(Value::Array(built_tools.clone()))
+        };
+        super::fingerprint::log_provider_canonical_input(
+            "copilot",
+            &model_for_fingerprint,
+            "chat_completions",
+            &canonical_payload,
+            &built_messages,
+            system_value.as_ref(),
+            tools_value.as_ref(),
+            Some(built_tools.len()),
+            &[("user_initiated", is_user_initiated.to_string())],
+        );
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 

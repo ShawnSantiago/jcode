@@ -66,6 +66,47 @@ impl Provider for OpenAIProvider {
             OpenAITransportMode::WebSocket => true,
             OpenAITransportMode::Auto => Self::should_prefer_websocket(&model_id),
         };
+        let request_tools = request
+            .get("tools")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let request_instructions = request.get("instructions").cloned();
+        let request_tool_count = request_tools
+            .as_array()
+            .map(|tools| tools.len())
+            .unwrap_or(api_tools.len());
+        let canonical_payload = serde_json::json!({
+            "model": request.get("model"),
+            "instructions": request.get("instructions"),
+            "input": &input,
+            "tools": request.get("tools"),
+            "tool_choice": request.get("tool_choice"),
+            "parallel_tool_calls": request.get("parallel_tool_calls"),
+            "reasoning": request.get("reasoning"),
+            "context_management": request.get("context_management"),
+            "include": request.get("include"),
+            "prompt_cache_key": request.get("prompt_cache_key"),
+            "prompt_cache_retention": request.get("prompt_cache_retention"),
+        });
+        crate::provider::fingerprint::log_provider_canonical_input(
+            "openai",
+            &model_id,
+            "openai_responses_full",
+            &canonical_payload,
+            &input,
+            request_instructions.as_ref(),
+            Some(&request_tools),
+            Some(request_tool_count),
+            &[
+                (
+                    "transport_mode",
+                    transport_mode_snapshot.as_str().to_string(),
+                ),
+                ("websocket_preferred", use_websocket_transport.to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                ("chatgpt_mode", is_chatgpt_mode.to_string()),
+            ],
+        );
         let usage_snapshot = crate::usage::get_openai_usage_sync();
         crate::logging::info(&format!(
             "OpenAI limit diag: request start model={} transport_mode={} websocket_preferred={} usage=({}) provider=({})",
