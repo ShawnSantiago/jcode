@@ -1330,10 +1330,9 @@ impl Provider for MultiProvider {
 
         let already_has_cursor = self.cursor_provider().is_some();
         if !already_has_cursor
-            && matches!(
-                crate::auth::AuthStatus::check_fast().cursor,
-                crate::auth::AuthState::Available
-            )
+            && crate::auth::AuthStatus::check_fast()
+                .assessment_for_provider(crate::provider_catalog::CURSOR_LOGIN_PROVIDER)
+                .is_available()
         {
             crate::logging::info("Hot-initialized Cursor provider after login");
             *self

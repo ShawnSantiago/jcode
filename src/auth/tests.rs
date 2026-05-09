@@ -87,6 +87,36 @@ fn provider_auth_default() {
 }
 
 #[test]
+fn provider_auth_assessment_predicates_reflect_state() {
+    fn assessment_with_state(state: AuthState) -> ProviderAuthAssessment {
+        ProviderAuthAssessment {
+            state,
+            readiness: AuthReadinessLevel::None,
+            method_detail: "test".to_string(),
+            credential_source: AuthCredentialSource::None,
+            credential_source_detail: "not configured".to_string(),
+            expiry_confidence: AuthExpiryConfidence::Unknown,
+            refresh_support: AuthRefreshSupport::Unknown,
+            validation_method: AuthValidationMethod::Unknown,
+            last_validation: None,
+            last_refresh: None,
+        }
+    }
+
+    let not_configured = assessment_with_state(AuthState::NotConfigured);
+    assert!(!not_configured.is_configured());
+    assert!(!not_configured.is_available());
+
+    let expired = assessment_with_state(AuthState::Expired);
+    assert!(expired.is_configured());
+    assert!(!expired.is_available());
+
+    let available = assessment_with_state(AuthState::Available);
+    assert!(available.is_configured());
+    assert!(available.is_available());
+}
+
+#[test]
 fn command_exists_for_known_binary() {
     if cfg!(windows) {
         assert!(command_exists("cmd") || command_exists("cmd.exe"));
@@ -311,16 +341,14 @@ fn openrouter_like_status_is_provider_specific() {
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check_fast();
+    let chutes_assessment =
+        status.assessment_for_provider(crate::provider_catalog::CHUTES_LOGIN_PROVIDER);
+    let opencode_assessment =
+        status.assessment_for_provider(crate::provider_catalog::OPENCODE_LOGIN_PROVIDER);
+    assert!(chutes_assessment.is_available());
+    assert_eq!(opencode_assessment.state, AuthState::NotConfigured);
     assert_eq!(
-        status.state_for_provider(crate::provider_catalog::CHUTES_LOGIN_PROVIDER),
-        AuthState::Available
-    );
-    assert_eq!(
-        status.state_for_provider(crate::provider_catalog::OPENCODE_LOGIN_PROVIDER),
-        AuthState::NotConfigured
-    );
-    assert_eq!(
-        status.method_detail_for_provider(crate::provider_catalog::CHUTES_LOGIN_PROVIDER),
+        chutes_assessment.method_detail,
         "API key (`CHUTES_API_KEY`)".to_string()
     );
 

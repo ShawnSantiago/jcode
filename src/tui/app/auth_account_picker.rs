@@ -86,8 +86,9 @@ impl App {
         ));
 
         for provider in providers {
-            let auth_state = status.state_for_provider(provider);
-            let method_detail = status.method_detail_for_provider(provider);
+            let assessment = status.assessment_for_provider(provider);
+            let auth_state = assessment.state;
+            let method_detail = assessment.method_detail.as_str();
             let validation_detail = validation
                 .get(provider.id)
                 .map(crate::auth::validation::format_record_label)

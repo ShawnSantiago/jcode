@@ -5,7 +5,11 @@ pub use jcode_auth_types::{
 
 use serde::Serialize;
 
-/// Authentication status for all supported providers
+/// Cached low-level authentication snapshot for all supported providers.
+///
+/// This is the probe/cache substrate. New CLI and UI surfaces should prefer
+/// `AuthStatus::assessment_for_provider`, which normalizes these raw fields into
+/// the canonical provider auth contract (`ProviderAuthAssessment`).
 #[derive(Debug, Clone, Default)]
 pub struct AuthStatus {
     /// Jcode subscription router credentials
@@ -55,6 +59,12 @@ pub struct ProviderAuth {
     pub has_api_key: bool,
 }
 
+/// Canonical auth contract for one login provider.
+///
+/// This is the single structured answer that UI, CLI reports, diagnostics, and
+/// provider setup should consume when they need to explain or act on auth state.
+/// It combines the cached credential probe, source attribution, refresh metadata,
+/// and runtime validation records into one provider-scoped assessment.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderAuthAssessment {
     pub state: AuthState,
@@ -70,6 +80,14 @@ pub struct ProviderAuthAssessment {
 }
 
 impl ProviderAuthAssessment {
+    pub fn is_available(&self) -> bool {
+        self.state == AuthState::Available
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.state != AuthState::NotConfigured
+    }
+
     pub fn health_summary(&self) -> String {
         let mut parts = vec![
             format!("readiness: {}", self.readiness.label()),
