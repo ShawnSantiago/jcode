@@ -241,6 +241,35 @@ pub fn debug(message: &str) {
     }
 }
 
+/// Log a structured auth event with conservative redaction.
+///
+/// Callers should pass only non-secret metadata. This function still redacts any
+/// field whose key looks credential-like so accidental tokens/keys do not land in
+/// logs.
+#[expect(
+    clippy::collapsible_if,
+    reason = "Logger lock + optional logger branching is intentionally straightforward"
+)]
+pub fn auth_event(event: &str, provider: &str, fields: &[(&str, &str)]) {
+    let mut parts = vec![
+        format!("event={}", sanitize_log_value(event)),
+        format!("provider={}", sanitize_log_value(provider)),
+    ];
+    for (key, value) in fields {
+        parts.push(format!(
+            "{}={}",
+            sanitize_log_value(key),
+            redact_auth_field(key, value)
+        ));
+    }
+    let msg = format!("AUTH {}", parts.join(" "));
+    if let Ok(mut guard) = LOGGER.lock()
+        && let Some(logger) = guard.as_mut()
+    {
+        logger.write("AUTH", &msg);
+    }
+}
+
 /// Log a tool call
 #[expect(
     clippy::collapsible_if,
@@ -316,4 +345,24 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+fn redact_auth_field(key: &str, value: &str) -> String {
+    let key = key.to_ascii_lowercase();
+    if key.contains("token")
+        || key.contains("secret")
+        || key.contains("key")
+        || key.contains("credential")
+        || key.contains("callback")
+        || key.contains("code")
+        || key.contains("authorization")
+    {
+        return "<redacted>".to_string();
+    }
+    sanitize_log_value(value)
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    let value = value.replace(['\n', '\r', '\t'], " ");
+    truncate(&value, 160)
 }

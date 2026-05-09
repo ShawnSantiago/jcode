@@ -2193,9 +2193,12 @@ impl App {
 
     fn finish_azure_login(&mut self, use_entra: bool) {
         crate::auth::AuthStatus::invalidate_cache();
-        crate::cli::provider_init::lock_model_provider("openrouter");
-        if let Some(model) = crate::auth::azure::load_model() {
-            crate::env::set_var("JCODE_OPENROUTER_MODEL", model);
+        if let Err(err) = crate::provider::activation::apply_azure_openai_runtime() {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Failed to activate Azure OpenAI runtime: {}",
+                err
+            )));
+            return;
         }
         crate::telemetry::record_auth_success(
             "azure",

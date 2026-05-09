@@ -1,5 +1,6 @@
 mod accessors;
 mod account_failover;
+pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;

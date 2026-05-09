@@ -235,6 +235,13 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
         return Some("jcode".to_string());
     }
 
+    if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
+        let runtime_provider = runtime_provider.trim().to_ascii_lowercase();
+        if !runtime_provider.is_empty() && runtime_provider != "openai-compatible" {
+            return Some(runtime_provider);
+        }
+    }
+
     if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
         let namespace = namespace.trim().to_ascii_lowercase();
         if !namespace.is_empty() {

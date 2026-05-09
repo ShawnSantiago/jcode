@@ -30,6 +30,45 @@ fn test_session_exists_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "azure-openai");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-cache");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("openrouter").as_deref(),
+        Some("azure-openai")
+    );
+}
+
+#[test]
+fn derive_session_provider_key_falls_back_to_openrouter_namespace() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("openrouter").as_deref(),
+        Some("azure-openai")
+    );
+}
+
+#[test]
+fn derive_session_provider_key_keeps_openai_compatible_profile_namespace() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai-compatible");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "zai");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("openrouter").as_deref(),
+        Some("zai")
+    );
+}
+
+#[test]
 fn rename_title_preserves_generated_title_for_clear() {
     let mut session = Session::create_with_id(
         "session_rename_clear_123".to_string(),
