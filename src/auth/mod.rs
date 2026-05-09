@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod external;
 pub mod gemini;
 pub mod google;
+pub mod integration;
 pub mod login_diagnostics;
 pub mod login_flows;
 pub mod oauth;
