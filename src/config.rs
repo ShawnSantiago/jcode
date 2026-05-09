@@ -13,13 +13,121 @@ pub use jcode_config_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
+use std::time::SystemTime;
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigCacheFingerprint {
+    path: Option<PathBuf>,
+    modified: Option<SystemTime>,
+    len: Option<u64>,
+    env: Vec<(String, String)>,
+}
 
-/// Get the global config instance (loaded once on first access)
+impl ConfigCacheFingerprint {
+    fn current() -> Self {
+        let path = Config::path();
+        let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
+        Self {
+            path,
+            modified: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
+            len: metadata.as_ref().map(std::fs::Metadata::len),
+            env: config_env_fingerprint(),
+        }
+    }
+}
+
+struct ConfigCache {
+    config: &'static Config,
+    fingerprint: ConfigCacheFingerprint,
+    force_reload: bool,
+}
+
+static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
+    let fingerprint = ConfigCacheFingerprint::current();
+    RwLock::new(ConfigCache {
+        config: leak_config(Config::load()),
+        fingerprint,
+        force_reload: false,
+    })
+});
+
+fn leak_config(config: Config) -> &'static Config {
+    Box::leak(Box::new(config))
+}
+
+/// Get the global config instance.
+///
+/// The returned reference is backed by a reloadable process cache. Each call
+/// checks the config file path/metadata and relevant environment overrides; when
+/// those inputs change, the next call reloads config.toml and invalidates
+/// dependent auth/model caches. Older references remain valid for the duration of
+/// any in-flight operation.
 pub fn config() -> &'static Config {
-    CONFIG.get_or_init(Config::load)
+    let fingerprint = ConfigCacheFingerprint::current();
+    if let Ok(cache) = CONFIG_CACHE.read()
+        && !cache.force_reload
+        && cache.fingerprint == fingerprint
+    {
+        return cache.config;
+    }
+
+    let mut reloaded = false;
+    let config = {
+        let mut cache = CONFIG_CACHE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fingerprint = ConfigCacheFingerprint::current();
+        if cache.force_reload || cache.fingerprint != fingerprint {
+            cache.config = leak_config(Config::load());
+            cache.fingerprint = fingerprint;
+            cache.force_reload = false;
+            reloaded = true;
+        }
+        cache.config
+    };
+
+    if reloaded {
+        notify_config_reloaded();
+    }
+
+    config
+}
+
+fn config_env_fingerprint() -> Vec<(String, String)> {
+    let mut values = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_string_lossy().to_string();
+            if key == "JCODE_HOME"
+                || key == "HOME"
+                || key == "XDG_CONFIG_HOME"
+                || key.starts_with("JCODE_")
+            {
+                Some((key, value.to_string_lossy().to_string()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+    values
+}
+
+pub(crate) fn invalidate_config_cache() {
+    let mut cache = CONFIG_CACHE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.force_reload = true;
+    drop(cache);
+    notify_config_reloaded();
+}
+
+fn notify_config_reloaded() {
+    crate::auth::AuthStatus::invalidate_cache();
+    crate::bus::Bus::global().publish_models_updated();
 }
 
 /// Main configuration struct

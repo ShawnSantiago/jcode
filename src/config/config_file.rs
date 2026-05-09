@@ -46,7 +46,13 @@ impl Config {
 
         let content = toml::to_string_pretty(self)?;
         std::fs::write(&path, content)?;
+        Self::invalidate_cache();
         Ok(())
+    }
+
+    /// Mark the process-cached config as stale and notify dependent caches.
+    pub fn invalidate_cache() {
+        super::invalidate_config_cache();
     }
 
     /// Update the copilot premium mode in the config file.
@@ -69,12 +75,6 @@ impl Config {
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
         cfg.save()?;
-
-        // Update the global singleton so current session reflects the change
-        let global = CONFIG.get_or_init(|| cfg.clone());
-        // CONFIG is a OnceLock so we can't mutate it directly, but the file is saved
-        // and will take effect on next restart. For this session we log it.
-        let _ = global; // suppress unused
         crate::logging::info(&format!(
             "Saved default model: {}, provider: {}",
             model.unwrap_or("(none)"),
