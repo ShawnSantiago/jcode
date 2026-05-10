@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::auth::lifecycle::{
     AuthActivationRequest, AuthActivationResult, AuthCatalogInvariantReport, activate_auth_change,
-    validate_catalog_invariants,
+    provider_model_to_select_after_auth, validate_catalog_invariants,
 };
 use crate::auth::test_sandbox::AuthTestSandbox;
 use crate::protocol::{
@@ -874,6 +874,108 @@ mod tests {
                     result.failure_report(&spec)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn provider_switch_reauth_matrix_recovers_from_stale_previous_provider_state() {
+        let profiles = crate::provider_catalog::openai_compatible_profiles();
+        assert!(
+            profiles.len() >= 2,
+            "switch/reauth matrix needs at least two OpenAI-compatible providers"
+        );
+
+        for window in profiles.windows(2) {
+            let previous_profile = window[0];
+            let reauth_profile = window[1];
+            let driver = AuthLifecycleDriver::new().expect("driver");
+            let previous_spec = AuthLifecycleSpec::openai_compatible_fixture(
+                previous_profile,
+                AuthLifecycleAuthPath::RemoteTuiPasteApiKey,
+            );
+            let reauth_spec = AuthLifecycleSpec::openai_compatible_fixture(
+                reauth_profile,
+                AuthLifecycleAuthPath::RemoteTuiPasteApiKey,
+            );
+
+            let previous = driver
+                .run_openai_compatible_fixture(&previous_spec)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "previous provider {} setup failed: {error:?}",
+                        previous_spec.provider_id
+                    )
+                });
+            let reauth = driver
+                .run_openai_compatible_fixture(&reauth_spec)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "reauth provider {} setup failed: {error:?}",
+                        reauth_spec.provider_id
+                    )
+                });
+
+            let stale_selected_model = previous.picker.selected_model.as_deref();
+            let mut mixed_routes = previous.catalog_routes.clone();
+            mixed_routes.extend(reauth.catalog_routes.clone());
+            let session_model_after_reauth = provider_model_to_select_after_auth(
+                &reauth.activation,
+                stale_selected_model,
+                &mixed_routes,
+            )
+            .or_else(|| stale_selected_model.map(ToString::to_string));
+            let catalog_report = validate_catalog_invariants(
+                &reauth.activation,
+                session_model_after_reauth.as_deref(),
+                &mixed_routes,
+            );
+            let picker = PickerSnapshot::build(
+                &reauth_spec,
+                &reauth.activation,
+                session_model_after_reauth.as_deref(),
+                &mixed_routes,
+            );
+
+            assert!(
+                catalog_report.ok(),
+                "reauth of {} after {} left stale selected/catalog state: {:?}",
+                reauth_spec.provider_id,
+                previous_spec.provider_id,
+                catalog_report.warning_message()
+            );
+            assert!(
+                session_model_after_reauth.as_ref().is_some_and(|selected| picker
+                    .provider_entries
+                    .iter()
+                    .any(|entry| entry == selected)),
+                "reauth of {} after {} selected {:?}, picker entries {:?}",
+                reauth_spec.provider_id,
+                previous_spec.provider_id,
+                session_model_after_reauth,
+                picker.provider_entries
+            );
+            assert!(
+                picker
+                    .provider_entries
+                    .iter()
+                    .all(|entry| reauth.catalog_routes.iter().any(|route| route.model == *entry)),
+                "reauth picker for {} leaked previous provider {} entries: {:?}",
+                reauth_spec.provider_id,
+                previous_spec.provider_id,
+                picker.provider_entries
+            );
+            assert!(
+                picker
+                    .switch_request
+                    .as_deref()
+                    .is_some_and(|request| request.starts_with(&format!(
+                        "{}:",
+                        reauth_spec.provider_id
+                    ))),
+                "reauth picker switch must target {}, got {:?}",
+                reauth_spec.provider_id,
+                picker.switch_request
+            );
         }
     }
 
