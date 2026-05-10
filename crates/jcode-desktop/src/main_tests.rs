@@ -562,6 +562,41 @@ fn single_session_unknown_slash_command_stays_local() {
 }
 
 #[test]
+fn single_session_slash_copy_uses_latest_assistant_response_without_submitting() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::assistant("completed answer"));
+    app.handle_key(KeyInput::Character("/copy".to_string()));
+
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::CopyLatestResponse("completed answer".to_string())
+    );
+    assert!(app.draft.is_empty());
+    assert_eq!(app.messages.len(), 1);
+
+    app.handle_key(KeyInput::Character("/copy".to_string()));
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "streaming answer".to_string(),
+    ));
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::CopyLatestResponse("streaming answer".to_string())
+    );
+}
+
+#[test]
+fn single_session_slash_copy_reports_missing_response_locally() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/copy".to_string()));
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert!(app.messages.is_empty());
+    assert!(app.draft.is_empty());
+    assert_eq!(app.status.as_deref(), Some("no assistant response to copy"));
+}
+
+#[test]
 fn single_session_transcript_roles_render_without_stringly_labels() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("question"));
