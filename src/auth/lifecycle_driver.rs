@@ -195,6 +195,7 @@ impl AuthLifecycleResult {
             "{}",
             self.failure_report(spec)
         );
+        self.assert_transcript_order(spec);
         for forbidden in [
             "Auth Model Catalog Warning",
             "did not switch models",
@@ -266,6 +267,45 @@ impl AuthLifecycleResult {
             "happy auth lifecycle accepted a static fallback route:\n{}",
             self.failure_report(spec)
         );
+    }
+
+    fn assert_transcript_order(&self, spec: &AuthLifecycleSpec) {
+        let transcript = self.transcript_text();
+        let saved_or_detected = if spec.auth_path.shows_paste_prompt() {
+            format!("**{} API key saved.**", spec.provider_label)
+        } else {
+            format!("**{} credentials detected.**", spec.provider_label)
+        };
+        let markers = [
+            saved_or_detected.as_str(),
+            "**Auth Change Received**",
+            "**Auth Model Routes Updating**",
+            "**Auth Model Catalog Updated**",
+        ];
+        let mut previous = None;
+        for marker in markers {
+            let first = transcript.find(marker).unwrap_or_else(|| {
+                panic!(
+                    "happy auth lifecycle transcript is missing `{marker}`:\n{}",
+                    self.failure_report(spec)
+                )
+            });
+            let last = transcript.rfind(marker).expect("marker found above");
+            assert_eq!(
+                first,
+                last,
+                "happy auth lifecycle transcript contained duplicate `{marker}`:\n{}",
+                self.failure_report(spec)
+            );
+            if let Some(previous) = previous {
+                assert!(
+                    previous < first,
+                    "happy auth lifecycle transcript marker `{marker}` was out of order:\n{}",
+                    self.failure_report(spec)
+                );
+            }
+            previous = Some(first);
+        }
     }
 
     pub(crate) fn transcript_text(&self) -> String {
@@ -815,6 +855,45 @@ mod tests {
         assert!(
             message.contains("static fallback"),
             "unexpected assertion failure: {message}"
+        );
+    }
+
+    #[test]
+    fn auth_lifecycle_success_rejects_duplicate_or_out_of_order_transcript_markers() {
+        let driver = AuthLifecycleDriver::new().expect("driver");
+        let spec = AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
+        let result = driver
+            .run_openai_compatible_fixture(&spec)
+            .expect("lifecycle result");
+
+        let mut duplicated = result.clone();
+        duplicated
+            .transcript
+            .push("**Auth Model Catalog Updated**\n\nDuplicate final success.".to_string());
+        let duplicate_panic = std::panic::catch_unwind(|| duplicated.assert_success(&spec))
+            .expect_err("duplicate final catalog update must not satisfy happy auth lifecycle");
+        let duplicate_message = duplicate_panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| duplicate_panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+        assert!(
+            duplicate_message.contains("duplicate"),
+            "unexpected assertion failure: {duplicate_message}"
+        );
+
+        let mut out_of_order = result.clone();
+        out_of_order.transcript.swap(1, 3);
+        let order_panic = std::panic::catch_unwind(|| out_of_order.assert_success(&spec))
+            .expect_err("out-of-order auth transcript must not satisfy happy lifecycle");
+        let order_message = order_panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| order_panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+        assert!(
+            order_message.contains("out of order"),
+            "unexpected assertion failure: {order_message}"
         );
     }
 
