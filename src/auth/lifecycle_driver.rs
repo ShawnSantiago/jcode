@@ -58,18 +58,35 @@ pub(crate) struct AuthLifecycleSpec {
 
 impl AuthLifecycleSpec {
     pub(crate) fn cerebras_fixture(auth_path: AuthLifecycleAuthPath) -> Self {
+        let mut spec =
+            Self::openai_compatible_fixture(crate::provider_catalog::CEREBRAS_PROFILE, auth_path);
+        spec.catalog_models_after_auth = vec![
+            "qwen-3-235b-a22b-instruct-2507".to_string(),
+            "llama3.1-8b".to_string(),
+            "gpt-oss-120b".to_string(),
+        ];
+        spec.selected_model_override = None;
+        spec
+    }
+
+    pub(crate) fn openai_compatible_fixture(
+        profile: OpenAiCompatibleProfile,
+        auth_path: AuthLifecycleAuthPath,
+    ) -> Self {
+        let default_model = profile.default_model.unwrap_or("fixture-model");
+        let mut catalog_models_after_auth = vec![default_model.to_string()];
+        catalog_models_after_auth.push(format!("{}-alternate-fixture-model", profile.id));
         Self {
-            provider_id: "cerebras",
-            provider_label: "Cerebras",
-            profile: crate::provider_catalog::CEREBRAS_PROFILE,
+            provider_id: profile.id,
+            provider_label: profile.display_name,
+            profile,
             auth_path,
-            api_key: "test-cerebras-key".to_string(),
-            catalog_models_after_auth: vec![
-                "qwen-3-235b-a22b-instruct-2507".to_string(),
-                "llama3.1-8b".to_string(),
-                "gpt-oss-120b".to_string(),
-            ],
-            selected_model_override: None,
+            api_key: format!("test-{}-key", profile.id),
+            catalog_models_after_auth,
+            selected_model_override: profile
+                .default_model
+                .is_none()
+                .then(|| default_model.to_string()),
             current_runtime_provider_name: "mock-auth",
         }
     }
@@ -612,6 +629,47 @@ mod tests {
                     result
                         .transcript_text()
                         .contains("**Cerebras credentials detected.**")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openai_compatible_provider_matrix_preserves_identity_catalog_and_picker() {
+        let auth_paths = [
+            AuthLifecycleAuthPath::RemoteTuiPasteApiKey,
+            AuthLifecycleAuthPath::EnvFilePreseeded,
+            AuthLifecycleAuthPath::ProcessEnvPreseeded,
+        ];
+
+        for profile in crate::provider_catalog::openai_compatible_profiles() {
+            for auth_path in auth_paths {
+                let driver = AuthLifecycleDriver::new().unwrap_or_else(|error| {
+                    panic!(
+                        "driver for provider {} via {:?}: {error:?}",
+                        profile.id, auth_path
+                    )
+                });
+                let spec = AuthLifecycleSpec::openai_compatible_fixture(*profile, auth_path);
+
+                let result = driver
+                    .run_openai_compatible_fixture(&spec)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "lifecycle setup failed for provider {} via {:?}: {error:?}",
+                            profile.id, auth_path
+                        )
+                    });
+
+                result.assert_success(&spec);
+                assert!(
+                    result
+                        .picker
+                        .switch_request
+                        .as_deref()
+                        .is_some_and(|request| request.starts_with("openrouter:")),
+                    "{}",
+                    result.failure_report(&spec)
                 );
             }
         }
