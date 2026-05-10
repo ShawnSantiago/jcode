@@ -1559,7 +1559,10 @@ impl App {
                             crate::provider_catalog::apply_openai_compatible_profile_env(Some(
                                 profile,
                             ));
-                            self.start_openai_compatible_post_login_activation(provider.clone());
+                            self.start_openai_compatible_post_login_activation(
+                                profile.id.to_string(),
+                                provider.clone(),
+                            );
                         }
 
                         let effective_default_model = resolved_openai_compatible
@@ -1960,7 +1963,11 @@ impl App {
         }
     }
 
-    pub(super) fn start_openai_compatible_post_login_activation(&mut self, provider_label: String) {
+    pub(super) fn start_openai_compatible_post_login_activation(
+        &mut self,
+        provider_id: String,
+        provider_label: String,
+    ) {
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::catalog(
                 Some(self.session.id.clone()),
@@ -1997,18 +2004,18 @@ impl App {
                             before_routes,
                             routes.clone(),
                         );
+                        let expected_api_method = format!("openai-compatible:{}", provider_id);
                         let selected = routes
                             .iter()
                             .find(|route| {
                                 route.available
-                                    && route.provider == provider_label
-                                    && route.api_method.starts_with("openai-compatible")
+                                    && route.api_method.eq_ignore_ascii_case(&expected_api_method)
                                     && crate::provider::is_listable_model_name(&route.model)
                             })
                             .or_else(|| {
                                 routes.iter().find(|route| {
                                     route.available
-                                        && route.provider == provider_label
+                                        && route.api_method.eq_ignore_ascii_case(&provider_id)
                                         && crate::provider::is_listable_model_name(&route.model)
                                 })
                             })

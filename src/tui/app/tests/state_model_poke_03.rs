@@ -81,21 +81,25 @@ struct EmptyPostLoginCatalogProvider {
 impl AuthUxStateSpaceProvider {
     fn routes(&self) -> Vec<crate::provider::ModelRoute> {
         let authed = self.authed.load(Ordering::SeqCst);
-        ["state-space-alpha", "state-space-beta"]
-            .into_iter()
-            .map(|model| crate::provider::ModelRoute {
-                model: model.to_string(),
-                provider: "StateSpace".to_string(),
-                api_method: "openai-compatible-test".to_string(),
-                available: authed,
-                detail: if authed {
-                    "fresh catalog route".to_string()
-                } else {
-                    "no API key".to_string()
-                },
-                cheapness: None,
-            })
-            .collect()
+        [
+            ("wrong-profile-first", "openai-compatible:other-provider"),
+            ("state-space-alpha", "openai-compatible:state-space"),
+            ("state-space-beta", "openai-compatible:state-space"),
+        ]
+        .into_iter()
+        .map(|(model, api_method)| crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "StateSpace".to_string(),
+            api_method: api_method.to_string(),
+            available: authed,
+            detail: if authed {
+                "fresh catalog route".to_string()
+            } else {
+                "no API key".to_string()
+            },
+            cheapness: None,
+        })
+        .collect()
     }
 }
 
@@ -326,7 +330,10 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     while bus_rx.try_recv().is_ok() {}
 
     let _guard = rt.enter();
-    app.start_openai_compatible_post_login_activation("StateSpace".to_string());
+    app.start_openai_compatible_post_login_activation(
+        "state-space".to_string(),
+        "StateSpace".to_string(),
+    );
     assert_eq!(
         app.status_notice(),
         Some("StateSpace: fetching models...".to_string())
@@ -345,7 +352,11 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
             }
         }
     });
-    assert_eq!(refreshes.load(Ordering::SeqCst), 1, "auth completion must refresh the model catalog exactly once");
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        1,
+        "auth completion must refresh the model catalog exactly once"
+    );
 
     super::local::handle_bus_event(&mut app, Ok(activation));
     assert!(
@@ -360,9 +371,15 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     assert!(last.content.contains("Use `/model`"));
     assert!(!last.content.contains("model picker is open"));
 
-    assert!(super::model_context::handle_model_command(&mut app, "/model state-space-beta"));
+    assert!(super::model_context::handle_model_command(
+        &mut app,
+        "/model state-space-beta"
+    ));
     assert_eq!(app.session.model.as_deref(), Some("state-space-beta"));
-    assert_eq!(app.status_notice(), Some("Model → state-space-beta".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Model → state-space-beta".to_string())
+    );
 }
 
 #[test]
@@ -387,17 +404,27 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
     while bus_rx.try_recv().is_ok() {}
 
     let _guard = rt.enter();
-    app.start_openai_compatible_post_login_activation("Cerebras".to_string());
+    app.start_openai_compatible_post_login_activation(
+        "cerebras".to_string(),
+        "Cerebras".to_string(),
+    );
 
-    let login = rt.block_on(async {
+    let activity = rt.block_on(async {
         loop {
             match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
                 Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
                     panic!("empty catalog must not activate a provider model")
                 }
-                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => break login,
+                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
+                    panic!("empty local catalog must not publish final login failure: {login:?}")
+                }
+                Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
+                    if activity.message.contains("Model Discovery Still Updating") =>
+                {
+                    break activity;
+                }
                 Ok(Ok(_)) => continue,
-                other => panic!("expected LoginCompleted event, got {other:?}"),
+                other => panic!("expected pending catalog activity, got {other:?}"),
             }
         }
     });
@@ -408,11 +435,11 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
         0,
         "post-login activation must not try the metadata default when the catalog has no selectable route"
     );
-    assert!(!login.success);
-    assert!(login.message.contains("no selectable Cerebras models"));
-    assert!(login.message.contains("did not switch models"));
-    assert!(!login.message.contains("documented default"));
-    assert!(!login.message.contains("qwen-3-coder-480b"));
+    assert!(activity.message.contains("Saved credentials are active"));
+    assert!(activity.message.contains("Jcode is still processing"));
+    assert!(!activity.message.contains("did not switch models"));
+    assert!(!activity.message.contains("documented default"));
+    assert!(!activity.message.contains("qwen-3-coder-480b"));
 }
 
 #[test]
