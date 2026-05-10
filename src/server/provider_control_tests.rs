@@ -152,10 +152,12 @@ impl Drop for EnvGuard {
 
 #[tokio::test]
 async fn notify_auth_changed_emits_available_models_updated_after_provider_update() {
+    let _guard = EnvGuard::save(&[]);
     crate::bus::reset_models_updated_publish_state_for_tests();
     let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
     let registry = Registry::empty();
     let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let session_id = { agent.lock().await.session_id().to_string() };
     let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
         "test-session".to_string(),
         Arc::clone(&agent),
@@ -166,6 +168,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
 
     handle_notify_auth_changed(
         42,
+        None,
         None,
         &provider,
         &provider,
@@ -226,6 +229,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
             match bus_rx.recv().await.expect("bus should stay open") {
                 crate::bus::BusEvent::UiActivity(activity)
                     if activity.kind == crate::bus::UiActivityKind::Catalog
+                        && activity.session_id.as_deref() == Some(session_id.as_str())
                         && activity.message.contains("Auth Model Catalog Updated") =>
                 {
                     break activity;
@@ -249,6 +253,7 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
 
 #[tokio::test]
 async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
+    let _guard = EnvGuard::save(&[]);
     crate::bus::reset_models_updated_publish_state_for_tests();
     let current_provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
     let busy_provider = Arc::new(AuthChangeMockProvider::new());
@@ -269,6 +274,7 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
 
     handle_notify_auth_changed(
         43,
+        None,
         None,
         &current_provider,
         &current_provider,
@@ -343,6 +349,7 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
     handle_notify_auth_changed(
         44,
         Some("Azure OpenAI".to_string()),
+        None,
         &provider,
         &provider,
         &sessions,
@@ -451,6 +458,99 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
     assert_eq!(
         model_switch_request_for_runtime_hint(hint, "mock-auth", "llama3.1-8b"),
         "openrouter:llama3.1-8b"
+    );
+}
+
+#[tokio::test]
+async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_identity() {
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let provider = Arc::new(AuthChangeMockProvider::new());
+    let provider: Arc<dyn Provider> = provider;
+    let registry = Registry::empty();
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let session_id = { agent.lock().await.session_id().to_string() };
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    let mut auth = crate::protocol::AuthChanged::new("cerebras");
+    auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
+    auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new(
+        "openai-compatible",
+    ));
+    auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new("cerebras"));
+
+    handle_notify_auth_changed(
+        45,
+        Some("openai".to_string()),
+        Some(auth),
+        &provider,
+        &provider,
+        &sessions,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Done { id: 45 })
+    ));
+
+    let final_activity = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match bus_rx.recv().await.expect("bus should stay open") {
+                crate::bus::BusEvent::UiActivity(activity)
+                    if activity.kind == crate::bus::UiActivityKind::Catalog
+                        && activity.session_id.as_deref() == Some(session_id.as_str())
+                        && activity.message.contains("Auth Model Catalog Updated") =>
+                {
+                    break activity;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("expected final auth catalog activity");
+
+    assert!(
+        final_activity
+            .message
+            .contains("Cerebras credentials are active"),
+        "typed auth event should control user-visible provider label, got: {}",
+        final_activity.message
+    );
+    assert!(
+        !final_activity
+            .message
+            .contains("OpenAI credentials are active"),
+        "stale legacy provider identity leaked into user-visible auth message: {}",
+        final_activity.message
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
+        Ok("cerebras")
     );
 }
 

@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use crate::agent::Agent;
-use crate::protocol::ServerEvent;
+use crate::protocol::{AuthChanged, ServerEvent};
 use crate::provider::{ModelCatalogRefreshSummary, ModelRoute, Provider};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -186,6 +186,24 @@ fn normalized_auth_provider_hint(provider_hint: Option<&str>) -> Option<&'static
     } else {
         None
     }
+}
+
+fn auth_provider_hint_for_request(
+    provider_hint: Option<String>,
+    auth: Option<&AuthChanged>,
+) -> Option<String> {
+    auth.map(|auth| auth.provider.as_str().to_string())
+        .or(provider_hint)
+}
+
+fn auth_provider_display_label(provider_hint: Option<&str>) -> Option<String> {
+    let provider = normalized_auth_provider_hint(provider_hint)?;
+    if provider == "azure-openai" {
+        return Some("Azure OpenAI".to_string());
+    }
+    crate::provider_catalog::openai_compatible_profile_by_id(provider)
+        .map(|profile| profile.display_name.to_string())
+        .or_else(|| Some(provider.to_string()))
 }
 
 fn apply_auth_provider_runtime_hint(provider_hint: Option<&str>) -> Option<String> {
@@ -605,6 +623,7 @@ pub(super) async fn handle_set_compaction_mode(
 pub(super) async fn handle_notify_auth_changed(
     id: u64,
     provider_hint: Option<String>,
+    auth: Option<AuthChanged>,
     provider: &Arc<dyn Provider>,
     provider_template: &Arc<dyn Provider>,
     sessions: &SessionAgents,
@@ -616,6 +635,8 @@ pub(super) async fn handle_notify_auth_changed(
         let agent_guard = agent.lock().await;
         agent_guard.session_id().to_string()
     };
+    let provider_hint = auth_provider_hint_for_request(provider_hint, auth.as_ref());
+    let provider_label = auth_provider_display_label(provider_hint.as_deref());
     crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
         crate::bus::UiActivity::auth(
             Some(session_id.clone()),
@@ -693,7 +714,9 @@ pub(super) async fn handle_notify_auth_changed(
             crate::bus::UiActivity::catalog(
                 Some(session_id),
                 format_auth_catalog_refresh_complete(
-                    latest_snapshot.provider_name.as_deref(),
+                    provider_label
+                        .as_deref()
+                        .or(latest_snapshot.provider_name.as_deref()),
                     latest_snapshot.provider_model.as_deref(),
                     &summary,
                 ),

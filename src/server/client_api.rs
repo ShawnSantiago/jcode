@@ -290,6 +290,7 @@ impl Client {
         let request = Request::NotifyAuthChanged {
             id,
             provider: provider.map(str::to_string),
+            auth: None,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

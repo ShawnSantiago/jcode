@@ -371,9 +371,10 @@ pub(super) async fn handle_bus_event(
         Ok(BusEvent::LoginCompleted(login)) => {
             let success = login.success && login.provider != "copilot_code";
             let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
+            let auth = auth_changed_event_for_login_provider(&login.provider);
             app.handle_login_completed(login);
             if success {
-                remote.notify_auth_changed_for_provider_detached(provider_hint);
+                remote.notify_auth_changed_detached_event(provider_hint, auth);
             }
         }
         Ok(BusEvent::UpdateStatus(status)) => {
@@ -424,6 +425,24 @@ fn auth_provider_hint_for_login_provider(provider: &str) -> Option<&'static str>
     } else {
         None
     }
+}
+
+fn auth_changed_event_for_login_provider(provider: &str) -> Option<crate::protocol::AuthChanged> {
+    let provider_id = auth_provider_hint_for_login_provider(provider)?;
+    let mut auth = crate::protocol::AuthChanged::new(provider_id);
+    auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
+    auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    if provider_id == "azure-openai" {
+        auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new("azure-openai"));
+        auth.expected_catalog_namespace =
+            Some(crate::protocol::CatalogNamespace::new("azure-openai"));
+    } else if crate::provider_catalog::openai_compatible_profile_by_id(provider_id).is_some() {
+        auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new(
+            "openai-compatible",
+        ));
+        auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new(provider_id));
+    }
+    Some(auth)
 }
 
 pub(super) async fn check_debug_command(
