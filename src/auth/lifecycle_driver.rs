@@ -201,6 +201,7 @@ impl AuthLifecycleResult {
             "did not switch models",
             "contained no selectable",
             "Login: failed",
+            "failed",
             "Unable to sign in",
             "Saved the API key and fetched the model catalog, but",
         ] {
@@ -642,6 +643,25 @@ mod tests {
         }
     }
 
+    fn assert_rejected_success(
+        spec: &AuthLifecycleSpec,
+        result: AuthLifecycleResult,
+        scenario: &str,
+        expected_message: &str,
+    ) {
+        let panic = std::panic::catch_unwind(|| result.assert_success(spec))
+            .expect_err("degraded state must not satisfy happy auth lifecycle");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+        assert!(
+            message.contains(expected_message),
+            "unexpected assertion for {scenario}: expected `{expected_message}` in:\n{message}"
+        );
+    }
+
     #[test]
     fn cerebras_remote_tui_paste_key_fixture_covers_catalog_picker_and_switch() {
         let driver = AuthLifecycleDriver::new().expect("driver");
@@ -698,6 +718,93 @@ mod tests {
         assert!(failure.contains("Expected selectable Cerebras model routes"));
         assert!(failure.contains("Selected model: `gpt-5.5`"));
         assert!(failure.contains("OpenAI"));
+    }
+
+    #[test]
+    fn auth_lifecycle_failure_contracts_reject_degraded_success_states() {
+        let driver = AuthLifecycleDriver::new().expect("driver");
+        let spec = AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
+        let success = driver
+            .run_openai_compatible_fixture(&spec)
+            .expect("lifecycle result");
+
+        let mut invalid_key = success.clone();
+        invalid_key.transcript.push(
+            "**Login: Cerebras failed**\n\nInvalid API key. No model catalog was activated.".to_string(),
+        );
+        assert_rejected_success(&spec, invalid_key, "invalid api key", "failed");
+
+        let mut network_failure = success.clone();
+        network_failure.transcript = vec![
+            format!("**{} API key saved.**", spec.provider_label),
+            "**Auth Change Received**\n\nThe server is reloading provider credentials.".to_string(),
+            "**Model Discovery Still Updating**\n\nCould not fetch the live catalog yet; waiting for server refresh."
+                .to_string(),
+        ];
+        assert_rejected_success(
+            &spec,
+            network_failure,
+            "network catalog failure pending state",
+            "Model Discovery Still Updating",
+        );
+
+        let mut empty_catalog = success.clone();
+        empty_catalog.catalog_routes.clear();
+        empty_catalog.catalog_report = validate_catalog_invariants(
+            &empty_catalog.activation,
+            empty_catalog.picker.selected_model.as_deref(),
+            &empty_catalog.catalog_routes,
+        );
+        empty_catalog.picker = PickerSnapshot::build(
+            &spec,
+            &empty_catalog.activation,
+            empty_catalog.picker.selected_model.as_deref(),
+            &empty_catalog.catalog_routes,
+        );
+        assert_rejected_success(&spec, empty_catalog, "empty catalog", "catalog invariant");
+
+        let mut wrong_profile = success.clone();
+        for route in &mut wrong_profile.catalog_routes {
+            route.api_method = "openai-compatible:other-provider".to_string();
+            route.detail = "wrong profile live-catalog route".to_string();
+        }
+        wrong_profile.catalog_report = validate_catalog_invariants(
+            &wrong_profile.activation,
+            wrong_profile.picker.selected_model.as_deref(),
+            &wrong_profile.catalog_routes,
+        );
+        wrong_profile.picker = PickerSnapshot::build(
+            &spec,
+            &wrong_profile.activation,
+            wrong_profile.picker.selected_model.as_deref(),
+            &wrong_profile.catalog_routes,
+        );
+        assert_rejected_success(
+            &spec,
+            wrong_profile,
+            "wrong provider profile catalog",
+            "catalog invariant",
+        );
+
+        let mut stale_cached_catalog = success.clone();
+        stale_cached_catalog.catalog_routes = vec![stale_openai_route("gpt-5.5")];
+        stale_cached_catalog.catalog_report = validate_catalog_invariants(
+            &stale_cached_catalog.activation,
+            Some("gpt-5.5"),
+            &stale_cached_catalog.catalog_routes,
+        );
+        stale_cached_catalog.picker = PickerSnapshot::build(
+            &spec,
+            &stale_cached_catalog.activation,
+            Some("gpt-5.5"),
+            &stale_cached_catalog.catalog_routes,
+        );
+        assert_rejected_success(
+            &spec,
+            stale_cached_catalog,
+            "stale cached OpenAI catalog",
+            "catalog invariant",
+        );
     }
 
     #[test]
