@@ -17,6 +17,8 @@ pub mod login_flows;
 pub mod oauth;
 pub mod refresh_state;
 mod status_types;
+#[cfg(test)]
+pub(crate) mod test_sandbox;
 pub mod validation;
 
 pub(crate) use commands::command_exists;
