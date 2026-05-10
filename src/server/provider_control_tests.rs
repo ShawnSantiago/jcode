@@ -547,6 +547,20 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
         "stale legacy provider identity leaked into user-visible auth message: {}",
         final_activity.message
     );
+    assert!(
+        final_activity
+            .message
+            .contains("Auth Model Catalog Warning"),
+        "typed auth event should warn when matching provider routes are missing: {}",
+        final_activity.message
+    );
+    assert!(
+        final_activity
+            .message
+            .contains("Expected selectable Cerebras model routes"),
+        "warning should identify the expected provider: {}",
+        final_activity.message
+    );
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
         Ok("cerebras")

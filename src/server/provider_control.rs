@@ -613,17 +613,26 @@ pub(super) async fn handle_notify_auth_changed(
             before_snapshot.available_model_routes,
             latest_snapshot.available_model_routes.clone(),
         );
+        let catalog_invariants = crate::auth::lifecycle::validate_catalog_invariants(
+            &activation,
+            latest_snapshot.provider_model.as_deref(),
+            &latest_snapshot.available_model_routes,
+        );
+        let mut catalog_message = format_auth_catalog_refresh_complete(
+            activation
+                .provider_label
+                .as_deref()
+                .or(latest_snapshot.provider_name.as_deref()),
+            latest_snapshot.provider_model.as_deref(),
+            &summary,
+        );
+        if let Some(warning) = catalog_invariants.warning_message() {
+            catalog_message.push_str(&warning);
+        }
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::catalog(
                 Some(session_id),
-                format_auth_catalog_refresh_complete(
-                    activation
-                        .provider_label
-                        .as_deref()
-                        .or(latest_snapshot.provider_name.as_deref()),
-                    latest_snapshot.provider_model.as_deref(),
-                    &summary,
-                ),
+                catalog_message,
                 Some("Auth: model catalog updated"),
             ),
         ));

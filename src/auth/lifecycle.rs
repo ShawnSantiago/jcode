@@ -1,4 +1,5 @@
 use crate::protocol::{AuthChanged, CatalogNamespace, RuntimeProviderKey};
+use crate::provider::ModelRoute;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthActivationRequest {
@@ -54,6 +55,108 @@ impl AuthActivationResult {
             model,
         )
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthCatalogInvariantReport {
+    pub applicable: bool,
+    pub provider_id: Option<String>,
+    pub provider_label: Option<String>,
+    pub selectable_provider_routes: usize,
+    pub selected_model: Option<String>,
+    pub selected_model_matches_provider_route: bool,
+    pub route_sample: Vec<String>,
+}
+
+impl AuthCatalogInvariantReport {
+    pub fn ok(&self) -> bool {
+        !self.applicable
+            || (self.selectable_provider_routes > 0 && self.selected_model_matches_provider_route)
+    }
+
+    pub fn warning_message(&self) -> Option<String> {
+        if self.ok() {
+            return None;
+        }
+
+        let provider = self
+            .provider_label
+            .as_deref()
+            .or(self.provider_id.as_deref())
+            .unwrap_or("provider");
+        let selected = self.selected_model.as_deref().unwrap_or("none");
+        let sample = if self.route_sample.is_empty() {
+            "none".to_string()
+        } else {
+            self.route_sample.join(", ")
+        };
+        Some(format!(
+            "\n\n**Auth Model Catalog Warning**\n\nExpected selectable {provider} model routes after auth, but found {} matching route(s). Selected model: `{selected}`. Matching route sample: {sample}.",
+            self.selectable_provider_routes
+        ))
+    }
+}
+
+pub fn validate_catalog_invariants(
+    activation: &AuthActivationResult,
+    selected_model: Option<&str>,
+    routes: &[ModelRoute],
+) -> AuthCatalogInvariantReport {
+    let provider_id = activation.provider_id.clone();
+    let provider_label = activation.provider_label.clone();
+    let applicable = provider_id.is_some() || provider_label.is_some();
+    let selected_model = selected_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string);
+
+    let matching_routes = routes
+        .iter()
+        .filter(|route| route.available && route_matches_activation(route, activation))
+        .collect::<Vec<_>>();
+    let selected_model_matches_provider_route = selected_model
+        .as_ref()
+        .is_some_and(|selected| matching_routes.iter().any(|route| route.model == *selected));
+    let route_sample = matching_routes
+        .iter()
+        .take(5)
+        .map(|route| format!("`{}` via {}", route.model, route.api_method))
+        .collect::<Vec<_>>();
+
+    AuthCatalogInvariantReport {
+        applicable,
+        provider_id,
+        provider_label,
+        selectable_provider_routes: matching_routes.len(),
+        selected_model,
+        selected_model_matches_provider_route,
+        route_sample,
+    }
+}
+
+fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResult) -> bool {
+    if let Some(label) = activation.provider_label.as_deref()
+        && route.provider.eq_ignore_ascii_case(label)
+    {
+        return true;
+    }
+
+    let Some(provider_id) = activation.provider_id.as_deref() else {
+        return false;
+    };
+
+    if route
+        .api_method
+        .eq_ignore_ascii_case(&format!("openai-compatible:{provider_id}"))
+    {
+        return true;
+    }
+
+    if route.api_method.eq_ignore_ascii_case(provider_id) {
+        return true;
+    }
+
+    false
 }
 
 pub fn normalized_auth_provider_id(provider_hint: Option<&str>) -> Option<&'static str> {
@@ -165,6 +268,17 @@ pub fn model_switch_request_for_provider_id(
 mod tests {
     use super::*;
 
+    fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            api_method: api_method.to_string(),
+            available,
+            detail: String::new(),
+            cheapness: None,
+        }
+    }
+
     #[test]
     fn typed_auth_request_provider_id_wins_over_legacy_hint() {
         let request = AuthActivationRequest::new(
@@ -189,5 +303,48 @@ mod tests {
             model_switch_request_for_provider_id(Some("cerebras"), "openrouter", "llama3.1-8b"),
             "llama3.1-8b"
         );
+    }
+
+    #[test]
+    fn catalog_invariants_pass_when_selected_model_matches_provider_route() {
+        let activation = AuthActivationResult {
+            provider_id: Some("cerebras".to_string()),
+            provider_label: Some("Cerebras".to_string()),
+            activated_model: Some("llama3.1-8b".to_string()),
+            expected_runtime: Some("openai-compatible".to_string()),
+            expected_catalog_namespace: Some("cerebras".to_string()),
+        };
+        let routes = vec![
+            route("gpt-5.5", "OpenAI", "openai", true),
+            route("llama3.1-8b", "Cerebras", "openai-compatible", true),
+        ];
+
+        let report = validate_catalog_invariants(&activation, Some("llama3.1-8b"), &routes);
+
+        assert!(
+            report.ok(),
+            "unexpected warning: {:?}",
+            report.warning_message()
+        );
+        assert_eq!(report.selectable_provider_routes, 1);
+    }
+
+    #[test]
+    fn catalog_invariants_warn_when_selected_model_is_from_stale_provider() {
+        let activation = AuthActivationResult {
+            provider_id: Some("cerebras".to_string()),
+            provider_label: Some("Cerebras".to_string()),
+            activated_model: Some("llama3.1-8b".to_string()),
+            expected_runtime: Some("openai-compatible".to_string()),
+            expected_catalog_namespace: Some("cerebras".to_string()),
+        };
+        let routes = vec![route("gpt-5.5", "OpenAI", "openai", true)];
+
+        let report = validate_catalog_invariants(&activation, Some("gpt-5.5"), &routes);
+
+        assert!(!report.ok());
+        let warning = report.warning_message().expect("warning expected");
+        assert!(warning.contains("Expected selectable Cerebras model routes"));
+        assert!(warning.contains("Selected model: `gpt-5.5`"));
     }
 }
