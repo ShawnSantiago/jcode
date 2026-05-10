@@ -413,6 +413,11 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if crate::network_retry::classify_message(&message).is_some()
+                && app.schedule_pending_remote_network_wait(&message)
+            {
+                return false;
+            }
             if app.auto_poke_incomplete_todos
                 && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
             {

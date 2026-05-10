@@ -219,7 +219,7 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
 }
 
 #[test]
-fn test_remote_connectivity_error_stops_auto_poke_without_retry_budget() {
+fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -250,14 +250,26 @@ fn test_remote_connectivity_error_stops_auto_poke_without_retry_budget() {
         &mut remote,
     );
 
-    assert!(!app.auto_poke_incomplete_todos);
-    assert!(app.queued_messages().is_empty());
-    assert!(app.rate_limit_pending_message.is_none());
-    assert!(app.rate_limit_reset.is_none());
+    assert!(app.auto_poke_incomplete_todos);
+    assert!(!app.queued_messages().is_empty());
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("offline auto-poke should be held for network recovery");
+    assert_eq!(pending.retry_attempts, 0);
+    assert!(app.rate_limit_reset.is_some());
+    assert!(matches!(
+        app.status,
+        ProcessingStatus::WaitingForNetwork { .. }
+    ));
+    assert_eq!(
+        app.status_detail.as_deref(),
+        Some("offline; waiting for network before retry")
+    );
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.contains("Auto-poke stopped"))
+            .any(|m| m.role == "system" && m.content.contains("Network appears offline"))
     );
     assert!(
         !app.display_messages()

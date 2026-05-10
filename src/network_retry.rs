@@ -91,6 +91,10 @@ pub async fn wait_until_probably_online() {
     }
 }
 
+pub async fn is_probably_online() -> bool {
+    probe_connectivity().await
+}
+
 async fn probe_connectivity() -> bool {
     let client = crate::provider::shared_http_client();
     let request = client

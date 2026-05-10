@@ -131,6 +131,16 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if !app.is_processing
             && let Some(pending) = app.rate_limit_pending_message.clone()
         {
+            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
+                && !crate::network_retry::is_probably_online().await
+            {
+                app.schedule_pending_remote_network_wait("network probe still failing");
+                return true;
+            }
+            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+                app.status = ProcessingStatus::Idle;
+                app.status_detail = None;
+            }
             let status = if pending.auto_retry {
                 format!(
                     "✓ Retrying continuation...{}",
