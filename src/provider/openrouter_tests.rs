@@ -287,6 +287,62 @@ fn cerebras_profile_exposes_static_models_before_catalog_refresh() {
 }
 
 #[test]
+fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallbacks() {
+    let cases = [
+        (jcode_provider_metadata::OPENCODE_PROFILE, "minimax-m2.7"),
+        (jcode_provider_metadata::OPENCODE_GO_PROFILE, "kimi-k2.5"),
+        (jcode_provider_metadata::ZAI_PROFILE, "glm-4.7"),
+        (
+            jcode_provider_metadata::AI302_PROFILE,
+            "qwen3-235b-a22b-instruct-2507",
+        ),
+        (jcode_provider_metadata::BASETEN_PROFILE, "zai-org/GLM-4.7"),
+        (jcode_provider_metadata::CORTECS_PROFILE, "kimi-k2.5"),
+        (jcode_provider_metadata::KIMI_PROFILE, "kimi-for-coding"),
+        (jcode_provider_metadata::FIRMWARE_PROFILE, "kimi-k2.5"),
+        (
+            jcode_provider_metadata::HUGGING_FACE_PROFILE,
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        ),
+        (jcode_provider_metadata::MOONSHOT_PROFILE, "kimi-k2.5"),
+        (
+            jcode_provider_metadata::NEBIUS_PROFILE,
+            "openai/gpt-oss-120b",
+        ),
+        (
+            jcode_provider_metadata::SCALEWAY_PROFILE,
+            "qwen3-coder-30b-a3b-instruct",
+        ),
+        (
+            jcode_provider_metadata::STACKIT_PROFILE,
+            "openai/gpt-oss-120b",
+        ),
+        (jcode_provider_metadata::PERPLEXITY_PROFILE, "sonar"),
+        (
+            jcode_provider_metadata::DEEPINFRA_PROFILE,
+            "moonshotai/Kimi-K2-Instruct",
+        ),
+        (
+            jcode_provider_metadata::FIREWORKS_PROFILE,
+            "accounts/fireworks/routers/kimi-k2p5-turbo",
+        ),
+        (
+            jcode_provider_metadata::ALIBABA_CODING_PLAN_PROFILE,
+            "qwen3-coder-plus",
+        ),
+    ];
+
+    for (profile, expected_model) in cases {
+        let models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
+        assert!(
+            models.iter().any(|model| model == expected_model),
+            "{} should expose static fallback model {expected_model}; got {models:?}",
+            profile.id
+        );
+    }
+}
+
+#[test]
 fn comtegra_profile_uses_endpoint_default_max_tokens() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _override = EnvVarGuard::remove("JCODE_OPENROUTER_MAX_TOKENS");

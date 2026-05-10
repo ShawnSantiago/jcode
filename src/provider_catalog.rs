@@ -188,6 +188,54 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     };
 
     match profile.id {
+        "opencode" => {
+            push("minimax-m2.7");
+            push("kimi-k2.5");
+            push("glm-4.7");
+            push("glm-5");
+            push("claude-haiku-4-5");
+            push("gpt-5.1-codex-max");
+        }
+        "opencode-go" => {
+            push("minimax-m2.7");
+            push("kimi-k2.5");
+            push("glm-5");
+            push("glm-5.1");
+            push("deepseek-v4-flash");
+            push("qwen3.5-plus");
+        }
+        "zai" => {
+            push("glm-4.5");
+            push("glm-4.7");
+            push("glm-5");
+            push("glm-5.1");
+            push("glm-4.7-flash");
+            push("glm-4.7-flashx");
+        }
+        "302ai" => {
+            push("qwen3-235b-a22b-instruct-2507");
+            push("glm-4.7");
+            push("glm-5.1");
+            push("MiniMax-M2");
+            push("kimi-k2-0905-preview");
+            push("claude-haiku-4-5");
+        }
+        "baseten" => {
+            push("zai-org/GLM-4.7");
+            push("zai-org/GLM-5");
+            push("openai/gpt-oss-120b");
+            push("moonshotai/Kimi-K2.6");
+            push("moonshotai/Kimi-K2.5");
+            push("deepseek-ai/DeepSeek-V4-Pro");
+        }
+        "cortecs" => {
+            push("minimax-m2.7");
+            push("kimi-k2.5");
+            push("glm-4.7");
+            push("glm-5");
+            push("claude-haiku-4-5");
+            push("qwen3-235b-a22b-instruct-2507");
+        }
         // Issue #79: DeepSeek's live model catalog is not always available during
         // TUI startup, but both models should still be selectable once the direct
         // provider is configured.
@@ -208,6 +256,78 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         }
         "kimi" => {
             push("kimi-for-coding");
+            push("kimi-k2.5");
+            push("kimi-k2.6");
+            push("kimi-k2-thinking");
+            push("kimi-k2-thinking-turbo");
+        }
+        "firmware" => {
+            push("kimi-k2.5");
+            push("zai-glm-5-1");
+            push("claude-haiku-4-5");
+            push("claude-sonnet-4-6");
+            push("grok-code-fast-1");
+            push("gemini-2.5-flash");
+        }
+        "huggingface" => {
+            push("Qwen/Qwen3-Coder-480B-A35B-Instruct");
+            push("Qwen/Qwen3-Coder-Next");
+            push("zai-org/GLM-4.7");
+            push("zai-org/GLM-5.1");
+            push("deepseek-ai/DeepSeek-V3.2");
+            push("openai/gpt-oss-120b");
+        }
+        "moonshotai" => {
+            push("kimi-k2.5");
+            push("kimi-k2.6");
+            push("kimi-k2-thinking");
+            push("kimi-k2-thinking-turbo");
+            push("kimi-k2-turbo-preview");
+        }
+        "nebius" => {
+            push("openai/gpt-oss-120b");
+            push("Qwen/Qwen3-235B-A22B-Instruct-2507");
+            push("Qwen/Qwen3.5-397B-A17B");
+            push("zai-org/GLM-5");
+            push("meta-llama/Llama-3.3-70B-Instruct");
+            push("NousResearch/Hermes-4-70B");
+        }
+        "scaleway" => {
+            push("qwen3-coder-30b-a3b-instruct");
+            push("qwen3-235b-a22b-instruct-2507");
+            push("qwen3.5-397b-a17b");
+            push("gpt-oss-120b");
+            push("mistral-small-3.2-24b-instruct-2506");
+            push("llama-3.3-70b-instruct");
+        }
+        "stackit" => {
+            push("openai/gpt-oss-120b");
+            push("Qwen/Qwen3-VL-235B-A22B-Instruct-FP8");
+            push("cortecs/Llama-3.3-70B-Instruct-FP8-Dynamic");
+            push("neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8");
+            push("google/gemma-3-27b-it");
+        }
+        "perplexity" => {
+            push("sonar");
+            push("sonar-pro");
+            push("sonar-reasoning-pro");
+            push("sonar-deep-research");
+        }
+        "deepinfra" => {
+            push("moonshotai/Kimi-K2-Instruct");
+            push("Qwen/Qwen3-Coder-480B-A35B-Instruct");
+            push("Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo");
+            push("zai-org/GLM-4.7");
+            push("zai-org/GLM-5.1");
+            push("meta-llama/Llama-3.1-70B-Instruct");
+        }
+        "fireworks" => {
+            push("accounts/fireworks/routers/kimi-k2p5-turbo");
+            push("accounts/fireworks/models/kimi-k2p5");
+            push("accounts/fireworks/models/kimi-k2p6");
+            push("accounts/fireworks/models/glm-4p7");
+            push("accounts/fireworks/models/glm-5p1");
+            push("accounts/fireworks/models/deepseek-v3p2");
         }
         "cerebras" => {
             push("qwen-3-235b-a22b-instruct-2507");
@@ -225,6 +345,16 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("MiniMax-M2.1");
             push("MiniMax-M2.1-highspeed");
             push("MiniMax-M2");
+        }
+        "alibaba-coding-plan" => {
+            push("qwen3-coder-plus");
+            push("qwen3.5-plus");
+            push("qwen3-max-2026-01-23");
+            push("qwen3-coder-next");
+            push("glm-5");
+            push("glm-4.7");
+            push("kimi-k2.5");
+            push("MiniMax-M2.5");
         }
         _ => {}
     }
