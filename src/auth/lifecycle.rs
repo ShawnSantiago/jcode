@@ -1,5 +1,7 @@
 use crate::protocol::{AuthChanged, CatalogNamespace, RuntimeProviderKey};
 use crate::provider::ModelRoute;
+use crate::provider::activation::{ProviderActivation, RuntimeProviderId};
+use jcode_provider_core::ActiveProvider;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthActivationRequest {
@@ -170,8 +172,28 @@ pub fn normalized_auth_provider_id(provider_hint: Option<&str>) -> Option<&'stat
         crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
     {
         Some(profile.id)
+    } else if let Some(descriptor) = crate::provider_catalog::resolve_login_provider(provider) {
+        normalized_login_provider_id(descriptor.id)
     } else {
         None
+    }
+}
+
+fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "claude" | "anthropic" => Some("claude"),
+        "openai" => Some("openai"),
+        "openai-api" | "openai-key" | "openai-apikey" | "openai-platform" | "platform-openai" => {
+            Some("openai-api")
+        }
+        "openrouter" => Some("openrouter"),
+        "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
+        "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
+        "cursor" => Some("cursor"),
+        "copilot" => Some("copilot"),
+        "gemini" => Some("gemini"),
+        "antigravity" => Some("antigravity"),
+        _ => None,
     }
 }
 
@@ -182,6 +204,10 @@ pub fn provider_display_label(provider_id: Option<&str>) -> Option<String> {
     }
     crate::provider_catalog::openai_compatible_profile_by_id(provider)
         .map(|profile| profile.display_name.to_string())
+        .or_else(|| {
+            crate::provider_catalog::resolve_login_provider(provider)
+                .map(|descriptor| descriptor.display_name.to_string())
+        })
         .or_else(|| Some(provider.to_string()))
 }
 
@@ -216,31 +242,87 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
                 None
             }
         },
-        Some(profile_id) => {
-            if let Some(profile) =
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+        Some(profile_id)
+            if crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() =>
+        {
+            let profile = crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+                .expect("guarded openai-compatible profile should resolve");
+            crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
+            let default_model =
+                crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model;
+            if let Err(error) =
+                crate::provider::activation::apply_openai_compatible_runtime(default_model.clone())
             {
-                crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
-                let default_model =
-                    crate::provider_catalog::resolve_openai_compatible_profile(profile)
-                        .default_model;
-                if let Err(error) = crate::provider::activation::apply_openai_compatible_runtime(
-                    default_model.clone(),
-                ) {
+                let message = error.to_string();
+                crate::logging::auth_event(
+                    "auth_changed_runtime_activation_failed",
+                    profile_id,
+                    &[("reason", message.as_str())],
+                );
+                None
+            } else {
+                default_model
+            }
+        }
+        Some(provider_id) => {
+            if let Some(activation) = direct_provider_activation(provider_id) {
+                if let Err(error) = activation.apply_env() {
                     let message = error.to_string();
                     crate::logging::auth_event(
                         "auth_changed_runtime_activation_failed",
-                        profile_id,
+                        provider_id,
                         &[("reason", message.as_str())],
                     );
-                    None
-                } else {
-                    default_model
                 }
-            } else {
-                None
             }
+            None
         }
+        _ => None,
+    }
+}
+
+fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
+    match normalized_login_provider_id(provider_id)? {
+        "claude" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Claude,
+            ActiveProvider::Claude,
+        )),
+        "openai" => Some(ProviderActivation::locked(
+            RuntimeProviderId::OpenAi,
+            ActiveProvider::OpenAI,
+        )),
+        "openai-api" => Some(ProviderActivation::locked(
+            RuntimeProviderId::OpenAiApiKey,
+            ActiveProvider::OpenAI,
+        )),
+        "openrouter" => Some(ProviderActivation::locked(
+            RuntimeProviderId::OpenRouter,
+            ActiveProvider::OpenRouter,
+        )),
+        "jcode" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Jcode,
+            ActiveProvider::OpenRouter,
+        )),
+        "bedrock" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Bedrock,
+            ActiveProvider::Bedrock,
+        )),
+        "cursor" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Cursor,
+            ActiveProvider::Cursor,
+        )),
+        "copilot" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Copilot,
+            ActiveProvider::Copilot,
+        )),
+        "gemini" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Gemini,
+            ActiveProvider::Gemini,
+        )),
+        "antigravity" => Some(ProviderActivation::locked(
+            RuntimeProviderId::Antigravity,
+            ActiveProvider::Antigravity,
+        )),
         _ => None,
     }
 }
@@ -268,6 +350,35 @@ pub fn model_switch_request_for_provider_id(
 mod tests {
     use super::*;
 
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect();
+            for key in keys {
+                crate::env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                if let Some(value) = value {
+                    crate::env::set_var(key, value);
+                } else {
+                    crate::env::remove_var(key);
+                }
+            }
+        }
+    }
+
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
             model: model.to_string(),
@@ -291,6 +402,97 @@ mod tests {
             provider_display_label(request.provider_id().as_deref()).as_deref(),
             Some("Cerebras")
         );
+    }
+
+    #[test]
+    fn direct_login_provider_ids_are_normalized_with_display_labels() {
+        for (hint, normalized, label) in [
+            ("claude", "claude", "Anthropic/Claude"),
+            ("anthropic", "claude", "Anthropic/Claude"),
+            ("openai", "openai", "OpenAI"),
+            ("openai-key", "openai-api", "OpenAI API"),
+            ("openrouter", "openrouter", "OpenRouter"),
+            ("subscription", "jcode", "Jcode Subscription"),
+            ("bedrock", "bedrock", "AWS Bedrock"),
+            ("cursor", "cursor", "Cursor"),
+            ("copilot", "copilot", "GitHub Copilot"),
+            ("gemini", "gemini", "Google Gemini"),
+            ("antigravity", "antigravity", "Antigravity"),
+        ] {
+            assert_eq!(normalized_auth_provider_id(Some(hint)), Some(normalized));
+            assert_eq!(provider_display_label(Some(hint)).as_deref(), Some(label));
+        }
+    }
+
+    #[test]
+    fn every_model_login_provider_has_explicit_lifecycle_normalization() {
+        let mut missing = Vec::new();
+        for provider in crate::provider_catalog::login_providers() {
+            let is_non_model_auth_surface = matches!(
+                provider.target,
+                crate::provider_catalog::LoginProviderTarget::AutoImport
+                    | crate::provider_catalog::LoginProviderTarget::Google
+            );
+            let normalized = normalized_auth_provider_id(Some(provider.id));
+            if is_non_model_auth_surface {
+                assert!(
+                    normalized.is_none(),
+                    "non-model auth provider {} should stay out of model lifecycle normalization",
+                    provider.id
+                );
+            } else if normalized.is_none() {
+                missing.push(provider.id);
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "model login providers missing lifecycle normalization: {:?}",
+            missing
+        );
+    }
+
+    #[test]
+    fn direct_login_provider_activation_sets_runtime_identity_and_active_provider() {
+        let _guard = EnvGuard::new(&[
+            "JCODE_RUNTIME_PROVIDER",
+            "JCODE_ACTIVE_PROVIDER",
+            "JCODE_FORCE_PROVIDER",
+            "JCODE_OPENROUTER_MODEL",
+        ]);
+
+        for (provider, runtime, active) in [
+            ("claude", "claude", "claude"),
+            ("openai", "openai", "openai"),
+            ("openai-api", "openai-api", "openai"),
+            ("openrouter", "openrouter", "openrouter"),
+            ("jcode", "jcode", "openrouter"),
+            ("bedrock", "bedrock", "bedrock"),
+            ("cursor", "cursor", "cursor"),
+            ("copilot", "copilot", "copilot"),
+            ("gemini", "gemini", "gemini"),
+            ("antigravity", "antigravity", "antigravity"),
+        ] {
+            crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+            crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+
+            let activation = activate_auth_change(&AuthActivationRequest::new(
+                None,
+                Some(AuthChanged::new(provider)),
+            ));
+
+            assert_eq!(activation.provider_id.as_deref(), Some(provider));
+            assert_eq!(
+                std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+                Ok(runtime)
+            );
+            assert_eq!(
+                std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+                Ok(active)
+            );
+            assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+        }
     }
 
     #[test]
