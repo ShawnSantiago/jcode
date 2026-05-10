@@ -155,6 +155,14 @@ pub fn provider_model_to_select_after_auth(
     if let Some(selected) = selected_model
         && matching_routes.iter().any(|route| route.model == selected)
     {
+        let same_model_wrong_route_exists = routes.iter().any(|route| {
+            route.available
+                && route.model == selected
+                && !route_matches_activation(route, activation)
+        });
+        if same_model_wrong_route_exists {
+            return Some(selected.to_string());
+        }
         return None;
     }
 
@@ -389,9 +397,9 @@ pub fn model_switch_request_for_provider_id(
         }
         Some(profile_id)
             if profile_id != "azure-openai"
-                && !provider_name.eq_ignore_ascii_case("openrouter") =>
+                && crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() =>
         {
-            format!("openrouter:{}", model)
+            format!("{}:{}", profile_id, model)
         }
         _ => model.to_string(),
     }
@@ -550,14 +558,35 @@ mod tests {
     }
 
     #[test]
-    fn model_switch_request_prefixes_openai_compatible_profiles_for_non_openrouter_provider() {
+    fn model_switch_request_prefixes_openai_compatible_profiles_with_profile_id() {
         assert_eq!(
             model_switch_request_for_provider_id(Some("cerebras"), "mock-auth", "llama3.1-8b"),
-            "openrouter:llama3.1-8b"
+            "cerebras:llama3.1-8b"
         );
         assert_eq!(
             model_switch_request_for_provider_id(Some("cerebras"), "openrouter", "llama3.1-8b"),
-            "llama3.1-8b"
+            "cerebras:llama3.1-8b"
+        );
+    }
+
+    #[test]
+    fn post_auth_model_selection_reselects_duplicate_model_name_from_matching_provider_route() {
+        let activation = AuthActivationResult {
+            provider_id: Some("cerebras".to_string()),
+            provider_label: Some("Cerebras".to_string()),
+            activated_model: Some("llama3.1-8b".to_string()),
+            expected_runtime: Some("openai-compatible".to_string()),
+            expected_catalog_namespace: Some("cerebras".to_string()),
+        };
+        let routes = vec![
+            route("llama3.1-8b", "Other Gateway", "openai-compatible:other", true),
+            route("llama3.1-8b", "Cerebras", "openai-compatible:cerebras", true),
+        ];
+
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, Some("llama3.1-8b"), &routes),
+            Some("llama3.1-8b".to_string()),
+            "duplicate model IDs must force an explicit provider-profile model switch"
         );
     }
 

@@ -236,7 +236,7 @@ impl AuthLifecycleResult {
             self.picker
                 .switch_request
                 .as_ref()
-                .is_some_and(|request| !request.trim().is_empty()),
+                .is_some_and(|request| request.starts_with(&format!("{}:", spec.provider_id))),
             "{}",
             self.failure_report(spec)
         );
@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(result.picker.switch_target.as_deref(), Some("llama3.1-8b"));
         assert_eq!(
             result.picker.switch_request.as_deref(),
-            Some("openrouter:llama3.1-8b")
+            Some("cerebras:llama3.1-8b")
         );
     }
 
@@ -762,7 +762,7 @@ mod tests {
                         .picker
                         .switch_request
                         .as_deref()
-                        .is_some_and(|request| request.starts_with("openrouter:")),
+                        .is_some_and(|request| request.starts_with(&format!("{}:", profile.id))),
                     "{}",
                     result.failure_report(&spec)
                 );
