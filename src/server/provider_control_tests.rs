@@ -82,10 +82,11 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let model = model.trim();
         let model = model
-            .trim()
-            .strip_prefix("openrouter:")
-            .unwrap_or_else(|| model.trim())
+            .split_once(':')
+            .map(|(_, model)| model)
+            .unwrap_or(model)
             .trim();
         if model.is_empty() {
             anyhow::bail!("model cannot be empty");
@@ -465,7 +466,7 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
     );
     assert_eq!(
         activation.model_switch_request("mock-auth", "llama3.1-8b"),
-        "openrouter:llama3.1-8b"
+        "cerebras:llama3.1-8b"
     );
 }
 

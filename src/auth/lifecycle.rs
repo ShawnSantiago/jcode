@@ -388,19 +388,25 @@ fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
 
 pub fn model_switch_request_for_provider_id(
     provider_id: Option<&str>,
-    provider_name: &str,
+    _provider_name: &str,
     model: &str,
 ) -> String {
     match normalized_auth_provider_id(provider_id) {
-        Some("azure-openai") if !provider_name.eq_ignore_ascii_case("openrouter") => {
-            format!("openrouter:{}", model)
-        }
+        Some("azure-openai") => format!("openrouter:{}", model),
         Some(profile_id)
             if profile_id != "azure-openai"
                 && crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() =>
         {
             format!("{}:{}", profile_id, model)
         }
+        Some("claude") => format!("claude:{}", model),
+        Some("openai") | Some("openai-api") => format!("openai:{}", model),
+        Some("openrouter") | Some("jcode") => format!("openrouter:{}", model),
+        Some("bedrock") => format!("bedrock:{}", model),
+        Some("cursor") => format!("cursor:{}", model),
+        Some("copilot") => format!("copilot:{}", model),
+        Some("gemini") => format!("gemini:{}", model),
+        Some("antigravity") => format!("antigravity:{}", model),
         _ => model.to_string(),
     }
 }
@@ -567,6 +573,31 @@ mod tests {
             model_switch_request_for_provider_id(Some("cerebras"), "openrouter", "llama3.1-8b"),
             "cerebras:llama3.1-8b"
         );
+    }
+
+    #[test]
+    fn model_switch_request_is_provider_explicit_for_all_auth_providers() {
+        for (provider, expected) in [
+            ("claude", "claude:shared-model"),
+            ("anthropic", "claude:shared-model"),
+            ("openai", "openai:shared-model"),
+            ("openai-api", "openai:shared-model"),
+            ("openrouter", "openrouter:shared-model"),
+            ("jcode", "openrouter:shared-model"),
+            ("azure-openai", "openrouter:shared-model"),
+            ("bedrock", "bedrock:shared-model"),
+            ("cursor", "cursor:shared-model"),
+            ("copilot", "copilot:shared-model"),
+            ("gemini", "gemini:shared-model"),
+            ("antigravity", "antigravity:shared-model"),
+            ("cerebras", "cerebras:shared-model"),
+        ] {
+            assert_eq!(
+                model_switch_request_for_provider_id(Some(provider), "mock-auth", "shared-model"),
+                expected,
+                "{provider} auth switch request must route explicitly so duplicate model IDs cannot select the wrong provider"
+            );
+        }
     }
 
     #[test]
