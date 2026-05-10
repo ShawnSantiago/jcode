@@ -257,14 +257,33 @@ impl AuthLifecycleResult {
             .filter(|route| route.available && route_matches_spec(route, spec))
             .collect::<Vec<_>>();
         assert!(
-            matching_routes.iter().all(|route| route.detail.contains("live-catalog")),
-            "happy auth lifecycle must be backed by live/provider catalog routes, not static fallback routes:\n{}",
+            matching_routes.iter().all(|route| spec
+                .catalog_models_after_auth
+                .iter()
+                .any(|model| model == &route.model)),
+            "happy auth lifecycle advertised provider routes that were not returned by the live catalog:\n{}",
+            self.failure_report(spec)
+        );
+        assert!(
+            self.picker.provider_entries.iter().all(|entry| spec
+                .catalog_models_after_auth
+                .iter()
+                .any(|model| model == entry)),
+            "happy auth lifecycle picker included models that were not returned by the live catalog:\n{}",
             self.failure_report(spec)
         );
         assert!(
             matching_routes
                 .iter()
-                .all(|route| !route.detail.to_ascii_lowercase().contains("static fallback")),
+                .all(|route| route.detail.contains("live-catalog")),
+            "happy auth lifecycle must be backed by live/provider catalog routes, not static fallback routes:\n{}",
+            self.failure_report(spec)
+        );
+        assert!(
+            matching_routes.iter().all(|route| !route
+                .detail
+                .to_ascii_lowercase()
+                .contains("static fallback")),
             "happy auth lifecycle accepted a static fallback route:\n{}",
             self.failure_report(spec)
         );
@@ -730,7 +749,8 @@ mod tests {
 
         let mut invalid_key = success.clone();
         invalid_key.transcript.push(
-            "**Login: Cerebras failed**\n\nInvalid API key. No model catalog was activated.".to_string(),
+            "**Login: Cerebras failed**\n\nInvalid API key. No model catalog was activated."
+                .to_string(),
         );
         assert_rejected_success(&spec, invalid_key, "invalid api key", "failed");
 
@@ -944,10 +964,12 @@ mod tests {
                 catalog_report.warning_message()
             );
             assert!(
-                session_model_after_reauth.as_ref().is_some_and(|selected| picker
-                    .provider_entries
-                    .iter()
-                    .any(|entry| entry == selected)),
+                session_model_after_reauth
+                    .as_ref()
+                    .is_some_and(|selected| picker
+                        .provider_entries
+                        .iter()
+                        .any(|entry| entry == selected)),
                 "reauth of {} after {} selected {:?}, picker entries {:?}",
                 reauth_spec.provider_id,
                 previous_spec.provider_id,
@@ -955,23 +977,19 @@ mod tests {
                 picker.provider_entries
             );
             assert!(
-                picker
-                    .provider_entries
+                picker.provider_entries.iter().all(|entry| reauth
+                    .catalog_routes
                     .iter()
-                    .all(|entry| reauth.catalog_routes.iter().any(|route| route.model == *entry)),
+                    .any(|route| route.model == *entry)),
                 "reauth picker for {} leaked previous provider {} entries: {:?}",
                 reauth_spec.provider_id,
                 previous_spec.provider_id,
                 picker.provider_entries
             );
             assert!(
-                picker
-                    .switch_request
-                    .as_deref()
-                    .is_some_and(|request| request.starts_with(&format!(
-                        "{}:",
-                        reauth_spec.provider_id
-                    ))),
+                picker.switch_request.as_deref().is_some_and(
+                    |request| request.starts_with(&format!("{}:", reauth_spec.provider_id))
+                ),
                 "reauth picker switch must target {}, got {:?}",
                 reauth_spec.provider_id,
                 picker.switch_request
@@ -1036,7 +1054,12 @@ mod tests {
             picker.switch_route_api_method.as_deref(),
             Some("openai-compatible:cerebras")
         );
-        assert!(!picker.provider_entries.iter().any(|model| model == "wrong-profile-first"));
+        assert!(
+            !picker
+                .provider_entries
+                .iter()
+                .any(|model| model == "wrong-profile-first")
+        );
     }
 
     #[test]
@@ -1064,6 +1087,53 @@ mod tests {
         assert!(
             message.contains("static fallback"),
             "unexpected assertion failure: {message}"
+        );
+    }
+
+    #[test]
+    fn auth_lifecycle_success_rejects_provider_routes_not_returned_by_live_catalog() {
+        let driver = AuthLifecycleDriver::new().expect("driver");
+        let spec = AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
+        let mut result = driver
+            .run_openai_compatible_fixture(&spec)
+            .expect("lifecycle result");
+        result.catalog_routes.push(ModelRoute {
+            model: "zai-glm-4.7".to_string(),
+            provider: "Cerebras".to_string(),
+            api_method: "openai-compatible:cerebras".to_string(),
+            available: true,
+            detail: "https://api.cerebras.ai/v1".to_string(),
+            cheapness: None,
+        });
+        result.catalog_report = validate_catalog_invariants(
+            &result.activation,
+            result.picker.selected_model.as_deref(),
+            &result.catalog_routes,
+        );
+        result.picker = PickerSnapshot::build(
+            &spec,
+            &result.activation,
+            result.picker.selected_model.as_deref(),
+            &result.catalog_routes,
+        );
+
+        assert!(
+            result.catalog_report.ok(),
+            "the route shape is valid, so only live-catalog membership should fail"
+        );
+        assert!(
+            result
+                .picker
+                .provider_entries
+                .iter()
+                .any(|model| model == "zai-glm-4.7"),
+            "test setup should mimic a stale static/provider route leaking into /model"
+        );
+        assert_rejected_success(
+            &spec,
+            result,
+            "provider route absent from live catalog",
+            "not returned by the live catalog",
         );
     }
 
@@ -1199,7 +1269,10 @@ mod tests {
             .expect("fresh-start TUI paste-key lifecycle");
 
         result.assert_success(&spec);
-        assert!(env_file.exists(), "TUI paste-key lifecycle should create env file");
+        assert!(
+            env_file.exists(),
+            "TUI paste-key lifecycle should create env file"
+        );
         assert_eq!(
             crate::provider_catalog::load_api_key_from_env_or_config(
                 &resolved.api_key_env,
