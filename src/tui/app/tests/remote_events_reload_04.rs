@@ -219,6 +219,54 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
 }
 
 #[test]
+fn test_remote_connectivity_error_stops_auto_poke_without_retry_budget() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.auto_poke_incomplete_todos = true;
+    app.queued_messages
+        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
+            .to_string(),
+        images: vec![],
+        is_system: true,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 15,
+            message: "Failed to send OpenAI-compatible chat request\n  endpoint: https://api.groq.com/openai/v1/chat/completions\n  model: llama-3.1-8b-instant\n  auth: GROQ_API_KEY\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).: error sending request for url (https://api.groq.com/openai/v1/chat/completions): client error (Connect): dns error: failed to lookup address information: Name or service not known".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(app.queued_messages().is_empty());
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("Auto-poke stopped"))
+    );
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("attempt 1/2"))
+    );
+}
+
+#[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
