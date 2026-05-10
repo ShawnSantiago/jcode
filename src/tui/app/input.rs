@@ -296,8 +296,9 @@ where
 mod tests {
     use super::{
         ClipboardPasteContent, ClipboardPasteKind, preferred_wayland_text_type,
-        read_clipboard_for_paste_with,
+        read_clipboard_for_paste_with, shifted_printable_fallback, text_input_for_key,
     };
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
     fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
@@ -353,6 +354,28 @@ mod tests {
         assert_eq!(
             preferred_wayland_text_type(types),
             Some("text/plain;charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn shifted_printable_fallback_uppercases_ascii_letters() {
+        assert_eq!(shifted_printable_fallback('a', KeyModifiers::SHIFT), 'A');
+        assert_eq!(shifted_printable_fallback('z', KeyModifiers::SHIFT), 'Z');
+    }
+
+    #[test]
+    fn shifted_printable_fallback_preserves_terminal_translated_symbols() {
+        assert_eq!(shifted_printable_fallback('/', KeyModifiers::SHIFT), '/');
+        assert_eq!(shifted_printable_fallback('?', KeyModifiers::SHIFT), '?');
+        assert_eq!(shifted_printable_fallback('(', KeyModifiers::SHIFT), '(');
+        assert_eq!(shifted_printable_fallback('&', KeyModifiers::SHIFT), '&');
+    }
+
+    #[test]
+    fn text_input_for_shifted_symbol_preserves_layout_translated_char() {
+        assert_eq!(
+            text_input_for_key(KeyCode::Char('/'), KeyModifiers::SHIFT),
+            Some("/".to_string())
         );
     }
 }
@@ -556,35 +579,11 @@ pub(super) fn text_input_for_key(code: KeyCode, modifiers: KeyModifiers) -> Opti
 }
 
 fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
-    if !modifiers.contains(KeyModifiers::SHIFT) {
-        return c;
+    if modifiers.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase() {
+        return c.to_ascii_uppercase();
     }
 
-    match c {
-        'a'..='z' => c.to_ascii_uppercase(),
-        '1' => '!',
-        '2' => '@',
-        '3' => '#',
-        '4' => '$',
-        '5' => '%',
-        '6' => '^',
-        '7' => '&',
-        '8' => '*',
-        '9' => '(',
-        '0' => ')',
-        '`' => '~',
-        '-' => '_',
-        '=' => '+',
-        '[' => '{',
-        ']' => '}',
-        '\\' => '|',
-        ';' => ':',
-        '\'' => '"',
-        ',' => '<',
-        '.' => '>',
-        '/' => '?',
-        _ => c,
-    }
+    c
 }
 
 pub(super) fn clear_input_for_escape(app: &mut App) {
