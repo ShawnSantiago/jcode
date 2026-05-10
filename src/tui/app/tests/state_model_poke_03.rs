@@ -70,6 +70,7 @@ struct AuthUxStateSpaceProvider {
     authed: StdArc<AtomicBool>,
     refreshes: StdArc<AtomicUsize>,
     model: StdArc<StdMutex<String>>,
+    set_model_requests: StdArc<StdMutex<Vec<String>>>,
     provider_id: &'static str,
     provider_label: &'static str,
     models: &'static [&'static str],
@@ -155,6 +156,13 @@ impl Provider for AuthUxStateSpaceProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
+        self.set_model_requests
+            .lock()
+            .unwrap()
+            .push(model.to_string());
+        let model = model
+            .strip_prefix(&format!("{}:", self.provider_id))
+            .unwrap_or(model);
         let found = self
             .routes()
             .into_iter()
@@ -375,6 +383,7 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         authed: StdArc::new(AtomicBool::new(false)),
         refreshes: StdArc::new(AtomicUsize::new(0)),
         model: StdArc::new(StdMutex::new("pre-auth-model".to_string())),
+        set_model_requests: StdArc::new(StdMutex::new(Vec::new())),
         provider_id: "state-space",
         provider_label: "StateSpace",
         models: &["state-space-alpha", "state-space-beta"],
@@ -469,12 +478,14 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         authed: StdArc::new(AtomicBool::new(false)),
         refreshes: StdArc::new(AtomicUsize::new(0)),
         model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
+        set_model_requests: StdArc::new(StdMutex::new(Vec::new())),
         provider_id: "cerebras",
         provider_label: "Cerebras",
         models: &["qwen-3-235b-a22b-instruct-2507", "llama3.1-8b"],
         include_wrong_profile_first: true,
     };
     let refreshes = fake_provider.refreshes.clone();
+    let set_model_requests = fake_provider.set_model_requests.clone();
     let provider: Arc<dyn Provider> = Arc::new(fake_provider);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
@@ -635,6 +646,52 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
             "transcript contained forbidden degraded-success marker `{forbidden}`:\n{transcript}"
         );
     }
+
+    set_model_requests.lock().unwrap().clear();
+    app.open_model_picker();
+    wait_for_model_picker_load(&mut app);
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should open after Cerebras auth");
+    let qwen_entry = picker
+        .entries
+        .iter()
+        .find(|entry| entry.name == "qwen-3-235b-a22b-instruct-2507")
+        .expect("selected Cerebras model should be visible in /model");
+    assert!(qwen_entry.options.iter().any(|route| {
+        route.provider == "Cerebras"
+            && route.api_method == "openai-compatible:cerebras"
+            && route.available
+    }));
+    let llama_idx = picker
+        .entries
+        .iter()
+        .position(|entry| entry.name == "llama3.1-8b")
+        .expect("alternate Cerebras model should be visible in /model");
+    let llama_entry = &picker.entries[llama_idx];
+    assert!(llama_entry.options.iter().any(|route| {
+        route.provider == "Cerebras"
+            && route.api_method == "openai-compatible:cerebras"
+            && route.available
+    }));
+    let filtered_pos = picker
+        .filtered
+        .iter()
+        .position(|&idx| idx == llama_idx)
+        .expect("alternate Cerebras model should be selectable in filtered picker list");
+
+    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("Cerebras picker selection should switch models");
+
+    assert_eq!(app.session.model.as_deref(), Some("llama3.1-8b"));
+    assert_eq!(app.provider.model(), "llama3.1-8b");
+    assert_eq!(
+        set_model_requests.lock().unwrap().as_slice(),
+        ["cerebras:llama3.1-8b"],
+        "model picker must route post-auth switches through the authenticated Cerebras profile"
+    );
 }
 
 #[test]

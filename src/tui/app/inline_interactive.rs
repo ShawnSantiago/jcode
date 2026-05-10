@@ -1995,9 +1995,15 @@ impl App {
                             match self.provider.set_model(&spec) {
                                 Ok(()) => {
                                     self.inline_interactive_state = None;
+                                    self.provider_session_id = None;
+                                    self.session.provider_session_id = None;
                                     self.upstream_provider = None;
                                     self.status_detail = None;
                                     self.invalidate_model_picker_cache();
+                                    let active_model = self.provider.model();
+                                    self.update_context_limit_for_model(&active_model);
+                                    self.session.model = Some(active_model);
+                                    let _ = self.session.save();
                                 }
                                 Err(error) => {
                                     self.push_display_message(DisplayMessage::error(
