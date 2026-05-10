@@ -104,6 +104,8 @@ pub struct FileTouch {
     pub session_id: String,
     pub path: PathBuf,
     pub op: FileOp,
+    /// Agent-provided intent for the tool call that touched this file.
+    pub intent: Option<String>,
     /// Human-readable summary like "edited lines 45-60" or "read 200 lines"
     pub summary: Option<String>,
     /// Optional compact preview of what changed. Keep this short and already truncated.

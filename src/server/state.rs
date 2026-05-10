@@ -19,6 +19,7 @@ pub struct FileAccess {
     pub op: FileOp,
     pub timestamp: Instant,
     pub absolute_time: std::time::SystemTime,
+    pub intent: Option<String>,
     pub summary: Option<String>,
     pub detail: Option<String>,
 }
@@ -240,6 +241,8 @@ pub enum SwarmEventType {
     FileTouch {
         path: String,
         op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<String>,
         summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,

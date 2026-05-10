@@ -39,6 +39,7 @@ fn file_access_with_summary(summary: Option<&str>) -> FileAccess {
         op: FileOp::Edit,
         timestamp: Instant::now(),
         absolute_time: std::time::SystemTime::now(),
+        intent: None,
         summary: summary.map(str::to_string),
         detail: None,
     }
@@ -49,6 +50,7 @@ fn file_touch_with_summary(summary: Option<&str>) -> FileTouch {
         session_id: "session-current".to_string(),
         path: std::path::PathBuf::from("src/lib.rs"),
         op: FileOp::Edit,
+        intent: None,
         summary: summary.map(str::to_string),
         detail: None,
     }
