@@ -148,6 +148,86 @@ fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
 }
 
 #[test]
+fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]);
+
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://openrouter.ai/api/v1");
+    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "OPENROUTER_API_KEY");
+    crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", "openrouter.env");
+    crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "openrouter");
+    crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "1");
+    crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+    crate::env::set_var("JCODE_OPENROUTER_MODEL_CATALOG", "stale-openrouter-catalog.json");
+    crate::env::set_var("JCODE_OPENROUTER_MODEL", "gpt-5.5");
+    crate::env::set_var("JCODE_OPENROUTER_STATIC_MODELS", "stale-openrouter-only-model");
+    crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "Bearer stale");
+    crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER_NAME", "Authorization");
+    crate::env::set_var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER", "openrouter");
+    crate::env::set_var("JCODE_OPENROUTER_PROVIDER", "openrouter");
+    crate::env::set_var("JCODE_OPENROUTER_NO_FALLBACK", "1");
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "openrouter");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "openrouter");
+
+    force_apply_openai_compatible_profile_env(Some(CEREBRAS_PROFILE));
+
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").as_deref(),
+        Ok("https://api.cerebras.ai/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME").as_deref(),
+        Ok("CEREBRAS_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_ENV_FILE").as_deref(),
+        Ok("cerebras.env")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
+        Ok("cerebras")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_PROVIDER_FEATURES").as_deref(),
+        Ok("0")
+    );
+    assert!(std::env::var_os("JCODE_OPENROUTER_ALLOW_NO_AUTH").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_MODEL_CATALOG").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_MODEL").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_AUTH_HEADER").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_AUTH_HEADER_NAME").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_PROVIDER").is_none());
+    assert!(std::env::var_os("JCODE_OPENROUTER_NO_FALLBACK").is_none());
+    assert!(std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none());
+    assert!(std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none());
+    assert!(std::env::var_os("JCODE_PROVIDER_PROFILE_NAME").is_none());
+    assert_ne!(
+        std::env::var("JCODE_OPENROUTER_STATIC_MODELS").ok().as_deref(),
+        Some("stale-openrouter-only-model")
+    );
+}
+
+#[test]
 fn matrix_login_provider_ids_and_aliases_are_unique() {
     let mut seen = std::collections::HashSet::new();
     for provider in login_providers() {
