@@ -468,10 +468,19 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
     let mut saw_saved = false;
     let mut saw_catalog_started = false;
     let mut saw_activation = false;
+    let mut login_success_events = 0;
+    let mut login_failure_events = 0;
+    let mut catalog_warning_events = 0;
+    let mut activation_events = 0;
     rt.block_on(async {
         while !(saw_saved && saw_catalog_started && saw_activation) {
             match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
                 Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
+                    if login.success {
+                        login_success_events += 1;
+                    } else {
+                        login_failure_events += 1;
+                    }
                     assert!(login.success, "unexpected failed login event: {login:?}");
                     assert_eq!(login.provider, "Cerebras");
                     assert!(login.message.contains("**Cerebras API key saved.**"));
@@ -486,6 +495,9 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     saw_saved = true;
                 }
                 Ok(Ok(crate::bus::BusEvent::UiActivity(activity))) => {
+                    if activity.message.contains("Auth Model Catalog Warning") {
+                        catalog_warning_events += 1;
+                    }
                     assert!(
                         !activity.message.contains("Auth Model Catalog Warning"),
                         "unexpected warning activity: {}",
@@ -505,6 +517,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     );
                 }
                 Ok(Ok(event @ crate::bus::BusEvent::ProviderModelActivated { .. })) => {
+                    activation_events += 1;
                     if let crate::bus::BusEvent::ProviderModelActivated { model, message, .. } =
                         &event
                     {
@@ -521,7 +534,39 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         }
     });
 
+    while let Ok(event) = bus_rx.try_recv() {
+        match event {
+            crate::bus::BusEvent::LoginCompleted(login) => {
+                if login.success {
+                    login_success_events += 1;
+                } else {
+                    panic!("late failed login event after successful auth: {login:?}");
+                }
+            }
+            crate::bus::BusEvent::UiActivity(activity) => {
+                if activity.message.contains("Auth Model Catalog Warning") {
+                    panic!("late warning activity after successful auth: {}", activity.message);
+                }
+                assert!(
+                    !activity.message.contains("did not switch models"),
+                    "late degraded activity after successful auth: {}",
+                    activity.message
+                );
+            }
+            crate::bus::BusEvent::ProviderModelActivated { model, message, .. } => {
+                activation_events += 1;
+                assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
+                assert!(message.contains("**Cerebras is ready.**"), "{message}");
+            }
+            _ => {}
+        }
+    }
+
     assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(login_success_events, 1, "expected exactly one successful login event");
+    assert_eq!(login_failure_events, 0, "happy auth must not publish failed login events");
+    assert_eq!(catalog_warning_events, 0, "happy auth must not publish catalog warnings");
+    assert_eq!(activation_events, 1, "expected exactly one provider activation event");
     assert_eq!(
         app.session.model.as_deref(),
         Some("qwen-3-235b-a22b-instruct-2507")
