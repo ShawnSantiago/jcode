@@ -66,7 +66,6 @@ impl AuthLifecycleSpec {
         spec.catalog_models_after_auth = vec![
             "qwen-3-235b-a22b-instruct-2507".to_string(),
             "llama3.1-8b".to_string(),
-            "gpt-oss-120b".to_string(),
         ];
         spec.selected_model_override = None;
         spec
@@ -566,7 +565,13 @@ pub(crate) async fn fetch_live_openai_compatible_models(
         .data
         .into_iter()
         .map(|model| model.id.trim().to_string())
-        .filter(|model| !model.is_empty())
+        .filter(|model| {
+            !model.is_empty()
+                && crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+                    resolved.id.as_str(),
+                    model,
+                )
+        })
         .collect::<Vec<_>>();
     ensure!(
         !models.is_empty(),

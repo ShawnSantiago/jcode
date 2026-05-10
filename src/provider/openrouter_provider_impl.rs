@@ -687,6 +687,16 @@ impl Provider for OpenRouterProvider {
             // preserve the caller's model string exactly for custom endpoints.
             (trimmed.to_string(), None)
         };
+        if let Some(profile_id) = self.profile_id.as_deref()
+            && !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+                profile_id, &model_id,
+            )
+        {
+            anyhow::bail!(
+                "Model '{}' is listed by the provider catalog but is not currently usable for chat completions through this direct provider. Choose another model from `/model`.",
+                model_id
+            );
+        }
         if let Ok(mut current) = self.model.try_write() {
             *current = model_id.clone();
         } else {
@@ -715,6 +725,7 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
+        let finalize = |models: Vec<String>| self.filter_profile_chat_supported_models(models);
         let with_current_model = |mut models: Vec<String>| {
             let current = self.model();
             if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
@@ -738,14 +749,14 @@ impl Provider for OpenRouterProvider {
 
         if !self.supports_model_catalog {
             if !self.static_models.is_empty() {
-                return with_current_model(self.static_models.clone());
+                return finalize(with_current_model(self.static_models.clone()));
             }
             let model = self.model();
-            return if model.trim().is_empty() {
+            return finalize(if model.trim().is_empty() {
                 Vec::new()
             } else {
                 vec![model]
-            };
+            });
         }
 
         if let Ok(cache) = self.models_cache.try_read()
@@ -758,7 +769,9 @@ impl Provider for OpenRouterProvider {
             {
                 self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
             }
-            return merge_static_models(cache.models.iter().map(|m| m.id.clone()).collect());
+            return finalize(merge_static_models(
+                cache.models.iter().map(|m| m.id.clone()).collect(),
+            ));
         }
 
         if let Some(cache_entry) = load_disk_cache_entry() {
@@ -771,7 +784,9 @@ impl Provider for OpenRouterProvider {
                 cache.cached_at = Some(cache_entry.cached_at);
             }
             self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
-            return merge_static_models(cache_entry.models.into_iter().map(|m| m.id).collect());
+            return finalize(merge_static_models(
+                cache_entry.models.into_iter().map(|m| m.id).collect(),
+            ));
         }
 
         // No memory or disk catalog yet. This commonly happens immediately after
@@ -784,15 +799,15 @@ impl Provider for OpenRouterProvider {
         self.maybe_schedule_model_catalog_refresh(u64::MAX, "display cache miss");
 
         if !self.static_models.is_empty() {
-            return with_current_model(self.static_models.clone());
+            return finalize(with_current_model(self.static_models.clone()));
         }
 
         let model = self.model();
-        if model.trim().is_empty() {
+        finalize(if model.trim().is_empty() {
             Vec::new()
         } else {
             vec![model]
-        }
+        })
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {

@@ -210,9 +210,7 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("kimi-for-coding");
         }
         "cerebras" => {
-            push("zai-glm-4.7");
             push("qwen-3-235b-a22b-instruct-2507");
-            push("gpt-oss-120b");
             push("llama3.1-8b");
         }
         // MiniMax's `/models` endpoint is authenticated and live, but post-login
@@ -232,6 +230,20 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     }
 
     models
+}
+
+pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
+    let profile_id = profile_id.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+
+    match profile_id.as_str() {
+        // Cerebras currently exposes these preview/reasoning IDs from GET /models
+        // for some keys, but POST /chat/completions returns model_not_found for
+        // the same key. Keep them out of the picker until the provider catalog
+        // exposes enough metadata to distinguish listable from chat-usable models.
+        "cerebras" if matches!(model.as_str(), "gpt-oss-120b" | "zai-glm-4.7") => false,
+        _ => true,
+    }
 }
 
 pub fn openai_compatible_profile_static_context_limits(

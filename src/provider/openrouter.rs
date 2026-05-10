@@ -794,6 +794,21 @@ impl OpenRouterProvider {
         self.supports_provider_features || self.profile_id.is_none()
     }
 
+    pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
+        let Some(profile_id) = self.profile_id.as_deref() else {
+            return models;
+        };
+
+        models
+            .into_iter()
+            .filter(|model| {
+                crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+                    profile_id, model,
+                )
+            })
+            .collect()
+    }
+
     fn begin_background_model_catalog_refresh(&self) -> bool {
         let Some(now) = current_unix_secs() else {
             return false;
