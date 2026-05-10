@@ -1524,8 +1524,8 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Enter inserts a newline in the input box
-        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+        // Shift+Enter and Alt/Option+Enter insert a newline in the input box.
+        if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
             handle_shift_enter(self);
             return Ok(());
         }

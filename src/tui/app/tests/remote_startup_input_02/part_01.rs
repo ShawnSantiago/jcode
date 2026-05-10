@@ -643,6 +643,22 @@ fn test_shift_enter_inserts_newline() {
     assert_eq!(app.interleave_message.as_deref(), None);
 }
 
+
+#[test]
+fn test_alt_enter_inserts_newline() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::ALT).unwrap();
+    app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.input(), "h\ni");
+    assert_eq!(app.queued_count(), 0);
+    assert_eq!(app.interleave_message.as_deref(), None);
+}
 #[test]
 fn test_ctrl_enter_opposite_send_mode() {
     let mut app = create_test_app();

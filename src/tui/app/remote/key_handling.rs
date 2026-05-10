@@ -616,7 +616,7 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
         input::insert_input_text(app, "\n");
         app.follow_chat_bottom_for_typing();
         return Ok(());
