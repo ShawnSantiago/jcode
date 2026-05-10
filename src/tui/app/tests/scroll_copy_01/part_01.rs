@@ -609,6 +609,26 @@ fn test_local_alt_m_toggles_side_panel_visibility() {
 }
 
 #[test]
+fn test_local_alt_m_hidden_side_panel_stays_hidden_across_snapshot_update() {
+    let mut app = create_test_app();
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.last_side_panel_focus_id = Some("plan".to_string());
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id, None);
+
+    app.set_side_panel_snapshot(test_side_panel_snapshot("plan", "Updated plan"));
+    assert_eq!(app.side_panel.focused_page_id, None);
+    assert_eq!(app.side_panel.pages[0].title, "Updated plan");
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert_eq!(app.status_notice(), Some("Side panel: Updated plan".to_string()));
+}
+
+#[test]
 fn test_local_alt_m_falls_back_to_diagram_pane_when_side_panel_is_empty() {
     let mut app = create_test_app();
     app.side_panel = crate::side_panel::SidePanelSnapshot::default();
@@ -619,6 +639,29 @@ fn test_local_alt_m_falls_back_to_diagram_pane_when_side_panel_is_empty() {
 
     assert!(!app.diagram_pane_enabled);
     assert_eq!(app.status_notice(), Some("Diagram pane: OFF".to_string()));
+}
+
+#[test]
+fn test_local_alt_m_toggles_image_side_panel_visibility() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot::default();
+    app.remote_side_pane_images.push(crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: "image-data".to_string(),
+        label: Some("preview.png".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+    });
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert!(app.side_panel_user_hidden);
+    assert_eq!(app.status_notice(), Some("Image side panel: OFF".to_string()));
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert!(!app.side_panel_user_hidden);
+    assert_eq!(app.status_notice(), Some("Image side panel: ON".to_string()));
 }
 
 #[test]

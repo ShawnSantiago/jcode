@@ -1213,7 +1213,7 @@ impl crate::tui::TuiState for App {
         &self.side_panel
     }
     fn pin_images(&self) -> bool {
-        self.pin_images
+        self.pin_images && !self.side_panel_user_hidden
     }
     fn chat_native_scrollbar(&self) -> bool {
         self.chat_native_scrollbar

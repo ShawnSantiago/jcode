@@ -290,6 +290,13 @@ impl App {
     }
 
     fn side_pane_has_visual_images(&self) -> bool {
+        if self.side_panel_user_hidden {
+            return false;
+        }
+        self.side_pane_has_visual_images_ignoring_user_hidden()
+    }
+
+    fn side_pane_has_visual_images_ignoring_user_hidden(&self) -> bool {
         if !self.pin_images || self.side_panel.focused_page().is_some() || self.diff_mode.is_file()
         {
             return false;
@@ -523,6 +530,27 @@ impl App {
     }
 
     pub(super) fn toggle_side_panel(&mut self) {
+        if self.side_panel_user_hidden {
+            self.side_panel_user_hidden = false;
+            if self.side_panel.pages.is_empty() {
+                if self.side_pane_has_visual_images_ignoring_user_hidden() {
+                    self.sync_diagram_fit_context();
+                    self.set_status_notice("Image side panel: ON");
+                } else {
+                    self.toggle_diagram_pane();
+                }
+                return;
+            }
+        }
+
+        if self.side_pane_has_visual_images() {
+            self.side_panel_user_hidden = true;
+            self.set_diff_pane_focus(false);
+            self.sync_diagram_fit_context();
+            self.set_status_notice("Image side panel: OFF");
+            return;
+        }
+
         if self.side_panel.pages.is_empty() {
             self.toggle_diagram_pane();
             return;
@@ -531,6 +559,7 @@ impl App {
         if self.side_panel.focused_page().is_some() {
             self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
             self.side_panel.focused_page_id = None;
+            self.side_panel_user_hidden = true;
             if !self.diff_pane_visible() {
                 self.set_diff_pane_focus(false);
             }
@@ -553,6 +582,7 @@ impl App {
 
         self.side_panel.focused_page_id = Some(restore_id.clone());
         self.last_side_panel_focus_id = Some(restore_id);
+        self.side_panel_user_hidden = false;
         self.sync_diagram_fit_context();
         let status = self
             .side_panel

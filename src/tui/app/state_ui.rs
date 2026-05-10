@@ -507,11 +507,14 @@ impl App {
         } else {
             snapshot
         };
-        let snapshot = if self.observe_mode_enabled {
+        let mut snapshot = if self.observe_mode_enabled {
             self.decorate_side_panel_with_observe(snapshot, focus_observe)
         } else {
             snapshot
         };
+        if self.side_panel_user_hidden && snapshot.focused_page_id.is_some() {
+            snapshot.focused_page_id = None;
+        }
         self.apply_side_panel_snapshot(snapshot);
     }
 

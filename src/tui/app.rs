@@ -827,6 +827,9 @@ pub struct App {
     last_client_focus_session_id: Option<String>,
     // Most recently focused side panel page, used to restore visibility when toggled off.
     last_side_panel_focus_id: Option<String>,
+    // User explicitly hid the side panel with Alt+M. While set, incoming snapshots may update
+    // pages but must not reopen the panel by restoring focused_page_id.
+    side_panel_user_hidden: bool,
     // Pin read images to side pane
     pin_images: bool,
     // Show a native terminal scrollbar in the chat viewport.
