@@ -385,9 +385,6 @@ fn push_handwritten_welcome_hero_with_offset(
     }
 
     let progress = reveal_progress.clamp(0.0, 1.0);
-    if progress >= 0.995 {
-        return;
-    }
 
     let paths = handwritten_welcome_paths_for_phrase(phrase);
     let total_length = stroke_paths_length(&paths);
@@ -5540,7 +5537,7 @@ pub(crate) fn single_session_text_areas_for_state(
     welcome_chrome_offset_pixels: f32,
     status_lane_visible: bool,
     ui_scale: f32,
-    welcome_hero_reveal_progress: f32,
+    _welcome_hero_reveal_progress: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
         return Vec::new();
@@ -5638,32 +5635,6 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom: draft_top as i32,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
-        });
-    }
-
-    if welcome_chrome_visible
-        && welcome_hero_reveal_progress >= 0.995
-        && let Some(hero_buffer) = buffers.get(6)
-    {
-        let (hero_min, hero_max) = handwritten_welcome_bounds_for_phrase_with_scale(
-            size,
-            handwritten_welcome_phrase(0),
-            ui_scale,
-        );
-        let hero_top = hero_min[1] + welcome_chrome_offset_pixels - 34.0 * ui_scale;
-        let hero_bottom = hero_max[1] + welcome_chrome_offset_pixels + 36.0 * ui_scale;
-        areas.push(TextArea {
-            buffer: hero_buffer,
-            left: hero_min[0],
-            top: hero_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: hero_top as i32,
-                right: hero_max[0] as i32,
-                bottom: hero_bottom as i32,
-            },
-            default_color: text_color(WELCOME_HANDWRITING_COLOR),
         });
     }
 
