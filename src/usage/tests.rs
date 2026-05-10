@@ -248,6 +248,37 @@ fn test_parse_usage_percent_supports_remaining_limit_shape() {
 }
 
 #[test]
+fn test_parse_usage_percent_preserves_low_percent_values() {
+    let mut obj = serde_json::Map::new();
+    obj.insert("used_percent".to_string(), serde_json::json!(0.06));
+
+    let percent = openai_helpers::parse_usage_percent_from_obj(&obj);
+    assert_eq!(percent, Some(0.06));
+}
+
+#[test]
+fn test_parse_openai_wham_windows_preserve_low_percent_values() {
+    let json = serde_json::json!({
+        "rate_limit": {
+            "allowed": true,
+            "primary_window": {
+                "used_percent": 0.06,
+                "reset_at": 1_766_000_000
+            },
+            "secondary_window": {
+                "used_percent": 0.25,
+                "reset_at": 1_766_086_400
+            }
+        }
+    });
+
+    let parsed = openai_helpers::parse_openai_usage_payload(&json);
+
+    assert_eq!(parsed.limits[0].usage_percent, 0.06);
+    assert_eq!(parsed.limits[1].usage_percent, 0.25);
+}
+
+#[test]
 fn test_active_anthropic_usage_report_prefers_marked_account() {
     let results = vec![
         ProviderUsage {
