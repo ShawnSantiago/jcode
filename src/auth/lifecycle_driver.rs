@@ -149,6 +149,7 @@ pub(crate) struct AuthLifecycleResult {
 
 impl AuthLifecycleResult {
     pub(crate) fn assert_success(&self, spec: &AuthLifecycleSpec) {
+        let transcript = self.transcript_text();
         assert!(self.catalog_report.ok(), "{}", self.failure_report(spec));
         assert_eq!(
             self.activation.provider_id.as_deref(),
@@ -167,25 +168,34 @@ impl AuthLifecycleResult {
             Some(spec.provider_id)
         );
         assert!(
-            self.transcript_text()
-                .contains(&format!("{} credentials are active", spec.provider_label)),
+            transcript.contains(&format!("{} credentials are active", spec.provider_label)),
             "{}",
             self.failure_report(spec)
         );
         assert!(
-            !self
-                .transcript_text()
-                .contains("OpenAI credentials are active"),
+            !transcript.contains("OpenAI credentials are active"),
             "{}",
             self.failure_report(spec)
         );
         assert!(
-            !self
-                .transcript_text()
-                .contains("OpenRouter credentials are active"),
+            !transcript.contains("OpenRouter credentials are active"),
             "{}",
             self.failure_report(spec)
         );
+        for forbidden in [
+            "Auth Model Catalog Warning",
+            "did not switch models",
+            "contained no selectable",
+            "Login: failed",
+            "Unable to sign in",
+            "Saved the API key and fetched the model catalog, but",
+        ] {
+            assert!(
+                !transcript.contains(forbidden),
+                "happy auth lifecycle transcript contained forbidden degraded-success marker `{forbidden}`:\n{}",
+                self.failure_report(spec)
+            );
+        }
         assert!(
             !self.picker.provider_entries.is_empty(),
             "{}",

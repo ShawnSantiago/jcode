@@ -174,13 +174,12 @@ pub fn provider_model_to_select_after_auth(
 }
 
 fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResult) -> bool {
-    if let Some(label) = activation.provider_label.as_deref()
-        && route.provider.eq_ignore_ascii_case(label)
-    {
-        return true;
-    }
-
     let Some(provider_id) = activation.provider_id.as_deref() else {
+        if let Some(label) = activation.provider_label.as_deref()
+            && route.provider.eq_ignore_ascii_case(label)
+        {
+            return true;
+        }
         return false;
     };
 
@@ -192,6 +191,21 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
     }
 
     if route.api_method.eq_ignore_ascii_case(provider_id) {
+        return true;
+    }
+
+    // OpenAI-compatible auth has a concrete catalog namespace. Accepting a
+    // matching display label or generic `openai-compatible` route as success can
+    // hide stale/mixed catalogs, especially when providers share model IDs.
+    if activation.expected_runtime.as_deref() == Some("openai-compatible")
+        || activation.expected_catalog_namespace.is_some()
+    {
+        return false;
+    }
+
+    if let Some(label) = activation.provider_label.as_deref()
+        && route.provider.eq_ignore_ascii_case(label)
+    {
         return true;
     }
 
@@ -555,7 +569,7 @@ mod tests {
         };
         let routes = vec![
             route("gpt-5.5", "OpenAI", "openai", true),
-            route("llama3.1-8b", "Cerebras", "openai-compatible", true),
+            route("llama3.1-8b", "Cerebras", "openai-compatible:cerebras", true),
         ];
 
         let report = validate_catalog_invariants(&activation, Some("llama3.1-8b"), &routes);
@@ -566,6 +580,37 @@ mod tests {
             report.warning_message()
         );
         assert_eq!(report.selectable_provider_routes, 1);
+    }
+
+    #[test]
+    fn catalog_invariants_reject_generic_openai_compatible_route_for_namespaced_auth() {
+        let activation = AuthActivationResult {
+            provider_id: Some("cerebras".to_string()),
+            provider_label: Some("Cerebras".to_string()),
+            activated_model: Some("llama3.1-8b".to_string()),
+            expected_runtime: Some("openai-compatible".to_string()),
+            expected_catalog_namespace: Some("cerebras".to_string()),
+        };
+        let routes = vec![route(
+            "llama3.1-8b",
+            "Cerebras",
+            "openai-compatible",
+            true,
+        )];
+
+        let report = validate_catalog_invariants(&activation, Some("llama3.1-8b"), &routes);
+
+        assert!(
+            !report.ok(),
+            "generic openai-compatible route should not satisfy namespaced auth: {report:?}"
+        );
+        assert_eq!(report.selectable_provider_routes, 0);
+        assert!(
+            report
+                .warning_message()
+                .expect("warning")
+                .contains("Expected selectable Cerebras model routes")
+        );
     }
 
     #[test]
