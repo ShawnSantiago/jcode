@@ -522,7 +522,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         },
         supports_provider_features: false,
         supports_model_catalog: true,
-        profile_id: Some("openai-compatible".to_string()),
+        profile_id: None,
         static_models: vec!["static-login-flow-fallback".to_string()],
         send_openrouter_headers: false,
         ..make_custom_compatible_provider()
@@ -562,6 +562,56 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
             .iter()
             .any(|model| model == "static-login-flow-fallback"),
         "static fallback/default models should remain visible alongside live catalog models: {display:?}"
+    );
+}
+
+#[test]
+fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp home");
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _namespace = EnvVarGuard::set(
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "test-cerebras-live-catalog-filters-static-fallback",
+    );
+    let (api_base, _request_rx) = spawn_single_response_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "live-cerebras-model", "object": "model"}
+            ]
+        }"#,
+    );
+    let provider = OpenRouterProvider {
+        api_base,
+        auth: ProviderAuth::AuthorizationBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "CEREBRAS_API_KEY".to_string(),
+        },
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("cerebras".to_string()),
+        static_models: vec![
+            "zai-glm-4.7".to_string(),
+            "qwen-3-235b-a22b-instruct-2507".to_string(),
+        ],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(provider.refresh_models())
+        .expect("refresh fake model catalog");
+
+    let display = provider.available_models_display();
+    assert!(display.iter().any(|model| model == "live-cerebras-model"));
+    assert!(
+        !display.iter().any(|model| model == "zai-glm-4.7"),
+        "built-in static fallback models should not be advertised after a live catalog refresh: {display:?}"
     );
 }
 

@@ -723,7 +723,11 @@ impl Provider for OpenRouterProvider {
             models
         };
 
+        let should_merge_static_models = self.should_merge_static_models_with_live_catalog();
         let merge_static_models = |mut models: Vec<String>| {
+            if !should_merge_static_models {
+                return with_current_model(models);
+            }
             for model in &self.static_models {
                 if !model.trim().is_empty() && !models.iter().any(|existing| existing == model) {
                     models.push(model.clone());
