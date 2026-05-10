@@ -423,14 +423,13 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
         "JCODE_FORCE_PROVIDER",
     ]);
 
-    let hint = normalized_auth_provider_hint(Some("Cerebras"));
-    assert_eq!(hint, Some("cerebras"));
+    let request =
+        crate::auth::lifecycle::AuthActivationRequest::new(Some("Cerebras".to_string()), None);
+    assert_eq!(request.provider_id().as_deref(), Some("cerebras"));
 
-    let default_model = apply_auth_provider_runtime_hint(hint);
-    assert_eq!(
-        default_model.as_deref(),
-        Some("qwen-3-235b-a22b-instruct-2507")
-    );
+    let activation = crate::auth::lifecycle::activate_auth_change(&request);
+    let default_model = activation.activated_model.as_deref();
+    assert_eq!(default_model, Some("qwen-3-235b-a22b-instruct-2507"));
     assert_eq!(
         std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
         Ok("openai-compatible")
@@ -456,7 +455,7 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
         Ok("cerebras")
     );
     assert_eq!(
-        model_switch_request_for_runtime_hint(hint, "mock-auth", "llama3.1-8b"),
+        activation.model_switch_request("mock-auth", "llama3.1-8b"),
         "openrouter:llama3.1-8b"
     );
 }

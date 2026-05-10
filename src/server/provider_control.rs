@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use crate::agent::Agent;
+use crate::auth::lifecycle::{AuthActivationRequest, AuthActivationResult};
 use crate::protocol::{AuthChanged, ServerEvent};
 use crate::provider::{ModelCatalogRefreshSummary, ModelRoute, Provider};
 use std::collections::HashMap;
@@ -172,104 +173,8 @@ fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     }
 }
 
-fn normalized_auth_provider_hint(provider_hint: Option<&str>) -> Option<&'static str> {
-    let provider = provider_hint?.trim();
-    if provider.eq_ignore_ascii_case("azure")
-        || provider.eq_ignore_ascii_case("azure-openai")
-        || provider.eq_ignore_ascii_case("azure openai")
-    {
-        Some("azure-openai")
-    } else if let Some(profile) =
-        crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
-    {
-        Some(profile.id)
-    } else {
-        None
-    }
-}
-
-fn auth_provider_hint_for_request(
-    provider_hint: Option<String>,
-    auth: Option<&AuthChanged>,
-) -> Option<String> {
-    auth.map(|auth| auth.provider.as_str().to_string())
-        .or(provider_hint)
-}
-
-fn auth_provider_display_label(provider_hint: Option<&str>) -> Option<String> {
-    let provider = normalized_auth_provider_hint(provider_hint)?;
-    if provider == "azure-openai" {
-        return Some("Azure OpenAI".to_string());
-    }
-    crate::provider_catalog::openai_compatible_profile_by_id(provider)
-        .map(|profile| profile.display_name.to_string())
-        .or_else(|| Some(provider.to_string()))
-}
-
-fn apply_auth_provider_runtime_hint(provider_hint: Option<&str>) -> Option<String> {
-    match normalized_auth_provider_hint(provider_hint) {
-        Some("azure-openai") => match crate::provider::activation::apply_azure_openai_runtime() {
-            Ok(model) => model,
-            Err(error) => {
-                let message = error.to_string();
-                crate::logging::auth_event(
-                    "auth_changed_runtime_activation_failed",
-                    "azure-openai",
-                    &[("reason", message.as_str())],
-                );
-                None
-            }
-        },
-        Some(profile_id) => {
-            if let Some(profile) =
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-            {
-                crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
-                let default_model =
-                    crate::provider_catalog::resolve_openai_compatible_profile(profile)
-                        .default_model;
-                if let Err(error) = crate::provider::activation::apply_openai_compatible_runtime(
-                    default_model.clone(),
-                ) {
-                    let message = error.to_string();
-                    crate::logging::auth_event(
-                        "auth_changed_runtime_activation_failed",
-                        profile_id,
-                        &[("reason", message.as_str())],
-                    );
-                    None
-                } else {
-                    default_model
-                }
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn model_switch_request_for_runtime_hint(
-    provider_hint: Option<&str>,
-    provider_name: &str,
-    model: &str,
-) -> String {
-    match normalized_auth_provider_hint(provider_hint) {
-        Some("azure-openai") if !provider_name.eq_ignore_ascii_case("openrouter") => {
-            format!("openrouter:{}", model)
-        }
-        Some(profile_id)
-            if profile_id != "azure-openai"
-                && !provider_name.eq_ignore_ascii_case("openrouter") =>
-        {
-            format!("openrouter:{}", model)
-        }
-        _ => model.to_string(),
-    }
-}
-
 async fn apply_auth_runtime_model_to_agent(
-    provider_hint: Option<&str>,
+    activation: &AuthActivationResult,
     model: Option<&str>,
     agent: &Arc<Mutex<Agent>>,
 ) {
@@ -277,12 +182,11 @@ async fn apply_auth_runtime_model_to_agent(
         return;
     };
 
-    let provider = normalized_auth_provider_hint(provider_hint).unwrap_or("auth");
+    let provider = activation.provider_id.as_deref().unwrap_or("auth");
     let result = {
         let mut agent_guard = agent.lock().await;
         let provider_name = agent_guard.provider_handle().name().to_string();
-        let model_request =
-            model_switch_request_for_runtime_hint(provider_hint, &provider_name, model);
+        let model_request = activation.model_switch_request(&provider_name, model);
         let result = agent_guard.set_model(&model_request);
         if result.is_ok() {
             agent_guard.reset_provider_session();
@@ -635,8 +539,7 @@ pub(super) async fn handle_notify_auth_changed(
         let agent_guard = agent.lock().await;
         agent_guard.session_id().to_string()
     };
-    let provider_hint = auth_provider_hint_for_request(provider_hint, auth.as_ref());
-    let provider_label = auth_provider_display_label(provider_hint.as_deref());
+    let activation_request = AuthActivationRequest::new(provider_hint, auth);
     crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
         crate::bus::UiActivity::auth(
             Some(session_id.clone()),
@@ -649,15 +552,15 @@ pub(super) async fn handle_notify_auth_changed(
     let agent_clone = agent.clone();
     let before_snapshot = available_models_snapshot(agent).await;
     tokio::spawn(async move {
-        let activated_model = apply_auth_provider_runtime_hint(provider_hint.as_deref());
+        let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
         let mut bus_rx = crate::bus::Bus::global().subscribe();
         for provider in targets.providers {
             provider.on_auth_changed();
         }
 
         apply_auth_runtime_model_to_agent(
-            provider_hint.as_deref(),
-            activated_model.as_deref(),
+            &activation,
+            activation.activated_model.as_deref(),
             &agent_clone,
         )
         .await;
@@ -714,7 +617,8 @@ pub(super) async fn handle_notify_auth_changed(
             crate::bus::UiActivity::catalog(
                 Some(session_id),
                 format_auth_catalog_refresh_complete(
-                    provider_label
+                    activation
+                        .provider_label
                         .as_deref()
                         .or(latest_snapshot.provider_name.as_deref()),
                     latest_snapshot.provider_model.as_deref(),
