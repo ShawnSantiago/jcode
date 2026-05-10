@@ -16,8 +16,7 @@ mod preview_request;
 use helpers::{
     agent_model_default_summary, agent_model_target_label, catchup_candidates,
     catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openai_compatible_profile_id_for_route, openrouter_route_model_id, picker_route_model_spec,
-    save_agent_model_override,
+    openrouter_route_model_id, picker_route_model_spec, save_agent_model_override,
 };
 
 impl App {
@@ -1800,44 +1799,13 @@ impl App {
                     let bare_name = model_entry_base_name(entry);
 
                     let (model_spec, provider_key) = if let Some(r) = route {
-                        let spec = if r.api_method == "copilot" {
-                            format!("copilot:{}", bare_name)
-                        } else if r.api_method == "cursor" {
-                            format!("cursor:{}", bare_name)
-                        } else if r.api_method == "bedrock" {
-                            format!("bedrock:{}", bare_name)
-                        } else if r.provider == "Antigravity" {
-                            format!("antigravity:{}", bare_name)
-                        } else if openai_compatible_profile_id_for_route(r).is_some() {
-                            bare_name.clone()
-                        } else if r.api_method == "openrouter" && r.provider != "auto" {
-                            if bare_name.contains('/') {
-                                format!("{}@{}", bare_name, r.provider)
-                            } else {
-                                format!("anthropic/{}@{}", bare_name, r.provider)
-                            }
-                        } else {
-                            bare_name.clone()
-                        };
-                        let pkey = match r.api_method.as_str() {
-                            "claude-oauth" | "api-key"
-                                if crate::provider::provider_for_model(&bare_name)
-                                    == Some("claude") =>
-                            {
-                                Some("claude")
-                            }
-                            "openai-oauth" | "openai-api-key" => Some("openai"),
-                            "copilot" => Some("copilot"),
-                            "cursor" => Some("cursor"),
-                            "bedrock" => Some("bedrock"),
-                            "cli" if r.provider == "Antigravity" => Some("antigravity"),
-                            "openrouter" => Some("openrouter"),
-                            method if method.starts_with("openai-compatible") => {
-                                openai_compatible_profile_id_for_route(r)
-                            }
-                            _ => openai_compatible_profile_id_for_route(r),
-                        };
-                        (spec, pkey)
+                        let selection =
+                            crate::provider::MultiProvider::default_model_selection_from_route(
+                                &bare_name,
+                                &r.api_method,
+                                &r.provider,
+                            );
+                        (selection.model_spec, selection.provider_key)
                     } else {
                         (bare_name.clone(), None)
                     };
@@ -1845,11 +1813,13 @@ impl App {
                     let notice = format!(
                         "Default → {} via {}",
                         model_spec,
-                        provider_key.unwrap_or("auto")
+                        provider_key.as_deref().unwrap_or("auto")
                     );
 
-                    match crate::config::Config::set_default_model(Some(&model_spec), provider_key)
-                    {
+                    match crate::config::Config::set_default_model(
+                        Some(&model_spec),
+                        provider_key.as_deref(),
+                    ) {
                         Ok(()) => {
                             self.invalidate_model_picker_cache();
                             self.set_status_notice(notice)

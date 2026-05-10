@@ -67,10 +67,11 @@ impl MultiProvider {
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
         let cfg = crate::config::config();
+        let provider_state = ProviderState::from_parts(cfg, &auth_status);
         let mut default_named_provider_profile: Option<String> = None;
         if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
             && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
-            && let Some(pref) = cfg.provider.default_provider.as_deref()
+            && let Some(pref) = provider_state.default_provider_key()
         {
             if let Some(profile) =
                 crate::provider_catalog::resolve_openai_compatible_profile_selection(pref)
@@ -95,10 +96,10 @@ impl MultiProvider {
 
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
-        let has_copilot_api = auth_status.copilot_has_api_token;
+        let has_copilot_api = provider_state.auth_status().copilot_has_api_token;
         let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();
         let has_gemini_creds = auth::gemini::load_tokens().is_ok();
-        let has_cursor_creds = auth_status
+        let has_cursor_creds = provider_state.auth_status()
             .assessment_for_provider(crate::provider_catalog::CURSOR_LOGIN_PROVIDER)
             .is_available();
         let has_bedrock_creds = bedrock::BedrockProvider::has_credentials();
@@ -263,46 +264,20 @@ impl MultiProvider {
                     Self::provider_key(forced)
                 ));
             }
-        } else if let Some(ref pref) = cfg.provider.default_provider {
-            if let Some(profile) =
-                crate::provider_catalog::resolve_openai_compatible_profile_selection(pref)
-            {
-                let is_configured = availability.is_configured(ActiveProvider::OpenRouter);
+        } else if let Some(pref) = provider_state.default_provider_key() {
+            if let Some(selection) = provider_state.default_provider_selection() {
+                let preferred = selection.active_provider();
+                let is_configured = provider_state
+                    .preferred_provider_is_configured(availability)
+                    .unwrap_or(false);
                 if is_configured {
-                    active = ActiveProvider::OpenRouter;
-                    let resolved =
-                        crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                    active = preferred;
                     crate::logging::info(&format!(
-                        "Using preferred provider '{}' from config via OpenAI-compatible profile {}",
-                        pref, resolved.display_name
-                    ));
-                } else {
-                    crate::logging::warn(&format!(
-                        "Preferred provider '{}' is not configured, using auto-detected default",
-                        pref
-                    ));
-                }
-            } else if cfg.providers.contains_key(pref) {
-                let is_configured = availability.is_configured(ActiveProvider::OpenRouter);
-                if is_configured {
-                    active = ActiveProvider::OpenRouter;
-                    crate::logging::info(&format!(
-                        "Using preferred provider profile '{}' from config",
-                        pref
-                    ));
-                } else {
-                    crate::logging::warn(&format!(
-                        "Preferred provider profile '{}' is not configured, using auto-detected default",
-                        pref
-                    ));
-                }
-            } else if let Some(pref_provider) = Self::parse_provider_hint(pref) {
-                let is_configured = availability.is_configured(pref_provider);
-                if is_configured {
-                    active = pref_provider;
-                    crate::logging::info(&format!(
-                        "Using preferred provider '{}' from config",
-                        pref
+                        "Using preferred provider '{}' from config via {}",
+                        pref,
+                        provider_state
+                            .preferred_provider_display_label()
+                            .unwrap_or_else(|| selection.display_label())
                     ));
                 } else {
                     crate::logging::warn(&format!(
@@ -334,9 +309,9 @@ impl MultiProvider {
             forced_provider,
         };
 
-        if let Some(ref model) = cfg.provider.default_model {
+        if let Some(model) = provider_state.default_model() {
             if let Err(e) =
-                result.set_config_default_model(model, cfg.provider.default_provider.as_deref())
+                result.set_config_default_model(model, provider_state.default_provider_key())
             {
                 crate::logging::warn(&format!(
                     "Failed to apply default_model '{}' from config: {}",

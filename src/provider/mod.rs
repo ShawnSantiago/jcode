@@ -21,6 +21,7 @@ pub mod pricing;
 mod route_builders;
 mod routing;
 mod selection;
+mod state;
 mod startup;
 
 use crate::auth;
@@ -101,7 +102,9 @@ pub use self::models::{
     should_refresh_openai_model_catalog,
 };
 use self::pricing::cheapness_for_route;
+pub use self::selection::DefaultModelSelection;
 use self::selection::{ActiveProvider, ProviderAvailability};
+use self::state::ProviderState;
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
@@ -702,14 +705,10 @@ impl MultiProvider {
             let trimmed = pref.trim();
             (!trimmed.is_empty()).then_some(trimmed)
         }) {
-            if crate::provider_catalog::resolve_openai_compatible_profile_selection(pref).is_some()
-                || crate::config::config().providers.contains_key(pref)
+            if let Some(selection) =
+                Self::resolve_config_provider_selection(pref, crate::config::config())
             {
-                return self.set_model_on_provider(ActiveProvider::OpenRouter, model);
-            }
-
-            if let Some(provider) = Self::parse_provider_hint(pref) {
-                return self.set_model_on_provider(provider, model);
+                return self.set_model_on_provider(selection.active_provider(), model);
             }
         }
 
