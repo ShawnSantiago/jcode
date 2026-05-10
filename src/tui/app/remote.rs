@@ -417,6 +417,10 @@ fn auth_provider_hint_for_login_provider(provider: &str) -> Option<&'static str>
         || provider.eq_ignore_ascii_case("azure openai")
     {
         Some("azure-openai")
+    } else if let Some(profile) =
+        crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
+    {
+        Some(profile.id)
     } else {
         None
     }

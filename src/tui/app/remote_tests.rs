@@ -1,5 +1,8 @@
 use super::reconnect;
-use super::{RemoteRunState, handle_post_connect, handle_server_event, process_remote_followups};
+use super::{
+    RemoteRunState, auth_provider_hint_for_login_provider, handle_post_connect,
+    handle_server_event, process_remote_followups,
+};
 use crate::protocol::{
     MemoryActivitySnapshot, MemoryPipelineSnapshot, MemoryStateSnapshot, MemoryStepStatusSnapshot,
     ServerEvent,
@@ -52,6 +55,30 @@ fn reload_handoff_active_when_server_flag_is_set() {
     };
 
     assert!(reconnect::reload_handoff_active(&state));
+}
+
+#[test]
+fn auth_provider_hint_maps_openai_compatible_login_providers() {
+    assert_eq!(
+        auth_provider_hint_for_login_provider("Azure OpenAI"),
+        Some("azure-openai")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("cerebras"),
+        Some("cerebras")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("Cerebras"),
+        Some("cerebras")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("minimax"),
+        Some("minimax")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("not-a-provider"),
+        None
+    );
 }
 
 #[test]

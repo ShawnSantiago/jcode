@@ -179,6 +179,10 @@ fn normalized_auth_provider_hint(provider_hint: Option<&str>) -> Option<&'static
         || provider.eq_ignore_ascii_case("azure openai")
     {
         Some("azure-openai")
+    } else if let Some(profile) =
+        crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
+    {
+        Some(profile.id)
     } else {
         None
     }
@@ -198,6 +202,31 @@ fn apply_auth_provider_runtime_hint(provider_hint: Option<&str>) -> Option<Strin
                 None
             }
         },
+        Some(profile_id) => {
+            if let Some(profile) =
+                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+            {
+                crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
+                let default_model =
+                    crate::provider_catalog::resolve_openai_compatible_profile(profile)
+                        .default_model;
+                if let Err(error) = crate::provider::activation::apply_openai_compatible_runtime(
+                    default_model.clone(),
+                ) {
+                    let message = error.to_string();
+                    crate::logging::auth_event(
+                        "auth_changed_runtime_activation_failed",
+                        profile_id,
+                        &[("reason", message.as_str())],
+                    );
+                    None
+                } else {
+                    default_model
+                }
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -209,6 +238,12 @@ fn model_switch_request_for_runtime_hint(
 ) -> String {
     match normalized_auth_provider_hint(provider_hint) {
         Some("azure-openai") if !provider_name.eq_ignore_ascii_case("openrouter") => {
+            format!("openrouter:{}", model)
+        }
+        Some(profile_id)
+            if profile_id != "azure-openai"
+                && !provider_name.eq_ignore_ascii_case("openrouter") =>
+        {
             format!("openrouter:{}", model)
         }
         _ => model.to_string(),

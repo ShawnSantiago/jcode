@@ -177,7 +177,7 @@ fn minimax_profile_exposes_static_models_before_catalog_refresh() {
 }
 
 #[test]
-fn cerebras_profile_default_tracks_live_catalog_and_is_not_static() {
+fn cerebras_profile_exposes_static_models_before_catalog_refresh() {
     assert_eq!(
         jcode_provider_metadata::CEREBRAS_PROFILE.default_model,
         Some("qwen-3-235b-a22b-instruct-2507")
@@ -191,12 +191,14 @@ fn cerebras_profile_default_tracks_live_catalog_and_is_not_static() {
         !models.iter().any(|model| model == "qwen-3-coder-480b"),
         "old Cerebras default is no longer returned by the live /models catalog"
     );
+    assert!(models.iter().any(|model| model == "zai-glm-4.7"));
     assert!(
-        !models
+        models
             .iter()
-            .any(|model| model == "qwen-3-235b-a22b-instruct-2507"),
-        "metadata default is only a suggestion; Cerebras selectable models must come from the live /models catalog"
+            .any(|model| model == "qwen-3-235b-a22b-instruct-2507")
     );
+    assert!(models.iter().any(|model| model == "gpt-oss-120b"));
+    assert!(models.iter().any(|model| model == "llama3.1-8b"));
 }
 
 #[test]

@@ -399,6 +399,61 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
     );
 }
 
+#[test]
+fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+
+    let hint = normalized_auth_provider_hint(Some("Cerebras"));
+    assert_eq!(hint, Some("cerebras"));
+
+    let default_model = apply_auth_provider_runtime_hint(hint);
+    assert_eq!(
+        default_model.as_deref(),
+        Some("qwen-3-235b-a22b-instruct-2507")
+    );
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+        Ok("openai-compatible")
+    );
+    assert_eq!(
+        std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+        Ok("openrouter")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").as_deref(),
+        Ok("https://api.cerebras.ai/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME").as_deref(),
+        Ok("CEREBRAS_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_ENV_FILE").as_deref(),
+        Ok("cerebras.env")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
+        Ok("cerebras")
+    );
+    assert_eq!(
+        model_switch_request_for_runtime_hint(hint, "mock-auth", "llama3.1-8b"),
+        "openrouter:llama3.1-8b"
+    );
+}
+
 #[tokio::test]
 async fn refresh_models_emits_available_models_updated_after_prefetch() {
     crate::bus::reset_models_updated_publish_state_for_tests();

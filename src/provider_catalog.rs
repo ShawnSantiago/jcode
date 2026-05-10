@@ -209,6 +209,12 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         "kimi" => {
             push("kimi-for-coding");
         }
+        "cerebras" => {
+            push("zai-glm-4.7");
+            push("qwen-3-235b-a22b-instruct-2507");
+            push("gpt-oss-120b");
+            push("llama3.1-8b");
+        }
         // MiniMax's `/models` endpoint is authenticated and live, but post-login
         // model activation should not depend on the catalog refresh completing
         // before the picker/routes are rebuilt. Keep the documented text models
