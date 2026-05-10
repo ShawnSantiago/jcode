@@ -1987,7 +1987,6 @@ impl App {
         // without requiring a restart or a second user action.
         let provider = Arc::clone(&self.provider);
         let session_id = self.session.id.clone();
-        let before_models = provider.available_models_display();
         let before_routes = provider.model_routes();
         self.provider.on_auth_changed();
 
@@ -1996,16 +1995,38 @@ impl App {
                 let result = provider.refresh_model_catalog().await;
                 match result {
                     Ok(_summary) => {
-                        let after_models = provider.available_models_display();
                         let routes = provider.model_routes();
-                        let summary = crate::provider::summarize_model_catalog_refresh(
-                            before_models,
-                            after_models,
-                            before_routes,
-                            routes.clone(),
-                        );
                         let expected_api_method = format!("openai-compatible:{}", provider_id);
-                        let selected = routes
+                        let route_matches_profile = |route: &crate::provider::ModelRoute| {
+                            route.available
+                                && crate::provider::is_listable_model_name(&route.model)
+                                && (route.api_method.eq_ignore_ascii_case(&expected_api_method)
+                                    || route.api_method.eq_ignore_ascii_case(&provider_id))
+                        };
+                        let before_provider_routes = before_routes
+                            .into_iter()
+                            .filter(route_matches_profile)
+                            .collect::<Vec<_>>();
+                        let provider_routes = routes
+                            .iter()
+                            .filter(|route| route_matches_profile(route))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let before_provider_models = before_provider_routes
+                            .iter()
+                            .map(|route| route.model.clone())
+                            .collect::<Vec<_>>();
+                        let after_provider_models = provider_routes
+                            .iter()
+                            .map(|route| route.model.clone())
+                            .collect::<Vec<_>>();
+                        let summary = crate::provider::summarize_model_catalog_refresh(
+                            before_provider_models,
+                            after_provider_models,
+                            before_provider_routes,
+                            provider_routes.clone(),
+                        );
+                        let selected = provider_routes
                             .iter()
                             .find(|route| {
                                 route.available
@@ -2013,7 +2034,7 @@ impl App {
                                     && crate::provider::is_listable_model_name(&route.model)
                             })
                             .or_else(|| {
-                                routes.iter().find(|route| {
+                                provider_routes.iter().find(|route| {
                                     route.available
                                         && route.api_method.eq_ignore_ascii_case(&provider_id)
                                         && crate::provider::is_listable_model_name(&route.model)

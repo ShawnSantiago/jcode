@@ -70,6 +70,10 @@ struct AuthUxStateSpaceProvider {
     authed: StdArc<AtomicBool>,
     refreshes: StdArc<AtomicUsize>,
     model: StdArc<StdMutex<String>>,
+    provider_id: &'static str,
+    provider_label: &'static str,
+    models: &'static [&'static str],
+    include_wrong_profile_first: bool,
 }
 
 #[derive(Clone)]
@@ -81,16 +85,25 @@ struct EmptyPostLoginCatalogProvider {
 impl AuthUxStateSpaceProvider {
     fn routes(&self) -> Vec<crate::provider::ModelRoute> {
         let authed = self.authed.load(Ordering::SeqCst);
-        [
-            ("wrong-profile-first", "openai-compatible:other-provider"),
-            ("state-space-alpha", "openai-compatible:state-space"),
-            ("state-space-beta", "openai-compatible:state-space"),
-        ]
-        .into_iter()
-        .map(|(model, api_method)| crate::provider::ModelRoute {
-            model: model.to_string(),
-            provider: "StateSpace".to_string(),
-            api_method: api_method.to_string(),
+        let mut routes = Vec::new();
+        if self.include_wrong_profile_first {
+            routes.push(crate::provider::ModelRoute {
+                model: "wrong-profile-first".to_string(),
+                provider: self.provider_label.to_string(),
+                api_method: "openai-compatible:other-provider".to_string(),
+                available: authed,
+                detail: if authed {
+                    "fresh wrong-profile catalog route".to_string()
+                } else {
+                    "no API key".to_string()
+                },
+                cheapness: None,
+            });
+        }
+        routes.extend(self.models.iter().map(|model| crate::provider::ModelRoute {
+            model: (*model).to_string(),
+            provider: self.provider_label.to_string(),
+            api_method: format!("openai-compatible:{}", self.provider_id),
             available: authed,
             detail: if authed {
                 "fresh catalog route".to_string()
@@ -98,8 +111,8 @@ impl AuthUxStateSpaceProvider {
                 "no API key".to_string()
             },
             cheapness: None,
-        })
-        .collect()
+        }));
+        routes
     }
 }
 
@@ -317,6 +330,10 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         authed: StdArc::new(AtomicBool::new(false)),
         refreshes: StdArc::new(AtomicUsize::new(0)),
         model: StdArc::new(StdMutex::new("pre-auth-model".to_string())),
+        provider_id: "state-space",
+        provider_label: "StateSpace",
+        models: &["state-space-alpha", "state-space-beta"],
+        include_wrong_profile_first: true,
     };
     let refreshes = provider.refreshes.clone();
     let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -380,6 +397,154 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         app.status_notice(),
         Some("Model → state-space-beta".to_string())
     );
+}
+
+#[test]
+fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _guard = AzureLoginEnvGuard::save(&[
+        "CEREBRAS_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let fake_provider = AuthUxStateSpaceProvider {
+        authed: StdArc::new(AtomicBool::new(false)),
+        refreshes: StdArc::new(AtomicUsize::new(0)),
+        model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
+        provider_id: "cerebras",
+        provider_label: "Cerebras",
+        models: &["qwen-3-235b-a22b-instruct-2507", "llama3.1-8b"],
+        include_wrong_profile_first: true,
+    };
+    let refreshes = fake_provider.refreshes.clone();
+    let provider: Arc<dyn Provider> = Arc::new(fake_provider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    app.start_login_provider(
+        crate::provider_catalog::resolve_login_provider("cerebras")
+            .expect("Cerebras login provider"),
+    );
+
+    let prompt = app.display_messages.last().expect("login prompt").content.clone();
+    assert!(prompt.contains("**Cerebras API Key**"), "{prompt}");
+    assert!(
+        prompt.contains("Stored variable: `CEREBRAS_API_KEY`"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Endpoint: `https://api.cerebras.ai/v1`"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Suggested default model: `qwen-3-235b-a22b-instruct-2507`"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("**Paste your API key below**"), "{prompt}");
+
+    let pending = app.pending_login.take().expect("pending Cerebras key login");
+    let _runtime_guard = rt.enter();
+    app.handle_login_input(pending, "test-cerebras-key".to_string());
+
+    let mut saw_saved = false;
+    let mut saw_catalog_started = false;
+    let mut saw_activation = false;
+    rt.block_on(async {
+        while !(saw_saved && saw_catalog_started && saw_activation) {
+            match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
+                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
+                    assert!(login.success, "unexpected failed login event: {login:?}");
+                    assert_eq!(login.provider, "Cerebras");
+                    assert!(login.message.contains("**Cerebras API key saved.**"));
+                    assert!(
+                        login
+                            .message
+                            .contains("Stored at `~/.config/jcode/cerebras.env`.")
+                    );
+                    assert!(login.message.contains("Fetching models now."));
+                    assert!(!login.message.contains("did not switch models"));
+                    app.handle_login_completed(login);
+                    saw_saved = true;
+                }
+                Ok(Ok(crate::bus::BusEvent::UiActivity(activity))) => {
+                    assert!(
+                        !activity.message.contains("Auth Model Catalog Warning"),
+                        "unexpected warning activity: {}",
+                        activity.message
+                    );
+                    assert!(
+                        !activity.message.contains("did not switch models"),
+                        "unexpected degraded activity: {}",
+                        activity.message
+                    );
+                    if activity.message.contains("Model Discovery Started") {
+                        saw_catalog_started = true;
+                    }
+                    super::local::handle_bus_event(
+                        &mut app,
+                        Ok(crate::bus::BusEvent::UiActivity(activity)),
+                    );
+                }
+                Ok(Ok(event @ crate::bus::BusEvent::ProviderModelActivated { .. })) => {
+                    if let crate::bus::BusEvent::ProviderModelActivated { model, message, .. } =
+                        &event
+                    {
+                        assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
+                        assert!(message.contains("**Cerebras is ready.**"), "{message}");
+                        assert!(!message.contains("wrong-profile-first"), "{message}");
+                    }
+                    super::local::handle_bus_event(&mut app, Ok(event));
+                    saw_activation = true;
+                }
+                Ok(Ok(_)) => {}
+                other => panic!("expected local Cerebras auth lifecycle event, got {other:?}"),
+            }
+        }
+    });
+
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        app.session.model.as_deref(),
+        Some("qwen-3-235b-a22b-instruct-2507")
+    );
+    let transcript = app
+        .display_messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    for forbidden in [
+        "Auth Model Catalog Warning",
+        "did not switch models",
+        "contained no selectable",
+        "Saved the API key and fetched the model catalog, but",
+        "Login: Cerebras failed",
+        "wrong-profile-first",
+    ] {
+        assert!(
+            !transcript.contains(forbidden),
+            "transcript contained forbidden degraded-success marker `{forbidden}`:\n{transcript}"
+        );
+    }
 }
 
 #[test]
