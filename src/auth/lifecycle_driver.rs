@@ -249,6 +249,23 @@ impl AuthLifecycleResult {
             "{}",
             self.failure_report(spec)
         );
+        let matching_routes = self
+            .catalog_routes
+            .iter()
+            .filter(|route| route.available && route_matches_spec(route, spec))
+            .collect::<Vec<_>>();
+        assert!(
+            matching_routes.iter().all(|route| route.detail.contains("live-catalog")),
+            "happy auth lifecycle must be backed by live/provider catalog routes, not static fallback routes:\n{}",
+            self.failure_report(spec)
+        );
+        assert!(
+            matching_routes
+                .iter()
+                .all(|route| !route.detail.to_ascii_lowercase().contains("static fallback")),
+            "happy auth lifecycle accepted a static fallback route:\n{}",
+            self.failure_report(spec)
+        );
     }
 
     pub(crate) fn transcript_text(&self) -> String {
@@ -771,6 +788,34 @@ mod tests {
             Some("openai-compatible:cerebras")
         );
         assert!(!picker.provider_entries.iter().any(|model| model == "wrong-profile-first"));
+    }
+
+    #[test]
+    fn auth_lifecycle_success_rejects_static_fallback_route_sources() {
+        let driver = AuthLifecycleDriver::new().expect("driver");
+        let spec = AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
+        let mut result = driver
+            .run_openai_compatible_fixture(&spec)
+            .expect("lifecycle result");
+        for route in &mut result.catalog_routes {
+            route.detail = "fixture static fallback route".to_string();
+        }
+
+        assert!(
+            result.catalog_report.ok(),
+            "the catalog shape is valid, so only source attribution should fail"
+        );
+        let panic = std::panic::catch_unwind(|| result.assert_success(&spec))
+            .expect_err("static fallback routes must not satisfy happy auth lifecycle");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+        assert!(
+            message.contains("static fallback"),
+            "unexpected assertion failure: {message}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
