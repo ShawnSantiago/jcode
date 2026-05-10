@@ -12,6 +12,7 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
 struct AuthRefreshTargets {
     providers: Vec<Arc<dyn Provider>>,
+    available_agents: Vec<Arc<Mutex<Agent>>>,
     deferred_agents: Vec<Arc<Mutex<Agent>>>,
 }
 
@@ -133,6 +134,7 @@ async fn auth_refresh_targets(
     }
 
     let mut handles = Vec::new();
+    let mut available_agents = Vec::new();
     let mut deferred_agents = Vec::new();
     push_unique(&mut handles, Arc::clone(provider_template));
     push_unique(&mut handles, Arc::clone(current_provider));
@@ -152,22 +154,31 @@ async fn auth_refresh_targets(
         };
         let provider = agent_guard.provider_handle();
         push_unique(&mut handles, provider);
+        available_agents.push(Arc::clone(&agent));
     }
 
     AuthRefreshTargets {
         providers: handles,
+        available_agents,
         deferred_agents,
     }
 }
 
-fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
+fn spawn_deferred_auth_refreshes(
+    agents: Vec<Arc<Mutex<Agent>>>,
+    activation: AuthActivationResult,
+    model: Option<String>,
+) {
     for agent in agents {
+        let activation = activation.clone();
+        let model = model.clone();
         tokio::spawn(async move {
             let provider = {
                 let agent_guard = agent.lock().await;
                 agent_guard.provider_handle()
             };
             provider.on_auth_changed();
+            apply_auth_runtime_model_to_agent(&activation, model.as_deref(), &agent).await;
             crate::bus::Bus::global().publish_models_updated();
         });
     }
@@ -558,12 +569,21 @@ pub(super) async fn handle_notify_auth_changed(
             provider.on_auth_changed();
         }
 
-        apply_auth_runtime_model_to_agent(
-            &activation,
-            activation.activated_model.as_deref(),
-            &agent_clone,
-        )
-        .await;
+        let mut model_agents = targets.available_agents;
+        if !model_agents
+            .iter()
+            .any(|candidate| Arc::ptr_eq(candidate, &agent_clone))
+        {
+            model_agents.push(Arc::clone(&agent_clone));
+        }
+        for model_agent in &model_agents {
+            apply_auth_runtime_model_to_agent(
+                &activation,
+                activation.activated_model.as_deref(),
+                model_agent,
+            )
+            .await;
+        }
 
         crate::bus::Bus::global().publish_models_updated();
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
@@ -574,7 +594,11 @@ pub(super) async fn handle_notify_auth_changed(
             ),
         ));
 
-        spawn_deferred_auth_refreshes(targets.deferred_agents);
+        spawn_deferred_auth_refreshes(
+            targets.deferred_agents,
+            activation.clone(),
+            activation.activated_model.clone(),
+        );
 
         // Hot-initializing providers is synchronous, while dynamic catalogs may
         // continue refreshing in the background. Push an immediate snapshot so
