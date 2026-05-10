@@ -1,5 +1,5 @@
-use super::selection::{ActiveProvider, ConfigProviderSelection, ProviderAvailability};
 use super::MultiProvider;
+use super::selection::{ActiveProvider, ConfigProviderSelection, ProviderAvailability};
 use crate::auth::AuthStatus;
 use crate::config::Config;
 
@@ -36,8 +36,9 @@ impl<'a> ProviderState<'a> {
     }
 
     pub(crate) fn default_provider_selection(&self) -> Option<ConfigProviderSelection> {
-        self.default_provider_key()
-            .and_then(|provider| MultiProvider::resolve_config_provider_selection(provider, self.config))
+        self.default_provider_key().and_then(|provider| {
+            MultiProvider::resolve_config_provider_selection(provider, self.config)
+        })
     }
 
     pub(crate) fn preferred_active_provider(&self) -> Option<ActiveProvider> {
@@ -73,7 +74,10 @@ mod tests {
 
         assert_eq!(state.default_provider_key(), Some("kimi"));
         assert_eq!(state.default_model(), Some("moonshot-v1-8k"));
-        assert_eq!(state.preferred_active_provider(), Some(ActiveProvider::OpenRouter));
+        assert_eq!(
+            state.preferred_active_provider(),
+            Some(ActiveProvider::OpenRouter)
+        );
         assert_eq!(
             state.preferred_provider_is_configured(ProviderAvailability {
                 openrouter: true,

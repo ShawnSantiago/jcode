@@ -443,38 +443,138 @@ async fn fetch_models_from_api(
         );
     }
 
-    #[derive(Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelInfo>,
-    }
-
     let raw_body = response
         .text()
         .await
         .with_context(|| format!("Failed to read model catalog response body from {}", url))?;
-    let models_response: ModelsResponse = serde_json::from_str(&raw_body).with_context(|| {
-        format!(
-            "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` array of model objects containing at least `id`\n  response: {}",
-            url,
-            auth.label(),
-            crate::util::truncate_str(&raw_body.trim().replace('\n', "\\n"), 1200)
-        )
-    })?;
+    let models = parse_openai_compatible_models_response(&raw_body).with_context(|| {
+            format!(
+                "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` or `models` array, or a top-level array, with model objects containing at least `id` or `name`\n  response: {}",
+                url,
+                auth.label(),
+                crate::util::truncate_str(&raw_body.trim().replace('\n', "\\n"), 1200)
+            )
+        })?;
 
-    save_disk_cache_with_source(&models_response.data, Some(&api_base));
+    save_disk_cache_with_source(&models, Some(&api_base));
 
     if let Some(now) = current_unix_secs() {
         let mut cache = models_cache.write().await;
-        cache.models = models_response.data.clone();
+        cache.models = models.clone();
         cache.fetched = true;
         cache.cached_at = Some(now);
     } else {
         let mut cache = models_cache.write().await;
-        cache.models = models_response.data.clone();
+        cache.models = models.clone();
         cache.fetched = true;
     }
 
-    Ok(models_response.data)
+    Ok(models)
+}
+
+fn parse_openai_compatible_models_response(raw_body: &str) -> Result<Vec<ModelInfo>> {
+    let value: Value = serde_json::from_str(raw_body)?;
+    let items = match &value {
+        Value::Array(items) => items,
+        Value::Object(object) => object
+            .get("data")
+            .or_else(|| object.get("models"))
+            .and_then(Value::as_array)
+            .context("missing model array")?,
+        _ => anyhow::bail!("model catalog response must be an object or array"),
+    };
+
+    let mut models = Vec::new();
+    for item in items {
+        if let Some(model) = parse_model_info_value(item) {
+            models.push(model);
+        }
+    }
+
+    if models.is_empty() {
+        anyhow::bail!("model catalog response did not contain any valid model objects");
+    }
+
+    Ok(models)
+}
+
+fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
+    let object = value.as_object()?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("name").and_then(Value::as_str))?
+        .to_string();
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("display_name").and_then(Value::as_str))
+        .or_else(|| object.get("displayName").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+
+    Some(ModelInfo {
+        id,
+        name,
+        context_length: first_u64_field(
+            object,
+            &[
+                "context_length",
+                "contextLength",
+                "max_context_length",
+                "maxModelLength",
+                "max_model_len",
+                "trainingContextLength",
+            ],
+        ),
+        pricing: parse_model_pricing(object.get("pricing")),
+        created: object.get("created").and_then(value_as_u64),
+    })
+}
+
+fn first_u64_field(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_as_u64))
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn value_as_pricing_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_model_pricing(value: Option<&Value>) -> ModelPricing {
+    let Some(Value::Object(object)) = value else {
+        return ModelPricing::default();
+    };
+
+    ModelPricing {
+        prompt: object
+            .get("prompt")
+            .or_else(|| object.get("input"))
+            .and_then(value_as_pricing_string),
+        completion: object
+            .get("completion")
+            .or_else(|| object.get("output"))
+            .and_then(value_as_pricing_string),
+        input_cache_read: object
+            .get("input_cache_read")
+            .or_else(|| object.get("cached_input"))
+            .and_then(value_as_pricing_string),
+        input_cache_write: object
+            .get("input_cache_write")
+            .and_then(value_as_pricing_string),
+    }
 }
 
 fn models_fingerprint(models: &[ModelInfo]) -> String {

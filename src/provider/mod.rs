@@ -21,8 +21,8 @@ pub mod pricing;
 mod route_builders;
 mod routing;
 mod selection;
-mod state;
 mod startup;
+mod state;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
