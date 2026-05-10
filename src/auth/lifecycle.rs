@@ -395,7 +395,8 @@ pub fn model_switch_request_for_provider_id(
         Some("azure-openai") => format!("openrouter:{}", model),
         Some(profile_id)
             if profile_id != "azure-openai"
-                && crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() =>
+                && crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+                    .is_some() =>
         {
             format!("{}:{}", profile_id, model)
         }
@@ -646,8 +647,14 @@ mod tests {
                 activation.provider_label.as_deref(),
                 Some(provider.display_name)
             );
-            assert_eq!(std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(), Ok(runtime));
-            assert_eq!(std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(), Ok(active));
+            assert_eq!(
+                std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+                Ok(runtime)
+            );
+            assert_eq!(
+                std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+                Ok(active)
+            );
             assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
             assert_eq!(
                 activation.model_switch_request("ignored-runtime", "shared-model"),
@@ -723,8 +730,18 @@ mod tests {
             expected_catalog_namespace: Some("cerebras".to_string()),
         };
         let routes = vec![
-            route("llama3.1-8b", "Other Gateway", "openai-compatible:other", true),
-            route("llama3.1-8b", "Cerebras", "openai-compatible:cerebras", true),
+            route(
+                "llama3.1-8b",
+                "Other Gateway",
+                "openai-compatible:other",
+                true,
+            ),
+            route(
+                "llama3.1-8b",
+                "Cerebras",
+                "openai-compatible:cerebras",
+                true,
+            ),
         ];
 
         assert_eq!(
@@ -745,7 +762,12 @@ mod tests {
         };
         let routes = vec![
             route("gpt-5.5", "OpenAI", "openai", true),
-            route("llama3.1-8b", "Cerebras", "openai-compatible:cerebras", true),
+            route(
+                "llama3.1-8b",
+                "Cerebras",
+                "openai-compatible:cerebras",
+                true,
+            ),
         ];
 
         let report = validate_catalog_invariants(&activation, Some("llama3.1-8b"), &routes);
@@ -767,12 +789,7 @@ mod tests {
             expected_runtime: Some("openai-compatible".to_string()),
             expected_catalog_namespace: Some("cerebras".to_string()),
         };
-        let routes = vec![route(
-            "llama3.1-8b",
-            "Cerebras",
-            "openai-compatible",
-            true,
-        )];
+        let routes = vec![route("llama3.1-8b", "Cerebras", "openai-compatible", true)];
 
         let report = validate_catalog_invariants(&activation, Some("llama3.1-8b"), &routes);
 

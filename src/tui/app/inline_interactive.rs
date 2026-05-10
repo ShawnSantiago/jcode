@@ -533,6 +533,7 @@ impl App {
         } else {
             routes
         };
+        let routes = crate::provider::dedupe_model_routes(routes);
 
         if routes.is_empty() {
             self.inline_interactive_state = None;

@@ -7,7 +7,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
     let prev_home = std::env::var_os("JCODE_HOME");
     let prev_subscription =
         std::env::var_os(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
-    let saved_profile_env = [
+    let mut profile_env_keys = vec![
         "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY",
         "KIMI_API_KEY",
@@ -30,8 +30,16 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",
-    ]
-    .map(|key| (key, std::env::var_os(key)));
+    ];
+    for profile in crate::provider_catalog::openai_compatible_profiles() {
+        if !profile_env_keys.contains(&profile.api_key_env) {
+            profile_env_keys.push(profile.api_key_env);
+        }
+    }
+    let saved_profile_env = profile_env_keys
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
     crate::env::set_var("JCODE_HOME", temp.path());
     for (key, _) in &saved_profile_env {
         crate::env::remove_var(key);

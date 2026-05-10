@@ -115,6 +115,164 @@ fn test_available_models_display_uses_route_models_and_filters_placeholder_rows(
 }
 
 #[test]
+fn test_cerebras_model_routes_are_profile_scoped_and_unique() {
+    with_clean_provider_test_env(|| {
+        with_env_var("CEREBRAS_API_KEY", "test-cerebras-key", || {
+            crate::provider_catalog::force_apply_openai_compatible_profile_env(
+                crate::provider_catalog::openai_compatible_profile_by_id("cerebras"),
+            );
+            let openrouter = Arc::new(
+                openrouter::OpenRouterProvider::new()
+                    .expect("Cerebras direct provider should initialize"),
+            );
+            let provider = MultiProvider {
+                claude: RwLock::new(None),
+                anthropic: RwLock::new(None),
+                openai: RwLock::new(None),
+                copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
+                gemini: RwLock::new(None),
+                cursor: RwLock::new(None),
+                bedrock: RwLock::new(None),
+                openrouter: RwLock::new(Some(openrouter)),
+                active: RwLock::new(ActiveProvider::OpenRouter),
+                use_claude_cli: false,
+                startup_notices: RwLock::new(Vec::new()),
+                forced_provider: Some(ActiveProvider::OpenRouter),
+            };
+
+            let routes = provider.model_routes();
+            let qwen_routes = routes
+                .iter()
+                .filter(|route| {
+                    route.provider == "Cerebras"
+                        && route.model == "qwen-3-235b-a22b-instruct-2507"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                qwen_routes.len(),
+                1,
+                "Cerebras direct route should not appear twice in provider routes: {routes:?}"
+            );
+            assert_eq!(qwen_routes[0].api_method, "openai-compatible:cerebras");
+            assert!(qwen_routes[0].available);
+            assert!(
+                !routes.iter().any(|route| {
+                    route.provider == "Cerebras" && route.api_method == "openai-compatible"
+                }),
+                "generic Cerebras OpenAI-compatible route should be collapsed into the profile-scoped route: {routes:?}"
+            );
+        })
+    });
+}
+
+#[test]
+fn test_auth_changed_preserves_existing_direct_profile_session() {
+    with_clean_provider_test_env(|| {
+        let cerebras = crate::provider_catalog::openai_compatible_profile_by_id("cerebras")
+            .expect("Cerebras profile exists");
+        let groq = crate::provider_catalog::openai_compatible_profile_by_id("groq")
+            .expect("Groq profile exists");
+
+        crate::env::set_var("CEREBRAS_API_KEY", "test-cerebras-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(cerebras));
+        let openrouter = Arc::new(
+            openrouter::OpenRouterProvider::new().expect("Cerebras provider should initialize"),
+        );
+        openrouter
+            .set_model("qwen-3-235b-a22b-instruct-2507")
+            .expect("Cerebras model should be selectable");
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(openrouter)),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::OpenRouter),
+        };
+
+        crate::env::set_var("GROQ_API_KEY", "test-groq-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(groq));
+        provider.on_auth_changed_preserve_current_provider();
+
+        assert_eq!(provider.model(), "qwen-3-235b-a22b-instruct-2507");
+        let active_direct_route = provider
+            .openrouter_provider()
+            .expect("existing direct provider remains installed")
+            .direct_openai_compatible_route_parts()
+            .expect("existing direct provider remains direct");
+        assert_eq!(active_direct_route.0, "Cerebras");
+        assert_eq!(active_direct_route.1, "openai-compatible:cerebras");
+
+        let routes = provider.model_routes();
+        assert!(routes.iter().any(|route| {
+            route.model == "qwen-3-235b-a22b-instruct-2507"
+                && route.provider == "Cerebras"
+                && route.api_method == "openai-compatible:cerebras"
+                && route.available
+        }));
+        assert!(
+            routes.iter().all(|route| {
+                !(route.model == "qwen-3-235b-a22b-instruct-2507" && route.provider == "Groq")
+            }),
+            "Groq auth should not relabel an existing Cerebras session route: {routes:?}"
+        );
+    });
+}
+
+#[test]
+fn test_auth_changed_replaces_template_direct_profile_for_new_logins() {
+    with_clean_provider_test_env(|| {
+        let cerebras = crate::provider_catalog::openai_compatible_profile_by_id("cerebras")
+            .expect("Cerebras profile exists");
+        let groq = crate::provider_catalog::openai_compatible_profile_by_id("groq")
+            .expect("Groq profile exists");
+
+        crate::env::set_var("CEREBRAS_API_KEY", "test-cerebras-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(cerebras));
+        let openrouter = Arc::new(
+            openrouter::OpenRouterProvider::new().expect("Cerebras provider should initialize"),
+        );
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(openrouter)),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::OpenRouter),
+        };
+
+        crate::env::set_var("GROQ_API_KEY", "test-groq-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(groq));
+        provider.on_auth_changed();
+
+        let active_direct_route = provider
+            .openrouter_provider()
+            .expect("template direct provider remains installed")
+            .direct_openai_compatible_route_parts()
+            .expect("template direct provider remains direct");
+        assert_eq!(active_direct_route.0, "Groq");
+        assert_eq!(active_direct_route.1, "openai-compatible:groq");
+    });
+}
+
+#[test]
 fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available() {
     with_clean_provider_test_env(|| {
         with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {

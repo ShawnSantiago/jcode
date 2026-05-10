@@ -75,6 +75,7 @@ struct AuthUxStateSpaceProvider {
     provider_label: &'static str,
     models: &'static [&'static str],
     include_wrong_profile_first: bool,
+    include_generic_profile_duplicate: bool,
 }
 
 #[derive(Clone)]
@@ -107,18 +108,34 @@ impl AuthUxStateSpaceProvider {
                 cheapness: None,
             });
         }
-        routes.extend(self.models.iter().map(|model| crate::provider::ModelRoute {
-            model: (*model).to_string(),
-            provider: self.provider_label.to_string(),
-            api_method: format!("openai-compatible:{}", self.provider_id),
-            available: authed,
-            detail: if authed {
-                "fresh catalog route".to_string()
-            } else {
-                "no API key".to_string()
-            },
-            cheapness: None,
-        }));
+        for model in self.models {
+            routes.push(crate::provider::ModelRoute {
+                model: (*model).to_string(),
+                provider: self.provider_label.to_string(),
+                api_method: format!("openai-compatible:{}", self.provider_id),
+                available: authed,
+                detail: if authed {
+                    "fresh catalog route".to_string()
+                } else {
+                    "no API key".to_string()
+                },
+                cheapness: None,
+            });
+            if self.include_generic_profile_duplicate {
+                routes.push(crate::provider::ModelRoute {
+                    model: (*model).to_string(),
+                    provider: self.provider_label.to_string(),
+                    api_method: "openai-compatible".to_string(),
+                    available: authed,
+                    detail: if authed {
+                        "duplicate generic direct route".to_string()
+                    } else {
+                        "no API key".to_string()
+                    },
+                    cheapness: None,
+                });
+            }
+        }
         routes
     }
 }
@@ -388,6 +405,7 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         provider_label: "StateSpace",
         models: &["state-space-alpha", "state-space-beta"],
         include_wrong_profile_first: true,
+        include_generic_profile_duplicate: false,
     };
     let refreshes = provider.refreshes.clone();
     let provider: Arc<dyn Provider> = Arc::new(provider);
@@ -483,6 +501,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         provider_label: "Cerebras",
         models: &["qwen-3-235b-a22b-instruct-2507", "llama3.1-8b"],
         include_wrong_profile_first: true,
+        include_generic_profile_duplicate: true,
     };
     let refreshes = fake_provider.refreshes.clone();
     let set_model_requests = fake_provider.set_model_requests.clone();
@@ -659,22 +678,54 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .iter()
         .find(|entry| entry.name == "qwen-3-235b-a22b-instruct-2507")
         .expect("selected Cerebras model should be visible in /model");
+    assert_eq!(
+        picker
+            .entries
+            .iter()
+            .filter(|entry| entry.name == "qwen-3-235b-a22b-instruct-2507")
+            .count(),
+        1,
+        "Cerebras model picker should not show duplicate rows for the selected model"
+    );
     assert!(qwen_entry.options.iter().any(|route| {
         route.provider == "Cerebras"
             && route.api_method == "openai-compatible:cerebras"
             && route.available
     }));
+    assert!(
+        !qwen_entry
+            .options
+            .iter()
+            .any(|route| route.api_method == "openai-compatible"),
+        "generic direct route should be de-duplicated in favor of the Cerebras profile route"
+    );
     let llama_idx = picker
         .entries
         .iter()
         .position(|entry| entry.name == "llama3.1-8b")
         .expect("alternate Cerebras model should be visible in /model");
     let llama_entry = &picker.entries[llama_idx];
+    assert_eq!(
+        picker
+            .entries
+            .iter()
+            .filter(|entry| entry.name == "llama3.1-8b")
+            .count(),
+        1,
+        "Cerebras model picker should not show duplicate rows for alternate models"
+    );
     assert!(llama_entry.options.iter().any(|route| {
         route.provider == "Cerebras"
             && route.api_method == "openai-compatible:cerebras"
             && route.available
     }));
+    assert!(
+        !llama_entry
+            .options
+            .iter()
+            .any(|route| route.api_method == "openai-compatible"),
+        "generic direct route should be de-duplicated in favor of the Cerebras profile route"
+    );
     let filtered_pos = picker
         .filtered
         .iter()

@@ -815,30 +815,15 @@ impl Provider for OpenRouterProvider {
     }
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        let provider_label = self
-            .profile_id
-            .as_deref()
-            .and_then(openai_compatible_profile_by_id)
-            .map(|profile| profile.display_name.to_string())
+        let (provider_label, api_method, detail) = self
+            .direct_openai_compatible_route_parts()
             .unwrap_or_else(|| {
-                if self.supports_provider_features {
-                    "OpenRouter".to_string()
-                } else {
-                    "OpenAI-compatible".to_string()
-                }
+                (
+                    "OpenRouter".to_string(),
+                    "openrouter".to_string(),
+                    String::new(),
+                )
             });
-        let api_method = if self.supports_provider_features {
-            "openrouter".to_string()
-        } else if let Some(profile_id) = self.profile_id.as_deref() {
-            format!("openai-compatible:{}", profile_id)
-        } else {
-            "openai-compatible".to_string()
-        };
-        let detail = if self.supports_provider_features {
-            String::new()
-        } else {
-            self.api_base.clone()
-        };
 
         self.available_models_display()
             .into_iter()

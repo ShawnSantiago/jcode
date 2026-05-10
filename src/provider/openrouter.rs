@@ -547,6 +547,29 @@ impl OpenRouterProvider {
         self.supports_provider_features
     }
 
+    pub(crate) fn direct_openai_compatible_route_parts(&self) -> Option<(String, String, String)> {
+        if self.supports_provider_features {
+            return None;
+        }
+
+        let provider_label = self
+            .profile_id
+            .as_deref()
+            .map(|profile_id| {
+                openai_compatible_profile_by_id(profile_id)
+                    .map(|profile| profile.display_name.to_string())
+                    .unwrap_or_else(|| profile_id.to_string())
+            })
+            .unwrap_or_else(|| "OpenAI-compatible".to_string());
+        let api_method = self
+            .profile_id
+            .as_deref()
+            .map(|profile_id| format!("openai-compatible:{}", profile_id))
+            .unwrap_or_else(|| "openai-compatible".to_string());
+
+        Some((provider_label, api_method, self.api_base.clone()))
+    }
+
     pub fn new_named_openai_compatible(
         profile_name: &str,
         profile: &crate::config::NamedProviderConfig,

@@ -677,7 +677,7 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
 }
 
 #[tokio::test]
-async fn notify_auth_changed_updates_all_connected_sessions_without_stale_models() {
+async fn notify_auth_changed_switches_only_current_session_model() {
     let _guard = EnvGuard::save(&[
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",
@@ -697,13 +697,13 @@ async fn notify_auth_changed_updates_all_connected_sessions_without_stale_models
     let current_provider = Arc::new(AuthChangeMockProvider::new());
     let current_state = Arc::clone(&current_provider.state);
     *current_state.selected_model.write().unwrap() = Some("gpt-5.5".to_string());
-    *current_state.route_provider.write().unwrap() = "Cerebras".to_string();
-    *current_state.route_api_method.write().unwrap() = "openai-compatible:cerebras".to_string();
+    *current_state.route_provider.write().unwrap() = "Groq".to_string();
+    *current_state.route_api_method.write().unwrap() = "openai-compatible:groq".to_string();
     let peer_provider = Arc::new(AuthChangeMockProvider::new());
     let peer_state = Arc::clone(&peer_provider.state);
     *peer_state.selected_model.write().unwrap() = Some("gpt-5.5".to_string());
-    *peer_state.route_provider.write().unwrap() = "Cerebras".to_string();
-    *peer_state.route_api_method.write().unwrap() = "openai-compatible:cerebras".to_string();
+    *peer_state.route_provider.write().unwrap() = "Groq".to_string();
+    *peer_state.route_api_method.write().unwrap() = "openai-compatible:groq".to_string();
 
     let current_provider: Arc<dyn Provider> = current_provider;
     let peer_provider: Arc<dyn Provider> = peer_provider;
@@ -719,13 +719,13 @@ async fn notify_auth_changed_updates_all_connected_sessions_without_stale_models
     ])));
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
-    let mut auth = crate::protocol::AuthChanged::new("cerebras");
+    let mut auth = crate::protocol::AuthChanged::new("groq");
     auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
     auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
     auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new(
         "openai-compatible",
     ));
-    auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new("cerebras"));
+    auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new("groq"));
 
     handle_notify_auth_changed(
         47,
@@ -744,12 +744,16 @@ async fn notify_auth_changed_updates_all_connected_sessions_without_stale_models
         Some(ServerEvent::Done { id: 47 })
     ));
 
-    let expected = "qwen-3-235b-a22b-instruct-2507";
+    let expected = "llama-3.1-8b-instant";
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while tokio::time::Instant::now() < deadline {
         let current = current_state.selected_model.read().unwrap().clone();
         let peer = peer_state.selected_model.read().unwrap().clone();
-        if current.as_deref() == Some(expected) && peer.as_deref() == Some(expected) {
+        let peer_refreshed = *peer_state.logged_in.read().unwrap();
+        if current.as_deref() == Some(expected)
+            && peer.as_deref() == Some("gpt-5.5")
+            && peer_refreshed
+        {
             let peer_snapshot = available_models_updated_event(&peer_agent).await;
             let ServerEvent::AvailableModelsUpdated {
                 provider_name,
@@ -761,15 +765,17 @@ async fn notify_auth_changed_updates_all_connected_sessions_without_stale_models
                 panic!("expected available models snapshot for peer session");
             };
             assert_eq!(provider_name.as_deref(), Some("mock-auth"));
-            assert_eq!(provider_model.as_deref(), Some(expected));
+            assert_eq!(provider_model.as_deref(), Some("gpt-5.5"));
             assert!(available_model_routes.iter().any(|route| {
-                route.model == expected
-                    && route.provider == "Cerebras"
-                    && route.api_method == "openai-compatible:cerebras"
+                route.model == "gpt-5.5"
+                    && route.provider == "Groq"
+                    && route.api_method == "openai-compatible:groq"
             }));
             assert!(
-                available_model_routes.iter().all(|route| route.model != "gpt-5.5"),
-                "stale selected model leaked into peer session routes: {:?}",
+                available_model_routes
+                    .iter()
+                    .all(|route| route.model != expected),
+                "auth-triggered Groq model leaked into peer session routes: {:?}",
                 available_model_routes
             );
             return;
@@ -778,9 +784,10 @@ async fn notify_auth_changed_updates_all_connected_sessions_without_stale_models
     }
 
     panic!(
-        "auth change did not update all connected session models: current={:?}, peer={:?}",
+        "auth change did not keep model switch session-local: current={:?}, peer={:?}, peer_refreshed={}",
         current_state.selected_model.read().unwrap().clone(),
-        peer_state.selected_model.read().unwrap().clone()
+        peer_state.selected_model.read().unwrap().clone(),
+        *peer_state.logged_in.read().unwrap()
     );
 }
 
