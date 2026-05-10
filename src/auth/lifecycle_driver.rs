@@ -101,6 +101,8 @@ pub(crate) struct PickerSnapshot {
     pub provider_entries: Vec<String>,
     pub switch_target: Option<String>,
     pub switch_request: Option<String>,
+    pub switch_route_provider: Option<String>,
+    pub switch_route_api_method: Option<String>,
 }
 
 impl PickerSnapshot {
@@ -110,9 +112,12 @@ impl PickerSnapshot {
         selected_model: Option<&str>,
         routes: &[ModelRoute],
     ) -> Self {
-        let provider_entries = routes
+        let provider_routes = routes
             .iter()
             .filter(|route| route.available && route_matches_spec(route, spec))
+            .collect::<Vec<_>>();
+        let provider_entries = provider_routes
+            .iter()
             .map(|route| route.model.clone())
             .collect::<Vec<_>>();
         let selected_model = selected_model
@@ -127,12 +132,20 @@ impl PickerSnapshot {
         let switch_request = switch_target.as_deref().map(|model| {
             activation.model_switch_request(spec.current_runtime_provider_name, model)
         });
+        let switch_route = switch_target.as_ref().and_then(|target| {
+            provider_routes
+                .iter()
+                .find(|route| route.model == *target)
+                .copied()
+        });
 
         Self {
             selected_model,
             provider_entries,
             switch_target,
             switch_request,
+            switch_route_provider: switch_route.map(|route| route.provider.clone()),
+            switch_route_api_method: switch_route.map(|route| route.api_method.clone()),
         }
     }
 }
@@ -223,6 +236,16 @@ impl AuthLifecycleResult {
                 .switch_request
                 .as_ref()
                 .is_some_and(|request| !request.trim().is_empty()),
+            "{}",
+            self.failure_report(spec)
+        );
+        assert!(
+            self.picker
+                .switch_route_api_method
+                .as_deref()
+                .is_some_and(|api_method| api_method
+                    .eq_ignore_ascii_case(&format!("openai-compatible:{}", spec.provider_id))
+                    || api_method.eq_ignore_ascii_case(spec.provider_id)),
             "{}",
             self.failure_report(spec)
         );
@@ -415,10 +438,9 @@ impl AuthLifecycleDriver {
 }
 
 fn route_matches_spec(route: &ModelRoute, spec: &AuthLifecycleSpec) -> bool {
-    route.provider.eq_ignore_ascii_case(spec.provider_label)
-        || route
-            .api_method
-            .eq_ignore_ascii_case(&format!("openai-compatible:{}", spec.provider_id))
+    route
+        .api_method
+        .eq_ignore_ascii_case(&format!("openai-compatible:{}", spec.provider_id))
         || route.api_method.eq_ignore_ascii_case(spec.provider_id)
 }
 
@@ -689,6 +711,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn picker_switch_target_uses_profile_route_not_matching_label_only_route() {
+        let spec = AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
+        let auth = AuthChanged {
+            provider: crate::protocol::AuthProviderId::new(spec.provider_id),
+            credential_source: Some(spec.auth_path.credential_source()),
+            auth_method: Some(spec.auth_path.auth_method()),
+            expected_runtime: Some(RuntimeProviderKey::new("openai-compatible")),
+            expected_catalog_namespace: Some(CatalogNamespace::new(spec.provider_id)),
+        };
+        let activation = activate_auth_change(&AuthActivationRequest::new(None, Some(auth)));
+        let routes = vec![
+            ModelRoute {
+                model: "wrong-profile-first".to_string(),
+                provider: "Cerebras".to_string(),
+                api_method: "openai-compatible:other-provider".to_string(),
+                available: true,
+                detail: "wrong namespace".to_string(),
+                cheapness: None,
+            },
+            ModelRoute {
+                model: "qwen-3-235b-a22b-instruct-2507".to_string(),
+                provider: "Cerebras".to_string(),
+                api_method: "openai-compatible:cerebras".to_string(),
+                available: true,
+                detail: "correct namespace".to_string(),
+                cheapness: None,
+            },
+            ModelRoute {
+                model: "llama3.1-8b".to_string(),
+                provider: "Cerebras".to_string(),
+                api_method: "openai-compatible:cerebras".to_string(),
+                available: true,
+                detail: "correct namespace".to_string(),
+                cheapness: None,
+            },
+        ];
+
+        let picker = PickerSnapshot::build(
+            &spec,
+            &activation,
+            Some("qwen-3-235b-a22b-instruct-2507"),
+            &routes,
+        );
+
+        assert_eq!(
+            picker.provider_entries,
+            vec![
+                "qwen-3-235b-a22b-instruct-2507".to_string(),
+                "llama3.1-8b".to_string()
+            ]
+        );
+        assert_eq!(picker.switch_target.as_deref(), Some("llama3.1-8b"));
+        assert_eq!(
+            picker.switch_route_api_method.as_deref(),
+            Some("openai-compatible:cerebras")
+        );
+        assert!(!picker.provider_entries.iter().any(|model| model == "wrong-profile-first"));
     }
 
     #[tokio::test(flavor = "current_thread")]
