@@ -8,7 +8,7 @@ pub(super) struct ParsedOpenAIUsageReport {
     pub(super) hard_limit_reached: bool,
 }
 
-pub(super) fn normalize_ratio(raw: f32) -> f32 {
+fn normalize_ratio_value(raw: f32) -> f32 {
     if !raw.is_finite() {
         return 0.0;
     }
@@ -20,7 +20,7 @@ pub(super) fn normalize_ratio(raw: f32) -> f32 {
 }
 
 fn normalize_percent(raw: f32) -> f32 {
-    normalize_ratio(raw) * 100.0
+    normalize_ratio_value(raw) * 100.0
 }
 
 fn clamp_percent(raw: f32) -> f32 {
@@ -29,6 +29,10 @@ fn clamp_percent(raw: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+pub(super) fn usage_percent_to_ratio(percent: f32) -> f32 {
+    clamp_percent(percent) / 100.0
 }
 
 fn normalize_limit_key(name: &str) -> String {
@@ -68,7 +72,7 @@ fn limit_mentions_spark(key: &str) -> bool {
 fn to_openai_window(limit: &UsageLimit) -> OpenAIUsageWindow {
     OpenAIUsageWindow {
         name: limit.name.clone(),
-        usage_ratio: normalize_ratio(limit.usage_percent),
+        usage_ratio: usage_percent_to_ratio(limit.usage_percent),
         resets_at: limit.resets_at.clone(),
     }
 }
