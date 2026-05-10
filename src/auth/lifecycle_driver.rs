@@ -1161,4 +1161,64 @@ mod tests {
             .expect("live Cerebras smoke completion");
         }
     }
+
+    #[test]
+    fn fresh_start_sandbox_is_unconfigured_then_tui_key_lifecycle_configures_provider() {
+        let driver = AuthLifecycleDriver::new().expect("driver");
+        let spec = AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::TuiPasteApiKey);
+        let resolved = crate::provider_catalog::resolve_openai_compatible_profile(spec.profile);
+        let env_file = driver.sandbox.env_file_path(&resolved.env_file);
+        let provider = crate::provider_catalog::resolve_login_provider(spec.provider_id)
+            .expect("Cerebras login provider descriptor");
+
+        assert!(
+            !env_file.exists(),
+            "fresh sandbox should not start with a provider env file: {}",
+            env_file.display()
+        );
+        assert_eq!(
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                &resolved.api_key_env,
+                &resolved.env_file,
+            ),
+            None,
+            "fresh sandbox should not inherit credentials from the developer machine"
+        );
+        assert!(
+            !crate::provider_catalog::openai_compatible_profile_is_configured(spec.profile),
+            "fresh sandbox should report the provider as unconfigured before setup"
+        );
+        crate::auth::AuthStatus::invalidate_cache();
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().state_for_provider(provider),
+            crate::auth::AuthState::NotConfigured
+        );
+
+        let result = driver
+            .run_openai_compatible_fixture(&spec)
+            .expect("fresh-start TUI paste-key lifecycle");
+
+        result.assert_success(&spec);
+        assert!(env_file.exists(), "TUI paste-key lifecycle should create env file");
+        assert_eq!(
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                &resolved.api_key_env,
+                &resolved.env_file,
+            )
+            .as_deref(),
+            Some(spec.api_key.as_str())
+        );
+        assert!(
+            result
+                .transcript_text()
+                .contains("**Cerebras API key saved.**"),
+            "fresh-start lifecycle should show the user that the key was saved: {}",
+            result.transcript_text()
+        );
+        crate::auth::AuthStatus::invalidate_cache();
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().state_for_provider(provider),
+            crate::auth::AuthState::Available
+        );
+    }
 }
