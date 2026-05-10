@@ -16,6 +16,7 @@ use crate::provider_catalog::OpenAiCompatibleProfile;
 pub(crate) enum AuthLifecycleAuthPath {
     TuiPasteApiKey,
     RemoteTuiPasteApiKey,
+    CliLogin,
     EnvFilePreseeded,
     ProcessEnvPreseeded,
 }
@@ -25,6 +26,7 @@ impl AuthLifecycleAuthPath {
         match self {
             Self::TuiPasteApiKey => AuthMethod::TuiPasteApiKey,
             Self::RemoteTuiPasteApiKey => AuthMethod::RemoteTuiPasteApiKey,
+            Self::CliLogin => AuthMethod::CliLogin,
             Self::EnvFilePreseeded => AuthMethod::EnvFilePreseeded,
             Self::ProcessEnvPreseeded => AuthMethod::ProcessEnvPreseeded,
         }
@@ -32,9 +34,10 @@ impl AuthLifecycleAuthPath {
 
     fn credential_source(self) -> AuthCredentialSource {
         match self {
-            Self::TuiPasteApiKey | Self::RemoteTuiPasteApiKey | Self::EnvFilePreseeded => {
-                AuthCredentialSource::ApiKeyFile
-            }
+            Self::TuiPasteApiKey
+            | Self::RemoteTuiPasteApiKey
+            | Self::CliLogin
+            | Self::EnvFilePreseeded => AuthCredentialSource::ApiKeyFile,
             Self::ProcessEnvPreseeded => AuthCredentialSource::ProcessEnv,
         }
     }
@@ -321,6 +324,7 @@ impl AuthLifecycleDriver {
         match spec.auth_path {
             AuthLifecycleAuthPath::TuiPasteApiKey
             | AuthLifecycleAuthPath::RemoteTuiPasteApiKey
+            | AuthLifecycleAuthPath::CliLogin
             | AuthLifecycleAuthPath::EnvFilePreseeded => {
                 let path = self
                     .sandbox
@@ -611,6 +615,7 @@ mod tests {
     fn cerebras_env_file_and_process_env_paths_share_same_lifecycle_invariants() {
         for auth_path in [
             AuthLifecycleAuthPath::TuiPasteApiKey,
+            AuthLifecycleAuthPath::CliLogin,
             AuthLifecycleAuthPath::EnvFilePreseeded,
             AuthLifecycleAuthPath::ProcessEnvPreseeded,
         ] {
@@ -638,6 +643,7 @@ mod tests {
     fn openai_compatible_provider_matrix_preserves_identity_catalog_and_picker() {
         let auth_paths = [
             AuthLifecycleAuthPath::RemoteTuiPasteApiKey,
+            AuthLifecycleAuthPath::CliLogin,
             AuthLifecycleAuthPath::EnvFilePreseeded,
             AuthLifecycleAuthPath::ProcessEnvPreseeded,
         ];
