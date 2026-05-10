@@ -1,4 +1,5 @@
 use anyhow::{Context, ensure};
+use serde::Deserialize;
 
 use crate::auth::lifecycle::{
     AuthActivationRequest, AuthActivationResult, AuthCatalogInvariantReport, activate_auth_change,
@@ -49,9 +50,9 @@ pub(crate) struct AuthLifecycleSpec {
     pub provider_label: &'static str,
     pub profile: OpenAiCompatibleProfile,
     pub auth_path: AuthLifecycleAuthPath,
-    pub api_key: &'static str,
-    pub catalog_models_after_auth: Vec<&'static str>,
-    pub selected_model_override: Option<&'static str>,
+    pub api_key: String,
+    pub catalog_models_after_auth: Vec<String>,
+    pub selected_model_override: Option<String>,
     pub current_runtime_provider_name: &'static str,
 }
 
@@ -62,11 +63,11 @@ impl AuthLifecycleSpec {
             provider_label: "Cerebras",
             profile: crate::provider_catalog::CEREBRAS_PROFILE,
             auth_path,
-            api_key: "test-cerebras-key",
+            api_key: "test-cerebras-key".to_string(),
             catalog_models_after_auth: vec![
-                "qwen-3-235b-a22b-instruct-2507",
-                "llama3.1-8b",
-                "gpt-oss-120b",
+                "qwen-3-235b-a22b-instruct-2507".to_string(),
+                "llama3.1-8b".to_string(),
+                "gpt-oss-120b".to_string(),
             ],
             selected_model_override: None,
             current_runtime_provider_name: "mock-auth",
@@ -267,7 +268,7 @@ impl AuthLifecycleDriver {
         let activation = activate_auth_change(&AuthActivationRequest::new(None, Some(auth)));
         let selected_model = spec
             .selected_model_override
-            .map(ToString::to_string)
+            .clone()
             .or_else(|| activation.activated_model.clone());
         let catalog_routes = self.catalog_routes_for_spec(spec);
         let catalog_report =
@@ -306,12 +307,12 @@ impl AuthLifecycleDriver {
             | AuthLifecycleAuthPath::EnvFilePreseeded => {
                 let path = self
                     .sandbox
-                    .write_openai_compatible_api_key(spec.profile, spec.api_key)
+                    .write_openai_compatible_api_key(spec.profile, &spec.api_key)
                     .with_context(|| format!("write {} API key file", spec.provider_label))?;
                 Ok(Some(path.display().to_string()))
             }
             AuthLifecycleAuthPath::ProcessEnvPreseeded => {
-                crate::env::set_var(&resolved.api_key_env, spec.api_key);
+                crate::env::set_var(&resolved.api_key_env, &spec.api_key);
                 crate::auth::AuthStatus::invalidate_cache();
                 Ok(Some(format!("process env {}", resolved.api_key_env)))
             }
@@ -322,7 +323,7 @@ impl AuthLifecycleDriver {
         spec.catalog_models_after_auth
             .iter()
             .map(|model| ModelRoute {
-                model: (*model).to_string(),
+                model: model.clone(),
                 provider: spec.provider_label.to_string(),
                 api_method: format!("openai-compatible:{}", spec.provider_id),
                 available: true,
@@ -390,9 +391,135 @@ fn route_matches_spec(route: &ModelRoute, spec: &AuthLifecycleSpec) -> bool {
         || route.api_method.eq_ignore_ascii_case(spec.provider_id)
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleModelsResponse {
+    #[serde(default)]
+    data: Vec<OpenAiCompatibleModelInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleModelInfo {
+    id: String,
+}
+
+pub(crate) async fn fetch_live_openai_compatible_models(
+    profile: OpenAiCompatibleProfile,
+    api_key: &str,
+) -> anyhow::Result<Vec<String>> {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    let url = format!("{}/models", resolved.api_base.trim_end_matches('/'));
+    let request = crate::provider::shared_http_client()
+        .get(&url)
+        .bearer_auth(api_key);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(20), request.send())
+        .await
+        .context("timed out fetching live model catalog")?
+        .with_context(|| {
+            format!(
+                "fetch live {} model catalog from {url}",
+                resolved.display_name
+            )
+        })?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    ensure!(
+        status.is_success(),
+        "{} live model catalog failed (HTTP {}): {}",
+        resolved.display_name,
+        status,
+        body.trim()
+    );
+
+    let parsed: OpenAiCompatibleModelsResponse = serde_json::from_str(&body)
+        .with_context(|| format!("parse live {} model catalog", resolved.display_name))?;
+    let models = parsed
+        .data
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    ensure!(
+        !models.is_empty(),
+        "{} live model catalog returned no models",
+        resolved.display_name
+    );
+    Ok(models)
+}
+
+pub(crate) async fn run_live_openai_compatible_smoke(
+    profile: OpenAiCompatibleProfile,
+    api_key: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    let url = format!(
+        "{}/chat/completions",
+        resolved.api_base.trim_end_matches('/')
+    );
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "Reply with exactly AUTH_TEST_OK and nothing else."}
+        ],
+        "temperature": 0,
+        "stream": false
+    });
+    let request = crate::provider::shared_http_client()
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
+        .await
+        .context("timed out running live smoke completion")?
+        .with_context(|| format!("run live {} smoke completion", resolved.display_name))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    ensure!(
+        status.is_success(),
+        "{} live smoke failed (HTTP {}): {}",
+        resolved.display_name,
+        status,
+        text.trim()
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parse live {} smoke response", resolved.display_name))?;
+    let content = parsed
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+        .unwrap_or_default()
+        .trim();
+    ensure!(
+        content.contains("AUTH_TEST_OK"),
+        "{} live smoke returned unexpected content: {:?}",
+        resolved.display_name,
+        content
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_truthy(key: &str) -> bool {
+        std::env::var(key)
+            .ok()
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    }
+
+    fn live_cerebras_api_key() -> Option<String> {
+        std::env::var("JCODE_AUTH_LIFECYCLE_CEREBRAS_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
 
     fn stale_openai_route(model: &str) -> ModelRoute {
         ModelRoute {
@@ -438,7 +565,7 @@ mod tests {
         let mut spec =
             AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
         spec.catalog_models_after_auth.clear();
-        spec.selected_model_override = Some("gpt-5.5");
+        spec.selected_model_override = Some("gpt-5.5".to_string());
 
         let mut result = driver
             .run_openai_compatible_fixture(&spec)
@@ -487,6 +614,62 @@ mod tests {
                         .contains("**Cerebras credentials detected.**")
                 );
             }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cerebras_live_opt_in_catalog_lifecycle_uses_isolated_sandbox() {
+        if !env_truthy("JCODE_AUTH_LIFECYCLE_LIVE") {
+            eprintln!(
+                "skipping live Cerebras auth lifecycle test; set JCODE_AUTH_LIFECYCLE_LIVE=1 and JCODE_AUTH_LIFECYCLE_CEREBRAS_API_KEY"
+            );
+            return;
+        }
+        let api_key = live_cerebras_api_key()
+            .expect("JCODE_AUTH_LIFECYCLE_LIVE=1 requires JCODE_AUTH_LIFECYCLE_CEREBRAS_API_KEY");
+
+        let models = fetch_live_openai_compatible_models(
+            crate::provider_catalog::CEREBRAS_PROFILE,
+            &api_key,
+        )
+        .await
+        .expect("live Cerebras model catalog");
+        let default_model = crate::provider_catalog::CEREBRAS_PROFILE.default_model;
+        let selected = default_model
+            .filter(|default| models.iter().any(|model| model == default))
+            .map(ToString::to_string)
+            .or_else(|| models.first().cloned())
+            .expect("live catalog has model");
+
+        let driver = AuthLifecycleDriver::new().expect("driver");
+        let mut spec =
+            AuthLifecycleSpec::cerebras_fixture(AuthLifecycleAuthPath::RemoteTuiPasteApiKey);
+        spec.api_key = api_key.clone();
+        spec.catalog_models_after_auth = models;
+        spec.selected_model_override = Some(selected.clone());
+
+        let result = driver
+            .run_openai_compatible_fixture(&spec)
+            .expect("live lifecycle result");
+
+        result.assert_success(&spec);
+        assert!(
+            result
+                .catalog_routes
+                .iter()
+                .any(|route| route.model == selected && route.provider == "Cerebras"),
+            "{}",
+            result.failure_report(&spec)
+        );
+
+        if env_truthy("JCODE_AUTH_LIFECYCLE_SMOKE") {
+            run_live_openai_compatible_smoke(
+                crate::provider_catalog::CEREBRAS_PROFILE,
+                &api_key,
+                &selected,
+            )
+            .await
+            .expect("live Cerebras smoke completion");
         }
     }
 }
