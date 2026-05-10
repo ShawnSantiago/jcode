@@ -400,13 +400,16 @@ pub fn model_switch_request_for_provider_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
 
     struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
         fn new(keys: &[&'static str]) -> Self {
+            let lock = crate::storage::lock_test_env();
             let saved = keys
                 .iter()
                 .map(|key| (*key, std::env::var(key).ok()))
@@ -414,7 +417,7 @@ mod tests {
             for key in keys {
                 crate::env::remove_var(key);
             }
-            Self { saved }
+            Self { _lock: lock, saved }
         }
     }
 
