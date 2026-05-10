@@ -564,6 +564,119 @@ mod tests {
     }
 
     #[test]
+    fn direct_login_provider_descriptor_matrix_has_full_lifecycle_parity() {
+        let _guard = EnvGuard::new(&[
+            "JCODE_RUNTIME_PROVIDER",
+            "JCODE_ACTIVE_PROVIDER",
+            "JCODE_FORCE_PROVIDER",
+            "JCODE_OPENROUTER_MODEL",
+        ]);
+
+        let mut covered = Vec::new();
+        for provider in crate::provider_catalog::login_providers() {
+            let Some((normalized, runtime, active, switch_prefix)) = (match provider.target {
+                crate::provider_catalog::LoginProviderTarget::Jcode => {
+                    Some(("jcode", "jcode", "openrouter", "openrouter"))
+                }
+                crate::provider_catalog::LoginProviderTarget::Claude => {
+                    Some(("claude", "claude", "claude", "claude"))
+                }
+                crate::provider_catalog::LoginProviderTarget::OpenAi => {
+                    Some(("openai", "openai", "openai", "openai"))
+                }
+                crate::provider_catalog::LoginProviderTarget::OpenAiApiKey => {
+                    Some(("openai-api", "openai-api", "openai", "openai"))
+                }
+                crate::provider_catalog::LoginProviderTarget::OpenRouter => {
+                    Some(("openrouter", "openrouter", "openrouter", "openrouter"))
+                }
+                crate::provider_catalog::LoginProviderTarget::Bedrock => {
+                    Some(("bedrock", "bedrock", "bedrock", "bedrock"))
+                }
+                crate::provider_catalog::LoginProviderTarget::Cursor => {
+                    Some(("cursor", "cursor", "cursor", "cursor"))
+                }
+                crate::provider_catalog::LoginProviderTarget::Copilot => {
+                    Some(("copilot", "copilot", "copilot", "copilot"))
+                }
+                crate::provider_catalog::LoginProviderTarget::Gemini => {
+                    Some(("gemini", "gemini", "gemini", "gemini"))
+                }
+                crate::provider_catalog::LoginProviderTarget::Antigravity => {
+                    Some(("antigravity", "antigravity", "antigravity", "antigravity"))
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            covered.push(provider.id);
+            assert_eq!(
+                normalized_auth_provider_id(Some(provider.id)),
+                Some(normalized),
+                "{} descriptor id must normalize into the auth lifecycle",
+                provider.id
+            );
+            for alias in provider.aliases {
+                assert_eq!(
+                    normalized_auth_provider_id(Some(alias)),
+                    Some(normalized),
+                    "{} alias `{}` must normalize into the same auth lifecycle provider",
+                    provider.id,
+                    alias
+                );
+            }
+            assert_eq!(
+                provider_display_label(Some(provider.id)).as_deref(),
+                Some(provider.display_name),
+                "{} descriptor display label must be user-visible auth label",
+                provider.id
+            );
+
+            crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+            crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+
+            let activation = activate_auth_change(&AuthActivationRequest::new(
+                None,
+                Some(AuthChanged::new(provider.id)),
+            ));
+            assert_eq!(activation.provider_id.as_deref(), Some(normalized));
+            assert_eq!(
+                activation.provider_label.as_deref(),
+                Some(provider.display_name)
+            );
+            assert_eq!(std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(), Ok(runtime));
+            assert_eq!(std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(), Ok(active));
+            assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+            assert_eq!(
+                activation.model_switch_request("ignored-runtime", "shared-model"),
+                format!("{switch_prefix}:shared-model"),
+                "{} direct auth model switch must stay provider-explicit",
+                provider.id
+            );
+        }
+
+        for expected in [
+            "claude",
+            "openai",
+            "openai-api",
+            "openrouter",
+            "jcode",
+            "bedrock",
+            "cursor",
+            "copilot",
+            "gemini",
+            "antigravity",
+        ] {
+            assert!(
+                covered.contains(&expected),
+                "direct provider parity matrix did not cover {expected}: {covered:?}"
+            );
+        }
+    }
+
+    #[test]
     fn model_switch_request_prefixes_openai_compatible_profiles_with_profile_id() {
         assert_eq!(
             model_switch_request_for_provider_id(Some("cerebras"), "mock-auth", "llama3.1-8b"),
