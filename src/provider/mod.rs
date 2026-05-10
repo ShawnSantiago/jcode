@@ -1218,17 +1218,27 @@ impl Provider for MultiProvider {
         }
 
         // OpenRouter models (with per-provider endpoints)
-        let has_openrouter = self.openrouter_provider().is_some();
-        if let Some(openrouter) = self.openrouter_provider() {
+        let openrouter_provider = self.openrouter_provider();
+        let has_openrouter = openrouter_provider.is_some();
+        let has_openrouter_provider_features = openrouter_provider
+            .as_ref()
+            .map(|openrouter| openrouter.supports_provider_routing_features())
+            .unwrap_or(false);
+        if let Some(openrouter) = openrouter_provider {
             let current_openrouter_model = openrouter.model();
             let supports_openrouter_provider_features =
                 openrouter.supports_provider_routing_features();
             let mut scheduled_endpoint_refreshes = 0usize;
             for model in openrouter.available_models_display() {
                 openrouter_models += 1;
-                let cached = openrouter::load_endpoints_disk_cache_public(&model);
+                let cached = if supports_openrouter_provider_features {
+                    openrouter::load_endpoints_disk_cache_public(&model)
+                } else {
+                    None
+                };
                 let cache_age = cached.as_ref().map(|(_, age)| *age);
-                if (model == current_openrouter_model || scheduled_endpoint_refreshes < 8)
+                if supports_openrouter_provider_features
+                    && (model == current_openrouter_model || scheduled_endpoint_refreshes < 8)
                     && openrouter.maybe_schedule_endpoint_refresh_for_display(
                         &model,
                         cache_age,
@@ -1287,7 +1297,7 @@ impl Provider for MultiProvider {
                     });
                 }
                 // Add per-provider routes from endpoints cache
-                if let Some((ref endpoints, _)) = cached {
+                if supports_openrouter_provider_features && let Some((ref endpoints, _)) = cached {
                     openrouter_endpoint_cache_hits += 1;
                     let stale_suffix = age_str.as_deref().unwrap_or("");
                     for ep in endpoints {
@@ -1316,7 +1326,7 @@ impl Provider for MultiProvider {
         }
 
         // Also add Claude/OpenAI models via openrouter as alternative routes
-        if has_openrouter {
+        if has_openrouter_provider_features {
             for model in known_anthropic_model_ids() {
                 let or_model = format!("anthropic/{}", model);
                 if let Some((endpoints, _)) =

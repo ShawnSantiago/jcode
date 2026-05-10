@@ -774,7 +774,7 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
-        if let Some(cache_entry) = load_disk_cache_entry() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
             let cache_age = current_unix_secs()
                 .map(|now| now.saturating_sub(cache_entry.cached_at))
                 .unwrap_or(0);

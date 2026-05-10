@@ -32,8 +32,9 @@ pub use jcode_provider_openrouter::{
 };
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
-    ProviderPin, current_unix_secs, known_providers, load_disk_cache, load_disk_cache_entry,
-    load_endpoints_disk_cache, parse_model_spec, save_disk_cache, save_endpoints_disk_cache,
+    ProviderPin, current_unix_secs, known_providers, load_disk_cache_entry,
+    load_endpoints_disk_cache, parse_model_spec, save_disk_cache_with_source,
+    save_endpoints_disk_cache,
 };
 use reqwest::Client;
 use reqwest::header::HeaderName;
@@ -460,7 +461,7 @@ async fn fetch_models_from_api(
         )
     })?;
 
-    save_disk_cache(&models_response.data);
+    save_disk_cache_with_source(&models_response.data, Some(&api_base));
 
     if let Some(now) = current_unix_secs() {
         let mut cache = models_cache.write().await;
@@ -830,6 +831,33 @@ impl OpenRouterProvider {
                 )
             })
             .collect()
+    }
+
+    fn model_disk_cache_source_matches(
+        &self,
+        cache_entry: &jcode_provider_openrouter::DiskCache,
+    ) -> bool {
+        let Some(source_api_base) = cache_entry
+            .source_api_base
+            .as_deref()
+            .and_then(normalize_api_base)
+        else {
+            // Legacy cache files did not record which endpoint produced the
+            // catalog. They are acceptable for real OpenRouter catalogs, but
+            // not for direct OpenAI-compatible profiles: a process-wide cache
+            // namespace can leave an OpenRouter catalog under a profile such as
+            // `chutes`, which then makes every picker row look like that direct
+            // provider.
+            return self.supports_provider_features;
+        };
+
+        source_api_base == self.api_base
+    }
+
+    pub(crate) fn load_usable_model_disk_cache_entry(
+        &self,
+    ) -> Option<jcode_provider_openrouter::DiskCache> {
+        load_disk_cache_entry().filter(|entry| self.model_disk_cache_source_matches(entry))
     }
 
     fn begin_background_model_catalog_refresh(&self) -> bool {
@@ -1327,7 +1355,7 @@ impl OpenRouterProvider {
         {
             return models_fingerprint(&cache.models);
         }
-        if let Some(cache_entry) = load_disk_cache_entry() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
             return models_fingerprint(&cache_entry.models);
         }
         String::new()
@@ -1450,7 +1478,7 @@ impl OpenRouterProvider {
         }
 
         // Check disk cache
-        if let Some(cache_entry) = load_disk_cache_entry() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
             let cache_age = current_unix_secs()
                 .map(|now| now.saturating_sub(cache_entry.cached_at))
                 .unwrap_or(0);
@@ -1627,7 +1655,8 @@ impl OpenRouterProvider {
             return Some(model.pricing.clone());
         }
 
-        if let Some(models) = load_disk_cache() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
+            let models = cache_entry.models;
             let pricing = models
                 .iter()
                 .find(|m| m.id == model_id)

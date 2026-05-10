@@ -66,6 +66,11 @@ struct CountingModelRoutesProvider {
 }
 
 #[derive(Clone)]
+struct MixedModelRoutesProvider {
+    model: StdArc<StdMutex<String>>,
+}
+
+#[derive(Clone)]
 struct AuthUxStateSpaceProvider {
     authed: StdArc<AtomicBool>,
     refreshes: StdArc<AtomicUsize>,
@@ -140,6 +145,45 @@ impl AuthUxStateSpaceProvider {
     }
 }
 
+impl MixedModelRoutesProvider {
+    fn routes() -> Vec<crate::provider::ModelRoute> {
+        vec![
+            crate::provider::ModelRoute {
+                model: "gpt-5.5".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "claude-opus-4-6".to_string(),
+                provider: "Anthropic".to_string(),
+                api_method: "claude-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
+                provider: "Chutes".to_string(),
+                api_method: "openai-compatible:chutes".to_string(),
+                available: true,
+                detail: "https://llm.chutes.ai/v1".to_string(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek/deepseek-v4-pro".to_string(),
+                provider: "auto".to_string(),
+                api_method: "openrouter".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+        ]
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for AuthUxStateSpaceProvider {
     async fn complete(
@@ -210,6 +254,48 @@ impl Provider for AuthUxStateSpaceProvider {
             routes_removed: 0,
             routes_changed: 0,
         })
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for MixedModelRoutesProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("MixedModelRoutesProvider")
+    }
+
+    fn name(&self) -> &str {
+        "mixed"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        Self::routes().into_iter().map(|route| route.model).collect()
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        Self::routes()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let model = model.strip_prefix("chutes:").unwrap_or(model);
+        if !Self::routes().iter().any(|route| route.model == model) {
+            anyhow::bail!("model {model} is not available in the mixed catalog");
+        }
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -912,6 +998,77 @@ fn test_model_picker_opens_loading_state_before_async_routes_complete() {
         .expect("hydrated picker should still be open");
     assert!(picker.entries.len() >= 2);
     assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
+}
+
+#[test]
+fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(MixedModelRoutesProvider {
+        model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.recent_authenticated_provider = Some(("chutes".to_string(), Instant::now()));
+
+    app.open_model_picker();
+    wait_for_model_picker_load(&mut app);
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("hydrated mixed-provider model picker should be open");
+    let mut routes_by_model = std::collections::BTreeMap::new();
+    for entry in &picker.entries {
+        let route = entry
+            .active_option()
+            .expect("model picker entry should have an active route");
+        routes_by_model.insert(
+            entry.name.clone(),
+            (route.provider.clone(), route.api_method.clone()),
+        );
+    }
+
+    assert_eq!(
+        routes_by_model.get("gpt-5.5"),
+        Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
+    );
+    assert_eq!(
+        routes_by_model.get("claude-opus-4-6"),
+        Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
+    );
+    assert_eq!(
+        routes_by_model.get("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
+        Some(&(
+            "Chutes".to_string(),
+            "openai-compatible:chutes".to_string()
+        ))
+    );
+    assert_eq!(
+        routes_by_model.get("deepseek/deepseek-v4-pro"),
+        Some(&("auto".to_string(), "openrouter".to_string()))
+    );
+
+    let chutes_rows = picker
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .active_option()
+                .map(|route| route.provider == "Chutes")
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        chutes_rows, 1,
+        "opening the model list must not collapse every route to the recently authenticated direct provider: {:?}",
+        routes_by_model
+    );
 }
 
 #[test]
