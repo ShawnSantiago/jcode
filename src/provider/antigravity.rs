@@ -297,7 +297,7 @@ fn parse_fetch_available_models_response(
         }
     }
 
-    ordered_ids
+    let mut models: Vec<CatalogModel> = ordered_ids
         .into_iter()
         .map(|id| {
             by_id.remove(&id).unwrap_or(CatalogModel {
@@ -313,7 +313,9 @@ fn parse_fetch_available_models_response(
                 remaining_fraction_milli: None,
             })
         })
-        .collect()
+        .collect();
+    models.sort_by_key(|model| !model.available);
+    models
 }
 
 fn catalog_model_detail(model: &CatalogModel) -> String {

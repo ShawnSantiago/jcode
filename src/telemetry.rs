@@ -545,6 +545,7 @@ fn infer_agent_role(state: &SessionTelemetry) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn infer_session_stop_reason(
     event_name: &'static str,
     reason: SessionEndReason,

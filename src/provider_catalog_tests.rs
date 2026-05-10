@@ -176,9 +176,15 @@ fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "openrouter");
     crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "1");
     crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
-    crate::env::set_var("JCODE_OPENROUTER_MODEL_CATALOG", "stale-openrouter-catalog.json");
+    crate::env::set_var(
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "stale-openrouter-catalog.json",
+    );
     crate::env::set_var("JCODE_OPENROUTER_MODEL", "gpt-5.5");
-    crate::env::set_var("JCODE_OPENROUTER_STATIC_MODELS", "stale-openrouter-only-model");
+    crate::env::set_var(
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "stale-openrouter-only-model",
+    );
     crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "Bearer stale");
     crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER_NAME", "Authorization");
     crate::env::set_var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER", "openrouter");
@@ -222,7 +228,9 @@ fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     assert!(std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none());
     assert!(std::env::var_os("JCODE_PROVIDER_PROFILE_NAME").is_none());
     assert_ne!(
-        std::env::var("JCODE_OPENROUTER_STATIC_MODELS").ok().as_deref(),
+        std::env::var("JCODE_OPENROUTER_STATIC_MODELS")
+            .ok()
+            .as_deref(),
         Some("stale-openrouter-only-model")
     );
 }

@@ -706,13 +706,7 @@ impl Provider for GeminiProvider {
             .map(|guard| guard.clone())
             .unwrap_or_default();
         if discovered.is_empty() {
-            return merge_gemini_model_lists(
-                AVAILABLE_MODELS
-                    .iter()
-                    .map(|model| (*model).to_string())
-                    .chain(std::iter::once(self.model()))
-                    .collect(),
-            );
+            return vec![self.model()];
         }
 
         merge_gemini_model_lists(

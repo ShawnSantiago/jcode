@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use workspace::{KeyInput, KeyOutcome};
 
 pub(crate) const SINGLE_SESSION_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
-pub(crate) const SINGLE_SESSION_ASSISTANT_FONT_FAMILY: &str = "Kalam";
+pub(crate) const SINGLE_SESSION_ASSISTANT_FONT_FAMILY: &str = "Homemade Apple";
 pub(crate) const SINGLE_SESSION_FONT_WEIGHT: &str = "Light";
 pub(crate) const SINGLE_SESSION_FONT_FALLBACKS: &[&str] = &[
     "JetBrainsMono Nerd Font Mono",
@@ -17,7 +17,7 @@ pub(crate) const SINGLE_SESSION_FONT_FALLBACKS: &[&str] = &[
 ];
 pub(crate) const SINGLE_SESSION_DEFAULT_FONT_SIZE: f32 = 22.0;
 pub(crate) const SINGLE_SESSION_TITLE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
-pub(crate) const SINGLE_SESSION_BODY_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0;
+pub(crate) const SINGLE_SESSION_BODY_FONT_SIZE: f32 = SINGLE_SESSION_CODE_FONT_SIZE * 1.5;
 pub(crate) const SINGLE_SESSION_META_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
 pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0;
 pub(crate) const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
@@ -159,7 +159,10 @@ impl ReadOnlyInlineWidget {
 
     fn styled_lines(self) -> Vec<SingleSessionStyledLine> {
         let mut styled = Vec::with_capacity(self.lines.len().saturating_add(2));
-        styled.push(styled_line(self.title, SingleSessionLineStyle::OverlayTitle));
+        styled.push(styled_line(
+            self.title,
+            SingleSessionLineStyle::OverlayTitle,
+        ));
         if !self.lines.is_empty() {
             styled.push(blank_styled_line());
             styled.extend(self.lines);
@@ -783,6 +786,19 @@ impl SingleSessionApp {
     #[cfg(test)]
     pub(crate) fn composer_status_line(&self) -> String {
         self.composer_status_line_for_tick(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_draft_count(&self) -> usize {
+        self.queued_drafts.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_draft_messages(&self) -> Vec<String> {
+        self.queued_drafts
+            .iter()
+            .map(|(message, _)| message.clone())
+            .collect()
     }
 
     pub(crate) fn composer_status_line_for_tick(&self, tick: u64) -> String {
@@ -1451,13 +1467,20 @@ impl SingleSessionApp {
                 if tool_messages.len() > 1 && !group_contains_active_tool {
                     append_tool_group_summary(&mut lines, tool_messages);
                 } else {
-                    for tool_message in tool_messages {
-                        append_chat_message_lines(&mut lines, tool_message, &mut user_turn);
+                    for (offset, tool_message) in tool_messages.iter().enumerate() {
+                        let is_active_tool = self.active_tool_message_index
+                            == Some(group_start.saturating_add(offset));
+                        append_chat_message_lines(
+                            &mut lines,
+                            tool_message,
+                            &mut user_turn,
+                            is_active_tool,
+                        );
                     }
                 }
                 continue;
             }
-            append_chat_message_lines(&mut lines, message, &mut user_turn);
+            append_chat_message_lines(&mut lines, message, &mut user_turn, false);
             message_index += 1;
         }
         if include_streaming_response && !self.streaming_response.is_empty() {
@@ -3307,6 +3330,7 @@ fn append_chat_message_lines(
     lines: &mut Vec<SingleSessionStyledLine>,
     message: &SingleSessionMessage,
     user_turn: &mut usize,
+    is_active_tool: bool,
 ) {
     match message.role {
         SingleSessionRole::User => {
@@ -3314,7 +3338,7 @@ fn append_chat_message_lines(
             *user_turn += 1;
         }
         SingleSessionRole::Assistant => append_assistant_lines(lines, message.content.trim()),
-        SingleSessionRole::Tool => append_tool_lines(lines, message.content.trim()),
+        SingleSessionRole::Tool => append_tool_lines(lines, message.content.trim(), is_active_tool),
         SingleSessionRole::System | SingleSessionRole::Meta => {
             append_meta_lines(lines, message.content.trim())
         }
@@ -3350,11 +3374,7 @@ fn append_assistant_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &st
 }
 
 fn append_streaming_assistant_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
-    lines.extend(
-        content
-            .lines()
-            .map(|line| styled_line(line, SingleSessionLineStyle::Assistant)),
-    );
+    lines.extend(render_assistant_markdown_lines(content));
 }
 
 fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine> {
@@ -3989,28 +4009,174 @@ fn format_table_separator(widths: &[usize]) -> String {
     rendered
 }
 
-fn append_tool_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str) {
+fn append_tool_lines(lines: &mut Vec<SingleSessionStyledLine>, content: &str, active: bool) {
     if content.is_empty() {
         return;
     }
-    for (index, line) in content.lines().enumerate() {
-        if index > 0
-            && let Some(raw_input) = line.strip_prefix("  input: ")
-        {
-            for display_line in formatted_tool_input_lines(raw_input) {
+    let mut raw_lines = content.lines();
+    let Some(header) = raw_lines.next() else {
+        return;
+    };
+    if !header.trim_start().starts_with(['▾', '▸']) {
+        for line in std::iter::once(header).chain(raw_lines) {
+            if !line.trim().is_empty() {
                 lines.push(styled_line(
-                    format!("    {display_line}"),
+                    format!("  {}", line.trim()),
                     SingleSessionLineStyle::Tool,
                 ));
             }
-            continue;
         }
-        let text = if index == 0 {
-            format!("  {line}")
-        } else {
-            format!("    {line}")
+        return;
+    }
+    let header = parse_tool_header(header);
+    let mut metadata_lines = Vec::new();
+    let mut widget_lines = Vec::new();
+    for line in raw_lines {
+        if let Some(raw_input) = line.strip_prefix("  input: ") {
+            metadata_lines.extend(formatted_tool_input_lines(&header.name, raw_input));
+        } else if !line.trim().is_empty() {
+            widget_lines.push(compact_tool_widget_text(line.trim(), 112));
+        }
+    }
+
+    lines.push(styled_line(
+        format_tool_header_line_with_metadata(&header, &metadata_lines),
+        SingleSessionLineStyle::Tool,
+    ));
+
+    if active
+        && widget_lines.is_empty()
+        && matches!(header.state.as_deref(), Some("preparing") | Some("running"))
+    {
+        widget_lines.push("waiting for tool output…".to_string());
+    }
+
+    if active && !widget_lines.is_empty() {
+        append_tool_content_widget(lines, &widget_lines);
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ToolHeader {
+    name: String,
+    state: Option<String>,
+    summary: Option<String>,
+}
+
+fn parse_tool_header(line: &str) -> ToolHeader {
+    let line = line.trim().trim_start_matches(['▾', '▸']).trim();
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let name = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or("tool");
+    let rest = parts.next().unwrap_or_default().trim();
+    if rest.is_empty() {
+        return ToolHeader {
+            name: name.to_string(),
+            state: None,
+            summary: None,
         };
-        lines.push(styled_line(text, SingleSessionLineStyle::Tool));
+    }
+
+    let (state, summary) = rest
+        .split_once(':')
+        .map(|(state, summary)| (state.trim(), Some(summary.trim())))
+        .unwrap_or((rest, None));
+
+    ToolHeader {
+        name: name.to_string(),
+        state: Some(state.to_string()).filter(|state| !state.is_empty()),
+        summary: summary
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| compact_tool_text(summary, 116)),
+    }
+}
+
+#[cfg(test)]
+fn format_tool_header_line(header: &ToolHeader) -> String {
+    format_tool_header_line_with_metadata(header, &[])
+}
+
+fn format_tool_header_line_with_metadata(header: &ToolHeader, metadata_lines: &[String]) -> String {
+    let icon = match header.state.as_deref() {
+        Some("done") => "✓",
+        Some("failed") => "✕",
+        Some("running") => "●",
+        Some("preparing") => "○",
+        _ => "•",
+    };
+    let mut line = match (&header.state, &header.summary) {
+        (Some(state), Some(summary)) => format!("  {icon} {} · {state} · {summary}", header.name),
+        (Some(state), None) => format!("  {icon} {} · {state}", header.name),
+        (None, Some(summary)) => format!("  {icon} {} · {summary}", header.name),
+        (None, None) => format!("  {icon} {}", header.name),
+    };
+
+    if let Some(metadata) = compact_tool_metadata(metadata_lines) {
+        line.push_str(" · ");
+        line.push_str(&metadata);
+    }
+    line
+}
+
+fn compact_tool_metadata(metadata_lines: &[String]) -> Option<String> {
+    let metadata = metadata_lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    (!metadata.is_empty()).then(|| compact_tool_text(&metadata, 116))
+}
+
+fn append_tool_content_widget(lines: &mut Vec<SingleSessionStyledLine>, content_lines: &[String]) {
+    const MAX_WIDGET_LINES: usize = 12;
+    const WIDGET_WIDTH: usize = 68;
+
+    lines.push(styled_line(
+        format!("  ╭{}╮", "─".repeat(WIDGET_WIDTH)),
+        SingleSessionLineStyle::Tool,
+    ));
+    for line in content_lines.iter().take(MAX_WIDGET_LINES) {
+        lines.push(styled_line(
+            format_tool_widget_content_line(line, WIDGET_WIDTH),
+            SingleSessionLineStyle::Tool,
+        ));
+    }
+    if content_lines.len() > MAX_WIDGET_LINES {
+        lines.push(styled_line(
+            format_tool_widget_content_line(
+                &format!("… {} more lines", content_lines.len() - MAX_WIDGET_LINES),
+                WIDGET_WIDTH,
+            ),
+            SingleSessionLineStyle::Tool,
+        ));
+    }
+    lines.push(styled_line(
+        format!("  ╰{}╯", "─".repeat(WIDGET_WIDTH)),
+        SingleSessionLineStyle::Tool,
+    ));
+}
+
+fn format_tool_widget_content_line(line: &str, width: usize) -> String {
+    let line = compact_tool_widget_text(line, width);
+    let padding = width.saturating_sub(line.chars().count());
+    format!("  │{line}{}│", " ".repeat(padding))
+}
+
+fn compact_tool_widget_text(text: &str, max_chars: usize) -> String {
+    let text = text.trim().replace('\t', "    ");
+    if text.chars().count() > max_chars {
+        format!(
+            "{}…",
+            text.chars()
+                .take(max_chars.saturating_sub(1))
+                .collect::<String>()
+        )
+    } else {
+        text
     }
 }
 
@@ -4075,7 +4241,7 @@ fn format_approx_tokens(tokens: usize) -> String {
     }
 }
 
-fn formatted_tool_input_lines(raw_input: &str) -> Vec<String> {
+fn formatted_tool_input_lines(tool_name: &str, raw_input: &str) -> Vec<String> {
     const MAX_INPUT_LINES: usize = 6;
     let raw_input = raw_input.trim();
     if raw_input.is_empty() {
@@ -4095,6 +4261,10 @@ fn formatted_tool_input_lines(raw_input: &str) -> Vec<String> {
 
     if map.is_empty() {
         return vec!["input: {}".to_string()];
+    }
+
+    if let Some(lines) = formatted_tool_input_summary(tool_name, &map) {
+        return lines;
     }
 
     let mut keys = map.keys().cloned().collect::<Vec<_>>();
@@ -4117,6 +4287,67 @@ fn formatted_tool_input_lines(raw_input: &str) -> Vec<String> {
         rendered.push(format!("… {} more", total - MAX_INPUT_LINES));
     }
     rendered
+}
+
+fn formatted_tool_input_summary(
+    tool_name: &str,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<String>> {
+    let string_value = |key: &str| map.get(key).and_then(serde_json::Value::as_str);
+    let bool_value = |key: &str| map.get(key).and_then(serde_json::Value::as_bool);
+    let mut lines = Vec::new();
+
+    match tool_name {
+        "bash" => {
+            if let Some(command) = string_value("command") {
+                lines.push(format!("$ {}", compact_tool_text(command, 132)));
+            }
+        }
+        "read" => {
+            if let Some(path) = string_value("file_path") {
+                lines.push(format!("read {}", compact_tool_text(path, 132)));
+            }
+        }
+        "write" | "edit" | "multiedit" => {
+            if let Some(path) = string_value("file_path") {
+                lines.push(format!("file {}", compact_tool_text(path, 132)));
+            }
+        }
+        "agentgrep" | "grep" => {
+            if let Some(query) = string_value("query").or_else(|| string_value("pattern")) {
+                lines.push(format!("search {}", compact_tool_text(query, 132)));
+            }
+            if let Some(path) = string_value("path") {
+                lines.push(format!("in {}", compact_tool_text(path, 132)));
+            }
+        }
+        "webfetch" | "websearch" => {
+            if let Some(query) = string_value("query").or_else(|| string_value("url")) {
+                lines.push(compact_tool_text(query, 132));
+            }
+        }
+        "browser" => {
+            if let Some(action) = string_value("action") {
+                let target = string_value("url")
+                    .or_else(|| string_value("selector"))
+                    .or_else(|| string_value("text"));
+                lines.push(match target {
+                    Some(target) => format!("{action} {}", compact_tool_text(target, 112)),
+                    None => action.to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(intent) = string_value("intent").filter(|intent| !intent.trim().is_empty()) {
+        lines.insert(0, format!("intent: {}", compact_tool_text(intent, 112)));
+    }
+    if bool_value("run_in_background") == Some(true) {
+        lines.push("background: yes".to_string());
+    }
+
+    (!lines.is_empty()).then_some(lines)
 }
 
 fn tool_input_key_priority(key: &str) -> usize {
@@ -4381,4 +4612,95 @@ pub(crate) fn single_session_styled_lines(
         );
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered_tool_text(content: &str, active: bool) -> Vec<String> {
+        let mut lines = Vec::new();
+        append_tool_lines(&mut lines, content, active);
+        lines.into_iter().map(|line| line.text).collect()
+    }
+
+    #[test]
+    fn tool_header_uses_status_icons_and_compact_summary() {
+        assert_eq!(
+            format_tool_header_line(&parse_tool_header("▾ bash done: completed successfully")),
+            "  ✓ bash · done · completed successfully"
+        );
+        assert_eq!(
+            format_tool_header_line(&parse_tool_header("▾ browser failed: selector missing")),
+            "  ✕ browser · failed · selector missing"
+        );
+    }
+
+    #[test]
+    fn bash_tool_rendering_shows_intent_command_and_background_flag() {
+        let lines = rendered_tool_text(
+            "▾ bash running\n  input: {\"intent\":\"run the desktop tests\",\"command\":\"cargo test -p jcode-desktop\",\"run_in_background\":true}",
+            true,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "  ● bash · running · intent: run the desktop tests · $ cargo test -p jcode-desktop · background: yes",
+                "  ╭────────────────────────────────────────────────────────────────────╮",
+                "  │waiting for tool output…                                            │",
+                "  ╰────────────────────────────────────────────────────────────────────╯",
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_result_content_renders_inside_inline_widget() {
+        let lines = rendered_tool_text(
+            "▾ bash failed: tests failed\n  input: {\"command\":\"cargo test -p jcode-desktop\"}\n  error[E0425]: cannot find value `foo` in this scope\n  test result: FAILED",
+            true,
+        );
+
+        assert_eq!(
+            lines[0],
+            "  ✕ bash · failed · tests failed · $ cargo test -p jcode-desktop"
+        );
+        assert_eq!(
+            lines[1],
+            "  ╭────────────────────────────────────────────────────────────────────╮"
+        );
+        assert_eq!(
+            lines[2],
+            "  │error[E0425]: cannot find value `foo` in this scope                 │"
+        );
+        assert_eq!(
+            lines[3],
+            "  │test result: FAILED                                                 │"
+        );
+        assert_eq!(
+            lines[4],
+            "  ╰────────────────────────────────────────────────────────────────────╯"
+        );
+    }
+
+    #[test]
+    fn inactive_tool_result_compacts_to_metadata_only() {
+        let lines = rendered_tool_text(
+            "▾ bash done: tests passed\n  input: {\"command\":\"cargo test -p jcode-desktop\"}\n  test result: ok",
+            false,
+        );
+
+        assert_eq!(
+            lines,
+            vec!["  ✓ bash · done · tests passed · $ cargo test -p jcode-desktop"]
+        );
+    }
+
+    #[test]
+    fn unknown_tool_falls_back_to_prioritized_key_value_lines() {
+        let lines = formatted_tool_input_lines(
+            "custom",
+            "{\"token\":\"secret\",\"query\":\"tool calls\",\"extra\":42}",
+        );
+        assert_eq!(lines, vec!["query: tool calls", "extra: 42", "token: ••••"]);
+    }
 }

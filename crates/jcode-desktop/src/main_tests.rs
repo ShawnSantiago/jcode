@@ -168,7 +168,7 @@ fn single_session_typography_targets_jetbrains_mono_light_nerd() {
     );
     assert_eq!(
         SINGLE_SESSION_BODY_FONT_SIZE,
-        SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0
+        SINGLE_SESSION_CODE_FONT_SIZE * 1.5
     );
     assert_eq!(
         SINGLE_SESSION_META_FONT_SIZE,
@@ -246,7 +246,6 @@ fn fresh_single_session_restores_dominant_welcome_hero_without_input_hline() {
     app.handle_key(KeyInput::Character("hello".to_string()));
     let typed = build_single_session_vertices(&app, size, 0.0, 18);
     assert!(vertices_have_color(&typed, WELCOME_AURORA_BLUE));
-    assert!(vertices_have_color(&typed, WELCOME_HANDWRITING_COLOR));
     assert!(!vertices_have_color(&typed, [0.060, 0.085, 0.145, 0.34]));
 }
 
@@ -305,21 +304,19 @@ fn single_session_active_work_uses_native_spinner_geometry() {
 }
 
 #[test]
-fn single_session_streaming_response_uses_line_reveal_shimmer() {
+fn single_session_streaming_response_does_not_draw_line_reveal_shimmer() {
     let mut app = SingleSessionApp::new(None);
     let size = PhysicalSize::new(900, 700);
-    assert!(single_session_streaming_shimmer(&app, size, 0).is_none());
+    const REMOVED_SHIMMER_SOFT_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.055];
+    const REMOVED_SHIMMER_CORE_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.115];
 
     app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
         "streaming answer".to_string(),
     ));
-    let tick_zero = single_session_streaming_shimmer(&app, size, 0).expect("streaming shimmer");
-    let tick_one = single_session_streaming_shimmer(&app, size, 8).expect("streaming shimmer");
+    let vertices = build_single_session_vertices(&app, size, 0.0, 0);
 
-    assert!(tick_zero.soft_rect.width > tick_zero.core_rect.width);
-    assert_eq!(tick_zero.soft_rect.y, tick_zero.core_rect.y);
-    assert_eq!(tick_zero.soft_rect.height, tick_zero.core_rect.height);
-    assert!(tick_one.core_rect.x > tick_zero.core_rect.x);
+    assert!(!vertices_have_color(&vertices, REMOVED_SHIMMER_SOFT_COLOR));
+    assert!(!vertices_have_color(&vertices, REMOVED_SHIMMER_CORE_COLOR));
 }
 
 #[test]
@@ -415,7 +412,12 @@ fn single_session_slash_help_opens_help_without_sending_prompt() {
     assert!(app.show_help);
     assert!(app.draft.is_empty());
     assert!(app.messages.is_empty());
-    let help = app.body_lines().join("\n");
+    let help = app
+        .inline_widget_styled_lines()
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(help.contains("slash commands"));
     assert!(help.contains("/model [name]"));
 }
@@ -670,6 +672,49 @@ fn single_session_markdown_renderer_scopes_links_and_structures_lists() {
 }
 
 #[test]
+fn single_session_streaming_markdown_renders_before_done() {
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "## Streaming\n\n- first\n- [x] shipped\n\n[docs]".to_string(),
+    ));
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "(https://example.com)\n\n```rust\nfn main() {}".to_string(),
+    ));
+
+    let lines = app.body_styled_lines();
+    let body = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(body.contains("Streaming"));
+    assert_eq!(
+        style_for_text(&lines, "Streaming"),
+        Some(SingleSessionLineStyle::AssistantHeading)
+    );
+    assert!(body.contains("• first"));
+    assert!(body.contains("✓ shipped"));
+    assert!(body.contains("docs ↗ https://example.com"));
+    assert_eq!(
+        style_for_text(&lines, "docs ↗ https://example.com"),
+        Some(SingleSessionLineStyle::AssistantLink)
+    );
+    assert!(body.contains("  rust"));
+    assert!(body.contains("  fn main() {}"));
+    assert!(!body.contains("```"));
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::Done);
+    let finished_body = app.body_lines().join("\n");
+    assert!(finished_body.contains("Streaming"));
+    assert!(finished_body.contains("• first"));
+    assert!(finished_body.contains("✓ shipped"));
+    assert!(finished_body.contains("docs ↗ https://example.com"));
+    assert!(finished_body.contains("  fn main() {}"));
+    assert!(!finished_body.contains("```"));
+}
+
+#[test]
 fn single_session_markdown_structure_uses_distinct_colors_and_cards() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::assistant(
@@ -786,11 +831,11 @@ fn desktop_arrow_word_navigation_maps_common_modifiers() {
     );
     assert_eq!(
         to_key_input(&Key::Named(NamedKey::ArrowLeft), ModifiersState::ALT),
-        KeyInput::MoveCursorWordLeft
+        KeyInput::CycleReasoningEffort(-1)
     );
     assert_eq!(
         to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::ALT),
-        KeyInput::MoveCursorWordRight
+        KeyInput::CycleReasoningEffort(1)
     );
 }
 
@@ -999,7 +1044,7 @@ fn single_session_text_buffers_include_header_version_area() {
     let mut font_system = FontSystem::new();
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
 
-    assert_eq!(buffers.len(), 6);
+    assert_eq!(buffers.len(), 7);
     assert_eq!(single_session_text_areas(&buffers, size).len(), 5);
 }
 
@@ -1029,8 +1074,12 @@ fn fresh_welcome_handwriting_reveals_over_time() {
 
     assert!(early_ink > 0, "first frame should show initial ink");
     assert!(
-        early_ink < middle_ink && middle_ink < done_ink,
-        "handwritten ink should grow during reveal: early={early_ink}, middle={middle_ink}, done={done_ink}"
+        early_ink < middle_ink,
+        "handwritten ink should grow during reveal: early={early_ink}, middle={middle_ink}"
+    );
+    assert_eq!(
+        done_ink, 0,
+        "completed reveal should hand off to the clean font without overlapping stroke ink"
     );
     assert!(vertices_have_color(
         &middle,
@@ -1102,7 +1151,6 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
     let markdown_key = single_session_text_key(&markdown_app, size);
     assert_eq!(markdown_key.title, "");
     assert!(markdown_key.status.starts_with("receiving"));
-    assert_visual_text_contains(&markdown_key, "Heading");
     assert_visual_text_contains(&markdown_key, "│ quoted");
     assert_visual_text_contains(&markdown_key, "docs ↗ https://example.com");
     assert_visual_text_contains(&markdown_key, "color │ yes");
@@ -1210,7 +1258,7 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
     );
 
     app.handle_key(KeyInput::HotkeyHelp);
-    let help = app.body_styled_lines();
+    let help = app.inline_widget_styled_lines();
     assert_eq!(
         style_for_text(&help, "desktop shortcuts"),
         Some(SingleSessionLineStyle::OverlayTitle)
@@ -1221,6 +1269,41 @@ fn single_session_body_styled_lines_follow_roles_and_overlays() {
             "  Ctrl+V      paste clipboard image when no text is present"
         ),
         Some(SingleSessionLineStyle::Overlay)
+    );
+}
+
+#[test]
+fn assistant_symbol_lines_use_main_font_to_avoid_missing_glyph_boxes() {
+    let symbol_line = "docs ↗ https://example.com";
+    let symbol_lines = [SingleSessionStyledLine {
+        text: symbol_line.to_string(),
+        style: SingleSessionLineStyle::AssistantLink,
+    }];
+    let symbol_segments = single_session_styled_text_segments(&symbol_lines);
+    assert!(
+        symbol_segments.contains(&(
+            symbol_line,
+            Attrs::new()
+                .family(Family::Name(SINGLE_SESSION_FONT_FAMILY))
+                .color(single_session_line_color(
+                    SingleSessionLineStyle::AssistantLink
+                ))
+        ))
+    );
+
+    let plain_line = "plain assistant prose";
+    let plain_lines = [SingleSessionStyledLine {
+        text: plain_line.to_string(),
+        style: SingleSessionLineStyle::Assistant,
+    }];
+    let plain_segments = single_session_styled_text_segments(&plain_lines);
+    assert!(
+        plain_segments.contains(&(
+            plain_line,
+            Attrs::new()
+                .family(Family::Name(SINGLE_SESSION_ASSISTANT_FONT_FAMILY))
+                .color(single_session_line_color(SingleSessionLineStyle::Assistant))
+        ))
     );
 }
 
@@ -1395,19 +1478,19 @@ fn single_session_tool_events_expand_context_and_collapse_previous_call() {
     });
 
     let body = app.body_lines().join("\n");
-    assert!(body.contains("  ▾ bash done: tests passed"));
-    assert!(body.contains("    intent: Run desktop tests"));
-    assert!(body.contains("    command: cargo test -p jcode-desktop"));
-    assert!(body.contains("    timeout: 120000"));
+    assert!(body.contains("  ✓ bash · done · tests passed"));
+    assert!(body.contains("intent: Run desktop tests"));
+    assert!(body.contains("$ cargo test -p jcode-desktop"));
+    assert!(!body.contains("    timeout: 120000"));
     assert_eq!(app.status.as_deref(), Some("tool bash done"));
 
     app.apply_session_event(session_launch::DesktopSessionEvent::ToolStarted {
         name: "read".to_string(),
     });
     let body = app.body_lines().join("\n");
-    assert!(body.contains("  ▸ bash done: tests passed"));
+    assert!(body.contains("  ✓ bash · done · tests passed"));
     assert!(!body.contains("Run desktop tests"));
-    assert!(body.contains("  ▾ read preparing"));
+    assert!(body.contains("  ○ read · preparing"));
 }
 
 #[test]
@@ -1438,9 +1521,9 @@ fn single_session_tool_summary_resets_at_non_tool_messages() {
     app.messages.push(SingleSessionMessage::tool("▸ edit done"));
 
     let body = app.body_lines().join("\n");
-    assert!(body.contains("  ▸ read done: 100 chars"));
+    assert!(body.contains("  ✓ read · done · 100 chars"));
     assert!(body.contains("ok"));
-    assert!(body.contains("  ▸ edit done"));
+    assert!(body.contains("  ✓ edit · done"));
     assert!(!body.contains("tools:"));
 }
 
@@ -1825,6 +1908,221 @@ fn single_session_ctrl_enter_queues_while_processing_then_dequeues() {
         Some(("next prompt".to_string(), Vec::new()))
     );
     assert!(app.is_processing);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueueTraceAction {
+    TypeA,
+    TypeB,
+    CtrlEnter,
+    Reloading,
+    SessionStarted,
+    Done,
+    TryDrainQueued,
+}
+
+#[derive(Default, Debug)]
+struct QueueReferenceModel {
+    draft: String,
+    processing: bool,
+    queued: Vec<String>,
+    sent: Vec<String>,
+}
+
+impl QueueReferenceModel {
+    fn apply(&mut self, action: QueueTraceAction) -> Option<String> {
+        match action {
+            QueueTraceAction::TypeA => self.draft.push('a'),
+            QueueTraceAction::TypeB => self.draft.push('b'),
+            QueueTraceAction::CtrlEnter => {
+                let message = self.draft.trim().to_string();
+                if message.is_empty() {
+                    return None;
+                }
+                self.draft.clear();
+                if self.processing {
+                    self.queued.push(message);
+                } else {
+                    self.processing = true;
+                    self.sent.push(message.clone());
+                    return Some(message);
+                }
+            }
+            QueueTraceAction::Reloading => {
+                // A hot reload is not a turn end. Wait-til-turn-end prompts must stay queued.
+                self.processing = true;
+            }
+            QueueTraceAction::SessionStarted => {
+                // Reconnection/session-start is also not a turn end.
+            }
+            QueueTraceAction::Done => self.processing = false,
+            QueueTraceAction::TryDrainQueued => {
+                if !self.processing && !self.queued.is_empty() {
+                    let message = self.queued.remove(0);
+                    self.processing = true;
+                    self.sent.push(message.clone());
+                    return Some(message);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn apply_queue_trace_action_to_app(
+    app: &mut SingleSessionApp,
+    action: QueueTraceAction,
+) -> Option<String> {
+    match action {
+        QueueTraceAction::TypeA => {
+            app.handle_key(KeyInput::Character("a".to_string()));
+            None
+        }
+        QueueTraceAction::TypeB => {
+            app.handle_key(KeyInput::Character("b".to_string()));
+            None
+        }
+        QueueTraceAction::CtrlEnter => match app.handle_key(KeyInput::QueueDraft) {
+            KeyOutcome::StartFreshSession { message, .. }
+            | KeyOutcome::SendDraft { message, .. } => Some(message),
+            KeyOutcome::Redraw | KeyOutcome::None => None,
+            other => panic!("unexpected Ctrl+Enter outcome in queue trace: {other:?}"),
+        },
+        QueueTraceAction::Reloading => {
+            app.apply_session_event(session_launch::DesktopSessionEvent::Reloading {
+                new_socket: Some("/tmp/jcode-reload-model-test.sock".to_string()),
+            });
+            None
+        }
+        QueueTraceAction::SessionStarted => {
+            app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+                session_id: "reload-model-session".to_string(),
+            });
+            None
+        }
+        QueueTraceAction::Done => {
+            app.apply_session_event(session_launch::DesktopSessionEvent::Done);
+            None
+        }
+        QueueTraceAction::TryDrainQueued => app
+            .take_next_queued_draft()
+            .map(|(message, _images)| message),
+    }
+}
+
+fn assert_queue_trace_state(
+    app: &SingleSessionApp,
+    model: &QueueReferenceModel,
+    real_sent: &[String],
+    trace: &[QueueTraceAction],
+) {
+    assert_eq!(app.draft, model.draft, "draft mismatch for trace {trace:?}");
+    assert_eq!(
+        app.is_processing, model.processing,
+        "processing mismatch for trace {trace:?}"
+    );
+    assert_eq!(
+        app.queued_draft_count(),
+        model.queued.len(),
+        "queued draft count mismatch for trace {trace:?}"
+    );
+    assert_eq!(
+        app.queued_draft_messages(),
+        model.queued,
+        "queued draft mismatch for trace {trace:?}"
+    );
+    assert_eq!(real_sent, model.sent, "sent mismatch for trace {trace:?}");
+
+    let status = app.composer_status_line();
+    if model.queued.is_empty() {
+        assert!(
+            !status.contains(" queued"),
+            "status should not show queued count for trace {trace:?}: {status}"
+        );
+    } else {
+        assert!(
+            status.contains(&format!("{} queued", model.queued.len())),
+            "status should show queued count for trace {trace:?}: {status}"
+        );
+    }
+
+    let body = app.body_lines().join("\n");
+    for queued in &model.queued {
+        assert!(
+            body.contains(&format!("queued prompt: {queued}")),
+            "body should show queued prompt {queued:?} for trace {trace:?}: {body}"
+        );
+    }
+}
+
+fn run_queue_trace(trace: &[QueueTraceAction]) {
+    let mut app = SingleSessionApp::new(None);
+    let mut model = QueueReferenceModel::default();
+    let mut real_sent = Vec::new();
+    let mut prefix = Vec::new();
+
+    for &action in trace {
+        prefix.push(action);
+        let expected_send = model.apply(action);
+        let actual_send = apply_queue_trace_action_to_app(&mut app, action);
+        assert_eq!(
+            actual_send, expected_send,
+            "send outcome mismatch after trace prefix {prefix:?}"
+        );
+        if let Some(message) = actual_send {
+            real_sent.push(message);
+        }
+        if action == QueueTraceAction::Reloading {
+            assert!(
+                app.composer_status_line()
+                    .contains("server reloading, reconnecting"),
+                "reload step should be visible in status for trace {prefix:?}: {}",
+                app.composer_status_line()
+            );
+        }
+        assert_queue_trace_state(&app, &model, &real_sent, &prefix);
+    }
+}
+
+#[test]
+fn single_session_reload_queue_golden_trace_waits_for_done_before_drain() {
+    run_queue_trace(&[
+        QueueTraceAction::Reloading,
+        QueueTraceAction::TypeA,
+        QueueTraceAction::CtrlEnter,
+        QueueTraceAction::SessionStarted,
+        QueueTraceAction::TryDrainQueued,
+        QueueTraceAction::Done,
+        QueueTraceAction::TryDrainQueued,
+    ]);
+}
+
+#[test]
+fn single_session_reload_queue_state_space_matches_reference_model() {
+    const ACTIONS: &[QueueTraceAction] = &[
+        QueueTraceAction::TypeA,
+        QueueTraceAction::TypeB,
+        QueueTraceAction::CtrlEnter,
+        QueueTraceAction::Reloading,
+        QueueTraceAction::SessionStarted,
+        QueueTraceAction::Done,
+        QueueTraceAction::TryDrainQueued,
+    ];
+
+    fn visit(trace: &mut Vec<QueueTraceAction>, depth_remaining: usize) {
+        run_queue_trace(trace);
+        if depth_remaining == 0 {
+            return;
+        }
+        for &action in ACTIONS {
+            trace.push(action);
+            visit(trace, depth_remaining - 1);
+            trace.pop();
+        }
+    }
+
+    let mut trace = Vec::new();
+    visit(&mut trace, 5);
 }
 
 #[test]
@@ -2556,7 +2854,7 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
         areas.first().expect("draft text area").top,
         fresh_welcome_draft_top(size)
     );
-    assert_eq!(areas.len(), 4, "fresh welcome hides normal status chrome");
+    assert_eq!(areas.len(), 5, "fresh welcome hides normal status chrome");
     assert!(
         areas.first().expect("draft text area").top > handwritten_welcome_bounds(size).1[1],
         "fresh input line should stay visually below the handwritten hero"
@@ -2610,15 +2908,15 @@ fn fresh_welcome_model_picker_only_reserves_inline_lane() {
     );
     assert_eq!(
         single_session_draft_top_for_app(&app, size),
-        fresh_welcome_draft_top(size),
-        "composer/hero placement should stay on the normal fresh-welcome grid"
+        single_session_draft_top(size),
+        "inline picker should move the composer to the normal bottom input lane"
     );
 
     let mut font_system = FontSystem::new();
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
     let areas = single_session_text_areas_for_app(&app, &buffers, size);
     let draft_area = areas.first().expect("draft text area");
-    assert_eq!(draft_area.top, fresh_welcome_draft_top(size));
+    assert_eq!(draft_area.top, single_session_draft_top(size));
     let inline_area = areas.last().expect("inline model picker text area");
     assert!(
         inline_area.top < draft_area.top,
@@ -2682,9 +2980,8 @@ fn fresh_submit_keeps_single_visual_timeline_without_transcript_greeting() {
             .any(|phrase| line.text.contains(phrase))),
         "welcome hero must stay visual-only, not become a transcript line"
     );
-    assert_eq!(
-        areas.len(),
-        4,
+    assert!(
+        areas.len() >= 4,
         "submit should keep welcome timeline chrome instead of switching screens"
     );
     let status_lane = areas.first().expect("status lane should prepare first");

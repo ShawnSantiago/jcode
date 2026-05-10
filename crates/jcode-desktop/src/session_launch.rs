@@ -203,6 +203,44 @@ pub fn spawn_cycle_model(
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn spawn_cycle_reasoning_effort(
+    direction: i8,
+    target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name("jcode-desktop-cycle-effort".to_string())
+        .spawn(move || {
+            if let Err(error) = cycle_reasoning_effort(
+                direction,
+                target_session_id.as_deref(),
+                Some(event_tx.clone()),
+            ) {
+                let _ = event_tx.send(DesktopSessionEvent::ModelCatalogError {
+                    error: format!("{error:#}"),
+                });
+            }
+        })
+        .context("failed to spawn desktop reasoning effort worker")?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn spawn_cycle_reasoning_effort(
+    _direction: i8,
+    _target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    event_tx
+        .send(DesktopSessionEvent::ModelCatalogError {
+            error: "desktop reasoning effort switching is not implemented on this platform yet"
+                .to_string(),
+        })
+        .ok();
+    Ok(())
+}
+
 #[cfg(not(unix))]
 pub fn spawn_cycle_model(
     _direction: i8,
@@ -391,6 +429,73 @@ fn set_model(
         }),
     )?;
     read_model_changed(
+        &mut reader,
+        SERVER_START_TIMEOUT,
+        event_tx.as_ref(),
+        request_id,
+    )
+}
+
+#[cfg(unix)]
+fn cycle_reasoning_effort(
+    direction: i8,
+    target_session_id: Option<&str>,
+    event_tx: Option<DesktopSessionEventSender>,
+) -> Result<()> {
+    const EFFORTS: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
+
+    send_desktop_status(&event_tx, "switching reasoning effort");
+    ensure_server_running()?;
+    let stream = connect_server_with_retry(SERVER_START_TIMEOUT)?;
+    let mut writer = stream
+        .try_clone()
+        .context("failed to clone server socket writer")?;
+    let mut reader = BufReader::new(stream);
+    let mut next_request_id = 1_u64;
+    subscribe_and_establish_session(
+        &mut reader,
+        &mut writer,
+        &mut next_request_id,
+        target_session_id,
+        event_tx.as_ref(),
+    )?;
+
+    let history_request_id = next_request_id;
+    write_json_line(
+        &mut writer,
+        json!({
+            "type": "get_history",
+            "id": history_request_id,
+        }),
+    )?;
+    next_request_id += 1;
+    let current = read_history_reasoning_effort(
+        &mut reader,
+        SERVER_START_TIMEOUT,
+        event_tx.as_ref(),
+        history_request_id,
+    )?;
+    let current_index = current
+        .as_deref()
+        .and_then(|effort| EFFORTS.iter().position(|candidate| *candidate == effort))
+        .unwrap_or(EFFORTS.len() - 1);
+    let next_index = if direction > 0 {
+        (current_index + 1).min(EFFORTS.len() - 1)
+    } else {
+        current_index.saturating_sub(1)
+    };
+    let next_effort = EFFORTS[next_index];
+
+    let request_id = next_request_id;
+    write_json_line(
+        &mut writer,
+        json!({
+            "type": "set_reasoning_effort",
+            "id": request_id,
+            "effort": next_effort,
+        }),
+    )?;
+    read_reasoning_effort_changed(
         &mut reader,
         SERVER_START_TIMEOUT,
         event_tx.as_ref(),
@@ -779,6 +884,113 @@ fn read_model_changed(
 }
 
 #[cfg(unix)]
+fn read_history_reasoning_effort(
+    reader: &mut BufReader<UnixStream>,
+    timeout: Duration,
+    event_tx: Option<&DesktopSessionEventSender>,
+    request_id: u64,
+) -> Result<Option<String>> {
+    reader
+        .get_ref()
+        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+        .context("failed to configure server socket timeout")?;
+    let started = Instant::now();
+    let mut line = String::new();
+    while started.elapsed() < timeout {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => anyhow::bail!("jcode server disconnected before loading history"),
+            Ok(_) => {
+                let value: Value = serde_json::from_str(line.trim())
+                    .context("failed to parse jcode server event")?;
+                if value.get("type").and_then(Value::as_str) == Some("history")
+                    && value.get("id").and_then(Value::as_u64) == Some(request_id)
+                {
+                    return Ok(history_reasoning_effort_from_server_value(&value));
+                }
+                if let Some(event) = desktop_event_from_server_value(&value) {
+                    if !matches!(event, DesktopSessionEvent::Done) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
+                }
+                if value.get("type").and_then(Value::as_str) == Some("error")
+                    && value.get("id").and_then(Value::as_u64) == Some(request_id)
+                {
+                    let message = value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown server error");
+                    anyhow::bail!("jcode server rejected history request: {message}");
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error).context("failed to read jcode server event"),
+        }
+    }
+
+    anyhow::bail!("timed out waiting for jcode server history")
+}
+
+#[cfg(unix)]
+fn read_reasoning_effort_changed(
+    reader: &mut BufReader<UnixStream>,
+    timeout: Duration,
+    event_tx: Option<&DesktopSessionEventSender>,
+    request_id: u64,
+) -> Result<()> {
+    reader
+        .get_ref()
+        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+        .context("failed to configure server socket timeout")?;
+    let started = Instant::now();
+    let mut line = String::new();
+    while started.elapsed() < timeout {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => anyhow::bail!("jcode server disconnected before switching reasoning effort"),
+            Ok(_) => {
+                let value: Value = serde_json::from_str(line.trim())
+                    .context("failed to parse jcode server event")?;
+                if value.get("type").and_then(Value::as_str) == Some("reasoning_effort_changed")
+                    && value.get("id").and_then(Value::as_u64) == Some(request_id)
+                {
+                    if let Some(event) = desktop_event_from_server_value(&value) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
+                    return Ok(());
+                }
+                if let Some(event) = desktop_event_from_server_value(&value) {
+                    if !matches!(event, DesktopSessionEvent::Done) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
+                }
+                if value.get("type").and_then(Value::as_str) == Some("error")
+                    && value.get("id").and_then(Value::as_u64) == Some(request_id)
+                {
+                    let message = value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown server error");
+                    anyhow::bail!("jcode server rejected reasoning effort switch: {message}");
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error).context("failed to read jcode server event"),
+        }
+    }
+
+    anyhow::bail!("timed out waiting for jcode server reasoning effort switch")
+}
+
+#[cfg(unix)]
 fn read_model_catalog(
     reader: &mut BufReader<UnixStream>,
     timeout: Duration,
@@ -1031,6 +1243,18 @@ fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent>
                     .map(ToOwned::to_owned),
             }
         }),
+        "reasoning_effort_changed" => {
+            let effort = value
+                .get("effort")
+                .and_then(Value::as_str)
+                .unwrap_or("unchanged");
+            let status = if let Some(error) = value.get("error").and_then(Value::as_str) {
+                format!("effort switch failed: {error}")
+            } else {
+                format!("effort: {effort}")
+            };
+            Some(DesktopSessionEvent::Status(status))
+        }
         "history" => model_catalog_event_from_server_value(value),
         "available_models_updated" => Some(DesktopSessionEvent::ModelCatalog {
             current_model: None,
@@ -1088,6 +1312,21 @@ fn model_catalog_event_from_server_value(value: &Value) -> Option<DesktopSession
             .map(ToOwned::to_owned),
         models: model_choices_from_server_value(value),
     })
+}
+
+fn history_reasoning_effort_from_server_value(value: &Value) -> Option<String> {
+    value
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("openai_reasoning_effort").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .get("provider_config")
+                .and_then(|config| config.get("openai_reasoning_effort"))
+                .and_then(Value::as_str)
+        })
+        .filter(|effort| !effort.trim().is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn model_choices_from_server_value(value: &Value) -> Vec<DesktopModelChoice> {

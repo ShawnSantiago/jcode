@@ -87,6 +87,8 @@ pub enum KeyInput {
     OpenSessionSwitcher,
     ModelPickerMove(i32),
     CycleModel(i8),
+    #[allow(dead_code)]
+    CycleReasoningEffort(i8),
     AttachClipboardImage,
     ClearAttachedImages,
     PasteText,
@@ -127,6 +129,8 @@ pub enum KeyOutcome {
     RestoreCrashedSessions,
     SetModel(String),
     CycleModel(i8),
+    #[allow(dead_code)]
+    CycleReasoningEffort(i8),
     SendStdinResponse {
         request_id: String,
         input: String,
@@ -617,6 +621,7 @@ impl Workspace {
             | KeyInput::ToggleSessionInfo
             | KeyInput::ModelPickerMove(_)
             | KeyInput::CycleModel(_)
+            | KeyInput::CycleReasoningEffort(_)
             | KeyInput::AdjustTextScale(_)
             | KeyInput::ResetTextScale => KeyOutcome::None,
             KeyInput::RetrieveQueuedDraft => KeyOutcome::None,

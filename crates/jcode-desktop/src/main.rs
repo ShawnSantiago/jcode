@@ -16,6 +16,7 @@ use glyphon::{
     Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Wrap,
 };
+use image::RgbaImage;
 use render_helpers::*;
 use single_session::{
     SINGLE_SESSION_ASSISTANT_FONT_FAMILY, SINGLE_SESSION_FONT_FAMILY, SelectionPoint,
@@ -141,8 +142,6 @@ const OVERLAY_SELECTION_TEXT_COLOR: [f32; 4] = [0.010, 0.035, 0.105, 1.0];
 const USER_PROMPT_ACCENT_COLOR: [f32; 4] = [0.000, 0.105, 0.250, 1.0];
 const PANEL_SECTION_COLOR: [f32; 4] = [0.045, 0.055, 0.080, 0.95];
 const SELECTION_HIGHLIGHT_COLOR: [f32; 4] = [0.220, 0.420, 0.700, 0.22];
-const STREAMING_SHIMMER_SOFT_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.055];
-const STREAMING_SHIMMER_CORE_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.115];
 const WELCOME_AURORA_BLUE: [f32; 4] = [0.250, 0.520, 1.000, 0.145];
 const WELCOME_AURORA_VIOLET: [f32; 4] = [0.720, 0.360, 0.980, 0.125];
 const WELCOME_AURORA_MINT: [f32; 4] = [0.220, 0.840, 0.660, 0.115];
@@ -209,6 +208,9 @@ async fn run() -> Result<()> {
     }
     if let Some(frames) = scroll_render_benchmark_frames(&args) {
         return run_scroll_render_benchmark(frames);
+    }
+    if let Some(output_dir) = hero_screenshot_capture_dir(&args) {
+        return run_hero_screenshot_capture(&output_dir).await;
     }
     if let Some(raw_events) = stream_e2e_benchmark_raw_events(&args) {
         return run_stream_e2e_benchmark(raw_events);
@@ -621,6 +623,23 @@ async fn run() -> Result<()> {
                                 app.apply_session_event(
                                     session_launch::DesktopSessionEvent::Status(
                                         "switching model".to_string(),
+                                    ),
+                                );
+                            }
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        }
+                        KeyOutcome::CycleReasoningEffort(direction) => {
+                            if let Err(error) = session_launch::spawn_cycle_reasoning_effort(
+                                direction,
+                                app.single_session_live_id(),
+                                session_event_tx.clone(),
+                            ) {
+                                apply_single_session_error(&mut app, error);
+                            } else {
+                                app.apply_session_event(
+                                    session_launch::DesktopSessionEvent::Status(
+                                        "switching reasoning effort".to_string(),
                                     ),
                                 );
                             }
@@ -1163,6 +1182,7 @@ const DESKTOP_HELP_LINES: &[&str] = &[
     "  --workspace                  Open the workspace prototype instead of the single-session chat",
     "  --startup-log                Print launch timing milestones to stderr",
     "  --startup-benchmark          Print launch timings and exit after the first frame",
+    "  --capture-hero-animation DIR Write deterministic hero animation PNG frames and exit",
     "  --scroll-render-benchmark[N]  Print CPU scroll/render benchmark JSON and exit",
     "  --stream-e2e-benchmark[N]     Print stream event-to-paint guardrail JSON and exit",
     "  --headless-chat-smoke <MSG>  Run a hidden backend smoke test and print JSON events",
@@ -1197,6 +1217,298 @@ fn scroll_render_benchmark_frames(args: &[String]) -> Option<usize> {
                 })
             })
     })
+}
+
+fn hero_screenshot_capture_dir(args: &[String]) -> Option<PathBuf> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--capture-hero-animation=")
+            .map(PathBuf::from)
+            .or_else(|| {
+                (arg == "--capture-hero-animation")
+                    .then(|| args.get(index + 1).map(PathBuf::from))
+                    .flatten()
+            })
+    })
+}
+
+async fn run_hero_screenshot_capture(output_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "failed to create hero screenshot directory {}",
+            output_dir.display()
+        )
+    })?;
+
+    let app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32);
+    let frames = [0_u64, 250, 675, 1013, 1350];
+    let mut manifest = Vec::new();
+    for elapsed_ms in frames {
+        let progress = welcome_hero_reveal_progress_for_elapsed(Duration::from_millis(elapsed_ms));
+        let tick = elapsed_ms / DESKTOP_SPINNER_FRAME_MS as u64;
+        let (image, vertices_len) = render_hero_frame_to_image(&app, size, tick, progress).await?;
+        let filename = format!("hero-{elapsed_ms:04}ms.png");
+        let path = output_dir.join(&filename);
+        image
+            .save(&path)
+            .with_context(|| format!("failed to save {}", path.display()))?;
+        manifest.push(serde_json::json!({
+            "file": filename,
+            "elapsed_ms": elapsed_ms,
+            "progress": progress,
+            "vertices": vertices_len,
+        }));
+    }
+
+    let manifest_path = output_dir.join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("manifest json serializes"),
+    )
+    .with_context(|| format!("failed to save {}", manifest_path.display()))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "output_dir": output_dir,
+            "frames": manifest,
+        })
+    );
+    Ok(())
+}
+
+async fn render_hero_frame_to_image(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    spinner_tick: u64,
+    welcome_hero_reveal_progress: f32,
+) -> Result<(RgbaImage, usize)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })
+        .await
+        .context("failed to find a GPU adapter for hero capture")?;
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("jcode-desktop-hero-capture-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+            },
+            None,
+        )
+        .await
+        .context("failed to create GPU device for hero capture")?;
+
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("jcode-desktop-hero-capture-primitive-shader"),
+        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("jcode-desktop-hero-capture-pipeline-layout"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[],
+    });
+    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("jcode-desktop-hero-capture-primitive-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[Vertex::layout()],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("jcode-desktop-hero-capture-texture"),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut font_system = create_desktop_font_system();
+    let mut swash_cache = SwashCache::new();
+    let mut text_atlas = TextAtlas::new(&device, &queue, format);
+    let mut text_renderer = TextRenderer::new(
+        &mut text_atlas,
+        &device,
+        wgpu::MultisampleState::default(),
+        None,
+    );
+
+    let rendered_body_lines = single_session_rendered_body_lines_for_tick(app, size, spinner_tick);
+    let text_key = single_session_text_key_for_tick_with_rendered_body(
+        app,
+        size,
+        spinner_tick,
+        0.0,
+        &rendered_body_lines,
+    );
+    let text_buffers = single_session_text_buffers_from_key(&text_key, size, &mut font_system);
+    let viewport = single_session_body_viewport_from_lines(app, size, 0.0, &rendered_body_lines);
+    let text_areas = single_session_text_areas_for_app_with_cached_body_viewport_and_reveal(
+        app,
+        &text_buffers,
+        size,
+        0.0,
+        viewport,
+        welcome_hero_reveal_progress,
+    );
+    if !text_areas.is_empty() {
+        text_renderer
+            .prepare(
+                &device,
+                &queue,
+                &mut font_system,
+                &mut text_atlas,
+                Resolution {
+                    width: size.width,
+                    height: size.height,
+                },
+                text_areas,
+                &mut swash_cache,
+            )
+            .context("failed to prepare hero capture text")?;
+    }
+
+    let vertices = build_single_session_vertices_with_cached_body(
+        app,
+        size,
+        0.0,
+        spinner_tick,
+        0.0,
+        welcome_hero_reveal_progress,
+        &rendered_body_lines,
+    );
+    let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("jcode-desktop-hero-capture-vertices"),
+        size: (vertices.len() * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+
+    let bytes_per_pixel = 4u32;
+    let unpadded_bytes_per_row = size.width * bytes_per_pixel;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let output_buffer_size = padded_bytes_per_row as u64 * size.height as u64;
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("jcode-desktop-hero-capture-readback"),
+        size: output_buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("jcode-desktop-hero-capture-encoder"),
+    });
+    {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("jcode-desktop-hero-capture-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        render_pass.set_pipeline(&render_pipeline);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.draw(0..vertices.len() as u32, 0..1);
+        if !text_buffers.is_empty() {
+            text_renderer
+                .render(&text_atlas, &mut render_pass)
+                .context("failed to render hero capture text")?;
+        }
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &output_buffer,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(size.height),
+            },
+        },
+        wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let buffer_slice = output_buffer.slice(..);
+    let (tx, rx) = mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv()
+        .context("hero capture readback channel closed")?
+        .context("failed to map hero capture readback buffer")?;
+    let mapped = buffer_slice.get_mapped_range();
+    let mut pixels = vec![0_u8; (unpadded_bytes_per_row * size.height) as usize];
+    for y in 0..size.height as usize {
+        let src_start = y * padded_bytes_per_row as usize;
+        let dst_start = y * unpadded_bytes_per_row as usize;
+        pixels[dst_start..dst_start + unpadded_bytes_per_row as usize]
+            .copy_from_slice(&mapped[src_start..src_start + unpadded_bytes_per_row as usize]);
+    }
+    drop(mapped);
+    output_buffer.unmap();
+    let image = RgbaImage::from_raw(size.width, size.height, pixels)
+        .context("failed to construct hero capture image")?;
+    Ok((image, vertices.len()))
 }
 
 fn stream_e2e_benchmark_raw_events(args: &[String]) -> Option<usize> {
@@ -3186,6 +3498,12 @@ fn create_desktop_font_system() -> FontSystem {
         .db_mut()
         .load_font_data(include_bytes!("../assets/fonts/Kalam-Regular.ttf").to_vec());
     font_system
+        .db_mut()
+        .load_font_data(include_bytes!("../assets/fonts/ShadowsIntoLightTwo-Regular.ttf").to_vec());
+    font_system
+        .db_mut()
+        .load_font_data(include_bytes!("../assets/fonts/HomemadeApple-Regular.ttf").to_vec());
+    font_system
 }
 
 fn spawn_desktop_font_system_loader() -> JoinHandle<FontSystem> {
@@ -3688,10 +4006,14 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Named(NamedKey::ArrowDown) if modifiers.alt_key() => KeyInput::JumpPrompt(1),
         Key::Named(NamedKey::ArrowUp) => KeyInput::ModelPickerMove(-1),
         Key::Named(NamedKey::ArrowDown) => KeyInput::ModelPickerMove(1),
-        Key::Named(NamedKey::ArrowLeft) if modifiers.control_key() || modifiers.alt_key() => {
-            KeyInput::MoveCursorWordLeft
+        Key::Named(NamedKey::ArrowLeft) if modifiers.alt_key() => {
+            KeyInput::CycleReasoningEffort(-1)
         }
-        Key::Named(NamedKey::ArrowRight) if modifiers.control_key() || modifiers.alt_key() => {
+        Key::Named(NamedKey::ArrowRight) if modifiers.alt_key() => {
+            KeyInput::CycleReasoningEffort(1)
+        }
+        Key::Named(NamedKey::ArrowLeft) if modifiers.control_key() => KeyInput::MoveCursorWordLeft,
+        Key::Named(NamedKey::ArrowRight) if modifiers.control_key() => {
             KeyInput::MoveCursorWordRight
         }
         Key::Named(NamedKey::ArrowLeft) => KeyInput::MoveCursorLeft,
@@ -5827,9 +6149,12 @@ impl<'window> Canvas<'window> {
         } else {
             None
         };
+        if welcome_hero_reveal_active {
+            self.text_needs_prepare = true;
+        }
         if self.text_needs_prepare {
             let text_areas = if let DesktopApp::SingleSession(single_session) = app {
-                single_session_text_areas_for_app_with_cached_body_viewport(
+                single_session_text_areas_for_app_with_cached_body_viewport_and_reveal(
                     single_session,
                     text_buffers,
                     self.size,
@@ -5837,6 +6162,7 @@ impl<'window> Canvas<'window> {
                     single_session_viewport
                         .clone()
                         .expect("single-session viewport should exist"),
+                    welcome_hero_reveal_progress,
                 )
             } else {
                 single_session_text_areas(text_buffers, self.size)

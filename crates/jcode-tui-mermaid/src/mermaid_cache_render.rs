@@ -128,6 +128,7 @@ impl MermaidCache {
         }
     }
 
+    #[cfg(feature = "renderer")]
     pub(super) fn cache_path(
         &self,
         hash: u64,
@@ -243,6 +244,7 @@ pub fn get_cached_path(hash: u64) -> Option<PathBuf> {
     get_cached_diagram(hash, None).map(|c| c.path)
 }
 
+#[cfg(feature = "renderer")]
 fn invalidate_cached_image(hash: u64) {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.remove(&hash);
@@ -299,6 +301,7 @@ pub(super) fn calculate_render_size(
     }
 }
 
+#[cfg(feature = "renderer")]
 fn svg_dimension_to_u32(value: f32) -> u32 {
     if value.is_finite() && value > 0.0 {
         value.round().clamp(1.0, u32::MAX as f32) as u32
@@ -595,6 +598,7 @@ fn render_mermaid_sized_internal(
 
     // Estimate complexity for sizing
     let (node_count, edge_count) = estimate_diagram_size(content);
+    #[cfg(feature = "renderer")]
     let complexity = node_count + edge_count;
 
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
@@ -661,214 +665,215 @@ fn render_mermaid_sized_internal(
             state.stats.render_errors += 1;
             state.stats.last_error = Some(msg.clone());
         }
-        return RenderResult::Error(msg);
+        RenderResult::Error(msg)
     }
 
     #[cfg(feature = "renderer")]
     {
-    // Get cache path
-    let png_path = {
-        let cache = RENDER_CACHE
+        // Get cache path
+        let png_path = {
+            let cache = RENDER_CACHE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.cache_path(hash, target_width_u32, render_profile)
+        };
+        let png_path_clone = png_path.clone();
+
+        let _render_guard = RENDER_WORK_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.cache_path(hash, target_width_u32, render_profile)
-    };
-    let png_path_clone = png_path.clone();
 
-    let _render_guard = RENDER_WORK_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    // Re-check cache after taking the render lock so a background worker that
-    // just finished can satisfy this request without doing duplicate work.
-    if let Some(cached) =
-        get_cached_diagram_for_profile(hash, Some(target_width_u32), render_profile)
-    {
-        if let Ok(mut errors) = RENDER_ERRORS.lock() {
-            errors.remove(&hash);
-        }
-        if let Ok(mut state) = MERMAID_DEBUG.lock() {
-            state.stats.cache_hits += 1;
-            state.stats.last_hash = Some(format!("{:016x}", hash));
-        }
-        if register_active {
-            register_active_diagram(hash, cached.width, cached.height, None);
-        }
-        return RenderResult::Image {
-            hash,
-            path: cached.path,
-            width: cached.width,
-            height: cached.height,
-        };
-    }
-
-    // Wrap mermaid library calls in catch_unwind for defense-in-depth
-    let content_owned = content.to_string();
-
-    let prev_hook = panic::take_hook();
-    panic::set_hook(Box::new(|_| {
-        // Silently ignore panics from mermaid renderer
-    }));
-
-    let render_start = Instant::now();
-    let render_result = panic::catch_unwind(move || -> Result<RenderStageBreakdown, String> {
-        let parse_start = Instant::now();
-        // Parse mermaid
-        let parsed = parse_mermaid(&content_owned).map_err(|e| format!("Parse error: {}", e))?;
-        let parse_ms = parse_start.elapsed().as_secs_f32() * 1000.0;
-
-        // Configure theme for terminal (dark background friendly)
-        let theme = terminal_theme();
-
-        // Adaptive spacing based on complexity
-        let spacing_factor = if complexity > 30 { 1.2 } else { 1.0 };
-        let layout_config = LayoutConfig {
-            node_spacing: 80.0 * spacing_factor,
-            rank_spacing: 80.0 * spacing_factor,
-            node_padding_x: 40.0,
-            node_padding_y: 20.0,
-            preferred_aspect_ratio: render_profile.preferred_aspect_ratio(),
-            ..Default::default()
-        };
-
-        let layout_start = Instant::now();
-        // Compute layout
-        let layout = compute_layout(&parsed.graph, &theme, &layout_config);
-        let layout_ms = layout_start.elapsed().as_secs_f32() * 1000.0;
-
-        let svg_start = Instant::now();
-        let output_dimensions = Some((target_width as f32, target_height as f32));
-        // Render and collect size metadata. With the mmdr size API enabled this
-        // comes directly from the renderer; the default compatibility path keeps
-        // the old SVG retargeting behavior until the dependency is updated.
-        let (svg, dimensions) =
-            render_svg_for_png(&layout, &theme, &layout_config, output_dimensions);
-        let svg_ms = svg_start.elapsed().as_secs_f32() * 1000.0;
-
-        // Convert SVG to PNG with adaptive dimensions
-        let render_config = RenderConfig {
-            width: dimensions.width,
-            height: dimensions.height,
-            background: theme.background.clone(),
-        };
-
-        // Ensure parent directory exists
-        if let Some(parent) = png_path_clone.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create cache directory: {}", e))?;
-        }
-
-        let png_start = Instant::now();
-        write_output_png_cached_fonts(&svg, &png_path_clone, &render_config, &theme)
-            .map_err(|e| format!("Render error: {}", e))?;
-        let png_ms = png_start.elapsed().as_secs_f32() * 1000.0;
-
-        Ok(RenderStageBreakdown {
-            parse_ms,
-            layout_ms,
-            svg_ms,
-            png_ms,
-            measured_width: svg_dimension_to_u32(dimensions.width),
-            measured_height: svg_dimension_to_u32(dimensions.height),
-            viewbox_width: svg_dimension_to_u32(dimensions.viewbox_width),
-            viewbox_height: svg_dimension_to_u32(dimensions.viewbox_height),
-        })
-    });
-
-    // Restore the original panic hook
-    panic::set_hook(prev_hook);
-
-    // Handle the result
-    let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
-    let stage_breakdown = match render_result {
-        Ok(Ok(stage_breakdown)) => {
+        // Re-check cache after taking the render lock so a background worker that
+        // just finished can satisfy this request without doing duplicate work.
+        if let Some(cached) =
+            get_cached_diagram_for_profile(hash, Some(target_width_u32), render_profile)
+        {
             if let Ok(mut errors) = RENDER_ERRORS.lock() {
                 errors.remove(&hash);
             }
             if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                state.stats.render_success += 1;
-                state.stats.last_render_ms = Some(render_ms);
-                state.stats.last_parse_ms = Some(stage_breakdown.parse_ms);
-                state.stats.last_layout_ms = Some(stage_breakdown.layout_ms);
-                state.stats.last_svg_ms = Some(stage_breakdown.svg_ms);
-                state.stats.last_png_ms = Some(stage_breakdown.png_ms);
-                state.stats.last_measured_width = Some(stage_breakdown.measured_width);
-                state.stats.last_measured_height = Some(stage_breakdown.measured_height);
-                state.stats.last_viewbox_width = Some(stage_breakdown.viewbox_width);
-                state.stats.last_viewbox_height = Some(stage_breakdown.viewbox_height);
+                state.stats.cache_hits += 1;
+                state.stats.last_hash = Some(format!("{:016x}", hash));
             }
-            stage_breakdown
-        }
-        Ok(Err(e)) => {
-            if let Ok(mut errors) = RENDER_ERRORS.lock() {
-                errors.insert(hash, e.clone());
+            if register_active {
+                register_active_diagram(hash, cached.width, cached.height, None);
             }
-            if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                state.stats.render_errors += 1;
-                state.stats.last_render_ms = Some(render_ms);
-                state.stats.last_error = Some(e.clone());
-            }
-            return RenderResult::Error(e);
-        }
-        Err(panic_info) => {
-            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic in mermaid renderer".to_string()
+            return RenderResult::Image {
+                hash,
+                path: cached.path,
+                width: cached.width,
+                height: cached.height,
             };
-            if let Ok(mut errors) = RENDER_ERRORS.lock() {
-                errors.insert(hash, format!("Renderer panic: {}", msg));
-            }
-            if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                state.stats.render_errors += 1;
-                state.stats.last_render_ms = Some(render_ms);
-                state.stats.last_error = Some(format!("Renderer panic: {}", msg));
-            }
-            return RenderResult::Error(format!("Renderer panic: {}", msg));
         }
-    };
 
-    // Get actual dimensions from rendered PNG
-    let (width, height) = get_png_dimensions(&png_path).unwrap_or((
-        stage_breakdown.measured_width,
-        stage_breakdown.measured_height,
-    ));
+        // Wrap mermaid library calls in catch_unwind for defense-in-depth
+        let content_owned = content.to_string();
 
-    if let Ok(mut state) = MERMAID_DEBUG.lock() {
-        state.stats.last_png_width = Some(width);
-        state.stats.last_png_height = Some(height);
-    }
+        let prev_hook = panic::take_hook();
+        panic::set_hook(Box::new(|_| {
+            // Silently ignore panics from mermaid renderer
+        }));
 
-    // Cache the result
-    {
-        let mut cache = RENDER_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.insert(
+        let render_start = Instant::now();
+        let render_result = panic::catch_unwind(move || -> Result<RenderStageBreakdown, String> {
+            let parse_start = Instant::now();
+            // Parse mermaid
+            let parsed =
+                parse_mermaid(&content_owned).map_err(|e| format!("Parse error: {}", e))?;
+            let parse_ms = parse_start.elapsed().as_secs_f32() * 1000.0;
+
+            // Configure theme for terminal (dark background friendly)
+            let theme = terminal_theme();
+
+            // Adaptive spacing based on complexity
+            let spacing_factor = if complexity > 30 { 1.2 } else { 1.0 };
+            let layout_config = LayoutConfig {
+                node_spacing: 80.0 * spacing_factor,
+                rank_spacing: 80.0 * spacing_factor,
+                node_padding_x: 40.0,
+                node_padding_y: 20.0,
+                preferred_aspect_ratio: render_profile.preferred_aspect_ratio(),
+                ..Default::default()
+            };
+
+            let layout_start = Instant::now();
+            // Compute layout
+            let layout = compute_layout(&parsed.graph, &theme, &layout_config);
+            let layout_ms = layout_start.elapsed().as_secs_f32() * 1000.0;
+
+            let svg_start = Instant::now();
+            let output_dimensions = Some((target_width as f32, target_height as f32));
+            // Render and collect size metadata. With the mmdr size API enabled this
+            // comes directly from the renderer; the default compatibility path keeps
+            // the old SVG retargeting behavior until the dependency is updated.
+            let (svg, dimensions) =
+                render_svg_for_png(&layout, &theme, &layout_config, output_dimensions);
+            let svg_ms = svg_start.elapsed().as_secs_f32() * 1000.0;
+
+            // Convert SVG to PNG with adaptive dimensions
+            let render_config = RenderConfig {
+                width: dimensions.width,
+                height: dimensions.height,
+                background: theme.background.clone(),
+            };
+
+            // Ensure parent directory exists
+            if let Some(parent) = png_path_clone.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+            }
+
+            let png_start = Instant::now();
+            write_output_png_cached_fonts(&svg, &png_path_clone, &render_config, &theme)
+                .map_err(|e| format!("Render error: {}", e))?;
+            let png_ms = png_start.elapsed().as_secs_f32() * 1000.0;
+
+            Ok(RenderStageBreakdown {
+                parse_ms,
+                layout_ms,
+                svg_ms,
+                png_ms,
+                measured_width: svg_dimension_to_u32(dimensions.width),
+                measured_height: svg_dimension_to_u32(dimensions.height),
+                viewbox_width: svg_dimension_to_u32(dimensions.viewbox_width),
+                viewbox_height: svg_dimension_to_u32(dimensions.viewbox_height),
+            })
+        });
+
+        // Restore the original panic hook
+        panic::set_hook(prev_hook);
+
+        // Handle the result
+        let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
+        let stage_breakdown = match render_result {
+            Ok(Ok(stage_breakdown)) => {
+                if let Ok(mut errors) = RENDER_ERRORS.lock() {
+                    errors.remove(&hash);
+                }
+                if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                    state.stats.render_success += 1;
+                    state.stats.last_render_ms = Some(render_ms);
+                    state.stats.last_parse_ms = Some(stage_breakdown.parse_ms);
+                    state.stats.last_layout_ms = Some(stage_breakdown.layout_ms);
+                    state.stats.last_svg_ms = Some(stage_breakdown.svg_ms);
+                    state.stats.last_png_ms = Some(stage_breakdown.png_ms);
+                    state.stats.last_measured_width = Some(stage_breakdown.measured_width);
+                    state.stats.last_measured_height = Some(stage_breakdown.measured_height);
+                    state.stats.last_viewbox_width = Some(stage_breakdown.viewbox_width);
+                    state.stats.last_viewbox_height = Some(stage_breakdown.viewbox_height);
+                }
+                stage_breakdown
+            }
+            Ok(Err(e)) => {
+                if let Ok(mut errors) = RENDER_ERRORS.lock() {
+                    errors.insert(hash, e.clone());
+                }
+                if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                    state.stats.render_errors += 1;
+                    state.stats.last_render_ms = Some(render_ms);
+                    state.stats.last_error = Some(e.clone());
+                }
+                return RenderResult::Error(e);
+            }
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic in mermaid renderer".to_string()
+                };
+                if let Ok(mut errors) = RENDER_ERRORS.lock() {
+                    errors.insert(hash, format!("Renderer panic: {}", msg));
+                }
+                if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                    state.stats.render_errors += 1;
+                    state.stats.last_render_ms = Some(render_ms);
+                    state.stats.last_error = Some(format!("Renderer panic: {}", msg));
+                }
+                return RenderResult::Error(format!("Renderer panic: {}", msg));
+            }
+        };
+
+        // Get actual dimensions from rendered PNG
+        let (width, height) = get_png_dimensions(&png_path).unwrap_or((
+            stage_breakdown.measured_width,
+            stage_breakdown.measured_height,
+        ));
+
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.last_png_width = Some(width);
+            state.stats.last_png_height = Some(height);
+        }
+
+        // Cache the result
+        {
+            let mut cache = RENDER_CACHE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.insert(
+                hash,
+                render_profile,
+                CachedDiagram {
+                    path: png_path.clone(),
+                    width,
+                    height,
+                },
+            );
+        }
+        // If we re-rendered at a new size/path, force widget state to reload.
+        invalidate_cached_image(hash);
+
+        if register_active {
+            // Register this diagram as active for info widget display
+            register_active_diagram(hash, width, height, None);
+        }
+
+        RenderResult::Image {
             hash,
-            render_profile,
-            CachedDiagram {
-                path: png_path.clone(),
-                width,
-                height,
-            },
-        );
-    }
-    // If we re-rendered at a new size/path, force widget state to reload.
-    invalidate_cached_image(hash);
-
-    if register_active {
-        // Register this diagram as active for info widget display
-        register_active_diagram(hash, width, height, None);
-    }
-
-    RenderResult::Image {
-        hash,
-        path: png_path,
-        width,
-        height,
-    }
+            path: png_path,
+            width,
+            height,
+        }
     }
 }
