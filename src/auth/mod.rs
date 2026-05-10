@@ -12,6 +12,8 @@ pub mod gemini;
 pub mod google;
 pub mod integration;
 pub mod lifecycle;
+#[cfg(test)]
+pub(crate) mod lifecycle_driver;
 pub mod login_diagnostics;
 pub mod login_flows;
 pub mod oauth;
