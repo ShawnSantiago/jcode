@@ -82,6 +82,12 @@ struct EmptyPostLoginCatalogProvider {
     set_model_attempts: StdArc<AtomicUsize>,
 }
 
+#[derive(Clone)]
+struct FailingPostLoginCatalogProvider {
+    refreshes: StdArc<AtomicUsize>,
+    set_model_attempts: StdArc<AtomicUsize>,
+}
+
 impl AuthUxStateSpaceProvider {
     fn routes(&self) -> Vec<crate::provider::ModelRoute> {
         let authed = self.authed.load(Ordering::SeqCst);
@@ -230,6 +236,45 @@ impl Provider for EmptyPostLoginCatalogProvider {
             routes_removed: 0,
             routes_changed: 0,
         })
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for FailingPostLoginCatalogProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("FailingPostLoginCatalogProvider")
+    }
+
+    fn name(&self) -> &str {
+        "failing-catalog"
+    }
+
+    fn model(&self) -> String {
+        "pre-auth-model".to_string()
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![]
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        self.set_model_attempts.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("unexpected attempt to switch to {model}")
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<crate::provider::ModelCatalogRefreshSummary> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("fixture refresh failed before server auth-change catalog refresh")
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -650,6 +695,69 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
     assert!(!activity.message.contains("did not switch models"));
     assert!(!activity.message.contains("documented default"));
     assert!(!activity.message.contains("qwen-3-coder-480b"));
+}
+
+#[test]
+fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let refreshes = StdArc::new(AtomicUsize::new(0));
+    let set_model_attempts = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(FailingPostLoginCatalogProvider {
+        refreshes: StdArc::clone(&refreshes),
+        set_model_attempts: StdArc::clone(&set_model_attempts),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    let _guard = rt.enter();
+    app.start_openai_compatible_post_login_activation(
+        "cerebras".to_string(),
+        "Cerebras".to_string(),
+    );
+
+    let activity = rt.block_on(async {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
+                Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
+                    panic!("failing local refresh must not activate a provider model")
+                }
+                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
+                    panic!(
+                        "local refresh failure must not publish a final login failure while server auth-change recovery can still finish: {login:?}"
+                    )
+                }
+                Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
+                    if activity.message.contains("Model Discovery Still Updating") =>
+                {
+                    break activity;
+                }
+                Ok(Ok(_)) => continue,
+                other => panic!("expected pending catalog activity, got {other:?}"),
+            }
+        }
+    });
+
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        set_model_attempts.load(Ordering::SeqCst),
+        0,
+        "local refresh failure must not try to switch models from an unavailable catalog"
+    );
+    assert!(activity.message.contains("Saved credentials are active"));
+    assert!(activity.message.contains("server auth-change catalog refresh"));
+    assert!(activity.message.contains("fixture refresh failed"));
+    assert!(!activity.message.contains("Login: failed"));
+    assert!(!activity.message.contains("Unable to sign in"));
+    assert!(!activity.message.contains("did not switch models"));
 }
 
 #[test]

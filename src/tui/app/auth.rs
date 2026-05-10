@@ -2099,15 +2099,18 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                            crate::bus::LoginCompleted {
-                                provider: provider_label,
-                                success: false,
-                                message: format!(
-                                    "Saved the API key, but failed to refresh the model catalog:\n\n{}\n\nRun `/refresh-model-list` to retry model discovery after checking the provider settings.",
-                                    error
+                        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+                            crate::bus::UiActivity::catalog(
+                                Some(session_id),
+                                format!(
+                                    "**{} Model Discovery Still Updating**\n\nSaved credentials are active, but this local refresh pass failed before the server auth-change catalog refresh finished. Jcode is still processing the auth-change catalog refresh and will switch once provider routes are available. If the model list still looks stale after the auth catalog update, run `/refresh-model-list`.\n\nLocal refresh error: {}",
+                                    provider_label, error
                                 ),
-                            },
+                                Some(format!(
+                                    "{}: waiting for model routes...",
+                                    provider_label
+                                )),
+                            ),
                         ));
                     }
                 }
