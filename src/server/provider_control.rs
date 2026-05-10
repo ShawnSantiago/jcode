@@ -607,6 +607,17 @@ pub(super) async fn handle_notify_auth_changed(
             }
         }
 
+        if let Some(model_to_select) = crate::auth::lifecycle::provider_model_to_select_after_auth(
+            &activation,
+            latest_snapshot.provider_model.as_deref(),
+            &latest_snapshot.available_model_routes,
+        ) {
+            apply_auth_runtime_model_to_agent(&activation, Some(&model_to_select), &agent_clone)
+                .await;
+            latest_snapshot = available_models_snapshot(&agent_clone).await;
+            let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
+        }
+
         let summary = crate::provider::summarize_model_catalog_refresh(
             before_snapshot.available_models,
             latest_snapshot.available_models.clone(),

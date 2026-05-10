@@ -136,6 +136,43 @@ pub fn validate_catalog_invariants(
     }
 }
 
+pub fn provider_model_to_select_after_auth(
+    activation: &AuthActivationResult,
+    selected_model: Option<&str>,
+    routes: &[ModelRoute],
+) -> Option<String> {
+    let matching_routes = routes
+        .iter()
+        .filter(|route| route.available && route_matches_activation(route, activation))
+        .collect::<Vec<_>>();
+    if matching_routes.is_empty() {
+        return None;
+    }
+
+    let selected_model = selected_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if let Some(selected) = selected_model
+        && matching_routes.iter().any(|route| route.model == selected)
+    {
+        return None;
+    }
+
+    if let Some(activated_model) = activation
+        .activated_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        && matching_routes
+            .iter()
+            .any(|route| route.model == activated_model)
+    {
+        return Some(activated_model.to_string());
+    }
+
+    matching_routes.first().map(|route| route.model.clone())
+}
+
 fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResult) -> bool {
     if let Some(label) = activation.provider_label.as_deref()
         && route.provider.eq_ignore_ascii_case(label)
@@ -548,5 +585,44 @@ mod tests {
         let warning = report.warning_message().expect("warning expected");
         assert!(warning.contains("Expected selectable Cerebras model routes"));
         assert!(warning.contains("Selected model: `gpt-5.5`"));
+    }
+
+    #[test]
+    fn post_auth_model_selection_prefers_matching_provider_route_over_stale_model() {
+        let activation = AuthActivationResult {
+            provider_id: Some("cerebras".to_string()),
+            provider_label: Some("Cerebras".to_string()),
+            activated_model: Some("qwen-3-235b-a22b-instruct-2507".to_string()),
+            expected_runtime: Some("openai-compatible".to_string()),
+            expected_catalog_namespace: Some("cerebras".to_string()),
+        };
+        let routes = vec![
+            route("gpt-5.5", "OpenAI", "openai", true),
+            route(
+                "qwen-3-235b-a22b-instruct-2507",
+                "Cerebras",
+                "openai-compatible:cerebras",
+                true,
+            ),
+            route(
+                "llama3.1-8b",
+                "Cerebras",
+                "openai-compatible:cerebras",
+                true,
+            ),
+        ];
+
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, Some("gpt-5.5"), &routes).as_deref(),
+            Some("qwen-3-235b-a22b-instruct-2507")
+        );
+        assert_eq!(
+            provider_model_to_select_after_auth(
+                &activation,
+                Some("qwen-3-235b-a22b-instruct-2507"),
+                &routes
+            ),
+            None
+        );
     }
 }

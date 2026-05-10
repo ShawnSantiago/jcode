@@ -13,6 +13,8 @@ use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
 struct AuthChangeMockState {
     logged_in: StdRwLock<bool>,
     selected_model: StdRwLock<Option<String>>,
+    route_provider: StdRwLock<String>,
+    route_api_method: StdRwLock<String>,
     complete_calls: AtomicUsize,
 }
 
@@ -22,8 +24,13 @@ struct AuthChangeMockProvider {
 
 impl AuthChangeMockProvider {
     fn new() -> Self {
+        let state = AuthChangeMockState {
+            route_provider: StdRwLock::new("MockAuth".to_string()),
+            route_api_method: StdRwLock::new("mock-auth".to_string()),
+            ..AuthChangeMockState::default()
+        };
         Self {
-            state: Arc::new(AuthChangeMockState::default()),
+            state: Arc::new(state),
         }
     }
 }
@@ -89,12 +96,14 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
+        let provider = self.state.route_provider.read().unwrap().clone();
+        let api_method = self.state.route_api_method.read().unwrap().clone();
         self.available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
                 model,
-                provider: "MockAuth".to_string(),
-                api_method: "mock-auth".to_string(),
+                provider: provider.clone(),
+                api_method: api_method.clone(),
                 available: true,
                 detail: String::new(),
                 cheapness: None,
@@ -564,6 +573,105 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
         Ok("cerebras")
+    );
+}
+
+#[tokio::test]
+async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_route() {
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let provider = Arc::new(AuthChangeMockProvider::new());
+    *provider.state.selected_model.write().unwrap() = Some("gpt-5.5".to_string());
+    *provider.state.route_provider.write().unwrap() = "Cerebras".to_string();
+    *provider.state.route_api_method.write().unwrap() = "openai-compatible:cerebras".to_string();
+    let provider: Arc<dyn Provider> = provider;
+    let registry = Registry::empty();
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let session_id = { agent.lock().await.session_id().to_string() };
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    let mut auth = crate::protocol::AuthChanged::new("cerebras");
+    auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
+    auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new(
+        "openai-compatible",
+    ));
+    auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new("cerebras"));
+
+    handle_notify_auth_changed(
+        46,
+        Some("openai".to_string()),
+        Some(auth),
+        &provider,
+        &provider,
+        &sessions,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    let final_activity = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match bus_rx.recv().await.expect("bus should stay open") {
+                crate::bus::BusEvent::UiActivity(activity)
+                    if activity.kind == crate::bus::UiActivityKind::Catalog
+                        && activity.session_id.as_deref() == Some(session_id.as_str())
+                        && activity.message.contains("Auth Model Catalog Updated") =>
+                {
+                    break activity;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("expected final auth catalog activity");
+
+    assert!(
+        final_activity
+            .message
+            .contains("Cerebras credentials are active"),
+        "{}",
+        final_activity.message
+    );
+    assert!(
+        final_activity
+            .message
+            .contains("Selected model: `qwen-3-235b-a22b-instruct-2507`"),
+        "final auth catalog update should switch away from stale OpenAI model: {}",
+        final_activity.message
+    );
+    assert!(
+        !final_activity.message.contains("Selected model: `gpt-5.5`"),
+        "stale selected model leaked into final auth update: {}",
+        final_activity.message
+    );
+    assert!(
+        !final_activity
+            .message
+            .contains("Auth Model Catalog Warning"),
+        "successful recovery should not warn: {}",
+        final_activity.message
     );
 }
 

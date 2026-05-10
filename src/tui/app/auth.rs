@@ -2055,16 +2055,18 @@ impl App {
                                 }
                             }
                         } else {
-                            crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                                crate::bus::LoginCompleted {
-                                    provider: provider_label.clone(),
-                                    success: false,
-                                    message:
-                                        format!(
-                                            "Saved the API key and fetched the model catalog, but it contained no selectable {} models. Jcode did not switch models.\n\nRun `/refresh-model-list` to retry model discovery, then `jcode auth status` and `jcode auth doctor` for a structured diagnosis.",
-                                            provider_label
-                                        ),
-                                },
+                            crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+                                crate::bus::UiActivity::catalog(
+                                    Some(session_id),
+                                    format!(
+                                        "**{} Model Discovery Still Updating**\n\nSaved credentials are active, but this local refresh pass did not find a selectable {} route yet. Jcode is still processing the auth-change catalog refresh and will switch once provider routes are available. If the model list still looks stale after the auth catalog update, run `/refresh-model-list`.",
+                                        provider_label, provider_label
+                                    ),
+                                    Some(format!(
+                                        "{}: waiting for model routes...",
+                                        provider_label
+                                    )),
+                                ),
                             ));
                         }
                     }
