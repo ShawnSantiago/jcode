@@ -102,12 +102,12 @@ mod transitions;
 mod viewport;
 
 use crate::tui::mermaid;
-#[cfg(test)]
-use box_utils::truncate_line_to_width;
 use box_utils::{
     line_plain_text, render_rounded_box, truncate_line_preserving_suffix_to_width,
     truncate_line_with_ellipsis_to_width,
 };
+#[cfg(test)]
+pub(crate) use box_utils::truncate_line_to_width;
 use changelog::get_grouped_changelog;
 #[cfg(test)]
 use changelog::{ChangelogEntry, group_changelog_entries, parse_changelog_from};
@@ -169,7 +169,10 @@ use viewport::compute_visible_margins;
 use viewport::draw_messages;
 #[cfg(test)]
 #[allow(unused_imports)]
-pub(crate) use viewport::reserve_copy_badge_margins;
+pub(crate) use viewport::{
+    copy_badge_reserved_width, reserve_copy_badge_margins,
+    truncate_line_in_place_to_width as truncate_copy_badge_line_to_width,
+};
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 #[cfg(not(test))]

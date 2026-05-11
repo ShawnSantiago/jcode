@@ -212,6 +212,20 @@ fn test_copy_badge_reserves_right_margin_for_info_widgets() {
 }
 
 #[test]
+fn test_copy_badge_truncates_full_width_line_before_appending_shortcut() {
+    let copy_badge_ui = crate::tui::app::CopyBadgeUiState::default();
+    let reserved = copy_badge_reserved_width('a', &copy_badge_ui, Instant::now());
+    let viewport_width = 20usize;
+    let mut line = Line::from("x".repeat(viewport_width));
+
+    truncate_copy_badge_line_to_width(&mut line, viewport_width.saturating_sub(reserved));
+    line.spans.push(Span::raw("[Alt] [⇧] [A]"));
+
+    assert_eq!(line.width(), viewport_width);
+    assert!(line.width() <= viewport_width);
+}
+
+#[test]
 fn test_estimate_pinned_diagram_pane_width_scales_to_height() {
     let diagram = info_widget::DiagramInfo {
         hash: 1,

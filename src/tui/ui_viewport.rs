@@ -76,6 +76,54 @@ fn highlight_line_selection(
     }
 }
 
+pub(crate) fn truncate_line_in_place_to_width(line: &mut Line<'static>, max_width: usize) {
+    let mut remaining = max_width;
+    let mut kept: Vec<Span<'static>> = Vec::new();
+
+    'spans: for span in line.spans.drain(..) {
+        if remaining == 0 {
+            break;
+        }
+
+        let span_width = span.content.as_ref().width();
+        if span_width <= remaining {
+            remaining = remaining.saturating_sub(span_width);
+            kept.push(span);
+            continue;
+        }
+
+        let mut text = String::new();
+        let mut used = 0usize;
+        for ch in span.content.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch_width > 0 && used.saturating_add(ch_width) > remaining {
+                break 'spans;
+            }
+            text.push(ch);
+            used = used.saturating_add(ch_width);
+        }
+        if !text.is_empty() {
+            kept.push(Span::styled(text, span.style));
+        }
+        break;
+    }
+
+    line.spans = kept;
+}
+
+pub(crate) fn copy_badge_reserved_width(
+    key: char,
+    copy_badge_ui: &crate::tui::app::CopyBadgeUiState,
+    now: std::time::Instant,
+) -> usize {
+    let mut reserved = UnicodeWidthStr::width("[Alt] [⇧] [A]");
+    if copy_badge_ui.feedback_for_key(key, now).is_some() {
+        // Includes the trailing spacer inserted between feedback and the shortcut badges.
+        reserved = reserved.saturating_add(UnicodeWidthStr::width(" ✓ Copied! "));
+    }
+    reserved
+}
+
 pub(super) fn compute_visible_margins(
     lines: &[Line],
     visible_user_indices: &[usize],
@@ -156,11 +204,7 @@ pub(crate) fn reserve_copy_badge_margins(
             continue;
         }
 
-        let mut reserved = UnicodeWidthStr::width("[Alt] [⇧] [A]") as u16;
-        if copy_badge_ui.feedback_for_key(key, now).is_some() {
-            // Includes the trailing spacer inserted between feedback and the shortcut badges.
-            reserved = reserved.saturating_add(UnicodeWidthStr::width(" ✓ Copied! ") as u16);
-        }
+        let reserved = copy_badge_reserved_width(key, copy_badge_ui, now) as u16;
         margins.right_widths[rel_idx] = margins.right_widths[rel_idx].saturating_sub(reserved);
     }
 }
@@ -435,6 +479,10 @@ pub(super) fn draw_messages(
         }
         let rel_idx = badge_line - scroll;
         if let Some(line) = visible_lines.get_mut(rel_idx) {
+            let reserved = copy_badge_reserved_width(key, &copy_badge_ui, copy_badge_now);
+            let max_content_width = (content_area.width as usize).saturating_sub(reserved);
+            truncate_line_in_place_to_width(line, max_content_width);
+
             let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
                 Style::default().fg(queued_color()).bold()
             } else {
