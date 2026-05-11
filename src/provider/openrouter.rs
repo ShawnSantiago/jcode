@@ -316,12 +316,12 @@ fn is_coding_agent_api_base(api_base: &str) -> bool {
         || (host == "api.z.ai" && path.starts_with("/api/coding/paas"))
 }
 
-fn is_kimi_for_coding_model(model: &str) -> bool {
-    model.trim().eq_ignore_ascii_case("kimi-for-coding")
+fn is_kimi_model_name(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("kimi")
 }
 
 fn should_send_kimi_coding_agent_headers(api_base: &str, model: Option<&str>) -> bool {
-    is_coding_agent_api_base(api_base) || model.map(is_kimi_for_coding_model).unwrap_or(false)
+    is_coding_agent_api_base(api_base) || model.map(is_kimi_model_name).unwrap_or(false)
 }
 
 fn apply_kimi_coding_agent_headers(

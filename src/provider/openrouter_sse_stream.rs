@@ -218,6 +218,7 @@ pub(crate) struct OpenRouterStream {
     provider_emitted: bool,
     model: String,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    reasoning_buffer: String,
 }
 
 #[derive(Default)]
@@ -241,6 +242,7 @@ impl OpenRouterStream {
             provider_emitted: false,
             model,
             provider_pin,
+            reasoning_buffer: String::new(),
         }
     }
 
@@ -361,8 +363,17 @@ impl OpenRouterStream {
                         .and_then(|c| c.as_str())
                         && !reasoning_content.is_empty()
                     {
-                        self.pending
-                            .push_back(StreamEvent::ThinkingDelta(reasoning_content.to_string()));
+                        let reasoning_delta = if reasoning_content.starts_with(&self.reasoning_buffer)
+                        {
+                            &reasoning_content[self.reasoning_buffer.len()..]
+                        } else {
+                            reasoning_content
+                        };
+                        self.reasoning_buffer = reasoning_content.to_string();
+                        if !reasoning_delta.is_empty() {
+                            self.pending
+                                .push_back(StreamEvent::ThinkingDelta(reasoning_delta.to_string()));
+                        }
                     }
 
                     // Text content

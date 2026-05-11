@@ -1098,10 +1098,33 @@ fn test_kimi_coding_header_detection_matches_endpoint_and_model() {
         "https://example.com/v1",
         Some("kimi-for-coding"),
     ));
+    assert!(should_send_kimi_coding_agent_headers(
+        "https://openrouter.ai/api/v1",
+        Some("moonshotai/kimi-k2.5"),
+    ));
     assert!(!should_send_kimi_coding_agent_headers(
         "https://api.openrouter.ai/api/v1",
         Some("anthropic/claude-sonnet-4"),
     ));
+}
+
+#[test]
+fn test_openrouter_kimi_chat_request_includes_compat_user_agent() {
+    let request = apply_kimi_coding_agent_headers(
+        Client::new().post("https://openrouter.ai/api/v1/chat/completions"),
+        "https://openrouter.ai/api/v1",
+        Some("moonshotai/kimi-k2.5"),
+    )
+    .build()
+    .expect("build request");
+    assert!(
+        request
+            .headers()
+            .get("User-Agent")
+            .and_then(|value| value.to_str().ok())
+            == Some(KIMI_CODING_USER_AGENT),
+        "Kimi OpenRouter chat request should include compatibility User-Agent"
+    );
 }
 
 #[test]
@@ -1117,6 +1140,29 @@ fn test_parse_next_event_accepts_compact_sse_data_and_reasoning_content() {
     match stream.parse_next_event() {
         Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "thinking"),
         other => panic!("expected ThinkingDelta, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_next_event_emits_only_incremental_reasoning_content() {
+    let mut stream = OpenRouterStream::new(
+        futures::stream::empty::<Result<Bytes, reqwest::Error>>(),
+        "moonshotai/kimi-k2.5".to_string(),
+        Arc::new(Mutex::new(None)),
+    );
+
+    stream.buffer =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking\"}}]}\n\n".to_string();
+    match stream.parse_next_event() {
+        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "Thinking"),
+        other => panic!("expected first ThinkingDelta, got {:?}", other),
+    }
+
+    stream.buffer =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking more\"}}]}\n\n".to_string();
+    match stream.parse_next_event() {
+        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, " more"),
+        other => panic!("expected incremental ThinkingDelta, got {:?}", other),
     }
 }
 
