@@ -859,9 +859,17 @@ pub(super) async fn handle_client(
     let mut last_available_models_snapshot: Option<String> = None;
     const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
 
+    let initial_subscribe_working_dir = match &initial_request {
+        Request::Subscribe { working_dir, .. } => working_dir.clone(),
+        _ => None,
+    };
+
     // Create a new session for this client
     let t0 = std::time::Instant::now();
     let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
+    if let Some(ref dir) = initial_subscribe_working_dir {
+        new_agent.set_working_dir(dir);
+    }
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
