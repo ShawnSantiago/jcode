@@ -138,6 +138,33 @@ pub(super) fn compute_visible_margins(
     }
 }
 
+pub(crate) fn reserve_copy_badge_margins(
+    margins: &mut info_widget::Margins,
+    scroll: usize,
+    visible_end: usize,
+    badge_assignments: &[(usize, char)],
+    copy_badge_ui: &crate::tui::app::CopyBadgeUiState,
+    now: std::time::Instant,
+) {
+    for &(badge_line, key) in badge_assignments {
+        if badge_line < scroll || badge_line >= visible_end {
+            continue;
+        }
+
+        let rel_idx = badge_line - scroll;
+        if rel_idx >= margins.right_widths.len() {
+            continue;
+        }
+
+        let mut reserved = UnicodeWidthStr::width("[Alt] [⇧] [A]") as u16;
+        if copy_badge_ui.feedback_for_key(key, now).is_some() {
+            // Includes the trailing spacer inserted between feedback and the shortcut badges.
+            reserved = reserved.saturating_add(UnicodeWidthStr::width(" ✓ Copied! ") as u16);
+        }
+        margins.right_widths[rel_idx] = margins.right_widths[rel_idx].saturating_sub(reserved);
+    }
+}
+
 pub(super) fn draw_messages(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -288,6 +315,14 @@ pub(super) fn draw_messages(
         });
         badge_assignments.push((target.badge_line, key));
     }
+    reserve_copy_badge_margins(
+        &mut margins,
+        scroll,
+        visible_end,
+        &badge_assignments,
+        &copy_badge_ui,
+        copy_badge_now,
+    );
     set_visible_copy_targets(visible_copy_targets);
     super::note_viewport_metrics(super::ViewportMetrics {
         scroll,

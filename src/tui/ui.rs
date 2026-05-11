@@ -167,6 +167,9 @@ use transitions::inline_ui_gap_height;
 #[cfg(test)]
 use viewport::compute_visible_margins;
 use viewport::draw_messages;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use viewport::reserve_copy_badge_margins;
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 #[cfg(not(test))]
