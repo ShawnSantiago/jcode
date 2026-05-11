@@ -849,6 +849,11 @@ pub struct App {
     model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
+    // Remote SetModel has been sent but ModelChanged has not arrived yet. User
+    // prompts submitted in this window are held so the first request cannot race
+    // the model switch and use stale provider/model state.
+    remote_model_switch_in_flight: bool,
+    pending_prompt_after_model_switch: Option<input::PreparedInput>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching

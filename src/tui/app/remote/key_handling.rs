@@ -934,6 +934,7 @@ async fn handle_remote_key_internal(
                     }
                     app.upstream_provider = None;
                     remote.set_model(model_name).await?;
+                    app.remote_model_switch_in_flight = true;
                     return Ok(());
                 }
 

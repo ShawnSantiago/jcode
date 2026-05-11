@@ -511,13 +511,15 @@ impl RemoteConnection {
     }
 
     /// Set the active model on the server
-    pub async fn set_model(&mut self, model: &str) -> Result<()> {
+    pub async fn set_model(&mut self, model: &str) -> Result<u64> {
+        let id = self.next_request_id;
         let request = Request::SetModel {
-            id: self.next_request_id,
+            id,
             model: model.to_string(),
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request(request).await?;
+        Ok(id)
     }
 
     /// Set or clear the session-scoped subagent model on the server.

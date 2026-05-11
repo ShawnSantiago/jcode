@@ -252,7 +252,18 @@ pub(super) async fn handle_terminal_event(
             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(spec) = app.pending_model_switch.take() {
-                    let _ = remote.set_model(&spec).await;
+                    match remote.set_model(&spec).await {
+                        Ok(_) => {
+                            app.remote_model_switch_in_flight = true;
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to request model switch: {}",
+                                error
+                            )));
+                            app.set_status_notice("Model switch failed");
+                        }
+                    }
                 }
                 if let Some(selection) = app.pending_account_picker_action.take() {
                     match selection {
@@ -645,6 +656,20 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     let _ = recover_stranded_soft_interrupts(app, remote).await;
 
     if app.pending_queued_dispatch {
+        return;
+    }
+
+    if !app.remote_model_switch_in_flight
+        && !app.is_processing
+        && let Some(prepared) = app.pending_prompt_after_model_switch.take()
+    {
+        if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit prompt after model switch: {}",
+                error
+            )));
+            app.set_status_notice("Queued prompt failed");
+        }
         return;
     }
 

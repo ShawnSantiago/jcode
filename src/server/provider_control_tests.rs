@@ -813,6 +813,7 @@ async fn notify_auth_changed_does_not_override_manual_model_selected_during_refr
 struct AuthModelE2eScenario {
     name: &'static str,
     manual_pick_after_first_snapshot: Option<&'static str>,
+    prompt_immediately_after_model_pick: bool,
     expected_first_prompt_model: &'static str,
 }
 
@@ -822,11 +823,13 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
         AuthModelE2eScenario {
             name: "auth auto-selects matching route when user does not intervene",
             manual_pick_after_first_snapshot: None,
+            prompt_immediately_after_model_pick: false,
             expected_first_prompt_model: "logged-in-model",
         },
         AuthModelE2eScenario {
             name: "manual picker selection during auth refresh wins first prompt",
             manual_pick_after_first_snapshot: Some("user-picked-model"),
+            prompt_immediately_after_model_pick: true,
             expected_first_prompt_model: "user-picked-model",
         },
     ];
@@ -912,6 +915,7 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
         .await
         .unwrap_or_else(|_| panic!("{}: expected immediate auth model snapshot", scenario.name));
 
+        let mut first_prompt_output = None;
         if let Some(model) = scenario.manual_pick_after_first_snapshot {
             handle_set_model(248, model.to_string(), &agent, &client_event_tx).await;
             loop {
@@ -933,6 +937,24 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
                     Some(_) => continue,
                     None => panic!("{}: model switch channel closed", scenario.name),
                 }
+            }
+
+            if scenario.prompt_immediately_after_model_pick {
+                let agent_for_prompt = Arc::clone(&agent);
+                let scenario_name = scenario.name;
+                first_prompt_output = Some(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+                        let mut agent_guard = agent_for_prompt.lock().await;
+                        agent_guard
+                            .run_once_capture("first prompt immediately after model selection")
+                            .await
+                    })
+                    .await
+                    .unwrap_or_else(|_| panic!("{}: first prompt stalled", scenario_name))
+                    .unwrap_or_else(|error| {
+                        panic!("{}: first prompt failed: {error:?}", scenario_name)
+                    }),
+                );
             }
         }
 
@@ -962,7 +984,9 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
             final_activity.message
         );
 
-        let first_prompt_output = {
+        let first_prompt_output = if let Some(output) = first_prompt_output {
+            output
+        } else {
             let mut agent_guard = agent.lock().await;
             agent_guard
                 .run_once_capture("first prompt after auth/model selection")
