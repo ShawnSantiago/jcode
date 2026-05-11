@@ -1240,12 +1240,18 @@ async fn run_hero_screenshot_capture(output_dir: &Path) -> Result<()> {
 
     let app = SingleSessionApp::new(None);
     let size = PhysicalSize::new(DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32);
-    let frames = [0_u64, 250, 675, 1013, 1350];
+    let (target_image, _) = render_hero_frame_to_image(&app, size, 0, 1.0, true).await?;
+    let target_path = output_dir.join("hero-font-target.png");
+    target_image
+        .save(&target_path)
+        .with_context(|| format!("failed to save {}", target_path.display()))?;
+    let frames = [0_u64, 150, 300, 450, 675, 900, 1125, 1350];
     let mut manifest = Vec::new();
     for elapsed_ms in frames {
         let progress = welcome_hero_reveal_progress_for_elapsed(Duration::from_millis(elapsed_ms));
         let tick = elapsed_ms / DESKTOP_SPINNER_FRAME_MS as u64;
-        let (image, vertices_len) = render_hero_frame_to_image(&app, size, tick, progress).await?;
+        let (image, vertices_len) =
+            render_hero_frame_to_image(&app, size, tick, progress, false).await?;
         let filename = format!("hero-{elapsed_ms:04}ms.png");
         let path = output_dir.join(&filename);
         image
@@ -1269,6 +1275,7 @@ async fn run_hero_screenshot_capture(output_dir: &Path) -> Result<()> {
         "{}",
         serde_json::json!({
             "output_dir": output_dir,
+            "font_target": "hero-font-target.png",
             "frames": manifest,
         })
     );
@@ -1280,6 +1287,7 @@ async fn render_hero_frame_to_image(
     size: PhysicalSize<u32>,
     spinner_tick: u64,
     welcome_hero_reveal_progress: f32,
+    font_target_only: bool,
 ) -> Result<(RgbaImage, usize)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
@@ -1382,14 +1390,18 @@ async fn render_hero_frame_to_image(
     );
     let text_buffers = single_session_text_buffers_from_key(&text_key, size, &mut font_system);
     let viewport = single_session_body_viewport_from_lines(app, size, 0.0, &rendered_body_lines);
-    let text_areas = single_session_text_areas_for_app_with_cached_body_viewport_and_reveal(
-        app,
-        &text_buffers,
-        size,
-        0.0,
-        viewport,
-        welcome_hero_reveal_progress,
-    );
+    let text_areas = if font_target_only {
+        single_session_hero_font_target_text_areas(&text_buffers, size, app.text_scale())
+    } else {
+        single_session_text_areas_for_app_with_cached_body_viewport_and_reveal(
+            app,
+            &text_buffers,
+            size,
+            0.0,
+            viewport,
+            welcome_hero_reveal_progress,
+        )
+    };
     if !text_areas.is_empty() {
         text_renderer
             .prepare(
@@ -1407,15 +1419,43 @@ async fn render_hero_frame_to_image(
             .context("failed to prepare hero capture text")?;
     }
 
-    let vertices = build_single_session_vertices_with_cached_body(
-        app,
-        size,
-        0.0,
-        spinner_tick,
-        0.0,
-        welcome_hero_reveal_progress,
-        &rendered_body_lines,
-    );
+    let vertices = if font_target_only {
+        let mut vertices = build_single_session_vertices_with_cached_body(
+            app,
+            size,
+            0.0,
+            spinner_tick,
+            0.0,
+            0.0,
+            &rendered_body_lines,
+        );
+        vertices.truncate(0);
+        push_gradient_rect(
+            &mut vertices,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: size.width as f32,
+                height: size.height as f32,
+            },
+            BACKGROUND_TOP_LEFT,
+            BACKGROUND_BOTTOM_LEFT,
+            BACKGROUND_BOTTOM_RIGHT,
+            BACKGROUND_TOP_RIGHT,
+            size,
+        );
+        vertices
+    } else {
+        build_single_session_vertices_with_cached_body(
+            app,
+            size,
+            0.0,
+            spinner_tick,
+            0.0,
+            welcome_hero_reveal_progress,
+            &rendered_body_lines,
+        )
+    };
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("jcode-desktop-hero-capture-vertices"),
         size: (vertices.len() * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,

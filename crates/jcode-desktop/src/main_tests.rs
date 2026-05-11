@@ -1116,14 +1116,8 @@ fn fresh_welcome_handwriting_reveals_over_time() {
         done_ink, 0,
         "completed reveal should hand off to the clean font without overlapping stroke ink"
     );
-    assert!(vertices_have_color(
-        &middle,
-        WELCOME_HANDWRITING_HIGHLIGHT_COLOR
-    ));
-    assert!(!vertices_have_color(
-        &done,
-        WELCOME_HANDWRITING_HIGHLIGHT_COLOR
-    ));
+    assert!(vertices_have_color(&middle, WELCOME_HANDWRITING_COLOR));
+    assert!(!vertices_have_color(&done, WELCOME_HANDWRITING_COLOR));
 }
 
 #[test]

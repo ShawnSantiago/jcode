@@ -52,7 +52,7 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
     focus_pulse: f32,
     spinner_tick: u64,
     smooth_scroll_lines: f32,
-    _welcome_hero_reveal_progress: f32,
+    welcome_hero_reveal_progress: f32,
 ) -> Vec<Vertex> {
     let width = size.width as f32;
     let height = size.height as f32;
@@ -95,6 +95,14 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
     };
     if welcome_timeline_chrome_visible(app, size, welcome_chrome_offset) {
         push_fresh_welcome_ambient(&mut vertices, size, spinner_tick, welcome_chrome_offset);
+        push_handwritten_welcome_hero_with_offset(
+            &mut vertices,
+            &app.welcome_hero_text(),
+            size,
+            app.text_scale(),
+            welcome_hero_reveal_progress,
+            welcome_chrome_offset,
+        );
     }
 
     if app.has_activity_indicator() {
@@ -119,7 +127,7 @@ pub(crate) fn build_single_session_vertices_with_cached_body(
     focus_pulse: f32,
     spinner_tick: u64,
     smooth_scroll_lines: f32,
-    _welcome_hero_reveal_progress: f32,
+    welcome_hero_reveal_progress: f32,
     rendered_body_lines: &[SingleSessionStyledLine],
 ) -> Vec<Vertex> {
     let width = size.width as f32;
@@ -168,6 +176,14 @@ pub(crate) fn build_single_session_vertices_with_cached_body(
     };
     if welcome_timeline_chrome_visible(app, size, welcome_chrome_offset) {
         push_fresh_welcome_ambient(&mut vertices, size, spinner_tick, welcome_chrome_offset);
+        push_handwritten_welcome_hero_with_offset(
+            &mut vertices,
+            &app.welcome_hero_text(),
+            size,
+            app.text_scale(),
+            welcome_hero_reveal_progress,
+            welcome_chrome_offset,
+        );
     }
 
     if app.has_activity_indicator() {
@@ -354,6 +370,79 @@ fn push_fresh_welcome_ambient(
         WELCOME_AURORA_WARM,
         WELCOME_AURORA_MINT,
     );
+}
+
+fn push_handwritten_welcome_hero_with_offset(
+    vertices: &mut Vec<Vertex>,
+    phrase: &str,
+    size: PhysicalSize<u32>,
+    ui_scale: f32,
+    reveal_progress: f32,
+    y_offset: f32,
+) {
+    if !welcome_hero_approx_bounds_visible(size, ui_scale, y_offset) {
+        return;
+    }
+
+    let progress = reveal_progress.clamp(0.0, 1.0);
+    if !welcome_hero_reveal_is_active(progress) {
+        return;
+    }
+
+    let paths = handwritten_welcome_paths_for_phrase(phrase);
+    let total_length = stroke_paths_length(&paths);
+    if total_length <= 0.0 {
+        return;
+    }
+
+    let (bounds_min, bounds_max) = glyph_welcome_hero_bounds(size, ui_scale);
+    let hero_height = (bounds_max[1] - bounds_min[1]).max(1.0);
+    let baseline_lift = hero_height * 0.11;
+    let bounds_min = [bounds_min[0], bounds_min[1] + y_offset - baseline_lift];
+    let bounds_max = [bounds_max[0], bounds_max[1] + y_offset - baseline_lift];
+    let (source_min, source_max) = stroke_paths_bounds(&paths);
+    let source_width = (source_max[0] - source_min[0]).max(1.0);
+    let scale = (bounds_max[0] - bounds_min[0]) / source_width;
+    let origin = [
+        bounds_min[0] - source_min[0] * scale,
+        bounds_min[1] - source_min[1] * scale,
+    ];
+    let thickness = (scale * 0.036).clamp(1.8, 4.6);
+    let mut remaining = total_length * progress;
+    let mut lead = None;
+
+    for path in &paths {
+        for pair in path.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let segment_length = distance(a, b);
+            if segment_length <= 0.001 || remaining <= 0.0 {
+                continue;
+            }
+            let draw_fraction = (remaining / segment_length).clamp(0.0, 1.0);
+            let end = lerp_point(a, b, draw_fraction);
+            let pa = transform_handwriting_point(a, origin, scale);
+            let pb = transform_handwriting_point(end, origin, scale);
+            push_stroke_segment(vertices, pa, pb, thickness, WELCOME_HANDWRITING_COLOR, size);
+            lead = Some(pb);
+            remaining -= segment_length;
+            if draw_fraction < 1.0 {
+                break;
+            }
+        }
+    }
+
+    if let Some(point) = lead
+        && (0.01..0.995).contains(&progress)
+    {
+        push_stroke_dot(
+            vertices,
+            point,
+            thickness * 1.65,
+            WELCOME_HANDWRITING_COLOR,
+            size,
+        );
+    }
 }
 
 fn welcome_timeline_chrome_visible(
@@ -3488,6 +3577,77 @@ fn stroke_paths_bounds(paths: &[Vec<[f32; 2]>]) -> ([f32; 2], [f32; 2]) {
     }
 }
 
+fn stroke_paths_length(paths: &[Vec<[f32; 2]>]) -> f32 {
+    paths
+        .iter()
+        .map(|path| {
+            path.windows(2)
+                .map(|pair| distance(pair[0], pair[1]))
+                .sum::<f32>()
+        })
+        .sum()
+}
+
+fn distance(a: [f32; 2], b: [f32; 2]) -> f32 {
+    ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
+}
+
+fn lerp_point(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
+fn transform_handwriting_point(point: [f32; 2], origin: [f32; 2], scale: f32) -> [f32; 2] {
+    [origin[0] + point[0] * scale, origin[1] + point[1] * scale]
+}
+
+fn push_stroke_segment(
+    vertices: &mut Vec<Vertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    thickness: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= 0.001 {
+        return;
+    }
+    let nx = -dy / length * thickness * 0.5;
+    let ny = dx / length * thickness * 0.5;
+    let p0 = [a[0] + nx, a[1] + ny];
+    let p1 = [b[0] + nx, b[1] + ny];
+    let p2 = [b[0] - nx, b[1] - ny];
+    let p3 = [a[0] - nx, a[1] - ny];
+    push_pixel_triangle(vertices, p0, p1, p2, color, size);
+    push_pixel_triangle(vertices, p0, p2, p3, color, size);
+    push_stroke_dot(vertices, a, thickness * 0.52, color, size);
+    push_stroke_dot(vertices, b, thickness * 0.52, color, size);
+}
+
+fn push_stroke_dot(
+    vertices: &mut Vec<Vertex>,
+    center: [f32; 2],
+    radius: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let segments = 12;
+    for index in 0..segments {
+        let a = index as f32 / segments as f32 * std::f32::consts::TAU;
+        let b = (index + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+        push_pixel_triangle(
+            vertices,
+            center,
+            [center[0] + a.cos() * radius, center[1] + a.sin() * radius],
+            [center[0] + b.cos() * radius, center[1] + b.sin() * radius],
+            color,
+            size,
+        );
+    }
+}
+
 fn push_aurora_ribbon(
     vertices: &mut Vec<Vertex>,
     size: PhysicalSize<u32>,
@@ -5289,6 +5449,30 @@ pub(crate) fn single_session_text_areas_for_app_with_cached_body_viewport_and_re
     )
 }
 
+pub(crate) fn single_session_hero_font_target_text_areas<'a>(
+    buffers: &'a [Buffer],
+    size: PhysicalSize<u32>,
+    ui_scale: f32,
+) -> Vec<TextArea<'a>> {
+    let Some(hero_buffer) = buffers.get(6) else {
+        return Vec::new();
+    };
+    let (hero_min, hero_max) = glyph_welcome_hero_bounds(size, ui_scale);
+    vec![TextArea {
+        buffer: hero_buffer,
+        left: hero_min[0],
+        top: hero_min[1],
+        scale: 1.0,
+        bounds: TextBounds {
+            left: hero_min[0] as i32,
+            top: hero_min[1] as i32,
+            right: hero_max[0].ceil() as i32,
+            bottom: hero_max[1].ceil() as i32,
+        },
+        default_color: text_color(WELCOME_HANDWRITING_COLOR),
+    }]
+}
+
 pub(crate) fn single_session_streaming_text_area_for_cached_body_viewport<'a>(
     app: &SingleSessionApp,
     buffer: &'a Buffer,
@@ -5362,7 +5546,7 @@ pub(crate) fn single_session_text_areas_for_state(
     welcome_chrome_offset_pixels: f32,
     status_lane_visible: bool,
     ui_scale: f32,
-    welcome_hero_reveal_progress: f32,
+    _welcome_hero_reveal_progress: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
         return Vec::new();
@@ -5460,28 +5644,6 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom: draft_top as i32,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
-        });
-    }
-
-    if welcome_chrome_visible && let Some(hero_buffer) = buffers.get(6) {
-        let (hero_min, hero_max) = glyph_welcome_hero_bounds(size, ui_scale);
-        let progress = welcome_hero_reveal_progress.clamp(0.0, 1.0);
-        let reveal_right = hero_min[0] + (hero_max[0] - hero_min[0]) * progress;
-        let reveal_right = reveal_right.max(hero_min[0] + 1.0).min(hero_max[0]);
-        let hero_top = hero_min[1] + welcome_chrome_offset_pixels;
-        let hero_bottom = hero_max[1] + welcome_chrome_offset_pixels;
-        areas.push(TextArea {
-            buffer: hero_buffer,
-            left: hero_min[0],
-            top: hero_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: hero_min[0] as i32,
-                top: hero_top as i32,
-                right: reveal_right.ceil() as i32,
-                bottom: hero_bottom.ceil() as i32,
-            },
-            default_color: text_color(WELCOME_HANDWRITING_COLOR),
         });
     }
 
