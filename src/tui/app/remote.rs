@@ -58,6 +58,7 @@ const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
+    Quit,
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
@@ -535,6 +536,21 @@ pub(super) async fn handle_remote_event<B: Backend>(
 ) -> Result<(RemoteEventOutcome, bool)> {
     match event {
         RemoteRead::Disconnected(reason) => {
+            if let RemoteDisconnectReason::Protocol(error) = &reason {
+                let detail = format_disconnect_reason(&reason);
+                crate::logging::error(&format!(
+                    "Remote protocol error is not retryable; stopping reconnect loop: {}",
+                    error
+                ));
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Remote protocol error. Stopped reconnecting to avoid replaying a large/corrupt session repeatedly. {}\n\nTry starting a fresh session, or resume after reducing/removing oversized tool output from the session history.",
+                    detail
+                )));
+                app.set_status_notice("Remote protocol error");
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                return Ok((RemoteEventOutcome::Quit, true));
+            }
             handle_disconnect(app, state, Some(reason));
             Ok((RemoteEventOutcome::Reconnect, true))
         }

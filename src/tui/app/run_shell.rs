@@ -198,6 +198,7 @@ impl App {
                         match outcome {
                             remote::RemoteEventOutcome::Continue => {}
                             remote::RemoteEventOutcome::Reconnect => continue 'outer,
+                            remote::RemoteEventOutcome::Quit => break 'outer,
                         }
                     }
                     event = event_stream.next() => {
