@@ -563,6 +563,7 @@ fn make_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: crate::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: DEFAULT_API_BASE.to_string(),
         auth: ProviderAuth::AuthorizationBearer {
             token: "test".to_string(),
@@ -588,6 +589,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: crate::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: "https://compat.example.test/v1".to_string(),
         auth: ProviderAuth::AuthorizationBearer {
             token: "test".to_string(),
@@ -635,6 +637,124 @@ fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Rec
     });
 
     (format!("http://{addr}/v1"), request_rx)
+}
+
+fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
+    let addr = listener.local_addr().expect("fake provider addr");
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fake provider request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut request = vec![0u8; 16384];
+        let n = stream.read(&mut request).unwrap_or(0);
+        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let _ = request_tx.send(request);
+
+        let body = "data: [DONE]\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write fake provider response");
+    });
+
+    (format!("http://{addr}/v1"), request_rx)
+}
+
+#[test]
+fn direct_deepseek_profile_exposes_max_reasoning_effort() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["none", "low", "medium", "high", "max"]
+    );
+    provider
+        .set_reasoning_effort("max")
+        .expect("DeepSeek direct profile should accept max effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+}
+
+#[test]
+fn non_deepseek_compatible_profile_does_not_expose_reasoning_effort() {
+    let provider = make_custom_compatible_provider();
+
+    assert!(provider.available_efforts().is_empty());
+    let error = provider
+        .set_reasoning_effort("max")
+        .expect_err("generic compatible profile should not expose DeepSeek effort UX");
+    assert!(
+        error.to_string().contains("DeepSeek direct profiles"),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn direct_deepseek_chat_request_sends_reasoning_effort() {
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        model: Arc::new(RwLock::new("deepseek-v4-pro".to_string())),
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+    provider
+        .set_reasoning_effort("max")
+        .expect("DeepSeek direct profile should accept max effort");
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should parse");
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("POST /v1/chat/completions "),
+        "unexpected chat request: {request}"
+    );
+    assert!(
+        request.contains(r#""model":"deepseek-v4-pro""#),
+        "request should contain model: {request}"
+    );
+    assert!(
+        request.contains(r#""reasoning_effort":"max""#),
+        "DeepSeek request should include max reasoning effort: {request}"
+    );
 }
 
 #[test]

@@ -602,6 +602,7 @@ fn global_endpoint_refresh() -> &'static Mutex<EndpointRefreshTracker> {
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
+    reasoning_effort: Arc<RwLock<Option<String>>>,
     api_base: String,
     auth: ProviderAuth,
     supports_provider_features: bool,
@@ -624,6 +625,29 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    fn profile_supports_reasoning_effort(profile_id: Option<&str>) -> bool {
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek"))
+    }
+
+    fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        match value.as_str() {
+            "none" | "low" | "medium" | "high" | "max" => Some(value),
+            // Match the existing OpenAI UX: accept unknown non-empty effort values
+            // by snapping to the strongest setting instead of rejecting the command.
+            other => {
+                crate::logging::info(&format!(
+                    "Warning: Unsupported DeepSeek reasoning effort '{}'; expected none|low|medium|high|max. Using 'max'.",
+                    other
+                ));
+                Some("max".to_string())
+            }
+        }
+    }
+
     fn configured_max_tokens(profile_id: Option<&str>) -> Option<u32> {
         if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MAX_TOKENS") {
             let trimmed = raw.trim();
@@ -742,6 +766,7 @@ impl OpenRouterProvider {
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
             supports_provider_features: matches!(
@@ -862,6 +887,7 @@ impl OpenRouterProvider {
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
             supports_provider_features,
@@ -1082,6 +1108,7 @@ impl OpenRouterProvider {
             let provider = OpenRouterProvider {
                 client,
                 model: Arc::new(RwLock::new(model_name.clone())),
+                reasoning_effort: Arc::new(RwLock::new(None)),
                 api_base,
                 auth,
                 supports_provider_features: true,

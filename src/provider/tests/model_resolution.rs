@@ -673,6 +673,42 @@ fn test_profile_prefixed_model_switch_reinitializes_direct_compatible_runtime() 
 }
 
 #[test]
+fn test_deepseek_direct_profile_supports_reasoning_effort_via_multi_provider() {
+    with_clean_provider_test_env(|| {
+        with_env_var("DEEPSEEK_API_KEY", "test-deepseek-key", || {
+            let provider = MultiProvider {
+                claude: RwLock::new(None),
+                anthropic: RwLock::new(None),
+                openai: RwLock::new(None),
+                copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
+                gemini: RwLock::new(None),
+                cursor: RwLock::new(None),
+                bedrock: RwLock::new(None),
+                openrouter: RwLock::new(None),
+                active: RwLock::new(ActiveProvider::OpenAI),
+                use_claude_cli: false,
+                startup_notices: RwLock::new(Vec::new()),
+                forced_provider: None,
+            };
+
+            provider
+                .set_model("deepseek:deepseek-v4-pro")
+                .expect("DeepSeek profile-prefixed model should initialize direct provider");
+
+            assert_eq!(
+                provider.available_efforts(),
+                vec!["none", "low", "medium", "high", "max"]
+            );
+            provider
+                .set_reasoning_effort("max")
+                .expect("/effort max should work for direct DeepSeek profile");
+            assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+        })
+    });
+}
+
+#[test]
 fn test_forced_copilot_treats_claude_like_model_as_provider_local() {
     with_clean_provider_test_env(|| {
         let copilot = Arc::new(copilot::CopilotApiProvider::new_with_token(
