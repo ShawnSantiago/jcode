@@ -80,7 +80,7 @@ pub(crate) fn truncate_line_in_place_to_width(line: &mut Line<'static>, max_widt
     let mut remaining = max_width;
     let mut kept: Vec<Span<'static>> = Vec::new();
 
-    'spans: for span in line.spans.drain(..) {
+    for span in line.spans.drain(..) {
         if remaining == 0 {
             break;
         }
@@ -97,7 +97,7 @@ pub(crate) fn truncate_line_in_place_to_width(line: &mut Line<'static>, max_widt
         for ch in span.content.chars() {
             let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
             if ch_width > 0 && used.saturating_add(ch_width) > remaining {
-                break 'spans;
+                break;
             }
             text.push(ch);
             used = used.saturating_add(ch_width);
