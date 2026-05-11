@@ -3201,7 +3201,7 @@ fn fresh_welcome_uses_dominant_hero_composer_while_drafting() {
 }
 
 #[test]
-fn completed_welcome_hero_stays_vector_rendered_not_text_overlay() {
+fn completed_welcome_hero_hands_off_to_clean_font_overlay() {
     let size = PhysicalSize::new(1000, 720);
     let app = SingleSessionApp::new(None);
     let mut font_system = FontSystem::new();
@@ -3211,15 +3211,15 @@ fn completed_welcome_hero_stays_vector_rendered_not_text_overlay() {
         build_single_session_vertices_with_scroll_and_reveal(&app, size, 0.0, 0, 0.0, 1.0);
     let completed_areas = single_session_text_areas_for_app(&app, &buffers, size);
 
-    assert!(vertices_have_color(
+    assert!(!vertices_have_color(
         &completed_vertices,
         WELCOME_HANDWRITING_COLOR
     ));
     assert!(
         completed_areas
             .iter()
-            .all(|area| !std::ptr::eq(area.buffer, &buffers[6])),
-        "completed reveal should keep the vector handwriting path instead of adding a text overlay area"
+            .any(|area| std::ptr::eq(area.buffer, &buffers[6])),
+        "completed reveal should hand off from vector handwriting to the clean shaped text overlay"
     );
 }
 

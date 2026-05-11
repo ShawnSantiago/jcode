@@ -5546,7 +5546,7 @@ pub(crate) fn single_session_text_areas_for_state(
     welcome_chrome_offset_pixels: f32,
     status_lane_visible: bool,
     ui_scale: f32,
-    _welcome_hero_reveal_progress: f32,
+    welcome_hero_reveal_progress: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
         return Vec::new();
@@ -5686,6 +5686,26 @@ pub(crate) fn single_session_text_areas_for_state(
         },
         default_color: text_color(ASSISTANT_TEXT_COLOR),
     });
+
+    if welcome_chrome_visible
+        && !welcome_hero_reveal_is_active(welcome_hero_reveal_progress)
+        && let Some(hero_buffer) = buffers.get(6)
+    {
+        let (hero_min, hero_max) = glyph_welcome_hero_bounds(size, ui_scale);
+        areas.push(TextArea {
+            buffer: hero_buffer,
+            left: hero_min[0],
+            top: hero_min[1] + welcome_chrome_offset_pixels,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: hero_min[0] as i32,
+                top: (hero_min[1] + welcome_chrome_offset_pixels) as i32,
+                right: hero_max[0].ceil() as i32,
+                bottom: (hero_max[1] + welcome_chrome_offset_pixels).ceil() as i32,
+            },
+            default_color: text_color(WELCOME_HANDWRITING_COLOR),
+        });
+    }
 
     if inline_widget_line_count > 0
         && let Some(buffer) = buffers.get(5)
