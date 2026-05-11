@@ -93,8 +93,4 @@ if command -v selfdev >/dev/null 2>&1; then
   exec selfdev enter "$@"
 fi
 
-if command -v jcode >/dev/null 2>&1; then
-  exec jcode "$@"
-fi
-
 exec "$repo_root/scripts/dev_cargo.sh" run --profile selfdev -p jcode --bin jcode -- "$@"
