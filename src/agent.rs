@@ -31,7 +31,7 @@ use crate::message::{
     ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition,
 };
 use crate::protocol::{HistoryMessage, ServerEvent};
-use crate::provider::{NativeToolResult, Provider};
+use crate::provider::{NativeToolResult, Provider, ProviderRuntimeState};
 use crate::session::{GitState, Session, SessionStatus, StoredDisplayRole, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
@@ -182,6 +182,8 @@ pub struct Agent {
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
+    /// Canonical reducer-backed view of runtime provider/model selection.
+    provider_runtime_state: ProviderRuntimeState,
 }
 
 impl Agent {
@@ -202,6 +204,7 @@ impl Agent {
         allowed_tools: Option<HashSet<String>>,
     ) -> Self {
         let skills = SkillRegistry::shared_snapshot();
+        let initial_provider_model = provider.model();
         Self {
             provider,
             registry,
@@ -228,6 +231,7 @@ impl Agent {
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
+            provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
         }
     }
 

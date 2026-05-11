@@ -196,7 +196,7 @@ async fn apply_auth_runtime_model_to_agent(
         let mut agent_guard = agent.lock().await;
         let provider_name = agent_guard.provider_handle().name().to_string();
         let model_request = activation.model_switch_request(&provider_name, model);
-        let result = agent_guard.set_model(&model_request);
+        let result = agent_guard.set_model_from_auth(&model_request);
         if result.is_ok() {
             agent_guard.reset_provider_session();
         }
@@ -580,6 +580,10 @@ pub(super) async fn handle_notify_auth_changed(
             &agent_clone,
         )
         .await;
+        let auth_selection_generation = {
+            let agent_guard = agent_clone.lock().await;
+            agent_guard.provider_model_selection_generation()
+        };
 
         crate::bus::Bus::global().publish_models_updated();
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
@@ -623,19 +627,15 @@ pub(super) async fn handle_notify_auth_changed(
             }
         }
 
-        let current_provider_model = {
+        let manual_model_selected_during_auth_refresh = {
             let agent_guard = agent_clone.lock().await;
-            agent_guard.provider_model()
+            agent_guard.user_selected_provider_model_after(auth_selection_generation)
         };
-        let model_changed_during_auth_refresh = latest_snapshot
-            .provider_model
-            .as_ref()
-            .is_some_and(|snapshot_model| snapshot_model != &current_provider_model);
-        if model_changed_during_auth_refresh {
+        if manual_model_selected_during_auth_refresh {
             crate::logging::auth_event(
                 "auth_changed_auto_model_skipped_after_manual_switch",
                 activation.provider_id.as_deref().unwrap_or("auth"),
-                &[("reason", "provider_model_changed_during_refresh")],
+                &[("reason", "user_selected_provider_model_during_refresh")],
             );
             latest_snapshot = available_models_snapshot(&agent_clone).await;
             let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());

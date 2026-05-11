@@ -15,6 +15,7 @@ struct AuthChangeMockState {
     selected_model: StdRwLock<Option<String>>,
     route_provider: StdRwLock<String>,
     route_api_method: StdRwLock<String>,
+    expose_selected_model_in_routes: StdRwLock<bool>,
     complete_calls: AtomicUsize,
 }
 
@@ -27,6 +28,7 @@ impl AuthChangeMockProvider {
         let state = AuthChangeMockState {
             route_provider: StdRwLock::new("MockAuth".to_string()),
             route_api_method: StdRwLock::new("mock-auth".to_string()),
+            expose_selected_model_in_routes: StdRwLock::new(true),
             ..AuthChangeMockState::default()
         };
         Self {
@@ -72,7 +74,8 @@ impl Provider for AuthChangeMockProvider {
             vec!["logged-out-model".to_string()]
         };
 
-        if let Some(model) = self.state.selected_model.read().unwrap().clone()
+        if *self.state.expose_selected_model_in_routes.read().unwrap()
+            && let Some(model) = self.state.selected_model.read().unwrap().clone()
             && !models.iter().any(|candidate| candidate == &model)
         {
             models.insert(0, model);
@@ -672,6 +675,123 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
             .message
             .contains("Auth Model Catalog Warning"),
         "successful recovery should not warn: {}",
+        final_activity.message
+    );
+}
+
+#[tokio::test]
+async fn notify_auth_changed_does_not_override_manual_model_selected_during_refresh() {
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]);
+
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let provider = Arc::new(AuthChangeMockProvider::new());
+    *provider.state.selected_model.write().unwrap() = Some("stale-model".to_string());
+    *provider.state.route_provider.write().unwrap() = "Cerebras".to_string();
+    *provider.state.route_api_method.write().unwrap() = "openai-compatible:cerebras".to_string();
+    *provider
+        .state
+        .expose_selected_model_in_routes
+        .write()
+        .unwrap() = false;
+    let provider: Arc<dyn Provider> = provider;
+    let registry = Registry::empty();
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry)));
+    let session_id = { agent.lock().await.session_id().to_string() };
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
+
+    let mut auth = crate::protocol::AuthChanged::new("cerebras");
+    auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
+    auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new(
+        "openai-compatible",
+    ));
+    auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new("cerebras"));
+
+    handle_notify_auth_changed(
+        48,
+        None,
+        Some(auth),
+        &provider,
+        &provider,
+        &sessions,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Done { id: 48 })
+    ));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                client_event_rx.recv().await,
+                Some(ServerEvent::AvailableModelsUpdated { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("expected immediate auth model snapshot");
+
+    {
+        let mut agent_guard = agent.lock().await;
+        agent_guard
+            .set_model("user-picked-model")
+            .expect("manual model switch should succeed");
+    }
+
+    let final_activity = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match bus_rx.recv().await.expect("bus should stay open") {
+                crate::bus::BusEvent::UiActivity(activity)
+                    if activity.kind == crate::bus::UiActivityKind::Catalog
+                        && activity.session_id.as_deref() == Some(session_id.as_str())
+                        && activity.message.contains("Auth Model Catalog Updated") =>
+                {
+                    break activity;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("expected final auth catalog activity");
+
+    assert!(
+        final_activity
+            .message
+            .contains("Selected model: `user-picked-model`"),
+        "late auth reconciliation must not override manual model selection: {}",
+        final_activity.message
+    );
+    assert!(
+        !final_activity
+            .message
+            .contains("Selected model: `logged-in-model`"),
+        "late auth auto-selection overrode manual choice: {}",
         final_activity.message
     );
 }

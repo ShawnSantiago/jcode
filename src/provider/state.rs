@@ -15,6 +15,101 @@ pub(crate) struct ProviderState<'a> {
     auth_status: &'a AuthStatus,
 }
 
+/// The source of the currently selected runtime model.
+///
+/// This is deliberately small: login/config/env/model-picker code should not each
+/// encode ad-hoc precedence rules. They should report what happened, and the
+/// reducer decides how later auth/catalog work may reconcile with that choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderModelSelectionSource {
+    Startup,
+    User,
+    Auth,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderStateEvent {
+    RuntimeModelObserved { model: String },
+    UserSelectedModel { model: String },
+    AuthSelectedModel { model: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderRuntimeState {
+    selected_model: Option<String>,
+    selection_source: ProviderModelSelectionSource,
+    selection_generation: u64,
+}
+
+impl Default for ProviderRuntimeState {
+    fn default() -> Self {
+        Self {
+            selected_model: None,
+            selection_source: ProviderModelSelectionSource::Startup,
+            selection_generation: 0,
+        }
+    }
+}
+
+impl ProviderStateEvent {
+    pub(crate) fn selected_model(
+        source: ProviderModelSelectionSource,
+        model: impl Into<String>,
+    ) -> Self {
+        match source {
+            ProviderModelSelectionSource::Startup => Self::RuntimeModelObserved {
+                model: model.into(),
+            },
+            ProviderModelSelectionSource::User => Self::UserSelectedModel {
+                model: model.into(),
+            },
+            ProviderModelSelectionSource::Auth => Self::AuthSelectedModel {
+                model: model.into(),
+            },
+        }
+    }
+}
+
+impl ProviderRuntimeState {
+    pub(crate) fn observed(model: impl Into<String>) -> Self {
+        let mut state = Self::default();
+        state.apply(ProviderStateEvent::RuntimeModelObserved {
+            model: model.into(),
+        });
+        state
+    }
+
+    pub(crate) fn selection_generation(&self) -> u64 {
+        self.selection_generation
+    }
+
+    pub(crate) fn user_selected_after(&self, generation: u64) -> bool {
+        self.selection_generation > generation
+            && self.selection_source == ProviderModelSelectionSource::User
+    }
+
+    pub(crate) fn apply(&mut self, event: ProviderStateEvent) {
+        match event {
+            ProviderStateEvent::RuntimeModelObserved { model } => {
+                self.selected_model = Some(model);
+                self.selection_source = ProviderModelSelectionSource::Startup;
+            }
+            ProviderStateEvent::UserSelectedModel { model } => {
+                self.record_selection(model, ProviderModelSelectionSource::User);
+            }
+            ProviderStateEvent::AuthSelectedModel { model } => {
+                self.record_selection(model, ProviderModelSelectionSource::Auth);
+            }
+        }
+    }
+
+    fn record_selection(&mut self, model: String, source: ProviderModelSelectionSource) {
+        self.selected_model = Some(model);
+        self.selection_source = source;
+        self.selection_generation = self.selection_generation.saturating_add(1);
+    }
+}
+
 impl<'a> ProviderState<'a> {
     pub(crate) fn from_parts(config: &'a Config, auth_status: &'a AuthStatus) -> Self {
         Self {
@@ -85,5 +180,30 @@ mod tests {
             }),
             Some(true)
         );
+    }
+
+    #[test]
+    fn runtime_state_tracks_user_selection_after_auth_generation() {
+        let mut state = ProviderRuntimeState::observed("startup-model");
+        assert_eq!(state.selection_generation(), 0);
+        assert_eq!(
+            state.selection_source,
+            ProviderModelSelectionSource::Startup
+        );
+
+        state.apply(ProviderStateEvent::AuthSelectedModel {
+            model: "auth-model".to_string(),
+        });
+        let auth_generation = state.selection_generation();
+        assert_eq!(auth_generation, 1);
+        assert_eq!(state.selected_model.as_deref(), Some("auth-model"));
+        assert!(!state.user_selected_after(auth_generation));
+
+        state.apply(ProviderStateEvent::UserSelectedModel {
+            model: "manual-model".to_string(),
+        });
+        assert!(state.user_selected_after(auth_generation));
+        assert_eq!(state.selected_model.as_deref(), Some("manual-model"));
+        assert_eq!(state.selection_source, ProviderModelSelectionSource::User);
     }
 }

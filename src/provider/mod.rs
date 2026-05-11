@@ -105,6 +105,9 @@ use self::pricing::cheapness_for_route;
 pub use self::selection::DefaultModelSelection;
 use self::selection::{ActiveProvider, ProviderAvailability};
 use self::state::ProviderState;
+pub(crate) use self::state::{
+    ProviderModelSelectionSource, ProviderRuntimeState, ProviderStateEvent,
+};
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
