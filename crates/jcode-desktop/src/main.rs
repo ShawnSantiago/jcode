@@ -216,6 +216,7 @@ async fn run() -> Result<()> {
     }
     let fullscreen = args.iter().any(|arg| arg == "--fullscreen");
     let desktop_mode = desktop_mode_from_args(args.iter().map(String::as_str));
+    let resume_session_id = desktop_resume_session_id_from_args(args.iter().map(String::as_str));
     emit_desktop_profile_event(
         "jcode-desktop-launch-profile",
         serde_json::json!({
@@ -256,7 +257,7 @@ async fn run() -> Result<()> {
         }
         DesktopApp::Workspace(workspace)
     } else {
-        fresh_single_session_app()
+        initial_single_session_app(resume_session_id.as_deref())
     };
     startup_trace.mark("app state initialized");
     window.set_title(&app.status_title());
@@ -1768,7 +1769,8 @@ fn desktop_session_event_payload_bytes(event: &session_launch::DesktopSessionEve
         session_launch::DesktopSessionEvent::ToolFinished { name, summary, .. } => {
             name.len() + summary.len()
         }
-        session_launch::DesktopSessionEvent::SessionStarted { session_id } => session_id.len(),
+        session_launch::DesktopSessionEvent::SessionStarted { session_id }
+        | session_launch::DesktopSessionEvent::Reloaded { session_id } => session_id.len(),
         session_launch::DesktopSessionEvent::ModelChanged {
             model,
             provider_name,
@@ -1920,6 +1922,14 @@ fn run_headless_chat_smoke(message: String) -> Result<()> {
                 println!(
                     "{}",
                     serde_json::json!({"event": "session", "session_id": id})
+                );
+            }
+            session_launch::DesktopSessionEvent::Reloaded { session_id: id } => {
+                session_id = Some(id.clone());
+                last_status = Some("server reconnected".to_string());
+                println!(
+                    "{}",
+                    serde_json::json!({"event": "reloaded", "session_id": id})
                 );
             }
             session_launch::DesktopSessionEvent::TextDelta(text) => {
@@ -3642,6 +3652,28 @@ fn fresh_single_session_app() -> DesktopApp {
     DesktopApp::SingleSession(SingleSessionApp::new(None))
 }
 
+fn initial_single_session_app(resume_session_id: Option<&str>) -> DesktopApp {
+    let Some(session_id) = resume_session_id else {
+        return fresh_single_session_app();
+    };
+
+    let mut app = SingleSessionApp::new(None);
+    app.initialize_resumed_session(session_id);
+    match session_data::load_session_card_by_id(session_id) {
+        Ok(Some(card)) => {
+            app.replace_session(Some(card));
+        }
+        Ok(None) => {
+            app.status = Some(format!("resumed session {session_id}"));
+        }
+        Err(error) => {
+            app.status = Some(format!("resumed session {session_id}"));
+            app.error = Some(format!("failed to load session metadata: {error:#}"));
+        }
+    }
+    DesktopApp::SingleSession(app)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DesktopMode {
     SingleSession,
@@ -3663,6 +3695,21 @@ fn desktop_mode_from_args<'a>(args: impl IntoIterator<Item = &'a str>) -> Deskto
     } else {
         DesktopMode::SingleSession
     }
+}
+
+fn desktop_resume_session_id_from_args<'a>(
+    args: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--resume" {
+            return args.next().map(str::to_string);
+        }
+        if let Some(session_id) = arg.strip_prefix("--resume=") {
+            return (!session_id.is_empty()).then(|| session_id.to_string());
+        }
+    }
+    None
 }
 
 struct DesktopHotReloader {
@@ -4252,6 +4299,7 @@ fn desktop_session_event_refreshes_session_card(
     matches!(
         event,
         session_launch::DesktopSessionEvent::SessionStarted { .. }
+            | session_launch::DesktopSessionEvent::Reloaded { .. }
             | session_launch::DesktopSessionEvent::Done
             | session_launch::DesktopSessionEvent::Error(_)
     )

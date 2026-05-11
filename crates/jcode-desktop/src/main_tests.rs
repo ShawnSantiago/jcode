@@ -1773,6 +1773,34 @@ fn single_session_session_switcher_loads_filters_and_resumes_session() {
 }
 
 #[test]
+fn desktop_resume_args_are_parsed() {
+    assert_eq!(
+        desktop_resume_session_id_from_args(["jcode-desktop", "--resume", "session_beta"]),
+        Some("session_beta".to_string())
+    );
+    assert_eq!(
+        desktop_resume_session_id_from_args(["jcode-desktop", "--resume=session_gamma"]),
+        Some("session_gamma".to_string())
+    );
+    assert_eq!(desktop_resume_session_id_from_args(["jcode-desktop"]), None);
+}
+
+#[test]
+fn initial_single_session_app_marks_resume_visible_before_interaction() {
+    let DesktopApp::SingleSession(app) = initial_single_session_app(Some("session_missing")) else {
+        panic!("expected single session app");
+    };
+
+    assert_eq!(app.live_session_id.as_deref(), Some("session_missing"));
+    assert!(
+        !app.body_lines()
+            .join("\n")
+            .contains("What are we building today")
+    );
+    assert!(app.body_lines().join("\n").contains("resumed session"));
+}
+
+#[test]
 fn single_session_session_switcher_marks_current_session_and_reloads() {
     let alpha = test_session_card("session_alpha", "alpha", "active");
     let beta = test_session_card("session_beta", "beta", "idle");
@@ -1945,8 +1973,11 @@ enum QueueTraceAction {
     TypeB,
     CtrlEnter,
     Reloading,
+    Reloaded,
     SessionStarted,
+    TextDelta,
     Done,
+    Error,
     TryDrainQueued,
 }
 
@@ -1954,6 +1985,8 @@ enum QueueTraceAction {
 struct QueueReferenceModel {
     draft: String,
     processing: bool,
+    reloading: bool,
+    error: bool,
     queued: Vec<String>,
     sent: Vec<String>,
 }
@@ -1973,6 +2006,7 @@ impl QueueReferenceModel {
                     self.queued.push(message);
                 } else {
                     self.processing = true;
+                    self.error = false;
                     self.sent.push(message.clone());
                     return Some(message);
                 }
@@ -1980,15 +2014,35 @@ impl QueueReferenceModel {
             QueueTraceAction::Reloading => {
                 // A hot reload is not a turn end. Wait-til-turn-end prompts must stay queued.
                 self.processing = true;
+                self.reloading = true;
+            }
+            QueueTraceAction::Reloaded => {
+                self.processing = true;
+                self.reloading = false;
             }
             QueueTraceAction::SessionStarted => {
                 // Reconnection/session-start is also not a turn end.
             }
-            QueueTraceAction::Done => self.processing = false,
+            QueueTraceAction::TextDelta => self.reloading = false,
+            QueueTraceAction::Done => {
+                if self.reloading {
+                    // A terminal event racing with reload is stale unless the reconnected turn has
+                    // produced activity again.
+                    self.processing = true;
+                } else {
+                    self.processing = false;
+                }
+            }
+            QueueTraceAction::Error => {
+                self.processing = false;
+                self.reloading = false;
+                self.error = true;
+            }
             QueueTraceAction::TryDrainQueued => {
-                if !self.processing && !self.queued.is_empty() {
+                if !self.processing && !self.error && !self.queued.is_empty() {
                     let message = self.queued.remove(0);
                     self.processing = true;
+                    self.error = false;
                     self.sent.push(message.clone());
                     return Some(message);
                 }
@@ -2023,14 +2077,32 @@ fn apply_queue_trace_action_to_app(
             });
             None
         }
+        QueueTraceAction::Reloaded => {
+            app.apply_session_event(session_launch::DesktopSessionEvent::Reloaded {
+                session_id: "reload-model-session".to_string(),
+            });
+            None
+        }
         QueueTraceAction::SessionStarted => {
             app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
                 session_id: "reload-model-session".to_string(),
             });
             None
         }
+        QueueTraceAction::TextDelta => {
+            app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+                "post reload activity".to_string(),
+            ));
+            None
+        }
         QueueTraceAction::Done => {
             app.apply_session_event(session_launch::DesktopSessionEvent::Done);
+            None
+        }
+        QueueTraceAction::Error => {
+            app.apply_session_event(session_launch::DesktopSessionEvent::Error(
+                "reload failed".to_string(),
+            ));
             None
         }
         QueueTraceAction::TryDrainQueued => app
@@ -2061,6 +2133,11 @@ fn assert_queue_trace_state(
         "queued draft mismatch for trace {trace:?}"
     );
     assert_eq!(real_sent, model.sent, "sent mismatch for trace {trace:?}");
+    assert_eq!(
+        app.error.is_some(),
+        model.error,
+        "error mismatch for trace {trace:?}"
+    );
 
     let status = app.composer_status_line();
     if model.queued.is_empty() {
@@ -2113,6 +2190,211 @@ fn run_queue_trace(trace: &[QueueTraceAction]) {
     }
 }
 
+fn apply_session_event_batch_then_auto_drain(
+    app: &mut DesktopApp,
+    events: Vec<session_launch::DesktopSessionEvent>,
+) -> Option<String> {
+    let stats = apply_desktop_session_event_batch_with_stats(app, events);
+    if !stats.visible_changed {
+        return None;
+    }
+    app.take_next_queued_single_session_draft()
+        .map(|(message, _images)| message)
+}
+
+#[test]
+fn single_session_event_loop_auto_drain_ignores_stale_done_after_reload() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "working".to_string(),
+    ));
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("next".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+
+    let drained = apply_session_event_batch_then_auto_drain(
+        &mut desktop,
+        vec![
+            session_launch::DesktopSessionEvent::Reloading {
+                new_socket: Some("/tmp/jcode-reload-event-loop-test.sock".to_string()),
+            },
+            session_launch::DesktopSessionEvent::Done,
+        ],
+    );
+
+    assert_eq!(
+        drained, None,
+        "stale Done after reload must not auto-drain queued prompt"
+    );
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    assert_eq!(app.queued_draft_messages(), vec!["next".to_string()]);
+    assert!(app.composer_status_line().contains("1 queued"));
+    assert!(app.is_processing);
+}
+
+#[test]
+fn single_session_event_loop_auto_drain_after_post_reload_activity_done() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "working".to_string(),
+    ));
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("next".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+
+    let drained = apply_session_event_batch_then_auto_drain(
+        &mut desktop,
+        vec![
+            session_launch::DesktopSessionEvent::Reloading {
+                new_socket: Some("/tmp/jcode-reload-event-loop-test.sock".to_string()),
+            },
+            session_launch::DesktopSessionEvent::Reloaded {
+                session_id: "reload-model-session".to_string(),
+            },
+            session_launch::DesktopSessionEvent::TextDelta("resumed".to_string()),
+            session_launch::DesktopSessionEvent::Done,
+        ],
+    );
+
+    assert_eq!(drained, Some("next".to_string()));
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    assert!(app.queued_draft_messages().is_empty());
+    assert!(
+        app.is_processing,
+        "draining queued prompt starts the next turn"
+    );
+}
+
+#[test]
+fn single_session_event_loop_auto_drain_allows_done_after_reloaded_without_output() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "working".to_string(),
+    ));
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("next".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+
+    let drained = apply_session_event_batch_then_auto_drain(
+        &mut desktop,
+        vec![
+            session_launch::DesktopSessionEvent::Reloading {
+                new_socket: Some("/tmp/jcode-reload-event-loop-test.sock".to_string()),
+            },
+            session_launch::DesktopSessionEvent::Reloaded {
+                session_id: "reload-model-session".to_string(),
+            },
+            session_launch::DesktopSessionEvent::Done,
+        ],
+    );
+
+    assert_eq!(drained, Some("next".to_string()));
+}
+
+#[test]
+fn single_session_event_loop_reload_error_keeps_queue_retryable() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "working".to_string(),
+    ));
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("retry me".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+
+    let drained = apply_session_event_batch_then_auto_drain(
+        &mut desktop,
+        vec![
+            session_launch::DesktopSessionEvent::Reloading {
+                new_socket: Some("/tmp/jcode-reload-event-loop-test.sock".to_string()),
+            },
+            session_launch::DesktopSessionEvent::Error("reload failed".to_string()),
+        ],
+    );
+
+    assert_eq!(drained, None);
+    let DesktopApp::SingleSession(app) = &desktop else {
+        unreachable!();
+    };
+    assert_eq!(app.queued_draft_messages(), vec!["retry me".to_string()]);
+    assert!(app.composer_status_line().contains("error"));
+    assert!(app.composer_status_line().contains("1 queued"));
+}
+
+#[test]
+fn single_session_event_loop_multiple_reloads_preserve_queued_prompt_order() {
+    let mut desktop = DesktopApp::SingleSession(SingleSessionApp::new(None));
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("first".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+
+    assert_eq!(
+        apply_session_event_batch_then_auto_drain(
+            &mut desktop,
+            vec![
+                session_launch::DesktopSessionEvent::Reloading {
+                    new_socket: Some("/tmp/jcode-reload-one.sock".to_string()),
+                },
+                session_launch::DesktopSessionEvent::Reloaded {
+                    session_id: "reload-model-session".to_string(),
+                },
+            ],
+        ),
+        None
+    );
+
+    let DesktopApp::SingleSession(app) = &mut desktop else {
+        unreachable!();
+    };
+    app.handle_key(KeyInput::Character("second".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+    assert_eq!(
+        app.queued_draft_messages(),
+        vec!["first".to_string(), "second".to_string()]
+    );
+
+    assert_eq!(
+        apply_session_event_batch_then_auto_drain(
+            &mut desktop,
+            vec![
+                session_launch::DesktopSessionEvent::Reloading {
+                    new_socket: Some("/tmp/jcode-reload-two.sock".to_string()),
+                },
+                session_launch::DesktopSessionEvent::Reloaded {
+                    session_id: "reload-model-session".to_string(),
+                },
+                session_launch::DesktopSessionEvent::Done,
+            ],
+        ),
+        Some("first".to_string())
+    );
+    assert_eq!(
+        apply_session_event_batch_then_auto_drain(
+            &mut desktop,
+            vec![session_launch::DesktopSessionEvent::Done],
+        ),
+        Some("second".to_string())
+    );
+}
+
 #[test]
 fn single_session_reload_queue_golden_trace_waits_for_done_before_drain() {
     run_queue_trace(&[
@@ -2121,6 +2403,12 @@ fn single_session_reload_queue_golden_trace_waits_for_done_before_drain() {
         QueueTraceAction::CtrlEnter,
         QueueTraceAction::SessionStarted,
         QueueTraceAction::TryDrainQueued,
+        QueueTraceAction::Done,
+        QueueTraceAction::TryDrainQueued,
+        QueueTraceAction::Reloaded,
+        QueueTraceAction::Done,
+        QueueTraceAction::TryDrainQueued,
+        QueueTraceAction::TextDelta,
         QueueTraceAction::Done,
         QueueTraceAction::TryDrainQueued,
     ]);
@@ -2133,8 +2421,11 @@ fn single_session_reload_queue_state_space_matches_reference_model() {
         QueueTraceAction::TypeB,
         QueueTraceAction::CtrlEnter,
         QueueTraceAction::Reloading,
+        QueueTraceAction::Reloaded,
         QueueTraceAction::SessionStarted,
+        QueueTraceAction::TextDelta,
         QueueTraceAction::Done,
+        QueueTraceAction::Error,
         QueueTraceAction::TryDrainQueued,
     ];
 

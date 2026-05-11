@@ -22,6 +22,18 @@ pub fn load_crashed_session_cards() -> Result<Vec<SessionCard>> {
         .collect())
 }
 
+pub fn load_session_card_by_id(session_id: &str) -> Result<Option<SessionCard>> {
+    let sessions_dir = jcode_sessions_dir()?;
+    let path = sessions_dir.join(format!("{session_id}.json"));
+    if path.exists() {
+        return load_session_card(&path);
+    }
+
+    Ok(load_recent_session_cards_with_limit(DEFAULT_SESSION_LIMIT)?
+        .into_iter()
+        .find(|card| card.session_id == session_id))
+}
+
 fn load_recent_session_cards_with_limit(limit: usize) -> Result<Vec<SessionCard>> {
     let sessions_dir = jcode_sessions_dir()?;
     if !sessions_dir.exists() {

@@ -64,6 +64,9 @@ pub enum DesktopSessionEvent {
     Reloading {
         new_socket: Option<String>,
     },
+    Reloaded {
+        session_id: String,
+    },
     Done,
     Error(String),
 }
@@ -582,13 +585,19 @@ fn run_server_session(
         let subscribe_request_id = next_request_id;
         subscribe_to_server(&mut writer, subscribe_request_id, Some(&session_id))?;
         next_request_id += 1;
-        let _ = establish_session_id(
+        let reconnected_session_id = establish_session_id(
             &mut reader,
             &mut writer,
             &mut next_request_id,
             subscribe_request_id,
             event_tx.as_ref(),
         )?;
+        send_desktop_event(
+            &event_tx,
+            DesktopSessionEvent::Reloaded {
+                session_id: reconnected_session_id,
+            },
+        );
     }
     Ok(session_id)
 }
@@ -1555,6 +1564,9 @@ mod tests {
     #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn validates_safe_session_ids() -> Result<()> {
         validate_resume_session_id("session_cow_123-abc.def")?;
@@ -1712,7 +1724,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn desktop_worker_roundtrips_message_with_fake_server() -> Result<()> {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let socket_path = std::env::temp_dir().join(format!(
             "jcode-desktop-worker-smoke-{}-{}.sock",
@@ -1763,6 +1774,78 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn desktop_worker_emits_reloaded_before_real_done_after_fake_reload() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let socket_path = std::env::temp_dir().join(format!(
+            "jcode-desktop-worker-reload-old-{}-{nonce}.sock",
+            std::process::id(),
+        ));
+        let new_socket_path = std::env::temp_dir().join(format!(
+            "jcode-desktop-worker-reload-new-{}-{nonce}.sock",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_file(&new_socket_path);
+        let listener = UnixListener::bind(&socket_path)?;
+        let new_listener = UnixListener::bind(&new_socket_path)?;
+        let previous_socket = std::env::var_os("JCODE_SOCKET");
+        unsafe {
+            std::env::set_var("JCODE_SOCKET", &socket_path);
+        }
+
+        let server = std::thread::spawn(move || {
+            fake_desktop_server_reload_roundtrip(listener, new_listener, new_socket_path)
+        });
+        let (event_tx, event_rx) = mpsc::channel();
+        let (_command_tx, command_rx) = mpsc::channel();
+
+        let result =
+            run_server_session(None, "hello reload", Vec::new(), Some(event_tx), command_rx);
+
+        restore_env_var("JCODE_SOCKET", previous_socket);
+        let _ = std::fs::remove_file(&socket_path);
+
+        assert_eq!(result?, "session_desktop_reload_fake");
+        let requests = server.join().unwrap()?;
+        assert_eq!(requests[0]["type"], "subscribe");
+        assert_eq!(requests[1]["type"], "state");
+        assert_eq!(requests[2]["type"], "message");
+        assert_eq!(requests[3]["type"], "subscribe");
+        assert_eq!(
+            requests[3]["target_session_id"],
+            "session_desktop_reload_fake"
+        );
+
+        let events = event_rx.try_iter().collect::<Vec<_>>();
+        let reload_index = events
+            .iter()
+            .position(|event| matches!(event, DesktopSessionEvent::Reloading { .. }))
+            .expect("worker should forward reload event");
+        let reloaded_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DesktopSessionEvent::Reloaded { session_id }
+                        if session_id == "session_desktop_reload_fake"
+                )
+            })
+            .expect("worker should emit explicit reload completion");
+        let done_index = events
+            .iter()
+            .position(|event| matches!(event, DesktopSessionEvent::Done))
+            .expect("worker should forward real message Done after reconnect");
+        assert!(reload_index < reloaded_index);
+        assert!(reloaded_index < done_index);
+        Ok(())
+    }
+
+    #[cfg(unix)]
     fn fake_desktop_server_roundtrip(listener: UnixListener) -> Result<Vec<Value>> {
         let (mut reader, mut writer, subscribe) = accept_first_requesting_client(&listener)?;
         write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
@@ -1789,6 +1872,59 @@ mod tests {
         )?;
         write_json_line(&mut writer, json!({"type": "done", "id": message["id"]}))?;
         Ok(vec![subscribe, state, message])
+    }
+
+    #[cfg(unix)]
+    fn fake_desktop_server_reload_roundtrip(
+        listener: UnixListener,
+        new_listener: UnixListener,
+        new_socket_path: PathBuf,
+    ) -> Result<Vec<Value>> {
+        let (mut reader, mut writer, subscribe) = accept_first_requesting_client(&listener)?;
+        write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
+        write_json_line(&mut writer, json!({"type": "done", "id": subscribe["id"]}))?;
+
+        let state = read_fake_server_request(&mut reader)?;
+        write_json_line(
+            &mut writer,
+            json!({
+                "type": "state",
+                "id": state["id"],
+                "session_id": "session_desktop_reload_fake",
+                "message_count": 0,
+                "is_processing": false,
+            }),
+        )?;
+
+        let message = read_fake_server_request(&mut reader)?;
+        write_json_line(&mut writer, json!({"type": "ack", "id": message["id"]}))?;
+        write_json_line(
+            &mut writer,
+            json!({"type": "reloading", "new_socket": new_socket_path.display().to_string()}),
+        )?;
+        // This terminal event belongs to the socket generation that just announced reload.
+        // The worker should leave that stream immediately and must not forward it.
+        let _ = write_json_line(&mut writer, json!({"type": "done", "id": message["id"]}));
+        drop(writer);
+        drop(reader);
+
+        let (new_reader, mut new_writer, reconnect_subscribe) =
+            accept_first_requesting_client(&new_listener)?;
+        write_json_line(
+            &mut new_writer,
+            json!({
+                "type": "session",
+                "session_id": "session_desktop_reload_fake",
+            }),
+        )?;
+        write_json_line(
+            &mut new_writer,
+            json!({"type": "done", "id": message["id"]}),
+        )?;
+        drop(new_reader);
+
+        let _ = std::fs::remove_file(new_socket_path);
+        Ok(vec![subscribe, state, message, reconnect_subscribe])
     }
 
     #[cfg(unix)]

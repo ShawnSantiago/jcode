@@ -116,12 +116,19 @@ pub(crate) struct SingleSessionApp {
     session_handle: Option<DesktopSessionHandle>,
     active_tool_message_index: Option<usize>,
     active_tool_input_buffer: String,
+    reload_phase: ReloadPhase,
     // True for the fresh-start chat that owns the welcome hero as visual UI.
     // The hero must stay out of `body_styled_lines()` so it never becomes part
     // of the persisted/rendered transcript text.
     welcome_timeline: bool,
     welcome_hero_phrase_index: usize,
     text_scale: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReloadPhase {
+    Stable,
+    AwaitingReconnect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -653,6 +660,7 @@ impl SingleSessionApp {
             session_handle: None,
             active_tool_message_index: None,
             active_tool_input_buffer: String::new(),
+            reload_phase: ReloadPhase::Stable,
             welcome_timeline,
             welcome_hero_phrase_index,
             text_scale: 1.0,
@@ -675,6 +683,23 @@ impl SingleSessionApp {
             self.welcome_timeline = true;
         }
         self.detail_scroll = 0;
+    }
+
+    pub(crate) fn initialize_resumed_session(&mut self, session_id: &str) {
+        self.live_session_id = Some(session_id.to_string());
+        self.detail_scroll = 0;
+        self.messages.clear();
+        self.streaming_response.clear();
+        self.error = None;
+        self.stdin_response = None;
+        self.body_scroll_lines = 0.0;
+        self.show_help = false;
+        self.show_session_info = false;
+        self.is_processing = false;
+        self.active_tool_message_index = None;
+        self.active_tool_input_buffer.clear();
+        self.reload_phase = ReloadPhase::Stable;
+        self.welcome_timeline = false;
     }
 
     pub(crate) fn set_recovery_session_count(&mut self, count: usize) {
@@ -709,6 +734,7 @@ impl SingleSessionApp {
         self.session_handle = None;
         self.active_tool_message_index = None;
         self.active_tool_input_buffer.clear();
+        self.reload_phase = ReloadPhase::Stable;
         self.welcome_timeline = true;
     }
 
@@ -1608,20 +1634,30 @@ impl SingleSessionApp {
             DesktopSessionEvent::Reloading { .. } => {
                 self.status = Some("server reloading, reconnecting".to_string());
                 self.is_processing = true;
+                self.reload_phase = ReloadPhase::AwaitingReconnect;
+            }
+            DesktopSessionEvent::Reloaded { session_id } => {
+                self.live_session_id = Some(session_id);
+                self.status = Some("server reconnected".to_string());
+                self.is_processing = true;
+                self.reload_phase = ReloadPhase::Stable;
             }
             DesktopSessionEvent::SessionStarted { session_id } => {
                 self.live_session_id = Some(session_id);
                 self.status = Some("connected".to_string());
             }
             DesktopSessionEvent::TextDelta(text) => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.streaming_response.push_str(&text);
                 self.status = Some("receiving".to_string());
             }
             DesktopSessionEvent::TextReplace(text) => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.streaming_response = text;
                 self.status = Some("receiving".to_string());
             }
             DesktopSessionEvent::ToolStarted { name } => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.collapse_active_tool_message();
                 self.active_tool_input_buffer.clear();
                 self.status = Some(format!("preparing tool {name}"));
@@ -1630,10 +1666,12 @@ impl SingleSessionApp {
                 self.active_tool_message_index = Some(self.messages.len().saturating_sub(1));
             }
             DesktopSessionEvent::ToolExecuting { name } => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.status = Some(format!("using tool {name}"));
                 self.replace_active_tool_header(&format!("▾ {name} running"));
             }
             DesktopSessionEvent::ToolInput { delta } => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.append_active_tool_input(&delta);
             }
             DesktopSessionEvent::ToolFinished {
@@ -1641,6 +1679,7 @@ impl SingleSessionApp {
                 summary,
                 is_error,
             } => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.status = Some(if is_error {
                     format!("tool {name} failed")
                 } else {
@@ -1704,6 +1743,7 @@ impl SingleSessionApp {
                 is_password,
                 tool_call_id,
             } => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.status = Some("interactive input requested".to_string());
                 self.show_help = false;
                 self.model_picker.close();
@@ -1726,6 +1766,11 @@ impl SingleSessionApp {
                 )));
             }
             DesktopSessionEvent::Done => {
+                if self.reload_phase == ReloadPhase::AwaitingReconnect {
+                    self.status = Some("server reloading, reconnecting".to_string());
+                    self.is_processing = true;
+                    return;
+                }
                 self.finish_streaming_response();
                 self.is_processing = false;
                 self.stdin_response = None;
@@ -1735,6 +1780,7 @@ impl SingleSessionApp {
                 self.status = Some("ready".to_string());
             }
             DesktopSessionEvent::Error(error) => {
+                self.reload_phase = ReloadPhase::Stable;
                 self.finish_streaming_response();
                 self.is_processing = false;
                 self.stdin_response = None;
@@ -2102,7 +2148,7 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn take_next_queued_draft(&mut self) -> Option<(String, Vec<(String, String)>)> {
-        if self.is_processing || self.queued_drafts.is_empty() {
+        if self.is_processing || self.error.is_some() || self.queued_drafts.is_empty() {
             return None;
         }
         let (message, images) = self.queued_drafts.remove(0);
