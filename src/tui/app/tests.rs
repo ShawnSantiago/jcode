@@ -69,3 +69,30 @@ fn kv_cache_signature_prefix_match_detects_prefix_mutation() {
     assert!(!App::kv_cache_signatures_prefix_match(&current, &baseline));
     assert_eq!(App::kv_cache_common_prefix_messages(&current, &baseline), 0);
 }
+
+#[test]
+fn cold_cache_warning_is_persisted_when_starting_next_request() {
+    let mut app = create_test_app();
+    app.display_messages.push(DisplayMessage::user("first"));
+    app.kv_cache_baseline = Some(KvCacheBaseline {
+        input_tokens: 911_873,
+        completed_at: Instant::now() - Duration::from_secs(301),
+        provider: "anthropic".to_string(),
+        model: "claude-opus-4-6".to_string(),
+        upstream_provider: None,
+        signature: None,
+    });
+
+    app.display_messages.push(DisplayMessage::user("second"));
+    app.begin_kv_cache_request(&[Message::user("second")], &[], "system", "");
+
+    let warning = app
+        .display_messages()
+        .iter()
+        .find(|message| {
+            message.role == "system" && message.content.contains("Prompt cache is cold")
+        })
+        .expect("cold cache warning should be persisted in the transcript");
+    assert!(warning.content.contains("911K"));
+    assert!(warning.content.contains("300s TTL expired"));
+}
