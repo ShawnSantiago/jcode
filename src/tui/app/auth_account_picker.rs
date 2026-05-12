@@ -210,25 +210,25 @@ impl App {
                     items.push(AccountPickerItem::action(
                         provider.id,
                         provider.display_name,
-                        "API base",
+                        "Step 1: API base URL",
                         compat.api_base,
                         AccountPickerCommand::PromptValue {
-                            prompt: "Enter the OpenAI-compatible API base URL.".to_string(),
+                            prompt: "Step 1/2: enter the OpenAI-compatible API base URL, for example https://llm.example.com/v1.".to_string(),
                             command_prefix: "/account openai-compatible api-base".to_string(),
                             empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing API base...".to_string(),
+                            status_notice: "Account: editing OpenAI-compatible API base URL (step 1/2)...".to_string(),
                         },
                     ));
                     items.push(AccountPickerItem::action(
                         provider.id,
                         provider.display_name,
-                        "API key variable",
+                        "Step 2: API key variable",
                         compat.api_key_env,
                         AccountPickerCommand::PromptValue {
-                            prompt: "Enter the env var name for the API key.".to_string(),
+                            prompt: "Step 2/2: enter the env var name that stores the API key, for example OPENAI_API_KEY.".to_string(),
                             command_prefix: "/account openai-compatible api-key-name".to_string(),
                             empty_value: Some("clear".to_string()),
-                            status_notice: "Account: editing API key variable...".to_string(),
+                            status_notice: "Account: editing OpenAI-compatible API key variable (step 2/2)...".to_string(),
                         },
                     ));
                     items.push(AccountPickerItem::action(
