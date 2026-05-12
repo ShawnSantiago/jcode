@@ -66,6 +66,38 @@ fn set_model_rejects_empty() {
 }
 
 #[test]
+fn gpt5_copilot_models_use_max_completion_tokens() {
+    assert_eq!(
+        CopilotApiProvider::max_token_parameter_for_model("gpt-5.4"),
+        "max_completion_tokens"
+    );
+    assert_eq!(
+        CopilotApiProvider::max_token_parameter_for_model(" GPT-5.4-pro "),
+        "max_completion_tokens"
+    );
+    assert_eq!(
+        CopilotApiProvider::max_token_parameter_for_model("gpt-5.3-codex"),
+        "max_completion_tokens"
+    );
+}
+
+#[test]
+fn non_gpt5_copilot_models_keep_max_tokens() {
+    assert_eq!(
+        CopilotApiProvider::max_token_parameter_for_model("claude-sonnet-4.6"),
+        "max_tokens"
+    );
+    assert_eq!(
+        CopilotApiProvider::max_token_parameter_for_model("gemini-3-pro-preview"),
+        "max_tokens"
+    );
+    assert_eq!(
+        CopilotApiProvider::max_token_parameter_for_model("gpt-4.1"),
+        "max_tokens"
+    );
+}
+
+#[test]
 fn context_window_handles_dot_and_dash_names() {
     assert_eq!(
         crate::provider::context_limit_for_model_with_provider("claude-opus-4.6", Some("copilot")),
