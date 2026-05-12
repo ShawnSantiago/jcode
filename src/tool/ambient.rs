@@ -855,6 +855,7 @@ impl Tool for ScheduleTool {
 
         let mut manager = AmbientManager::new()?;
         let id = manager.schedule(request)?;
+        nudge_schedule_runner();
 
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
