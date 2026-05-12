@@ -4965,6 +4965,409 @@ pub(crate) fn append_single_session_streaming_response_rendered_body_lines(
     ));
 }
 
+pub(crate) fn push_single_session_streaming_stroke_text(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    viewport: &SingleSessionBodyViewport,
+    start_line: usize,
+    end_line: usize,
+    rendered_lines: &[SingleSessionStyledLine],
+) {
+    if app.streaming_response.is_empty()
+        || start_line >= end_line
+        || start_line >= rendered_lines.len()
+    {
+        return;
+    }
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.body_size * typography.body_line_height;
+    let scale = typography.body_size / 10.0;
+    let stroke = (scale * 0.95).clamp(1.15, 2.4);
+    let char_advance = scale * 8.0;
+    let body_top = single_session_body_top_for_app(app, size);
+    let body_bottom = single_session_body_bottom_for_total_lines(app, size, viewport.total_lines);
+    let max_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
+    let color = [
+        ASSISTANT_TEXT_COLOR[0] * 0.84,
+        ASSISTANT_TEXT_COLOR[1] * 0.78,
+        ASSISTANT_TEXT_COLOR[2] * 0.68,
+        0.92,
+    ];
+
+    for line_index in start_line..end_line.min(rendered_lines.len()) {
+        let visual_line = line_index.saturating_sub(viewport.start_line);
+        let baseline_y =
+            body_top + viewport.top_offset_pixels + visual_line as f32 * line_height + scale * 1.5;
+        if baseline_y + scale * 10.0 < body_top || baseline_y > body_bottom {
+            continue;
+        }
+        push_single_line_font_text(
+            vertices,
+            &rendered_lines[line_index].text,
+            PANEL_TITLE_LEFT_PADDING,
+            baseline_y,
+            scale,
+            stroke,
+            char_advance,
+            max_width,
+            color,
+            size,
+        );
+    }
+}
+
+fn push_single_line_font_text(
+    vertices: &mut Vec<Vertex>,
+    text: &str,
+    x: f32,
+    y: f32,
+    scale: f32,
+    stroke: f32,
+    char_advance: f32,
+    max_width: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let mut cursor = x;
+    for ch in text.chars() {
+        if cursor + char_advance > x + max_width {
+            break;
+        }
+        if ch.is_whitespace() {
+            cursor += char_advance * 0.72;
+            continue;
+        }
+        if let Some(strokes) = single_line_glyph(ch) {
+            for &(x0, y0, x1, y1) in strokes {
+                push_thick_line(
+                    vertices,
+                    cursor + x0 * scale,
+                    y + y0 * scale,
+                    cursor + x1 * scale,
+                    y + y1 * scale,
+                    stroke,
+                    color,
+                    size,
+                );
+            }
+        }
+        cursor += char_advance;
+    }
+}
+
+fn push_thick_line(
+    vertices: &mut Vec<Vertex>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt().max(0.001);
+    let nx = -dy / len * width * 0.5;
+    let ny = dx / len * width * 0.5;
+    push_colored_quad(
+        vertices,
+        [
+            (x0 + nx, y0 + ny),
+            (x0 - nx, y0 - ny),
+            (x1 - nx, y1 - ny),
+            (x1 + nx, y1 + ny),
+        ],
+        color,
+        size,
+    );
+}
+
+fn push_colored_quad(
+    vertices: &mut Vec<Vertex>,
+    points: [(f32, f32); 4],
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let width = size.width.max(1) as f32;
+    let height = size.height.max(1) as f32;
+    let to_ndc = |(x, y): (f32, f32)| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
+    vertices.extend_from_slice(&[
+        Vertex {
+            position: to_ndc(points[0]),
+            color,
+        },
+        Vertex {
+            position: to_ndc(points[1]),
+            color,
+        },
+        Vertex {
+            position: to_ndc(points[2]),
+            color,
+        },
+        Vertex {
+            position: to_ndc(points[0]),
+            color,
+        },
+        Vertex {
+            position: to_ndc(points[2]),
+            color,
+        },
+        Vertex {
+            position: to_ndc(points[3]),
+            color,
+        },
+    ]);
+}
+
+type Stroke = (f32, f32, f32, f32);
+
+fn single_line_glyph(ch: char) -> Option<&'static [Stroke]> {
+    let ch = ch.to_ascii_uppercase();
+    Some(match ch {
+        'A' => &[
+            (1.0, 9.0, 3.5, 1.0),
+            (3.5, 1.0, 6.0, 9.0),
+            (2.0, 5.7, 5.0, 5.7),
+        ],
+        'B' => &[
+            (1.0, 1.0, 1.0, 9.0),
+            (1.0, 1.0, 5.0, 2.0),
+            (5.0, 2.0, 5.0, 4.6),
+            (5.0, 4.6, 1.0, 5.0),
+            (1.0, 5.0, 5.3, 6.0),
+            (5.3, 6.0, 5.0, 8.4),
+            (5.0, 8.4, 1.0, 9.0),
+        ],
+        'C' => &[
+            (5.8, 2.0, 3.5, 1.0),
+            (3.5, 1.0, 1.2, 3.0),
+            (1.2, 3.0, 1.2, 7.0),
+            (1.2, 7.0, 3.5, 9.0),
+            (3.5, 9.0, 5.8, 8.0),
+        ],
+        'D' => &[
+            (1.0, 1.0, 1.0, 9.0),
+            (1.0, 1.0, 5.3, 3.0),
+            (5.3, 3.0, 5.3, 7.0),
+            (5.3, 7.0, 1.0, 9.0),
+        ],
+        'E' => &[
+            (5.8, 1.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0, 9.0),
+            (1.0, 5.0, 4.7, 5.0),
+            (1.0, 9.0, 5.8, 9.0),
+        ],
+        'F' => &[
+            (1.0, 1.0, 1.0, 9.0),
+            (1.0, 1.0, 5.8, 1.0),
+            (1.0, 5.0, 4.8, 5.0),
+        ],
+        'G' => &[
+            (5.8, 2.0, 3.5, 1.0),
+            (3.5, 1.0, 1.2, 3.0),
+            (1.2, 3.0, 1.2, 7.0),
+            (1.2, 7.0, 3.5, 9.0),
+            (3.5, 9.0, 5.8, 7.4),
+            (5.8, 7.4, 5.8, 5.8),
+            (5.8, 5.8, 4.0, 5.8),
+        ],
+        'H' => &[
+            (1.0, 1.0, 1.0, 9.0),
+            (6.0, 1.0, 6.0, 9.0),
+            (1.0, 5.0, 6.0, 5.0),
+        ],
+        'I' => &[
+            (2.0, 1.0, 5.0, 1.0),
+            (3.5, 1.0, 3.5, 9.0),
+            (2.0, 9.0, 5.0, 9.0),
+        ],
+        'J' => &[
+            (5.5, 1.0, 5.5, 7.0),
+            (5.5, 7.0, 4.2, 9.0),
+            (4.2, 9.0, 2.0, 8.3),
+        ],
+        'K' => &[
+            (1.0, 1.0, 1.0, 9.0),
+            (6.0, 1.0, 1.0, 5.2),
+            (1.0, 5.2, 6.0, 9.0),
+        ],
+        'L' => &[(1.0, 1.0, 1.0, 9.0), (1.0, 9.0, 5.8, 9.0)],
+        'M' => &[
+            (0.8, 9.0, 0.8, 1.0),
+            (0.8, 1.0, 3.5, 5.2),
+            (3.5, 5.2, 6.2, 1.0),
+            (6.2, 1.0, 6.2, 9.0),
+        ],
+        'N' => &[
+            (1.0, 9.0, 1.0, 1.0),
+            (1.0, 1.0, 6.0, 9.0),
+            (6.0, 9.0, 6.0, 1.0),
+        ],
+        'O' => &[
+            (3.5, 1.0, 1.2, 3.0),
+            (1.2, 3.0, 1.2, 7.0),
+            (1.2, 7.0, 3.5, 9.0),
+            (3.5, 9.0, 5.8, 7.0),
+            (5.8, 7.0, 5.8, 3.0),
+            (5.8, 3.0, 3.5, 1.0),
+        ],
+        'P' => &[
+            (1.0, 9.0, 1.0, 1.0),
+            (1.0, 1.0, 5.5, 2.0),
+            (5.5, 2.0, 5.0, 5.0),
+            (5.0, 5.0, 1.0, 5.5),
+        ],
+        'Q' => &[
+            (3.5, 1.0, 1.2, 3.0),
+            (1.2, 3.0, 1.2, 7.0),
+            (1.2, 7.0, 3.5, 9.0),
+            (3.5, 9.0, 5.8, 7.0),
+            (5.8, 7.0, 5.8, 3.0),
+            (5.8, 3.0, 3.5, 1.0),
+            (4.2, 6.8, 6.2, 9.4),
+        ],
+        'R' => &[
+            (1.0, 9.0, 1.0, 1.0),
+            (1.0, 1.0, 5.5, 2.0),
+            (5.5, 2.0, 5.0, 5.0),
+            (5.0, 5.0, 1.0, 5.5),
+            (2.8, 5.4, 6.0, 9.0),
+        ],
+        'S' => &[
+            (5.7, 2.0, 3.2, 1.0),
+            (3.2, 1.0, 1.2, 3.0),
+            (1.2, 3.0, 5.4, 5.4),
+            (5.4, 5.4, 5.4, 7.4),
+            (5.4, 7.4, 3.0, 9.0),
+            (3.0, 9.0, 1.0, 8.2),
+        ],
+        'T' => &[(1.0, 1.0, 6.0, 1.0), (3.5, 1.0, 3.5, 9.0)],
+        'U' => &[
+            (1.0, 1.0, 1.0, 7.0),
+            (1.0, 7.0, 3.5, 9.0),
+            (3.5, 9.0, 6.0, 7.0),
+            (6.0, 7.0, 6.0, 1.0),
+        ],
+        'V' => &[(1.0, 1.0, 3.5, 9.0), (3.5, 9.0, 6.0, 1.0)],
+        'W' => &[
+            (0.8, 1.0, 2.0, 9.0),
+            (2.0, 9.0, 3.5, 5.4),
+            (3.5, 5.4, 5.0, 9.0),
+            (5.0, 9.0, 6.2, 1.0),
+        ],
+        'X' => &[(1.0, 1.0, 6.0, 9.0), (6.0, 1.0, 1.0, 9.0)],
+        'Y' => &[
+            (1.0, 1.0, 3.5, 4.8),
+            (6.0, 1.0, 3.5, 4.8),
+            (3.5, 4.8, 3.5, 9.0),
+        ],
+        'Z' => &[
+            (1.0, 1.0, 6.0, 1.0),
+            (6.0, 1.0, 1.0, 9.0),
+            (1.0, 9.0, 6.0, 9.0),
+        ],
+        '0' => &[
+            (3.5, 1.0, 1.3, 3.0),
+            (1.3, 3.0, 1.3, 7.0),
+            (1.3, 7.0, 3.5, 9.0),
+            (3.5, 9.0, 5.7, 7.0),
+            (5.7, 7.0, 5.7, 3.0),
+            (5.7, 3.0, 3.5, 1.0),
+            (2.0, 8.0, 5.0, 2.0),
+        ],
+        '1' => &[
+            (2.5, 2.4, 3.8, 1.0),
+            (3.8, 1.0, 3.8, 9.0),
+            (2.4, 9.0, 5.1, 9.0),
+        ],
+        '2' => &[
+            (1.3, 3.0, 3.4, 1.0),
+            (3.4, 1.0, 5.7, 3.0),
+            (5.7, 3.0, 1.2, 9.0),
+            (1.2, 9.0, 6.0, 9.0),
+        ],
+        '3' => &[
+            (1.4, 2.0, 3.7, 1.0),
+            (3.7, 1.0, 5.6, 3.0),
+            (5.6, 3.0, 3.8, 5.0),
+            (3.8, 5.0, 5.7, 7.0),
+            (5.7, 7.0, 3.2, 9.0),
+            (3.2, 9.0, 1.2, 8.0),
+        ],
+        '4' => &[
+            (5.0, 9.0, 5.0, 1.0),
+            (5.0, 1.0, 1.0, 6.5),
+            (1.0, 6.5, 6.2, 6.5),
+        ],
+        '5' => &[
+            (5.8, 1.0, 1.5, 1.0),
+            (1.5, 1.0, 1.2, 4.8),
+            (1.2, 4.8, 4.8, 4.8),
+            (4.8, 4.8, 5.7, 7.0),
+            (5.7, 7.0, 3.2, 9.0),
+            (3.2, 9.0, 1.2, 8.2),
+        ],
+        '6' => &[
+            (5.4, 2.0, 3.0, 1.0),
+            (3.0, 1.0, 1.2, 4.8),
+            (1.2, 4.8, 1.6, 8.0),
+            (1.6, 8.0, 4.0, 9.0),
+            (4.0, 9.0, 5.8, 7.0),
+            (5.8, 7.0, 4.0, 5.0),
+            (4.0, 5.0, 1.2, 5.2),
+        ],
+        '7' => &[(1.0, 1.0, 6.0, 1.0), (6.0, 1.0, 2.8, 9.0)],
+        '8' => &[
+            (3.5, 1.0, 1.4, 2.8),
+            (1.4, 2.8, 3.5, 5.0),
+            (3.5, 5.0, 5.6, 2.8),
+            (5.6, 2.8, 3.5, 1.0),
+            (3.5, 5.0, 1.2, 7.2),
+            (1.2, 7.2, 3.5, 9.0),
+            (3.5, 9.0, 5.8, 7.2),
+            (5.8, 7.2, 3.5, 5.0),
+        ],
+        '9' => &[
+            (5.8, 4.8, 3.0, 4.8),
+            (3.0, 4.8, 1.2, 3.0),
+            (1.2, 3.0, 3.4, 1.0),
+            (3.4, 1.0, 5.6, 2.8),
+            (5.6, 2.8, 5.6, 6.0),
+            (5.6, 6.0, 3.8, 9.0),
+            (3.8, 9.0, 1.5, 8.2),
+        ],
+        '.' => &[(3.5, 8.6, 3.55, 8.65)],
+        ',' => &[(3.8, 8.2, 3.0, 10.0)],
+        ':' => &[(3.5, 3.2, 3.55, 3.25), (3.5, 8.0, 3.55, 8.05)],
+        ';' => &[(3.5, 3.2, 3.55, 3.25), (3.8, 8.0, 3.0, 9.8)],
+        '-' => &[(1.8, 5.2, 5.2, 5.2)],
+        '_' => &[(1.0, 9.4, 6.0, 9.4)],
+        '/' => &[(6.0, 1.0, 1.0, 9.0)],
+        '\\' => &[(1.0, 1.0, 6.0, 9.0)],
+        '(' => &[
+            (4.8, 1.0, 2.2, 3.2),
+            (2.2, 3.2, 2.2, 6.8),
+            (2.2, 6.8, 4.8, 9.0),
+        ],
+        ')' => &[
+            (2.2, 1.0, 4.8, 3.2),
+            (4.8, 3.2, 4.8, 6.8),
+            (4.8, 6.8, 2.2, 9.0),
+        ],
+        '?' => &[
+            (1.5, 2.5, 3.5, 1.0),
+            (3.5, 1.0, 5.5, 2.8),
+            (5.5, 2.8, 3.5, 5.2),
+            (3.5, 5.2, 3.5, 6.4),
+            (3.5, 8.6, 3.55, 8.65),
+        ],
+        '!' => &[(3.5, 1.0, 3.5, 6.8), (3.5, 8.6, 3.55, 8.65)],
+        _ => return None,
+    })
+}
+
 pub(crate) fn single_session_streaming_response_rendered_body_line_count(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
