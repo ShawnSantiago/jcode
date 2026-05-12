@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1"
 arboard = "3"
 base64 = "0.22"

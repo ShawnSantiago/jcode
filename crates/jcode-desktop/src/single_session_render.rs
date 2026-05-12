@@ -17,6 +17,21 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) status: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WelcomeHeroStrokeSegment {
+    pub(crate) start: [f32; 2],
+    pub(crate) end: [f32; 2],
+    pub(crate) start_progress: f32,
+    pub(crate) end_progress: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WelcomeHeroRuntimeMaskSpec {
+    pub(crate) phrase: String,
+    pub(crate) rect: Rect,
+    pub(crate) font_size: f32,
+}
+
 #[cfg(test)]
 pub(crate) fn build_single_session_vertices(
     app: &SingleSessionApp,
@@ -235,6 +250,110 @@ pub(crate) fn welcome_hero_reveal_progress_for_elapsed(elapsed: Duration) -> f32
     FIRST_INK_PROGRESS + (1.0 - FIRST_INK_PROGRESS) * eased
 }
 
+pub(crate) fn welcome_hero_runtime_mask_supported(phrase: &str) -> bool {
+    phrase.trim().eq_ignore_ascii_case("Hello there")
+}
+
+pub(crate) fn welcome_hero_runtime_mask_rect(
+    size: PhysicalSize<u32>,
+    ui_scale: f32,
+    y_offset: f32,
+) -> Rect {
+    let (hero_min, hero_max) = glyph_welcome_hero_bounds(size, ui_scale);
+    Rect {
+        x: hero_min[0],
+        y: hero_min[1] + y_offset,
+        width: (hero_max[0] - hero_min[0]).max(1.0),
+        height: (hero_max[1] - hero_min[1]).max(1.0),
+    }
+}
+
+pub(crate) fn welcome_hero_runtime_font_size(size: PhysicalSize<u32>, ui_scale: f32) -> f32 {
+    glyph_welcome_hero_font_size(size, ui_scale)
+}
+
+pub(crate) fn welcome_hero_runtime_mask_spec_for_total_lines(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    smooth_scroll_lines: f32,
+    total_lines: usize,
+) -> Option<WelcomeHeroRuntimeMaskSpec> {
+    let y_offset = welcome_timeline_visual_offset_pixels_for_total_lines(
+        app,
+        size,
+        smooth_scroll_lines,
+        total_lines,
+    );
+    if !welcome_timeline_chrome_visible(app, size, y_offset) {
+        return None;
+    }
+    welcome_hero_runtime_mask_spec_for_phrase(
+        &app.welcome_hero_text(),
+        size,
+        app.text_scale(),
+        y_offset,
+    )
+}
+
+pub(crate) fn welcome_hero_runtime_mask_spec_for_phrase(
+    phrase: &str,
+    size: PhysicalSize<u32>,
+    ui_scale: f32,
+    y_offset: f32,
+) -> Option<WelcomeHeroRuntimeMaskSpec> {
+    if !welcome_hero_runtime_mask_supported(phrase) {
+        return None;
+    }
+    Some(WelcomeHeroRuntimeMaskSpec {
+        phrase: phrase.to_string(),
+        rect: welcome_hero_runtime_mask_rect(size, ui_scale, y_offset),
+        font_size: welcome_hero_runtime_font_size(size, ui_scale),
+    })
+}
+
+pub(crate) fn welcome_hero_normalized_stroke_segments(
+    phrase: &str,
+) -> Vec<WelcomeHeroStrokeSegment> {
+    let paths = handwritten_welcome_paths_for_phrase(phrase);
+    let total_length = stroke_paths_length(&paths);
+    if total_length <= 0.001 {
+        return Vec::new();
+    }
+
+    let (source_min, source_max) = stroke_paths_bounds(&paths);
+    let source_width = (source_max[0] - source_min[0]).max(0.001);
+    let source_height = (source_max[1] - source_min[1]).max(0.001);
+    let normalize = |point: [f32; 2]| -> [f32; 2] {
+        [
+            ((point[0] - source_min[0]) / source_width).clamp(0.0, 1.0),
+            ((point[1] - source_min[1]) / source_height).clamp(0.0, 1.0),
+        ]
+    };
+
+    let mut cursor = 0.0;
+    let mut segments = Vec::new();
+    for path in &paths {
+        for pair in path.windows(2) {
+            let start = pair[0];
+            let end = pair[1];
+            let segment_length = distance(start, end);
+            if segment_length <= 0.001 {
+                continue;
+            }
+            let start_progress = cursor / total_length;
+            cursor += segment_length;
+            let end_progress = (cursor / total_length).clamp(start_progress, 1.0);
+            segments.push(WelcomeHeroStrokeSegment {
+                start: normalize(start),
+                end: normalize(end),
+                start_progress,
+                end_progress,
+            });
+        }
+    }
+    segments
+}
+
 pub(crate) fn welcome_hero_reveal_is_active(progress: f32) -> bool {
     progress < 0.999
 }
@@ -386,6 +505,10 @@ fn push_handwritten_welcome_hero_with_offset(
 
     let progress = reveal_progress.clamp(0.0, 1.0);
     if !welcome_hero_reveal_is_active(progress) {
+        return;
+    }
+
+    if welcome_hero_runtime_mask_supported(phrase) {
         return;
     }
 
@@ -5373,6 +5496,7 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
         welcome_chrome_offset_pixels,
         welcome_status_lane_visible(app),
         app.text_scale(),
+        welcome_hero_runtime_mask_supported(&app.welcome_hero_text()),
         1.0,
     )
 }
@@ -5445,32 +5569,9 @@ pub(crate) fn single_session_text_areas_for_app_with_cached_body_viewport_and_re
         welcome_chrome_offset_pixels,
         welcome_status_lane_visible(app),
         app.text_scale(),
+        welcome_hero_runtime_mask_supported(&app.welcome_hero_text()),
         welcome_hero_reveal_progress,
     )
-}
-
-pub(crate) fn single_session_hero_font_target_text_areas<'a>(
-    buffers: &'a [Buffer],
-    size: PhysicalSize<u32>,
-    ui_scale: f32,
-) -> Vec<TextArea<'a>> {
-    let Some(hero_buffer) = buffers.get(6) else {
-        return Vec::new();
-    };
-    let (hero_min, hero_max) = glyph_welcome_hero_bounds(size, ui_scale);
-    vec![TextArea {
-        buffer: hero_buffer,
-        left: hero_min[0],
-        top: hero_min[1],
-        scale: 1.0,
-        bounds: TextBounds {
-            left: hero_min[0] as i32,
-            top: hero_min[1] as i32,
-            right: hero_max[0].ceil() as i32,
-            bottom: hero_max[1].ceil() as i32,
-        },
-        default_color: text_color(WELCOME_HANDWRITING_COLOR),
-    }]
 }
 
 pub(crate) fn single_session_streaming_text_area_for_cached_body_viewport<'a>(
@@ -5522,6 +5623,7 @@ pub(crate) fn single_session_text_areas_for_fresh_state(
         0.0,
         false,
         1.0,
+        false,
         1.0,
     )
 }
@@ -5546,6 +5648,7 @@ pub(crate) fn single_session_text_areas_for_state(
     welcome_chrome_offset_pixels: f32,
     status_lane_visible: bool,
     ui_scale: f32,
+    welcome_hero_runtime_mask_available: bool,
     welcome_hero_reveal_progress: f32,
 ) -> Vec<TextArea<'_>> {
     if buffers.len() < 5 {
@@ -5688,6 +5791,7 @@ pub(crate) fn single_session_text_areas_for_state(
     });
 
     if welcome_chrome_visible
+        && !welcome_hero_runtime_mask_available
         && !welcome_hero_reveal_is_active(welcome_hero_reveal_progress)
         && let Some(hero_buffer) = buffers.get(6)
     {
