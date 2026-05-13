@@ -968,7 +968,6 @@ fn update_state_from_collection(
             for thread in threads {
                 let previous = state.last_seen.review_threads.get(&thread.id);
                 let body_hash = thread.body.as_ref().map(|body| stable_body_hash(body));
-                let is_new = previous.is_none();
                 let has_new_reply = previous
                     .and_then(|marker| marker.body_hash.as_ref())
                     .zip(body_hash.as_ref())
@@ -985,7 +984,7 @@ fn update_state_from_collection(
                         url: thread.url.clone(),
                     },
                 );
-                if (is_new || has_new_reply) && !thread.is_resolved && !thread.is_outdated {
+                if !thread.is_resolved && !thread.is_outdated {
                     pending_actionable.push(ActionableItem {
                         id: thread.id,
                         surface: "review_threads".to_string(),
@@ -1718,7 +1717,8 @@ mod tests {
             }]),
         };
         update_state_from_collection(&mut state, collection, "2026-05-13T18:05:00Z");
-        assert!(state.pending_actionable.is_empty());
+        assert_eq!(state.pending_actionable.len(), 1);
+        assert_eq!(state.pending_actionable[0].id, "THREAD_BASE");
     }
     #[test]
     fn unresolved_review_threads_are_actionable_and_resolved_are_not() {

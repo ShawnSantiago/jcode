@@ -843,9 +843,13 @@ pub fn parse_gh_checks(stdout: &str) -> Result<Vec<CheckRunState>, GhParseError>
                     .and_then(|o| string_field(o, "name"))
                     .or_else(|| obj.and_then(|o| string_field(o, "context")))
                     .unwrap_or_else(|| format!("check-{idx}")),
-                status: obj.and_then(|o| string_field(o, "status")),
+                status: obj
+                    .and_then(|o| string_field(o, "status"))
+                    .or_else(|| obj.and_then(|o| string_field(o, "bucket")))
+                    .or_else(|| obj.and_then(|o| string_field(o, "state"))),
                 conclusion: obj
                     .and_then(|o| string_field(o, "conclusion"))
+                    .or_else(|| obj.and_then(|o| string_field(o, "bucket")))
                     .or_else(|| obj.and_then(|o| string_field(o, "state"))),
                 url: obj
                     .and_then(|o| string_field(o, "detailsUrl"))
