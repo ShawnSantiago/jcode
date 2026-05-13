@@ -5,7 +5,7 @@ use chrono::Utc;
 use jcode_pr_watch_core::{
     ActionableItem, CheckRunState, CycleOutcome, Marker, PrTarget, PrWatchState, SurfaceError,
     WatchEvent, normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments,
-    parse_gh_pr_view, parse_gh_review_comments, parse_gh_reviews,
+    parse_gh_pr_view, parse_gh_review_comments, parse_gh_review_threads, parse_gh_reviews,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -200,6 +200,8 @@ fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
             .and_then(|stdout| parse_gh_issue_comments(&stdout).map_err(|err| SurfaceError::transient("issue_comments", err.to_string()))),
         reviews: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/reviews"), "--paginate"])
             .and_then(|stdout| parse_gh_reviews(&stdout).map_err(|err| SurfaceError::transient("reviews", err.to_string()))),
+        review_threads: run_gh_graphql_review_threads(root, repo, pr)
+            .and_then(|stdout| parse_gh_review_threads(&stdout).map_err(|err| SurfaceError::transient("review_threads", err.to_string()))),
     }
 }
 
@@ -210,6 +212,55 @@ struct GhCollection {
     review_comments: Result<Vec<jcode_pr_watch_core::ReviewComment>, SurfaceError>,
     issue_comments: Result<Vec<jcode_pr_watch_core::IssueComment>, SurfaceError>,
     reviews: Result<Vec<jcode_pr_watch_core::Review>, SurfaceError>,
+    review_threads: Result<Vec<jcode_pr_watch_core::ReviewThread>, SurfaceError>,
+}
+
+fn run_gh_graphql_review_threads(root: &Path, repo: &str, pr: u64) -> Result<String, SurfaceError> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| SurfaceError::permanent("review_threads", "repo must be owner/name"))?;
+    let pr_s = pr.to_string();
+    let query = r#"
+query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          comments(first:1) {
+            nodes {
+              path
+              line
+              url
+              body
+              createdAt
+              updatedAt
+              author { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+    run_gh(
+        root,
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("name={name}"),
+            "-F",
+            &format!("number={pr_s}"),
+            "-f",
+            &format!("query={query}"),
+        ],
+    )
 }
 
 fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
@@ -240,6 +291,7 @@ fn update_state_from_collection(
         "review_comments".to_string(),
         "issue_comments".to_string(),
         "reviews".to_string(),
+        "review_threads".to_string(),
     ];
     state.last_cycle.surface_counts = BTreeMap::new();
 
@@ -364,6 +416,53 @@ fn update_state_from_collection(
                         url: comment.url,
                         path: None,
                         status: Some("new".to_string()),
+                    });
+                }
+            }
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    match collection.review_threads {
+        Ok(threads) => {
+            state
+                .last_cycle
+                .surface_counts
+                .insert("review_threads".to_string(), threads.len());
+            state
+                .last_successful_fetch
+                .insert("review_threads".to_string(), collected_at.to_string());
+            state.baseline.unresolved_thread_ids = threads
+                .iter()
+                .filter(|thread| !thread.is_resolved && !thread.is_outdated)
+                .map(|thread| thread.id.clone())
+                .collect();
+            for thread in threads {
+                let is_new = !state.last_seen.review_threads.contains_key(&thread.id);
+                state.last_seen.review_threads.insert(
+                    thread.id.clone(),
+                    jcode_pr_watch_core::ReviewThreadMarker {
+                        id: thread.id.clone(),
+                        updated_at: thread.updated_at.clone(),
+                        resolved: thread.is_resolved,
+                        outdated: thread.is_outdated,
+                        body_hash: thread.body.as_ref().map(|body| stable_body_hash(body)),
+                        url: thread.url.clone(),
+                    },
+                );
+                if is_new && !thread.is_resolved && !thread.is_outdated {
+                    pending_actionable.push(ActionableItem {
+                        id: thread.id,
+                        surface: "review_threads".to_string(),
+                        summary: thread
+                            .body
+                            .unwrap_or_else(|| "Unresolved review thread".to_string()),
+                        url: thread.url,
+                        path: thread.path,
+                        status: Some("unresolved".to_string()),
                     });
                 }
             }
@@ -707,6 +806,7 @@ mod tests {
             }]),
             issue_comments: Err(SurfaceError::transient("issue_comments", "timeout")),
             reviews: Ok(Vec::new()),
+            review_threads: Ok(Vec::new()),
         };
         let outcome = update_state_from_collection(&mut state, collection, "2026-05-13T17:00:00Z");
         assert!(outcome.partial_failure);
@@ -724,6 +824,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unresolved_review_threads_are_actionable_and_resolved_are_not() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 10,
+        });
+        let collection = GhCollection {
+            metadata: Err(SurfaceError::transient("metadata", "skip")),
+            checks: Ok(Vec::new()),
+            review_comments: Ok(Vec::new()),
+            issue_comments: Ok(Vec::new()),
+            reviews: Ok(Vec::new()),
+            review_threads: Ok(vec![
+                jcode_pr_watch_core::ReviewThread {
+                    id: "THREAD_OPEN".into(),
+                    is_resolved: false,
+                    is_outdated: false,
+                    path: Some("src/lib.rs".into()),
+                    line: Some(12),
+                    url: Some("https://thread-open".into()),
+                    updated_at: Some("2026-05-13T17:00:00Z".into()),
+                    author: Some("reviewer".into()),
+                    body: Some("Please address this thread".into()),
+                },
+                jcode_pr_watch_core::ReviewThread {
+                    id: "THREAD_RESOLVED".into(),
+                    is_resolved: true,
+                    is_outdated: false,
+                    path: Some("src/lib.rs".into()),
+                    line: Some(20),
+                    url: Some("https://thread-resolved".into()),
+                    updated_at: Some("2026-05-13T17:00:00Z".into()),
+                    author: Some("reviewer".into()),
+                    body: Some("Already resolved".into()),
+                },
+            ]),
+        };
+        let outcome = update_state_from_collection(&mut state, collection, "2026-05-13T17:00:00Z");
+        assert!(outcome.partial_failure);
+        assert_eq!(state.pending_actionable.len(), 1);
+        assert_eq!(state.pending_actionable[0].id, "THREAD_OPEN");
+        assert_eq!(
+            state.baseline.unresolved_thread_ids,
+            vec!["THREAD_OPEN".to_string()]
+        );
+        assert!(state.last_seen.review_threads.contains_key("THREAD_OPEN"));
+        assert!(
+            state
+                .last_seen
+                .review_threads
+                .contains_key("THREAD_RESOLVED")
+        );
+    }
     #[test]
     fn automation_chatter_is_not_actionable() {
         assert!(is_automation_chatter(
