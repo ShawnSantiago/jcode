@@ -132,7 +132,6 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
     let mut state = PrWatchState::new(target);
     let path = state_path(store, &state.watch_id);
     apply_schedule_fields(&mut state, &params);
-    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         fs::create_dir_all(store)?;
@@ -148,6 +147,7 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
             })?;
         file.write_all(&serde_json::to_vec_pretty(&state)?)?;
     }
+    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     Ok(ToolOutput::new(format!(
         "PR watch initialized: {}\nPath: {}\nMode: local state initialized. Use poll_now for read-only gh collection{}{}",
         state.watch_id,
