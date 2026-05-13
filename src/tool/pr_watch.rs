@@ -541,8 +541,23 @@ async fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
     GhCollection {
         metadata: run_gh(root, &["pr", "view", &pr.to_string(), "--repo", repo, "--json", "url,state,baseRefName,headRefName,headRefOid,mergeStateStatus,reviewDecision,isDraft"]).await
             .and_then(|stdout| parse_gh_pr_view(repo, pr, &stdout).map_err(|err| SurfaceError::transient("metadata", err.to_string()))),
-        checks: run_gh(root, &["pr", "checks", &pr.to_string(), "--repo", repo, "--json", "name,state,event,link,bucket,workflow,description,startedAt,completedAt"]).await
-            .and_then(|stdout| parse_gh_checks(&stdout).map_err(|err| SurfaceError::transient("checks", err.to_string()))),
+        checks: run_gh_allow_exit(
+            root,
+            &[
+                "pr",
+                "checks",
+                &pr.to_string(),
+                "--repo",
+                repo,
+                "--json",
+                "name,state,event,link,bucket,workflow,description,startedAt,completedAt",
+            ],
+            &[8],
+        )
+        .await
+        .and_then(|stdout| {
+            parse_gh_checks(&stdout).map_err(|err| SurfaceError::transient("checks", err.to_string()))
+        }),
         review_comments: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/comments"), "--paginate"]).await
             .and_then(|stdout| parse_gh_review_comments(&stdout).map_err(|err| SurfaceError::transient("review_comments", err.to_string()))),
         issue_comments: run_gh(root, &["api", &format!("repos/{repo}/issues/{pr}/comments"), "--paginate"]).await
@@ -592,7 +607,8 @@ query($owner:String!, $name:String!, $number:Int!) {{
           id
           isResolved
           isOutdated
-          comments(first:20) {{
+          comments(first:100) {{
+            pageInfo {{ hasNextPage endCursor }}
             nodes {{
               path
               line
@@ -635,7 +651,10 @@ query($owner:String!, $name:String!, $number:Int!) {{
                 SurfaceError::transient("review_threads", "missing reviewThreads connection")
             })?;
         if let Some(nodes) = connection.get("nodes").and_then(Value::as_array) {
-            all_nodes.extend(nodes.iter().cloned());
+            for node in nodes {
+                let enriched = enrich_review_thread_comments(root, node.clone()).await?;
+                all_nodes.push(enriched);
+            }
         }
         let page_info = connection.get("pageInfo").unwrap_or(&Value::Null);
         if !page_info
@@ -663,14 +682,119 @@ query($owner:String!, $name:String!, $number:Int!) {{
     )
 }
 
+async fn enrich_review_thread_comments(
+    root: &Path,
+    mut thread: Value,
+) -> Result<Value, SurfaceError> {
+    let thread_id = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SurfaceError::transient("review_threads", "thread missing id"))?
+        .to_string();
+    let mut after = thread
+        .pointer("/comments/pageInfo/endCursor")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let mut has_next = thread
+        .pointer("/comments/pageInfo/hasNextPage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    while has_next {
+        let after_clause = after
+            .as_ref()
+            .map(|cursor| format!(", after:\"{}\"", cursor.replace('"', "\\\"")))
+            .unwrap_or_default();
+        let query = format!(
+            r#"
+query($threadId:ID!) {{
+  node(id:$threadId) {{
+    ... on PullRequestReviewThread {{
+      comments(first:100{after_clause}) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
+          path
+          line
+          url
+          body
+          createdAt
+          updatedAt
+          author {{ login }}
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+        );
+        let stdout = run_gh(
+            root,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("threadId={thread_id}"),
+                "-f",
+                &format!("query={query}"),
+            ],
+        )
+        .await?;
+        let page: Value = serde_json::from_str(&stdout).map_err(|err| {
+            SurfaceError::transient(
+                "review_threads",
+                format!("invalid thread comments GraphQL JSON: {err}"),
+            )
+        })?;
+        let comments = page.pointer("/data/node/comments").ok_or_else(|| {
+            SurfaceError::transient("review_threads", "missing thread comments connection")
+        })?;
+        let extra_nodes = comments
+            .get("nodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(existing) = thread
+            .pointer_mut("/comments/nodes")
+            .and_then(Value::as_array_mut)
+        {
+            existing.extend(extra_nodes);
+        }
+        let page_info = comments.get("pageInfo").unwrap_or(&Value::Null);
+        has_next = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        after = page_info
+            .get("endCursor")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        if has_next && after.is_none() {
+            return Err(SurfaceError::transient(
+                "review_threads",
+                "thread comments pageInfo indicated more pages without an endCursor",
+            ));
+        }
+    }
+    Ok(thread)
+}
+
 async fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
+    run_gh_allow_exit(root, args, &[]).await
+}
+
+async fn run_gh_allow_exit(
+    root: &Path,
+    args: &[&str],
+    allowed_nonzero_exit_codes: &[i32],
+) -> Result<String, SurfaceError> {
     let output = Command::new("gh")
         .args(args)
         .current_dir(root)
         .output()
         .await
         .map_err(|err| SurfaceError::transient("gh", format!("failed to run gh: {err}")))?;
-    if !output.status.success() {
+    let code = output.status.code().unwrap_or(-1);
+    if !output.status.success() && !allowed_nonzero_exit_codes.contains(&code) {
         return Err(SurfaceError::transient(
             "gh",
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
