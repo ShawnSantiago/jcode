@@ -346,6 +346,9 @@ impl PrWatchState {
     }
 
     pub fn readiness(&self) -> Readiness {
+        if self.terminal && self.stop_reason.as_deref() != Some("quiet_cycles_satisfied") {
+            return Readiness::BlockedByPolicy;
+        }
         if self.pr.state.as_deref() != Some("OPEN") && self.pr.state.is_some() {
             return Readiness::BlockedByClosedPr;
         }

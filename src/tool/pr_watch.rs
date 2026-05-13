@@ -199,7 +199,7 @@ fn maybe_schedule_next(
     state: &PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
-    if !params.schedule_next || params.dry_run.unwrap_or(false) {
+    if !params.schedule_next || params.dry_run.unwrap_or(false) || state.terminal {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
@@ -553,6 +553,16 @@ async fn poll_now(
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_schedule_fields(&mut state, &params);
+    if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
+        && state.pending_actionable.is_empty()
+        && state.last_cycle.pending_check_count == 0
+        && state.last_cycle.failed_check_count == 0
+        && !outcome.partial_failure
+    {
+        state.terminal = true;
+        state.stop_reason = Some("quiet_cycles_satisfied".to_string());
+        state.polling.next_poll_at = None;
+    }
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
@@ -1486,6 +1496,8 @@ fn stop_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     state.terminal = true;
     state.stop_reason = Some("stopped_by_pr_watch_tool".to_string());
+    state.polling.next_poll_at = None;
+    state.last_cycle.status = jcode_pr_watch_core::CycleStatus::Stopped;
     let path = state_path(store, &state.watch_id);
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
