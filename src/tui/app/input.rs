@@ -372,10 +372,48 @@ mod tests {
     }
 
     #[test]
-    fn text_input_for_shifted_symbol_preserves_layout_translated_char() {
+    fn shifted_printable_fallback_does_not_synthesize_us_symbol_layout() {
+        assert_eq!(shifted_printable_fallback('7', KeyModifiers::SHIFT), '7');
+        assert_eq!(shifted_printable_fallback('8', KeyModifiers::SHIFT), '8');
+        assert_eq!(shifted_printable_fallback('=', KeyModifiers::SHIFT), '=');
+    }
+
+    #[test]
+    fn text_input_for_shifted_symbols_preserves_layout_translated_char() {
+        for c in ['/', '?', '(', ')', '&', '=', '"'] {
+            assert_eq!(
+                text_input_for_key(KeyCode::Char(c), KeyModifiers::SHIFT),
+                Some(c.to_string()),
+                "shifted {c:?} should be treated as terminal/layout-translated text"
+            );
+        }
+    }
+
+    #[test]
+    fn text_input_for_altgr_symbols_preserves_layout_translated_char() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+
+        for c in ['@', '{', '}', '\\', '€', 'ą'] {
+            assert_eq!(
+                text_input_for_key(KeyCode::Char(c), altgr),
+                Some(c.to_string()),
+                "AltGr-style {c:?} should be treated as terminal/layout-translated text"
+            );
+        }
+    }
+
+    #[test]
+    fn text_input_for_control_shortcut_letters_stays_non_text() {
         assert_eq!(
-            text_input_for_key(KeyCode::Char('/'), KeyModifiers::SHIFT),
-            Some("/".to_string())
+            text_input_for_key(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ),
+            None
+        );
+        assert_eq!(
+            text_input_for_key(KeyCode::Char('@'), KeyModifiers::CONTROL),
+            None
         );
     }
 }
@@ -565,17 +603,37 @@ pub(super) fn text_input_for_key_event(event: &KeyEvent) -> Option<String> {
 }
 
 pub(super) fn text_input_for_key(code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
-    if modifiers.intersects(
-        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER,
-    ) {
-        return None;
-    }
-
     let KeyCode::Char(c) = code else {
         return None;
     };
 
+    if !modifiers_allow_printable_text(c, modifiers) {
+        return None;
+    }
+
     Some(shifted_printable_fallback(c, modifiers).to_string())
+}
+
+fn modifiers_allow_printable_text(c: char, modifiers: KeyModifiers) -> bool {
+    if modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+        return false;
+    }
+
+    let has_control = modifiers.contains(KeyModifiers::CONTROL);
+    let has_alt = modifiers.contains(KeyModifiers::ALT);
+    match (has_control, has_alt) {
+        (false, false) => true,
+        // Some terminals report AltGr/layout-generated symbols as Ctrl+Alt plus the final
+        // printable character. Preserve that character when it cannot be confused with normal
+        // Ctrl/Alt letter shortcuts. If the terminal only reports the physical base key, we still
+        // refuse to synthesize a layout-specific character we cannot know.
+        (_, true) => is_layout_modified_text_char(c),
+        (true, false) => false,
+    }
+}
+
+fn is_layout_modified_text_char(c: char) -> bool {
+    !c.is_control() && c != ' ' && !c.is_ascii_alphanumeric()
 }
 
 fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
@@ -1544,13 +1602,14 @@ impl App {
             }
         }
 
-        // Never fall through and insert literal text for unhandled Ctrl+key chords.
-        if modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
+            handle_text_input(self, &text);
             return Ok(());
         }
 
-        if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
-            handle_text_input(self, &text);
+        // Never fall through and insert literal text for unhandled Ctrl+key chords. This stays
+        // after text_input so Ctrl+Alt/AltGr symbols delivered as final printable text still work.
+        if modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(());
         }
 

@@ -539,7 +539,7 @@ fn test_remote_typing_resumes_bottom_follow_mode() {
 }
 
 #[test]
-fn test_remote_shift_slash_inserts_question_mark() {
+fn test_remote_shift_slash_preserves_layout_translated_slash() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -548,12 +548,12 @@ fn test_remote_shift_slash_inserts_question_mark() {
     rt.block_on(app.handle_remote_key(KeyCode::Char('/'), KeyModifiers::SHIFT, &mut remote))
         .unwrap();
 
-    assert_eq!(app.input(), "?");
+    assert_eq!(app.input(), "/");
     assert_eq!(app.cursor_pos(), 1);
 }
 
 #[test]
-fn test_remote_key_event_shift_slash_inserts_question_mark() {
+fn test_remote_key_event_shift_slash_preserves_layout_translated_slash() {
     use crossterm::event::{KeyEvent, KeyEventKind};
 
     let mut app = create_test_app();
@@ -568,7 +568,25 @@ fn test_remote_key_event_shift_slash_inserts_question_mark() {
     ))
     .unwrap();
 
-    assert_eq!(app.input(), "?");
+    assert_eq!(app.input(), "/");
+    assert_eq!(app.cursor_pos(), 1);
+}
+
+#[test]
+fn test_remote_control_alt_symbol_inserts_layout_translated_text() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(
+        KeyCode::Char('@'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+        &mut remote,
+    ))
+    .unwrap();
+
+    assert_eq!(app.input(), "@");
     assert_eq!(app.cursor_pos(), 1);
 }
 

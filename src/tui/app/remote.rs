@@ -1161,14 +1161,15 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    // Never fall through and insert literal text for unhandled Ctrl+key chords.
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        return Ok(());
-    }
-
     if let Some(text) = text_input.or_else(|| input::text_input_for_key(code, modifiers)) {
         input::handle_text_input(app, &text);
         app.follow_chat_bottom_for_typing();
+        return Ok(());
+    }
+
+    // Never fall through and insert literal text for unhandled Ctrl+key chords. This stays after
+    // text_input so Ctrl+Alt/AltGr symbols delivered as final printable text still work.
+    if modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(());
     }
 

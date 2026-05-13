@@ -73,9 +73,9 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 /// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
 /// terminals such as kitty/Alacritty/Warp can report printable keys as a base key plus
 /// modifiers instead of the final text produced by the active keyboard layout. Crossterm does
-/// not yet expose kitty's associated text / alternate key data, so our printable fallback would
-/// reconstruct characters using a US-centric shift map and break international layouts (for
-/// example German macOS keyboards).
+/// not yet expose kitty's associated text / alternate key data, so we cannot safely reconstruct
+/// shifted symbols for every keyboard layout. Prefer the terminal-delivered printable character
+/// and only synthesize ASCII letter casing in the input fallback.
 ///
 /// Returns true if successfully enabled, false if the terminal doesn't support it.
 pub fn enable_keyboard_enhancement() -> bool {
