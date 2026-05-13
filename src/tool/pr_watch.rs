@@ -899,18 +899,25 @@ fn update_state_from_collection(
                 .last_successful_fetch
                 .insert("review_comments".to_string(), collected_at.to_string());
             for comment in comments {
-                let is_new = !state.last_seen.review_comments.contains_key(&comment.id);
+                let previous = state.last_seen.review_comments.get(&comment.id);
+                let body_hash = comment.body.as_ref().map(|body| stable_body_hash(body));
+                let is_new = previous.is_none();
+                let is_edited = previous
+                    .map(|marker| {
+                        marker.updated_at != comment.updated_at || marker.body_hash != body_hash
+                    })
+                    .unwrap_or(false);
                 state.last_seen.review_comments.insert(
                     comment.id.clone(),
                     Marker {
                         id: comment.id.clone(),
                         updated_at: comment.updated_at.clone(),
                         author: comment.author.clone(),
-                        body_hash: comment.body.as_ref().map(|body| stable_body_hash(body)),
+                        body_hash,
                         url: comment.url.clone(),
                     },
                 );
-                if is_new
+                if (is_new || is_edited)
                     && !is_automation_chatter(comment.author.as_deref(), comment.body.as_deref())
                 {
                     pending_actionable.push(ActionableItem {
@@ -921,7 +928,7 @@ fn update_state_from_collection(
                             .unwrap_or_else(|| "New review comment".to_string()),
                         url: comment.url,
                         path: comment.path,
-                        status: Some("new".to_string()),
+                        status: Some(if is_edited { "edited" } else { "new" }.to_string()),
                     });
                 }
             }
@@ -942,18 +949,25 @@ fn update_state_from_collection(
                 .last_successful_fetch
                 .insert("issue_comments".to_string(), collected_at.to_string());
             for comment in comments {
-                let is_new = !state.last_seen.issue_comments.contains_key(&comment.id);
+                let previous = state.last_seen.issue_comments.get(&comment.id);
+                let body_hash = comment.body.as_ref().map(|body| stable_body_hash(body));
+                let is_new = previous.is_none();
+                let is_edited = previous
+                    .map(|marker| {
+                        marker.updated_at != comment.updated_at || marker.body_hash != body_hash
+                    })
+                    .unwrap_or(false);
                 state.last_seen.issue_comments.insert(
                     comment.id.clone(),
                     Marker {
                         id: comment.id.clone(),
                         updated_at: comment.updated_at.clone(),
                         author: comment.author.clone(),
-                        body_hash: comment.body.as_ref().map(|body| stable_body_hash(body)),
+                        body_hash,
                         url: comment.url.clone(),
                     },
                 );
-                if is_new
+                if (is_new || is_edited)
                     && !is_automation_chatter(comment.author.as_deref(), comment.body.as_deref())
                 {
                     pending_actionable.push(ActionableItem {
@@ -964,7 +978,7 @@ fn update_state_from_collection(
                             .unwrap_or_else(|| "New issue comment".to_string()),
                         url: comment.url,
                         path: None,
-                        status: Some("new".to_string()),
+                        status: Some(if is_edited { "edited" } else { "new" }.to_string()),
                     });
                 }
             }
@@ -1166,17 +1180,12 @@ fn is_failed_check(check: &CheckRunState) -> bool {
     )
 }
 
-fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
-    let author = author.unwrap_or_default().to_ascii_lowercase();
+fn is_automation_chatter(_author: Option<&str>, body: Option<&str>) -> bool {
     let body = body.unwrap_or_default().to_ascii_lowercase();
-    author.ends_with("[bot]")
-        || matches!(
-            author.as_str(),
-            "github-actions" | "claude" | "codex" | "gemini-code-assist"
-        )
-        || body.starts_with("fix-summary:")
+    body.starts_with("fix-summary:")
         || body.contains("triggered the review bot")
         || body.contains("automation progress")
+        || body.contains("<!-- jcode-pr-watch-ignore -->")
 }
 
 fn stable_body_hash(body: &str) -> String {
@@ -1802,7 +1811,7 @@ mod tests {
     }
     #[test]
     fn automation_chatter_is_not_actionable() {
-        assert!(is_automation_chatter(
+        assert!(!is_automation_chatter(
             Some("github-actions[bot]"),
             Some("Progress update")
         ));

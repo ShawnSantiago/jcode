@@ -363,6 +363,12 @@ impl PrWatchState {
         if self.last_cycle.pending_check_count > 0 {
             return Readiness::NotReadyChecksPending;
         }
+        if matches!(
+            self.pr.merge_state.as_deref(),
+            Some("DIRTY" | "BLOCKED" | "UNKNOWN" | "UNSTABLE" | "HAS_HOOKS" | "BEHIND")
+        ) {
+            return Readiness::BlockedByPolicy;
+        }
         if self.polling.quiet_cycles >= self.polling.required_quiet_cycles {
             return Readiness::ReadyForHumanMerge;
         }
