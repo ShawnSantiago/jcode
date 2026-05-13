@@ -150,16 +150,33 @@ pub fn build_control_master_script(profile: &SshRemoteProfile) -> Result<String>
     Ok(format!(
         r#"printf '%s\n' 'Jcode SSH login for {name}'
 printf '%s\n' 'Type your SSH password here if prompted. Jcode will not see or store it.'
-printf '%s\n' 'After login succeeds, SSH will move into the background and this terminal can close.'
+printf '%s\n' 'After login succeeds, Jcode verifies the SSH control socket before this terminal closes.'
+printf '%s\n' 'If verification fails, this terminal will stay open so you can read the error.'
 ssh -f -M -S {socket} -N {target}
 status=$?
-if [ $status -eq 0 ]; then
-  printf '%s\n' 'Connected. You can close this terminal.'
-else
-  printf '%s\n' 'SSH connection failed. Check your username, host, password, or school VPN.'
+if [ $status -ne 0 ]; then
+  printf '%s\n' 'SSH connection failed. Check your username, host, password, school VPN, or two-factor prompt.'
+  printf '%s' 'Press Enter to close this terminal... '
+  read _
+  exit $status
 fi
-sleep 3
-exit $status
+
+printf '%s\n' 'SSH accepted the login. Verifying background connection...'
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if ssh -S {socket} -O check {target} >/dev/null 2>&1; then
+    printf '%s\n' 'Connected and verified. Jcode can now use this SSH connection headlessly.'
+    sleep 1
+    exit 0
+  fi
+  sleep 1
+done
+
+printf '%s\n' 'SSH login appeared to succeed, but Jcode could not verify the background control socket.'
+printf '%s\n' 'This can happen if the server disallows SSH multiplexing or the connection closed immediately.'
+printf '%s\n' 'The terminal is staying open so you can read this message.'
+printf '%s' 'Press Enter to close this terminal... '
+read _
+exit 1
 "#,
         name = shell_single_quote(&profile.name),
         socket = shell_single_quote(&socket.to_string_lossy()),
@@ -193,5 +210,21 @@ mod tests {
             "alice_login.school.edu"
         );
         assert_eq!(sanitize_profile_name("!!!"), "remote");
+    }
+
+    #[test]
+    fn control_master_script_waits_for_verified_socket_before_closing() {
+        let profile = SshRemoteProfile {
+            name: "school".to_string(),
+            ssh_target: "alice@login.school.edu".to_string(),
+            workspace: "~".to_string(),
+        };
+
+        let script = build_control_master_script(&profile).unwrap();
+        assert!(script.contains("Verifying background connection"));
+        assert!(script.contains("ssh -S"));
+        assert!(script.contains("-O check"));
+        assert!(script.contains("Press Enter to close this terminal"));
+        assert!(script.contains("Jcode will not see or store it"));
     }
 }
