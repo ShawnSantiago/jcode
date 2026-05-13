@@ -12,8 +12,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::process::Command;
 
 pub struct PrWatchTool;
 
@@ -58,7 +60,7 @@ impl Tool for PrWatchTool {
     }
 
     fn description(&self) -> &str {
-        "Read-only PR feedback watch state. Start a local watch state, list watches, show status, or compute readiness. No GitHub network calls, scheduling, pushes, comments, thread resolution, or merges are performed in this phase."
+        "PR feedback watch state. Start a local watch, run read-only gh collection, schedule follow-up polls, list watches, show status, or compute readiness. No pushes, comments, thread resolution, or merges are performed."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -93,8 +95,8 @@ impl Tool for PrWatchTool {
         match params.action {
             PrWatchAction::Start => start_watch(&store, params, &ctx),
             PrWatchAction::List => list_watches(&store),
-            PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx),
-            PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx),
+            PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx).await,
+            PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx).await,
             PrWatchAction::Status => status_like(&store, params),
             PrWatchAction::Readiness => readiness_report(&store, params),
             PrWatchAction::Handoff => handoff_report(&store, params),
@@ -109,6 +111,14 @@ fn watch_dir(root: &Path) -> PathBuf {
 
 fn state_path(store: &Path, watch_id: &str) -> PathBuf {
     store.join(format!("{watch_id}-state.json"))
+}
+
+fn write_state_atomic(path: &Path, state: &PrWatchState) -> Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, serde_json::to_vec_pretty(state)?)?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to atomically replace {}", path.display()))?;
+    Ok(())
 }
 
 fn target_from_params(params: &PrWatchInput) -> Result<PrTarget> {
@@ -126,10 +136,17 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         fs::create_dir_all(store)?;
-        if path.exists() {
-            bail!("watch state already exists: {}", path.display());
-        }
-        fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "watch state already exists or cannot be created: {}",
+                    path.display()
+                )
+            })?;
+        file.write_all(&serde_json::to_vec_pretty(&state)?)?;
     }
     Ok(ToolOutput::new(format!(
         "PR watch initialized: {}\nPath: {}\nMode: local state initialized. Use poll_now for read-only gh collection{}{}",
@@ -233,7 +250,7 @@ fn scheduled_poll_prompt(state: &PrWatchState) -> String {
     )
 }
 
-fn ack_baseline(
+async fn ack_baseline(
     root: &Path,
     store: &Path,
     params: PrWatchInput,
@@ -242,13 +259,13 @@ fn ack_baseline(
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
     let collected_at = now_iso();
-    let collection = collect_with_gh(root, &state.pr.repo, state.pr.number);
+    let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
     apply_schedule_fields(&mut state, &params);
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
-        fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
+        write_state_atomic(&path, &state)?;
     }
     let text = format!(
         "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}{}",
@@ -473,7 +490,7 @@ fn apply_baseline_from_collection(
     partial_failure
 }
 
-fn poll_now(
+async fn poll_now(
     root: &Path,
     store: &Path,
     params: PrWatchInput,
@@ -482,13 +499,13 @@ fn poll_now(
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
     let collected_at = now_iso();
-    let result = collect_with_gh(root, &state.pr.repo, state.pr.number);
+    let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_schedule_fields(&mut state, &params);
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
-        fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
+        write_state_atomic(&path, &state)?;
     }
     let readiness = state.readiness();
     let text = format!(
@@ -520,19 +537,19 @@ fn poll_now(
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": would_write})))
 }
 
-fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
+async fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
     GhCollection {
-        metadata: run_gh(root, &["pr", "view", &pr.to_string(), "--repo", repo, "--json", "url,state,baseRefName,headRefName,headRefOid,mergeStateStatus,reviewDecision,isDraft"])
+        metadata: run_gh(root, &["pr", "view", &pr.to_string(), "--repo", repo, "--json", "url,state,baseRefName,headRefName,headRefOid,mergeStateStatus,reviewDecision,isDraft"]).await
             .and_then(|stdout| parse_gh_pr_view(repo, pr, &stdout).map_err(|err| SurfaceError::transient("metadata", err.to_string()))),
-        checks: run_gh(root, &["pr", "checks", &pr.to_string(), "--repo", repo, "--json", "name,status,conclusion,detailsUrl"])
+        checks: run_gh(root, &["pr", "checks", &pr.to_string(), "--repo", repo, "--json", "name,state,event,link,bucket,workflow,description,startedAt,completedAt"]).await
             .and_then(|stdout| parse_gh_checks(&stdout).map_err(|err| SurfaceError::transient("checks", err.to_string()))),
-        review_comments: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/comments"), "--paginate"])
+        review_comments: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/comments"), "--paginate"]).await
             .and_then(|stdout| parse_gh_review_comments(&stdout).map_err(|err| SurfaceError::transient("review_comments", err.to_string()))),
-        issue_comments: run_gh(root, &["api", &format!("repos/{repo}/issues/{pr}/comments"), "--paginate"])
+        issue_comments: run_gh(root, &["api", &format!("repos/{repo}/issues/{pr}/comments"), "--paginate"]).await
             .and_then(|stdout| parse_gh_issue_comments(&stdout).map_err(|err| SurfaceError::transient("issue_comments", err.to_string()))),
-        reviews: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/reviews"), "--paginate"])
+        reviews: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/reviews"), "--paginate"]).await
             .and_then(|stdout| parse_gh_reviews(&stdout).map_err(|err| SurfaceError::transient("reviews", err.to_string()))),
-        review_threads: run_gh_graphql_review_threads(root, repo, pr)
+        review_threads: run_gh_graphql_review_threads(root, repo, pr).await
             .and_then(|stdout| parse_gh_review_threads(&stdout).map_err(|err| SurfaceError::transient("review_threads", err.to_string()))),
     }
 }
@@ -547,7 +564,11 @@ struct GhCollection {
     review_threads: Result<Vec<jcode_pr_watch_core::ReviewThread>, SurfaceError>,
 }
 
-fn run_gh_graphql_review_threads(root: &Path, repo: &str, pr: u64) -> Result<String, SurfaceError> {
+async fn run_gh_graphql_review_threads(
+    root: &Path,
+    repo: &str,
+    pr: u64,
+) -> Result<String, SurfaceError> {
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| SurfaceError::permanent("review_threads", "repo must be owner/name"))?;
@@ -557,11 +578,12 @@ query($owner:String!, $name:String!, $number:Int!) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
       reviewThreads(first:100) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
           isOutdated
-          comments(first:1) {
+          comments(first:20) {
             nodes {
               path
               line
@@ -578,7 +600,7 @@ query($owner:String!, $name:String!, $number:Int!) {
   }
 }
 "#;
-    run_gh(
+    let stdout = run_gh(
         root,
         &[
             "api",
@@ -593,13 +615,22 @@ query($owner:String!, $name:String!, $number:Int!) {
             &format!("query={query}"),
         ],
     )
+    .await?;
+    if stdout.contains(r#"\"hasNextPage\":true"#) {
+        return Err(SurfaceError::transient(
+            "review_threads",
+            "more than 100 review threads present; pagination is not yet exhausted",
+        ));
+    }
+    Ok(stdout)
 }
 
-fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
+async fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
     let output = Command::new("gh")
         .args(args)
         .current_dir(root)
         .output()
+        .await
         .map_err(|err| SurfaceError::transient("gh", format!("failed to run gh: {err}")))?;
     if !output.status.success() {
         return Err(SurfaceError::transient(
@@ -773,7 +804,14 @@ fn update_state_from_collection(
                 .map(|thread| thread.id.clone())
                 .collect();
             for thread in threads {
-                let is_new = !state.last_seen.review_threads.contains_key(&thread.id);
+                let previous = state.last_seen.review_threads.get(&thread.id);
+                let body_hash = thread.body.as_ref().map(|body| stable_body_hash(body));
+                let is_new = previous.is_none();
+                let has_new_reply = previous
+                    .and_then(|marker| marker.body_hash.as_ref())
+                    .zip(body_hash.as_ref())
+                    .map(|(old, new)| old != new)
+                    .unwrap_or(false);
                 state.last_seen.review_threads.insert(
                     thread.id.clone(),
                     jcode_pr_watch_core::ReviewThreadMarker {
@@ -781,11 +819,11 @@ fn update_state_from_collection(
                         updated_at: thread.updated_at.clone(),
                         resolved: thread.is_resolved,
                         outdated: thread.is_outdated,
-                        body_hash: thread.body.as_ref().map(|body| stable_body_hash(body)),
+                        body_hash,
                         url: thread.url.clone(),
                     },
                 );
-                if is_new && !thread.is_resolved && !thread.is_outdated {
+                if (is_new || has_new_reply) && !thread.is_resolved && !thread.is_outdated {
                     pending_actionable.push(ActionableItem {
                         id: thread.id,
                         surface: "review_threads".to_string(),
@@ -794,7 +832,14 @@ fn update_state_from_collection(
                             .unwrap_or_else(|| "Unresolved review thread".to_string()),
                         url: thread.url,
                         path: thread.path,
-                        status: Some("unresolved".to_string()),
+                        status: Some(
+                            if has_new_reply {
+                                "new_reply"
+                            } else {
+                                "unresolved"
+                            }
+                            .to_string(),
+                        ),
                     });
                 }
             }
@@ -947,10 +992,12 @@ fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
 }
 
 fn stable_body_hash(body: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    body.hash(&mut hasher);
-    format!("hash:{:016x}", hasher.finish())
+    let mut hasher = 0xcbf29ce484222325u64;
+    for byte in body.as_bytes() {
+        hasher ^= u64::from(*byte);
+        hasher = hasher.wrapping_mul(0x100000001b3);
+    }
+    format!("hash:{:016x}", hasher)
 }
 
 fn now_iso() -> String {

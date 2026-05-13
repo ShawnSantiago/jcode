@@ -13,8 +13,25 @@ pub struct PrTarget {
 
 impl PrTarget {
     pub fn watch_id(&self) -> String {
-        format!("{}-pr-{}", self.repo.replace('/', "-"), self.number)
+        format!(
+            "{}-pr-{}",
+            escape_watch_id_component(&self.repo),
+            self.number
+        )
     }
+}
+
+fn escape_watch_id_component(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                escaped.push(byte as char);
+            }
+            _ => escaped.push_str(&format!("~{byte:02x}")),
+        }
+    }
+    escaped
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,6 +348,11 @@ impl PrWatchState {
     pub fn readiness(&self) -> Readiness {
         if self.pr.state.as_deref() != Some("OPEN") && self.pr.state.is_some() {
             return Readiness::BlockedByClosedPr;
+        }
+        if self.last_cycle.status == CycleStatus::TransientFailure
+            || self.polling.consecutive_transient_failures > 0
+        {
+            return Readiness::NotReadyValidationStale;
         }
         if !self.pending_actionable.is_empty() {
             return Readiness::NotReadyActionRequired;
@@ -916,8 +938,10 @@ pub fn parse_gh_review_threads(stdout: &str) -> Result<Vec<ReviewThread>, GhPars
         .filter_map(|thread| {
             let obj = thread.as_object()?;
             let id = string_field(obj, "id")?;
-            let first_comment = thread
-                .pointer("/comments/nodes/0")
+            let latest_comment = thread
+                .pointer("/comments/nodes")
+                .and_then(Value::as_array)
+                .and_then(|comments| comments.last())
                 .and_then(Value::as_object);
             Some(ReviewThread {
                 id,
@@ -929,14 +953,14 @@ pub fn parse_gh_review_threads(stdout: &str) -> Result<Vec<ReviewThread>, GhPars
                     .get("isOutdated")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                path: first_comment.and_then(|c| string_field(c, "path")),
-                line: first_comment.and_then(|c| c.get("line").and_then(Value::as_u64)),
-                url: first_comment.and_then(|c| string_field(c, "url")),
-                updated_at: first_comment.and_then(|c| {
+                path: latest_comment.and_then(|c| string_field(c, "path")),
+                line: latest_comment.and_then(|c| c.get("line").and_then(Value::as_u64)),
+                url: latest_comment.and_then(|c| string_field(c, "url")),
+                updated_at: latest_comment.and_then(|c| {
                     string_field(c, "updatedAt").or_else(|| string_field(c, "createdAt"))
                 }),
-                author: first_comment.and_then(|c| login_from_user(c.get("author"))),
-                body: first_comment.and_then(|c| string_field(c, "body")),
+                author: latest_comment.and_then(|c| login_from_user(c.get("author"))),
+                body: latest_comment.and_then(|c| string_field(c, "body")),
             })
         })
         .collect())
@@ -1012,7 +1036,7 @@ mod tests {
         });
         let json = serde_json::to_value(&state.policy).unwrap();
         assert!(json.get("merge").is_none());
-        assert_eq!(state.watch_id, "owner-repo-pr-7");
+        assert_eq!(state.watch_id, "owner~2frepo-pr-7");
     }
 
     #[test]
@@ -1054,7 +1078,7 @@ mod tests {
     fn v1_state_normalizes_markers_and_pr_identity() {
         let state = normalize_watch_state_json(sample_v1()).unwrap();
         assert_eq!(state.schema_version, 2);
-        assert_eq!(state.watch_id, "1jehuang-jcode-pr-188");
+        assert_eq!(state.watch_id, "1jehuang~2fjcode-pr-188");
         assert_eq!(state.pr.repo, "1jehuang/jcode");
         assert_eq!(state.pr.number, 188);
         assert_eq!(state.pr.base_ref.as_deref(), Some("master"));
@@ -1089,7 +1113,7 @@ mod tests {
         });
         assert_eq!(state.polling.quiet_cycles, 2);
         assert_eq!(state.last_cycle.status, CycleStatus::TransientFailure);
-        assert_ne!(state.readiness(), Readiness::ReadyForHumanMerge);
+        assert_eq!(state.readiness(), Readiness::NotReadyValidationStale);
     }
 
     #[test]
