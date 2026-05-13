@@ -276,7 +276,6 @@ async fn ack_baseline(
     let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
     apply_schedule_fields(&mut state, &params);
-    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
@@ -304,6 +303,7 @@ async fn ack_baseline(
         }
         write_state_atomic(&path, &state)?;
     }
+    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let text = format!(
         "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}{}",
         state.watch_id,

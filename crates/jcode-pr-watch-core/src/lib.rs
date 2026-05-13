@@ -363,7 +363,10 @@ impl PrWatchState {
         if self.last_cycle.pending_check_count > 0 {
             return Readiness::NotReadyChecksPending;
         }
-        if self.pr.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
+        if matches!(
+            self.pr.review_decision.as_deref(),
+            Some("CHANGES_REQUESTED" | "REVIEW_REQUIRED")
+        ) {
             return Readiness::NotReadyActionRequired;
         }
         if matches!(
