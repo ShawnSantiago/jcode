@@ -258,6 +258,8 @@ async fn ack_baseline(
 ) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
+    let loaded_updated_at = state.updated_at.clone();
+    let loaded_cycle_number = state.polling.cycle_number;
     if state.terminal {
         let readiness = state.readiness();
         return Ok(ToolOutput::new(format!(
@@ -277,6 +279,29 @@ async fn ack_baseline(
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
+        let current_text = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to re-read {} before writing poll result",
+                path.display()
+            )
+        })?;
+        let current_state = normalize_watch_state_json(&current_text).with_context(|| {
+            format!(
+                "failed to parse {} before writing poll result",
+                path.display()
+            )
+        })?;
+        if current_state.updated_at != loaded_updated_at
+            || current_state.polling.cycle_number != loaded_cycle_number
+        {
+            let readiness = current_state.readiness();
+            return Ok(ToolOutput::new(format!(
+                "PR watch poll result is stale: {}\nRepo: {}\nPR: #{}\nNo state was changed because another poll updated the watch first.",
+                current_state.watch_id, current_state.pr.repo, current_state.pr.number
+            ))
+            .with_title(format!("{} stale poll", current_state.watch_id))
+            .with_metadata(json!({"watch": current_state, "readiness": readiness, "written": false, "stale_poll": true})));
+        }
         write_state_atomic(&path, &state)?;
     }
     let text = format!(
@@ -510,6 +535,8 @@ async fn poll_now(
 ) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
+    let loaded_updated_at = state.updated_at.clone();
+    let loaded_cycle_number = state.polling.cycle_number;
     if state.terminal {
         let readiness = state.readiness();
         return Ok(ToolOutput::new(format!(
@@ -526,11 +553,34 @@ async fn poll_now(
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_schedule_fields(&mut state, &params);
-    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
+        let current_text = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to re-read {} before writing poll result",
+                path.display()
+            )
+        })?;
+        let current_state = normalize_watch_state_json(&current_text).with_context(|| {
+            format!(
+                "failed to parse {} before writing poll result",
+                path.display()
+            )
+        })?;
+        if current_state.updated_at != loaded_updated_at
+            || current_state.polling.cycle_number != loaded_cycle_number
+        {
+            let readiness = current_state.readiness();
+            return Ok(ToolOutput::new(format!(
+                "PR watch poll result is stale: {}\nRepo: {}\nPR: #{}\nNo state was changed because another poll updated the watch first.",
+                current_state.watch_id, current_state.pr.repo, current_state.pr.number
+            ))
+            .with_title(format!("{} stale poll", current_state.watch_id))
+            .with_metadata(json!({"watch": current_state, "readiness": readiness, "written": false, "stale_poll": true})));
+        }
         write_state_atomic(&path, &state)?;
     }
+    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let readiness = state.readiness();
     let text = format!(
         "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}",
