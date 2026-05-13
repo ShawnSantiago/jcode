@@ -244,6 +244,12 @@ fn maybe_schedule_next(
 }
 
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
+    if state.last_successful_fetch.is_empty() {
+        return format!(
+            "Run the first read-only PR watch baseline acknowledgement for {}. Use pr_watch with action=ack_baseline, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
+            state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+        );
+    }
     format!(
         "Run the next read-only PR watch poll for {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
         state.watch_id, state.pr.repo, state.pr.number, state.watch_id
@@ -1737,11 +1743,17 @@ mod tests {
             number: 13,
         });
         let prompt = scheduled_poll_prompt(&state);
-        assert!(prompt.contains("action=poll_now"));
+        assert!(prompt.contains("action=ack_baseline"));
         assert!(prompt.contains("repo=owner/repo"));
         assert!(prompt.contains("pr=13"));
         assert!(prompt.contains("Do not push"));
         assert!(prompt.contains("merge"));
+
+        let mut baselined = state;
+        baselined
+            .last_successful_fetch
+            .insert("metadata".to_string(), "2026-05-13T21:00:00Z".to_string());
+        assert!(scheduled_poll_prompt(&baselined).contains("action=poll_now"));
     }
     #[test]
     fn ack_baseline_marks_current_feedback_seen_without_actionable() {
