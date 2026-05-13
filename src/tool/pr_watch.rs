@@ -32,6 +32,7 @@ enum PrWatchAction {
     Stop,
     Readiness,
     Handoff,
+    AckBaseline,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +62,7 @@ impl Tool for PrWatchTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "list", "poll_now", "stop", "readiness", "handoff"],
+                    "enum": ["start", "status", "list", "poll_now", "ack_baseline", "stop", "readiness", "handoff"],
                     "description": "Action. poll_now performs read-only gh CLI collection and updates local state; no mutations are performed."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
@@ -83,6 +84,7 @@ impl Tool for PrWatchTool {
             PrWatchAction::Start => start_watch(&store, params),
             PrWatchAction::List => list_watches(&store),
             PrWatchAction::PollNow => poll_now(&root, &store, params),
+            PrWatchAction::AckBaseline => ack_baseline(&root, &store, params),
             PrWatchAction::Status | PrWatchAction::Readiness | PrWatchAction::Handoff => {
                 status_like(&store, params)
             }
@@ -150,6 +152,235 @@ fn list_watches(store: &Path) -> Result<ToolOutput> {
     Ok(ToolOutput::new(lines.join("\n"))
         .with_title(format!("{} watches", states.len()))
         .with_metadata(json!({"watches": states.into_iter().map(|(_, s)| s).collect::<Vec<_>>() })))
+}
+
+fn ack_baseline(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+    let mut state = load_state_for_params(store, &params)?;
+    let path = state_path(store, &state.watch_id);
+    let collected_at = now_iso();
+    let collection = collect_with_gh(root, &state.pr.repo, state.pr.number);
+    let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
+    let would_write = !params.dry_run.unwrap_or(false);
+    if would_write {
+        fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
+    }
+    let text = format!(
+        "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        state.baseline.unresolved_thread_ids.len(),
+        state.last_seen.review_comments.len(),
+        state.last_seen.issue_comments.len(),
+        state.last_seen.reviews.len(),
+        partial_failure,
+        if would_write {
+            ""
+        } else {
+            "\nDry run: no file written"
+        }
+    );
+    Ok(ToolOutput::new(text)
+        .with_title(format!("baseline {}", state.watch_id))
+        .with_metadata(
+            json!({"watch": state, "partial_failure": partial_failure, "written": would_write}),
+        ))
+}
+
+fn apply_baseline_from_collection(
+    state: &mut PrWatchState,
+    collection: GhCollection,
+    collected_at: &str,
+) -> bool {
+    state.updated_at = Some(collected_at.to_string());
+    state.baseline.established_at = Some(collected_at.to_string());
+    state.polling.quiet_cycles = 0;
+    state.pending_actionable.clear();
+    state.last_cycle.completed_at = Some(collected_at.to_string());
+    state.last_cycle.status = jcode_pr_watch_core::CycleStatus::BaselineEstablished;
+    state.last_cycle.actionable_count = 0;
+    state.last_cycle.pending_check_count = 0;
+    state.last_cycle.failed_check_count = 0;
+    state.last_cycle.surfaces_checked = vec![
+        "metadata".to_string(),
+        "checks".to_string(),
+        "review_comments".to_string(),
+        "issue_comments".to_string(),
+        "reviews".to_string(),
+        "review_threads".to_string(),
+    ];
+    state.last_cycle.surface_counts = BTreeMap::new();
+    let mut partial_failure = false;
+
+    match collection.metadata {
+        Ok(metadata) => {
+            state.pr = metadata.identity;
+            state.baseline.head_sha = state.pr.head_sha.clone();
+            state
+                .last_successful_fetch
+                .insert("metadata".to_string(), collected_at.to_string());
+            state
+                .last_cycle
+                .surface_counts
+                .insert("metadata".to_string(), 1);
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    match collection.checks {
+        Ok(checks) => {
+            state.last_checks_for_sha.head_sha = state.pr.head_sha.clone();
+            state.last_checks_for_sha.runs = checks;
+            state
+                .last_successful_fetch
+                .insert("checks".to_string(), collected_at.to_string());
+            state
+                .last_cycle
+                .surface_counts
+                .insert("checks".to_string(), state.last_checks_for_sha.runs.len());
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    match collection.review_comments {
+        Ok(comments) => {
+            state.baseline.review_comment_count = comments.len();
+            state
+                .last_cycle
+                .surface_counts
+                .insert("review_comments".to_string(), comments.len());
+            state
+                .last_successful_fetch
+                .insert("review_comments".to_string(), collected_at.to_string());
+            for comment in comments {
+                state.last_seen.review_comments.insert(
+                    comment.id.clone(),
+                    Marker {
+                        id: comment.id,
+                        updated_at: comment.updated_at,
+                        author: comment.author,
+                        body_hash: comment.body.as_ref().map(|body| stable_body_hash(body)),
+                        url: comment.url,
+                    },
+                );
+            }
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    match collection.issue_comments {
+        Ok(comments) => {
+            state.baseline.issue_comment_count = comments.len();
+            state
+                .last_cycle
+                .surface_counts
+                .insert("issue_comments".to_string(), comments.len());
+            state
+                .last_successful_fetch
+                .insert("issue_comments".to_string(), collected_at.to_string());
+            for comment in comments {
+                state.last_seen.issue_comments.insert(
+                    comment.id.clone(),
+                    Marker {
+                        id: comment.id,
+                        updated_at: comment.updated_at,
+                        author: comment.author,
+                        body_hash: comment.body.as_ref().map(|body| stable_body_hash(body)),
+                        url: comment.url,
+                    },
+                );
+            }
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    match collection.reviews {
+        Ok(reviews) => {
+            state.baseline.review_count = reviews.len();
+            state
+                .last_cycle
+                .surface_counts
+                .insert("reviews".to_string(), reviews.len());
+            state
+                .last_successful_fetch
+                .insert("reviews".to_string(), collected_at.to_string());
+            for review in reviews {
+                state.last_seen.reviews.insert(
+                    review.id.clone(),
+                    Marker {
+                        id: review.id,
+                        updated_at: review.submitted_at,
+                        author: review.author,
+                        body_hash: review.body.as_ref().map(|body| stable_body_hash(body)),
+                        url: None,
+                    },
+                );
+            }
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    match collection.review_threads {
+        Ok(threads) => {
+            state.baseline.unresolved_thread_ids = threads
+                .iter()
+                .filter(|thread| !thread.is_resolved && !thread.is_outdated)
+                .map(|thread| thread.id.clone())
+                .collect();
+            state
+                .last_cycle
+                .surface_counts
+                .insert("review_threads".to_string(), threads.len());
+            state
+                .last_successful_fetch
+                .insert("review_threads".to_string(), collected_at.to_string());
+            for thread in threads {
+                state.last_seen.review_threads.insert(
+                    thread.id.clone(),
+                    jcode_pr_watch_core::ReviewThreadMarker {
+                        id: thread.id,
+                        updated_at: thread.updated_at,
+                        resolved: thread.is_resolved,
+                        outdated: thread.is_outdated,
+                        body_hash: thread.body.as_ref().map(|body| stable_body_hash(body)),
+                        url: thread.url,
+                    },
+                );
+            }
+        }
+        Err(err) => {
+            partial_failure = true;
+            state.push_event(surface_error_event(collected_at, err));
+        }
+    }
+
+    state.push_event(WatchEvent {
+        at: collected_at.to_string(),
+        kind: "baseline_acknowledged".to_string(),
+        data: json!({
+            "partial_failure": partial_failure,
+            "review_comment_count": state.baseline.review_comment_count,
+            "issue_comment_count": state.baseline.issue_comment_count,
+            "review_count": state.baseline.review_count,
+            "unresolved_thread_count": state.baseline.unresolved_thread_ids.len(),
+        }),
+    });
+    partial_failure
 }
 
 fn poll_now(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
@@ -734,6 +965,7 @@ mod tests {
             .unwrap();
         assert!(actions.iter().any(|value| value == "start"));
         assert!(actions.iter().any(|value| value == "poll_now"));
+        assert!(actions.iter().any(|value| value == "ack_baseline"));
         assert!(!actions.iter().any(|value| value == "authorize"));
     }
 
@@ -824,6 +1056,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ack_baseline_marks_current_feedback_seen_without_actionable() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 11,
+        });
+        let collection = GhCollection {
+            metadata: Ok(jcode_pr_watch_core::PrMetadata {
+                identity: jcode_pr_watch_core::PrIdentity {
+                    repo: "owner/repo".into(),
+                    number: 11,
+                    url: Some("https://github.com/owner/repo/pull/11".into()),
+                    state: Some("OPEN".into()),
+                    base_ref: Some("main".into()),
+                    head_ref: Some("feature".into()),
+                    head_sha: Some("sha1".into()),
+                    merge_state: Some("CLEAN".into()),
+                    review_decision: None,
+                },
+                is_draft: Some(false),
+            }),
+            checks: Ok(Vec::new()),
+            review_comments: Ok(vec![jcode_pr_watch_core::ReviewComment {
+                id: "RC_BASE".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(1),
+                url: Some("https://comment".into()),
+                updated_at: Some("2026-05-13T18:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Existing comment".into()),
+            }]),
+            issue_comments: Ok(Vec::new()),
+            reviews: Ok(Vec::new()),
+            review_threads: Ok(vec![jcode_pr_watch_core::ReviewThread {
+                id: "THREAD_BASE".into(),
+                is_resolved: false,
+                is_outdated: false,
+                path: Some("src/lib.rs".into()),
+                line: Some(2),
+                url: Some("https://thread".into()),
+                updated_at: Some("2026-05-13T18:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Existing thread".into()),
+            }]),
+        };
+        let partial =
+            apply_baseline_from_collection(&mut state, collection, "2026-05-13T18:00:00Z");
+        assert!(!partial);
+        assert!(state.pending_actionable.is_empty());
+        assert_eq!(
+            state.last_cycle.status,
+            jcode_pr_watch_core::CycleStatus::BaselineEstablished
+        );
+        assert_eq!(state.baseline.head_sha.as_deref(), Some("sha1"));
+        assert_eq!(state.baseline.review_comment_count, 1);
+        assert_eq!(
+            state.baseline.unresolved_thread_ids,
+            vec!["THREAD_BASE".to_string()]
+        );
+        assert!(state.last_seen.review_comments.contains_key("RC_BASE"));
+        assert!(state.last_seen.review_threads.contains_key("THREAD_BASE"));
+
+        let collection = GhCollection {
+            metadata: Err(SurfaceError::transient("metadata", "skip")),
+            checks: Ok(Vec::new()),
+            review_comments: Ok(vec![jcode_pr_watch_core::ReviewComment {
+                id: "RC_BASE".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(1),
+                url: Some("https://comment".into()),
+                updated_at: Some("2026-05-13T18:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Existing comment".into()),
+            }]),
+            issue_comments: Ok(Vec::new()),
+            reviews: Ok(Vec::new()),
+            review_threads: Ok(vec![jcode_pr_watch_core::ReviewThread {
+                id: "THREAD_BASE".into(),
+                is_resolved: false,
+                is_outdated: false,
+                path: Some("src/lib.rs".into()),
+                line: Some(2),
+                url: Some("https://thread".into()),
+                updated_at: Some("2026-05-13T18:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Existing thread".into()),
+            }]),
+        };
+        update_state_from_collection(&mut state, collection, "2026-05-13T18:05:00Z");
+        assert!(state.pending_actionable.is_empty());
+    }
     #[test]
     fn unresolved_review_threads_are_actionable_and_resolved_are_not() {
         let mut state = PrWatchState::new(PrTarget {
