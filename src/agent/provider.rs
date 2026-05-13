@@ -166,6 +166,12 @@ impl Agent {
         self.session.working_dir = Some(dir.to_string());
         self.session.refresh_initial_session_context_message();
         self.log_env_snapshot("working_dir");
+        if let Err(error) = self.session.save() {
+            crate::logging::warn(&format!(
+                "Failed to persist session working directory update for {}: {}",
+                self.session.id, error
+            ));
+        }
     }
 
     /// Get the working directory for this session

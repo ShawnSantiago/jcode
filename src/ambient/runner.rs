@@ -27,6 +27,7 @@ use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
+const DIRECT_DELIVERY_RETRY_SECS: i64 = 300;
 
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
@@ -521,9 +522,13 @@ impl AmbientRunnerHandle {
         for item in items {
             if let Err(e) = self.deliver_scheduled_direct_item(provider, &item).await {
                 logging::error(&format!(
-                    "Ambient runner: failed to deliver scheduled direct item {}: {}",
-                    item.id, e
+                    "Ambient runner: failed to deliver scheduled direct item {}; requeueing in {}s: {}",
+                    item.id, DIRECT_DELIVERY_RETRY_SECS, e
                 ));
+                if let Ok(mut mgr) = AmbientManager::new() {
+                    let _ = mgr
+                        .requeue_after(item, chrono::Duration::seconds(DIRECT_DELIVERY_RETRY_SECS));
+                }
             }
         }
     }
