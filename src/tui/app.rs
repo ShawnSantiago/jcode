@@ -955,6 +955,8 @@ pub struct App {
     pending_login: Option<PendingLogin>,
     /// Pending account picker follow-up input (new label or setting value)
     pending_account_input: Option<auth::PendingAccountInput>,
+    /// Pending SSH remote target prompt. Stores the friendly remote name.
+    pending_ssh_remote_name: Option<String>,
     /// One-shot flag: force the next paint to clear the terminal first.
     /// Needed after native terminal scrolls mutate the screen outside ratatui's diff model.
     force_full_redraw: bool,

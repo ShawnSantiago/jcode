@@ -1856,8 +1856,14 @@ impl App {
             return;
         }
 
+        if let Some(name) = self.pending_ssh_remote_name.take() {
+            commands::handle_pending_ssh_remote_target(self, name, input);
+            return;
+        }
+
         let trimmed = input.trim();
         let handled = commands::handle_help_command(self, trimmed)
+            || commands::handle_ssh_command(self, trimmed)
             || commands::handle_session_command(self, trimmed)
             || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)

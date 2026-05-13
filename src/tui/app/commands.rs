@@ -810,6 +810,199 @@ pub(super) fn handle_help_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+pub(super) fn handle_ssh_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/ssh") else {
+        return false;
+    };
+    if !rest.is_empty()
+        && !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let mut parts = rest.split_whitespace();
+    let first = parts.next();
+    match first {
+        None => show_ssh_remotes(app),
+        Some("add") => {
+            let name = parts.next().unwrap_or("school");
+            begin_ssh_target_prompt(app, name);
+        }
+        Some("status") => show_ssh_status(app),
+        Some("disconnect") => {
+            if let Some(name) = parts.next() {
+                disconnect_ssh_remote(app, name);
+            } else {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: `/ssh disconnect <name>`".to_string(),
+                ));
+            }
+        }
+        Some(name) => {
+            let inline_target = parts.next();
+            if let Some(target) = inline_target {
+                match crate::ssh_remote::upsert_profile(name, target) {
+                    Ok(profile) => connect_ssh_remote(app, profile),
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to save SSH remote `{}`: {}",
+                        name, error
+                    ))),
+                }
+            } else {
+                match crate::ssh_remote::find_profile(name) {
+                    Ok(Some(profile)) => connect_ssh_remote(app, profile),
+                    Ok(None) => begin_ssh_target_prompt(app, name),
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to load SSH remotes: {}",
+                        error
+                    ))),
+                }
+            }
+        }
+    }
+    true
+}
+
+pub(super) fn handle_pending_ssh_remote_target(app: &mut App, name: String, input: String) {
+    let target = input.trim();
+    if target.is_empty() || target.eq_ignore_ascii_case("cancel") {
+        app.push_display_message(DisplayMessage::system(
+            "SSH remote setup cancelled.".to_string(),
+        ));
+        app.set_status_notice("SSH setup cancelled");
+        return;
+    }
+    match crate::ssh_remote::upsert_profile(&name, target) {
+        Ok(profile) => connect_ssh_remote(app, profile),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to save SSH remote `{}`: {}",
+            name, error
+        ))),
+    }
+}
+
+fn begin_ssh_target_prompt(app: &mut App, name: &str) {
+    app.pending_ssh_remote_name = Some(name.to_string());
+    app.push_display_message(DisplayMessage::system(format!(
+        "Create SSH remote **{}**. Enter the SSH target, the same thing you would type after `ssh`.
+Example: `alice@login.school.edu`
+
+Jcode will not ask for or store your password. Type `cancel` to stop.",
+        name
+    )));
+    app.set_status_notice("Enter SSH target");
+}
+
+fn show_ssh_remotes(app: &mut App) {
+    match crate::ssh_remote::load_config() {
+        Ok(config) if config.hosts.is_empty() => {
+            app.push_display_message(DisplayMessage::system(
+                "No SSH remotes configured. Use `/ssh school` to add one.".to_string(),
+            ));
+        }
+        Ok(config) => {
+            let mut lines = vec!["SSH remotes:".to_string()];
+            for profile in config.hosts {
+                let alive = if crate::ssh_remote::is_control_master_alive(&profile) {
+                    "connected"
+                } else {
+                    "not connected"
+                };
+                lines.push(format!(
+                    "- `{}` → `{}` ({})",
+                    profile.name, profile.ssh_target, alive
+                ));
+            }
+            lines.push("".to_string());
+            lines.push(
+                "Use `/ssh <name>` to connect or `/ssh disconnect <name>` to disconnect."
+                    .to_string(),
+            );
+            app.push_display_message(DisplayMessage::system(lines.join("\n")));
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to load SSH remotes: {}",
+            error
+        ))),
+    }
+}
+
+fn show_ssh_status(app: &mut App) {
+    show_ssh_remotes(app);
+}
+
+fn connect_ssh_remote(app: &mut App, profile: crate::ssh_remote::SshRemoteProfile) {
+    if crate::ssh_remote::is_control_master_alive(&profile)
+        || crate::ssh_remote::can_connect_batch_mode(&profile)
+    {
+        app.push_display_message(DisplayMessage::system(format!(
+            "✓ SSH remote **{}** is reachable at `{}`.
+
+Next step: start the remote Jcode server over this SSH connection. For now, the secure SSH login/socket setup is ready.",
+            profile.name, profile.ssh_target
+        )));
+        app.set_status_notice(format!("SSH {} connected", profile.name));
+        return;
+    }
+
+    match crate::ssh_remote::spawn_control_master_terminal(&profile) {
+        Ok(true) => {
+            app.push_display_message(DisplayMessage::system(format!(
+                "Opening secure SSH login terminal for **{}**.
+
+Type your SSH password there if prompted. Jcode will not see or store it. After login succeeds, SSH moves into the background and Jcode can use the connection headlessly.",
+                profile.name
+            )));
+            app.set_status_notice("SSH login terminal opened");
+        }
+        Ok(false) => app.push_display_message(DisplayMessage::system(format!(
+            "Could not open a terminal automatically. Run this in a terminal to authenticate once:\n\n```bash\nssh -f -M -S {} -N {}\n```",
+            crate::ssh_remote::control_socket_path(&profile.name)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "~/.jcode/ssh-control/remote.sock".to_string()),
+            profile.ssh_target
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to open SSH login terminal: {}",
+            error
+        ))),
+    }
+}
+
+fn disconnect_ssh_remote(app: &mut App, name: &str) {
+    match crate::ssh_remote::find_profile(name) {
+        Ok(Some(profile)) => match crate::ssh_remote::disconnect(&profile) {
+            Ok(true) => {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Disconnected SSH remote **{}**.",
+                    name
+                )));
+                app.set_status_notice("SSH disconnected");
+            }
+            Ok(false) => app.push_display_message(DisplayMessage::system(format!(
+                "SSH remote **{}** did not have an active ControlMaster connection.",
+                name
+            ))),
+            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                "Failed to disconnect SSH remote `{}`: {}",
+                name, error
+            ))),
+        },
+        Ok(None) => app.push_display_message(DisplayMessage::error(format!(
+            "Unknown SSH remote `{}`. Use `/ssh` to list remotes.",
+            name
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to load SSH remote `{}`: {}",
+            name, error
+        ))),
+    }
+}
+
 fn build_btw_loading_markdown(question: &str) -> String {
     format!(
         "# `/btw`\n\n## Question\n{}\n\n## Status\nThinking…\n",
