@@ -888,27 +888,52 @@ pub(super) fn handle_pending_ssh_remote_target(app: &mut App, name: String, inpu
 fn begin_ssh_target_prompt(app: &mut App, name: &str) {
     app.pending_ssh_remote_name = Some(name.to_string());
     app.push_display_message(DisplayMessage::system(format!(
-        "Create SSH remote **{}**. Enter the SSH target, the same thing you would type after `ssh`.
-Example: `alice@login.school.edu`
+        "## SSH setup: `{}`
 
-Jcode will not ask for or store your password. Type `cancel` to stop.",
-        name
+**Step 1/4: Tell Jcode where to connect.**
+
+Enter only the SSH target, meaning the part after `ssh`:
+
+```text
+alice@login.school.edu
+```
+
+You can also enter an SSH config alias like `school`.
+
+**Security model**
+- Jcode stores this host/user target so you can run `/ssh {}` later.
+- Jcode does **not** ask for or store your SSH password.
+- If a password is needed, it will be typed into your system `ssh` prompt, not into Jcode.
+
+Type `cancel` to stop setup.",
+        name, name
     )));
-    app.set_status_notice("Enter SSH target");
+    app.set_status_notice("SSH setup 1/4: enter target");
 }
 
 fn show_ssh_remotes(app: &mut App) {
     match crate::ssh_remote::load_config() {
         Ok(config) if config.hosts.is_empty() => {
             app.push_display_message(DisplayMessage::system(
-                "No SSH remotes configured. Use `/ssh school` to add one.".to_string(),
+                "## SSH remotes
+
+No SSH remotes are configured yet.
+
+Start with:
+
+```text
+/ssh school
+```
+
+Jcode will ask for the SSH target, then use your system SSH client for authentication. Jcode never stores SSH passwords."
+                    .to_string(),
             ));
         }
         Ok(config) => {
-            let mut lines = vec!["SSH remotes:".to_string()];
+            let mut lines = vec!["## SSH remotes".to_string(), "".to_string()];
             for profile in config.hosts {
                 let alive = if crate::ssh_remote::is_control_master_alive(&profile) {
-                    "connected"
+                    "✓ connected"
                 } else {
                     "not connected"
                 };
@@ -919,9 +944,11 @@ fn show_ssh_remotes(app: &mut App) {
             }
             lines.push("".to_string());
             lines.push(
-                "Use `/ssh <name>` to connect or `/ssh disconnect <name>` to disconnect."
+                "Use `/ssh <name>` to connect, `/ssh status` to check, or `/ssh disconnect <name>` to disconnect."
                     .to_string(),
             );
+            lines.push("".to_string());
+            lines.push("Security: Jcode stores targets only, never SSH passwords.".to_string());
             app.push_display_message(DisplayMessage::system(lines.join("\n")));
         }
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
@@ -940,27 +967,60 @@ fn connect_ssh_remote(app: &mut App, profile: crate::ssh_remote::SshRemoteProfil
         || crate::ssh_remote::can_connect_batch_mode(&profile)
     {
         app.push_display_message(DisplayMessage::system(format!(
-            "✓ SSH remote **{}** is reachable at `{}`.
+            "## SSH remote `{}`
 
-Next step: start the remote Jcode server over this SSH connection. For now, the secure SSH login/socket setup is ready.",
+**Step 4/4: Connected.**
+
+Jcode verified that `{}` is reachable through your system SSH client.
+
+What this means:
+- Authentication is handled by OpenSSH / your SSH agent.
+- Jcode did not see or store your password.
+- The SSH connection setup is ready for remote Jcode tools.
+
+Next implementation step: start the remote Jcode server over this verified SSH connection.",
             profile.name, profile.ssh_target
         )));
-        app.set_status_notice(format!("SSH {} connected", profile.name));
+        app.set_status_notice(format!("SSH {} connected 4/4", profile.name));
         return;
     }
 
     match crate::ssh_remote::spawn_control_master_terminal(&profile) {
         Ok(true) => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Opening secure SSH login terminal for **{}**.
+                "## SSH remote `{}`
 
-Type your SSH password there if prompted. Jcode will not see or store it. After login succeeds, SSH moves into the background and Jcode can use the connection headlessly.",
-                profile.name
+**Step 2/4: Opening secure SSH login terminal.**
+
+Jcode could not connect without an interactive login, so it opened a separate terminal running your system `ssh` command.
+
+**What to expect in that terminal**
+1. OpenSSH may ask for your password or two-factor prompt.
+2. You type credentials into OpenSSH, not into Jcode.
+3. After login, SSH creates a temporary background control socket.
+4. The terminal verifies that socket before closing.
+
+**Security model**
+- Jcode cannot read what you type in the SSH terminal.
+- Jcode stores only the target `{}`.
+- Close or disconnect later with `/ssh disconnect {}`.",
+                profile.name, profile.ssh_target, profile.name
             )));
-            app.set_status_notice("SSH login terminal opened");
+            app.set_status_notice("SSH setup 2/4: login terminal opened");
         }
         Ok(false) => app.push_display_message(DisplayMessage::system(format!(
-            "Could not open a terminal automatically. Run this in a terminal to authenticate once:\n\n```bash\nssh -f -M -S {} -N {}\n```",
+            "## SSH remote `{}`
+
+**Step 2/4: Manual login needed.**
+
+Jcode could not open a terminal automatically. Run this command yourself:
+
+```bash
+ssh -f -M -S {} -N {}
+```
+
+Type your password into that SSH prompt if asked. Jcode will not see or store it.",
+            profile.name,
             crate::ssh_remote::control_socket_path(&profile.name)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "~/.jcode/ssh-control/remote.sock".to_string()),

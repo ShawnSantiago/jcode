@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,9 +55,10 @@ pub fn save_config(config: &SshRemoteConfig) -> Result<()> {
 
 pub fn upsert_profile(name: &str, ssh_target: &str) -> Result<SshRemoteProfile> {
     let mut config = load_config()?;
+    let ssh_target = normalize_ssh_target(ssh_target)?;
     let profile = SshRemoteProfile {
         name: name.to_string(),
-        ssh_target: ssh_target.to_string(),
+        ssh_target,
         workspace: default_workspace(),
     };
     if let Some(existing) = config.hosts.iter_mut().find(|p| p.name == name) {
@@ -71,7 +72,35 @@ pub fn upsert_profile(name: &str, ssh_target: &str) -> Result<SshRemoteProfile> 
 }
 
 pub fn find_profile(name: &str) -> Result<Option<SshRemoteProfile>> {
-    Ok(load_config()?.hosts.into_iter().find(|p| p.name == name))
+    let Some(mut profile) = load_config()?.hosts.into_iter().find(|p| p.name == name) else {
+        return Ok(None);
+    };
+    // Older MVP builds could save a pasted command like `ssh user@host`. Normalize on load so
+    // users do not have to manually repair ~/.jcode/ssh_remotes.json.
+    profile.ssh_target = normalize_ssh_target(&profile.ssh_target)?;
+    Ok(Some(profile))
+}
+
+pub fn normalize_ssh_target(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    let without_ssh = trimmed
+        .strip_prefix("ssh ")
+        .or_else(|| trimmed.strip_prefix("ssh\t"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if without_ssh.is_empty() {
+        bail!("SSH target cannot be empty. Example: alice@login.school.edu");
+    }
+    if without_ssh.starts_with('-') || without_ssh.split_whitespace().count() != 1 {
+        bail!(
+            "SSH target should be just the host alias or user@host, not a full command. Example: alice@login.school.edu"
+        );
+    }
+    if without_ssh.chars().any(|c| c.is_control()) {
+        bail!("SSH target contains invalid control characters");
+    }
+    Ok(without_ssh.to_string())
 }
 
 pub fn sanitize_profile_name(name: &str) -> String {
@@ -148,32 +177,58 @@ pub fn build_control_master_script(profile: &SshRemoteProfile) -> Result<String>
     let socket = control_socket_path(&profile.name)?;
     let target = &profile.ssh_target;
     Ok(format!(
-        r#"printf '%s\n' 'Jcode SSH login for {name}'
-printf '%s\n' 'Type your SSH password here if prompted. Jcode will not see or store it.'
-printf '%s\n' 'After login succeeds, Jcode verifies the SSH control socket before this terminal closes.'
-printf '%s\n' 'If verification fails, this terminal will stay open so you can read the error.'
+        r#"printf '%s\n' '========================================'
+printf '%s\n' 'Jcode SSH login for {name}'
+printf '%s\n' '========================================'
+printf '%s\n' ''
+printf '%s\n' 'Step 2/4: Authenticate with your system SSH client'
+printf '%s\n' ''
+printf '%s\n' 'What is happening:'
+printf '%s\n' '  - This terminal is running OpenSSH, not a Jcode password form.'
+printf '%s\n' '  - If a password or two-factor prompt appears, type it here.'
+printf '%s\n' '  - Jcode cannot read or store what you type in this terminal.'
+printf '%s\n' ''
+printf '%s\n' 'After authentication:'
+printf '%s\n' '  - SSH will create a temporary background control socket.'
+printf '%s\n' '  - Jcode will verify that socket before this terminal closes.'
+printf '%s\n' '  - If anything fails, this terminal stays open with the reason.'
+printf '%s\n' ''
 ssh -f -M -S {socket} -N {target}
 status=$?
 if [ $status -ne 0 ]; then
-  printf '%s\n' 'SSH connection failed. Check your username, host, password, school VPN, or two-factor prompt.'
+  printf '%s\n' ''
+  printf '%s\n' 'Step 2/4 failed: SSH did not complete authentication.'
+  printf '%s\n' ''
+  printf '%s\n' 'Common fixes:'
+  printf '%s\n' '  - Check that the SSH target is only user@host or an SSH alias, not a full command.'
+  printf '%s\n' '  - Check username, hostname, password, VPN, and two-factor prompt.'
+  printf '%s\n' '  - Try the same target manually with: ssh {target}'
   printf '%s' 'Press Enter to close this terminal... '
   read _
   exit $status
 fi
 
-printf '%s\n' 'SSH accepted the login. Verifying background connection...'
+printf '%s\n' ''
+printf '%s\n' 'Step 3/4: SSH accepted the login. Verifying background control socket...'
 for i in 1 2 3 4 5 6 7 8 9 10; do
   if ssh -S {socket} -O check {target} >/dev/null 2>&1; then
-    printf '%s\n' 'Connected and verified. Jcode can now use this SSH connection headlessly.'
+    printf '%s\n' ''
+    printf '%s\n' 'Step 4/4: Connected and verified.'
+    printf '%s\n' 'Jcode can now use this SSH connection headlessly.'
+    printf '%s\n' 'This terminal will close automatically.'
     sleep 1
     exit 0
   fi
   sleep 1
 done
 
-printf '%s\n' 'SSH login appeared to succeed, but Jcode could not verify the background control socket.'
-printf '%s\n' 'This can happen if the server disallows SSH multiplexing or the connection closed immediately.'
-printf '%s\n' 'The terminal is staying open so you can read this message.'
+printf '%s\n' ''
+printf '%s\n' 'Step 3/4 failed: Jcode could not verify the background control socket.'
+printf '%s\n' ''
+printf '%s\n' 'What this means:'
+printf '%s\n' '  - SSH login may have succeeded, but multiplexing did not stay available.'
+printf '%s\n' '  - The server may disallow SSH ControlMaster, or the connection closed immediately.'
+printf '%s\n' '  - Jcode is keeping this terminal open so you can read the reason.'
 printf '%s' 'Press Enter to close this terminal... '
 read _
 exit 1
@@ -188,7 +243,7 @@ pub fn spawn_control_master_terminal(profile: &SshRemoteProfile) -> Result<bool>
     let script = build_control_master_script(profile)?;
     let command = crate::terminal_launch::TerminalCommand::new(
         "sh".to_string(),
-        vec!["-lc".to_string(), script],
+        vec!["-c".to_string(), script],
     )
     .title(format!("jcode ssh · {}", profile.name));
     crate::terminal_launch::spawn_command_in_new_terminal(&command, Path::new("."))
@@ -213,6 +268,29 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ssh_target_accepts_alias_and_user_host() {
+        assert_eq!(normalize_ssh_target("school").unwrap(), "school");
+        assert_eq!(
+            normalize_ssh_target(" alice@login.school.edu ").unwrap(),
+            "alice@login.school.edu"
+        );
+    }
+
+    #[test]
+    fn normalize_ssh_target_strips_pasted_ssh_prefix() {
+        assert_eq!(
+            normalize_ssh_target("ssh alice@login.school.edu").unwrap(),
+            "alice@login.school.edu"
+        );
+    }
+
+    #[test]
+    fn normalize_ssh_target_rejects_full_commands_with_options() {
+        assert!(normalize_ssh_target("ssh -p 2222 alice@login.school.edu").is_err());
+        assert!(normalize_ssh_target("alice@login.school.edu true").is_err());
+    }
+
+    #[test]
     fn control_master_script_waits_for_verified_socket_before_closing() {
         let profile = SshRemoteProfile {
             name: "school".to_string(),
@@ -221,10 +299,11 @@ mod tests {
         };
 
         let script = build_control_master_script(&profile).unwrap();
-        assert!(script.contains("Verifying background connection"));
+        assert!(script.contains("Step 3/4: SSH accepted the login"));
+        assert!(script.contains("Step 4/4: Connected and verified"));
         assert!(script.contains("ssh -S"));
         assert!(script.contains("-O check"));
         assert!(script.contains("Press Enter to close this terminal"));
-        assert!(script.contains("Jcode will not see or store it"));
+        assert!(script.contains("Jcode cannot read or store"));
     }
 }
