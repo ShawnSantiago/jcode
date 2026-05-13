@@ -573,56 +573,94 @@ async fn run_gh_graphql_review_threads(
         .split_once('/')
         .ok_or_else(|| SurfaceError::permanent("review_threads", "repo must be owner/name"))?;
     let pr_s = pr.to_string();
-    let query = r#"
-query($owner:String!, $name:String!, $number:Int!) {
-  repository(owner:$owner, name:$name) {
-    pullRequest(number:$number) {
-      reviewThreads(first:100) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
+    let mut after: Option<String> = None;
+    let mut all_nodes: Vec<Value> = Vec::new();
+
+    loop {
+        let after_clause = after
+            .as_ref()
+            .map(|cursor| format!(", after:\"{}\"", cursor.replace('"', "\\\"")))
+            .unwrap_or_default();
+        let query = format!(
+            r#"
+query($owner:String!, $name:String!, $number:Int!) {{
+  repository(owner:$owner, name:$name) {{
+    pullRequest(number:$number) {{
+      reviewThreads(first:100{after_clause}) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
           id
           isResolved
           isOutdated
-          comments(first:20) {
-            nodes {
+          comments(first:20) {{
+            nodes {{
               path
               line
               url
               body
               createdAt
               updatedAt
-              author { login }
-            }
-          }
+              author {{ login }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+        );
+        let stdout = run_gh(
+            root,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("name={name}"),
+                "-F",
+                &format!("number={pr_s}"),
+                "-f",
+                &format!("query={query}"),
+            ],
+        )
+        .await?;
+        let page: Value = serde_json::from_str(&stdout).map_err(|err| {
+            SurfaceError::transient("review_threads", format!("invalid GraphQL JSON: {err}"))
+        })?;
+        let connection = page
+            .pointer("/data/repository/pullRequest/reviewThreads")
+            .ok_or_else(|| {
+                SurfaceError::transient("review_threads", "missing reviewThreads connection")
+            })?;
+        if let Some(nodes) = connection.get("nodes").and_then(Value::as_array) {
+            all_nodes.extend(nodes.iter().cloned());
         }
-      }
+        let page_info = connection.get("pageInfo").unwrap_or(&Value::Null);
+        if !page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        after = page_info
+            .get("endCursor")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        if after.is_none() {
+            return Err(SurfaceError::transient(
+                "review_threads",
+                "reviewThreads pageInfo indicated more pages without an endCursor",
+            ));
+        }
     }
-  }
-}
-"#;
-    let stdout = run_gh(
-        root,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("owner={owner}"),
-            "-f",
-            &format!("name={name}"),
-            "-F",
-            &format!("number={pr_s}"),
-            "-f",
-            &format!("query={query}"),
-        ],
+
+    Ok(
+        json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes": all_nodes}}}}})
+            .to_string(),
     )
-    .await?;
-    if stdout.contains(r#"\"hasNextPage\":true"#) {
-        return Err(SurfaceError::transient(
-            "review_threads",
-            "more than 100 review threads present; pagination is not yet exhausted",
-        ));
-    }
-    Ok(stdout)
 }
 
 async fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
