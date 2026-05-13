@@ -177,6 +177,44 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
 }
 
 #[test]
+fn test_requeue_after_preserves_failed_direct_item() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path);
+    let past = Utc::now() - Duration::minutes(5);
+
+    queue.push(ScheduledItem {
+        id: "session_due".into(),
+        scheduled_for: past,
+        context: "scheduled session task".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Session {
+            session_id: "session_123".into(),
+        },
+        created_by_session: "session_123".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let mut ready = queue.take_ready_direct_items();
+    assert_eq!(ready.len(), 1);
+    assert!(queue.is_empty());
+
+    let item = ready.pop().unwrap();
+    queue.requeue_after(item, Duration::minutes(5));
+
+    assert_eq!(queue.len(), 1);
+    let requeued = queue.peek_next().unwrap();
+    assert_eq!(requeued.id, "session_due");
+    assert!(requeued.scheduled_for > Utc::now());
+}
+
+#[test]
 fn test_ambient_state_record_cycle() {
     let mut state = AmbientState::default();
     assert_eq!(state.total_cycles, 0);

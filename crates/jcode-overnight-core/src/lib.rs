@@ -431,10 +431,40 @@ pub fn task_card_validated(card: &OvernightTaskCard) -> bool {
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    result.contains("pass")
-        || result.contains("success")
-        || result.contains("validated")
-        || result == "ok"
+    let tokens: Vec<&str> = result
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    if tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "fail" | "failed" | "failing" | "failure" | "error" | "errored" | "invalid"
+        )
+    }) || result.contains("did not pass")
+        || result.contains("not passed")
+        || result.contains("not validated")
+        || result.contains("not ok")
+        || result.contains("not successful")
+        || result.contains("not succeeded")
+        || result.contains("not success")
+    {
+        return false;
+    }
+
+    tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "pass"
+                | "passed"
+                | "passing"
+                | "success"
+                | "succeeded"
+                | "successful"
+                | "validated"
+                | "ok"
+        )
+    })
 }
 
 pub fn event_class(kind: &str) -> &'static str {
@@ -1269,6 +1299,14 @@ mod helper_tests {
         assert_eq!(task_status_bucket("in-progress"), "active");
         assert_eq!(task_status_bucket("needs user"), "blocked");
         assert_eq!(task_status_bucket("not started"), "skipped");
+    }
+
+    #[test]
+    fn task_card_validation_rejects_negative_pass_phrases() {
+        let mut card = task_card("1", "Failed validation", "completed");
+        card.validation.result = Some("failed: tests did not pass".to_string());
+
+        assert!(!task_card_validated(&card));
     }
 
     #[test]

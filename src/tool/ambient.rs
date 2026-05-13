@@ -855,6 +855,7 @@ impl Tool for ScheduleTool {
 
         let mut manager = AmbientManager::new()?;
         let id = manager.schedule(request)?;
+        nudge_schedule_runner();
 
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
@@ -908,7 +909,7 @@ fn parse_schedule_target(s: Option<&str>, session_id: &str) -> Result<ScheduleTa
     })
 }
 
-fn nudge_schedule_runner() {
+pub(crate) fn nudge_schedule_runner() {
     let runner = SCHEDULE_RUNNER
         .get_or_init(|| Mutex::new(None))
         .lock()
