@@ -95,9 +95,9 @@ impl Tool for PrWatchTool {
             PrWatchAction::List => list_watches(&store),
             PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx),
             PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx),
-            PrWatchAction::Status | PrWatchAction::Readiness | PrWatchAction::Handoff => {
-                status_like(&store, params)
-            }
+            PrWatchAction::Status => status_like(&store, params),
+            PrWatchAction::Readiness => readiness_report(&store, params),
+            PrWatchAction::Handoff => handoff_report(&store, params),
             PrWatchAction::Stop => stop_watch(&store, params),
         }
     }
@@ -960,8 +960,80 @@ fn now_iso() -> String {
 fn status_like(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let state = load_state_for_params(store, &params)?;
     let readiness = state.readiness();
-    let text = format!(
-        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={}",
+    let text = format_status_report(&state, readiness_label(&readiness));
+    Ok(ToolOutput::new(text)
+        .with_title(format!(
+            "{} {}",
+            state.watch_id,
+            readiness_label(&readiness)
+        ))
+        .with_metadata(json!({"watch": state, "readiness": readiness})))
+}
+
+fn readiness_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+    let state = load_state_for_params(store, &params)?;
+    let readiness = state.readiness();
+    let mut text = format_status_report(&state, readiness_label(&readiness));
+    text.push_str("\n\nReadiness decision:\n");
+    text.push_str(&format!("- {}\n", readiness_label(&readiness)));
+    for reason in readiness_reasons(&state) {
+        text.push_str(&format!("- {}\n", reason));
+    }
+    Ok(ToolOutput::new(text)
+        .with_title(format!("readiness {}", readiness_label(&readiness)))
+        .with_metadata(json!({"watch": state, "readiness": readiness})))
+}
+
+fn handoff_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+    let state = load_state_for_params(store, &params)?;
+    let readiness = state.readiness();
+    let mut text = String::new();
+    text.push_str(&format!("# PR watch handoff: {}\n\n", state.watch_id));
+    text.push_str(&format!("- PR: {}/#{}\n", state.pr.repo, state.pr.number));
+    if let Some(url) = &state.pr.url {
+        text.push_str(&format!("- URL: {}\n", url));
+    }
+    text.push_str(&format!("- Readiness: {}\n", readiness_label(&readiness)));
+    text.push_str(&format!(
+        "- Current status: {:?}\n",
+        state.last_cycle.status
+    ));
+    text.push_str(&format!(
+        "- Quiet cycles: {}/{}\n",
+        state.polling.quiet_cycles, state.polling.required_quiet_cycles
+    ));
+    text.push_str("\n## Evidence\n");
+    for line in evidence_lines(&state) {
+        text.push_str(&format!("- {}\n", line));
+    }
+    text.push_str("\n## Pending actionable items\n");
+    if state.pending_actionable.is_empty() {
+        text.push_str("- None recorded.\n");
+    } else {
+        for item in &state.pending_actionable {
+            text.push_str(&format!(
+                "- [{}] {}{}\n",
+                item.surface,
+                item.summary,
+                item.url
+                    .as_ref()
+                    .map(|u| format!(" ({u})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    text.push_str("\n## Human next step\n");
+    text.push_str(&human_next_step(&state));
+    text.push('\n');
+    text.push_str("\nNo mutation was performed by this report. Do not merge unless repository policy and a human maintainer approve it.\n");
+    Ok(ToolOutput::new(text)
+        .with_title(format!("handoff {}", readiness_label(&readiness)))
+        .with_metadata(json!({"watch": state, "readiness": readiness})))
+}
+
+fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
+    let mut text = format!(
+        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -972,15 +1044,131 @@ fn status_like(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
         state.pending_actionable.len(),
         state.last_cycle.pending_check_count,
         state.last_cycle.failed_check_count,
+        state.baseline.unresolved_thread_ids.len(),
+        state
+            .polling
+            .next_poll_at
+            .as_deref()
+            .unwrap_or("not scheduled"),
         state.policy.local_fix,
         state.policy.commit,
         state.policy.push,
         state.policy.comment,
         state.policy.resolve_threads,
     );
-    Ok(ToolOutput::new(text)
-        .with_title(format!("{} {:?}", state.watch_id, readiness))
-        .with_metadata(json!({"watch": state, "readiness": readiness})))
+    if !state.last_successful_fetch.is_empty() {
+        text.push_str("\nLast successful fetch:");
+        for (surface, at) in &state.last_successful_fetch {
+            text.push_str(&format!("\n- {}: {}", surface, at));
+        }
+    }
+    text
+}
+
+fn readiness_label(readiness: &jcode_pr_watch_core::Readiness) -> &'static str {
+    match readiness {
+        jcode_pr_watch_core::Readiness::NotReadyActionRequired => "not_ready_action_required",
+        jcode_pr_watch_core::Readiness::NotReadyChecksPending => "not_ready_checks_pending",
+        jcode_pr_watch_core::Readiness::NotReadyChecksFailed => "not_ready_checks_failed",
+        jcode_pr_watch_core::Readiness::NotReadyValidationStale => "not_ready_validation_stale",
+        jcode_pr_watch_core::Readiness::ReadyForHumanReview => "ready_for_human_review",
+        jcode_pr_watch_core::Readiness::ReadyForHumanPush => "ready_for_human_push",
+        jcode_pr_watch_core::Readiness::ReadyForHumanMerge => "ready_for_human_merge",
+        jcode_pr_watch_core::Readiness::BlockedByPolicy => "blocked_by_policy",
+        jcode_pr_watch_core::Readiness::BlockedByClosedPr => "blocked_by_closed_pr",
+    }
+}
+
+fn readiness_reasons(state: &PrWatchState) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if state.pr.state.as_deref() != Some("OPEN") && state.pr.state.is_some() {
+        reasons.push("PR is not open.".to_string());
+    }
+    if !state.pending_actionable.is_empty() {
+        reasons.push(format!(
+            "{} actionable item(s) need attention.",
+            state.pending_actionable.len()
+        ));
+    }
+    if state.last_cycle.failed_check_count > 0 {
+        reasons.push(format!(
+            "{} check(s) failed.",
+            state.last_cycle.failed_check_count
+        ));
+    }
+    if state.last_cycle.pending_check_count > 0 {
+        reasons.push(format!(
+            "{} check(s) are pending.",
+            state.last_cycle.pending_check_count
+        ));
+    }
+    if state.polling.quiet_cycles < state.polling.required_quiet_cycles {
+        reasons.push(format!(
+            "Quiet cycle requirement not yet met: {}/{}.",
+            state.polling.quiet_cycles, state.polling.required_quiet_cycles
+        ));
+    }
+    if state.last_successful_fetch.is_empty() {
+        reasons.push("No successful fetch evidence recorded yet.".to_string());
+    }
+    if reasons.is_empty() {
+        reasons.push("Required quiet cycles are satisfied and no actionable items or blocking checks are recorded.".to_string());
+    }
+    reasons
+}
+
+fn evidence_lines(state: &PrWatchState) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Last cycle completed: {}",
+        state
+            .last_cycle
+            .completed_at
+            .as_deref()
+            .unwrap_or("unknown")
+    ));
+    lines.push(format!(
+        "Surfaces checked: {}",
+        if state.last_cycle.surfaces_checked.is_empty() {
+            "none".to_string()
+        } else {
+            state.last_cycle.surfaces_checked.join(", ")
+        }
+    ));
+    lines.push(format!(
+        "Checks: {} pending, {} failed",
+        state.last_cycle.pending_check_count, state.last_cycle.failed_check_count
+    ));
+    lines.push(format!(
+        "Actionable items: {}",
+        state.pending_actionable.len()
+    ));
+    lines.push(format!(
+        "Unresolved review threads at baseline/latest poll: {}",
+        state.baseline.unresolved_thread_ids.len()
+    ));
+    if let Some(head) = &state.pr.head_sha {
+        lines.push(format!("Head SHA: {}", head));
+    }
+    if let Some(next) = &state.polling.next_poll_at {
+        lines.push(format!("Next scheduled poll: {}", next));
+    }
+    lines
+}
+
+fn human_next_step(state: &PrWatchState) -> String {
+    let readiness = state.readiness();
+    match readiness {
+        jcode_pr_watch_core::Readiness::ReadyForHumanMerge => format!(
+            "- Human maintainer may review repository policy and choose an approved merge strategy, for example: `gh pr merge {} --repo {} [--squash|--merge|--rebase]`",
+            state.pr.number, state.pr.repo
+        ),
+        jcode_pr_watch_core::Readiness::NotReadyActionRequired => "- Address actionable review feedback, validate locally, then run `pr_watch poll_now` again.".to_string(),
+        jcode_pr_watch_core::Readiness::NotReadyChecksPending => "- Wait for pending checks, then run `pr_watch poll_now` again.".to_string(),
+        jcode_pr_watch_core::Readiness::NotReadyChecksFailed => "- Investigate failing checks, fix locally if appropriate, then run `pr_watch poll_now` again.".to_string(),
+        jcode_pr_watch_core::Readiness::BlockedByClosedPr => "- PR is closed; stop the watcher or reopen the PR before continuing.".to_string(),
+        _ => "- Continue monitoring until quiet-cycle and validation requirements are satisfied.".to_string(),
+    }
 }
 
 fn stop_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
@@ -1157,6 +1345,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn readiness_reasons_explain_actionable_items() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 14,
+        });
+        state.pending_actionable.push(ActionableItem {
+            id: "a1".into(),
+            surface: "review_threads".into(),
+            summary: "Fix thread".into(),
+            url: Some("https://thread".into()),
+            path: Some("src/lib.rs".into()),
+            status: Some("unresolved".into()),
+        });
+        let reasons = readiness_reasons(&state);
+        assert!(reasons.iter().any(|reason| reason.contains("actionable")));
+        assert!(human_next_step(&state).contains("Address actionable"));
+    }
+
+    #[test]
+    fn handoff_helpers_include_merge_template_only_when_ready() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 15,
+        });
+        state.pr.state = Some("OPEN".into());
+        state.polling.quiet_cycles = 3;
+        state.polling.required_quiet_cycles = 3;
+        state.last_cycle.completed_at = Some("2026-05-13T19:00:00Z".into());
+        let status = format_status_report(&state, "ready_for_human_merge");
+        assert!(status.contains("Next poll: not scheduled"));
+        let next = human_next_step(&state);
+        assert!(next.contains("gh pr merge 15 --repo owner/repo"));
+        assert!(next.contains("[--squash|--merge|--rebase]"));
+        let evidence = evidence_lines(&state);
+        assert!(
+            evidence
+                .iter()
+                .any(|line| line.contains("Last cycle completed"))
+        );
+    }
     #[test]
     fn schedule_fields_set_interval_and_next_poll() {
         let mut state = PrWatchState::new(PrTarget {
