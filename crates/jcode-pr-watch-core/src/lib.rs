@@ -363,6 +363,9 @@ impl PrWatchState {
         if self.last_cycle.pending_check_count > 0 {
             return Readiness::NotReadyChecksPending;
         }
+        if self.pr.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
+            return Readiness::NotReadyActionRequired;
+        }
         if matches!(
             self.pr.merge_state.as_deref(),
             Some("DIRTY" | "BLOCKED" | "UNKNOWN" | "UNSTABLE" | "HAS_HOOKS" | "BEHIND")
