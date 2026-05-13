@@ -25,6 +25,7 @@ members = [
     "crates/jcode-message-types",
     "crates/jcode-overnight-core",
     "crates/jcode-plan",
+    "crates/jcode-pr-watch-core",
     "crates/jcode-swarm-core",
     "crates/jcode-protocol",
     "crates/jcode-selfdev-types",
