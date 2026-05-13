@@ -258,6 +258,18 @@ async fn ack_baseline(
 ) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
+    if state.terminal {
+        let readiness = state.readiness();
+        return Ok(ToolOutput::new(format!(
+            "PR watch is stopped: {}\nRepo: {}\nPR: #{}\nStop reason: {}\nNo poll was run and no state was changed.",
+            state.watch_id,
+            state.pr.repo,
+            state.pr.number,
+            state.stop_reason.as_deref().unwrap_or("terminal")
+        ))
+        .with_title(format!("{} stopped", state.watch_id))
+        .with_metadata(json!({"watch": state, "readiness": readiness, "written": false})));
+    }
     let collected_at = now_iso();
     let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
@@ -498,6 +510,18 @@ async fn poll_now(
 ) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
+    if state.terminal {
+        let readiness = state.readiness();
+        return Ok(ToolOutput::new(format!(
+            "PR watch is stopped: {}\nRepo: {}\nPR: #{}\nStop reason: {}\nNo poll was run and no state was changed.",
+            state.watch_id,
+            state.pr.repo,
+            state.pr.number,
+            state.stop_reason.as_deref().unwrap_or("terminal")
+        ))
+        .with_title(format!("{} stopped", state.watch_id))
+        .with_metadata(json!({"watch": state, "readiness": readiness, "written": false})));
+    }
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
@@ -1135,8 +1159,11 @@ fn is_failed_check(check: &CheckRunState) -> bool {
         .to_ascii_uppercase();
     matches!(
         conclusion.as_str(),
-        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED"
-    ) || matches!(status.as_str(), "FAILURE" | "ERROR" | "FAILED")
+        "FAILURE" | "FAIL" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "CANCEL"
+    ) || matches!(
+        status.as_str(),
+        "FAILURE" | "FAIL" | "ERROR" | "FAILED" | "CANCELLED" | "CANCEL"
+    )
 }
 
 fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
