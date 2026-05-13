@@ -25,6 +25,7 @@ members = [
     "crates/jcode-message-types",
     "crates/jcode-overnight-core",
     "crates/jcode-plan",
+    "crates/jcode-pr-watch-core",
     "crates/jcode-swarm-core",
     "crates/jcode-protocol",
     "crates/jcode-selfdev-types",
@@ -196,6 +197,7 @@ jcode-memory-types = { path = "crates/jcode-memory-types" }
 jcode-message-types = { path = "crates/jcode-message-types" }
 jcode-overnight-core = { path = "crates/jcode-overnight-core" }
 jcode-plan = { path = "crates/jcode-plan" }
+jcode-pr-watch-core = { path = "crates/jcode-pr-watch-core" }
 jcode-swarm-core = { path = "crates/jcode-swarm-core" }
 jcode-protocol = { path = "crates/jcode-protocol" }
 jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }

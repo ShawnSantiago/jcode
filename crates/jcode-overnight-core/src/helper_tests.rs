@@ -70,6 +70,14 @@ fn task_status_bucket_normalizes_common_labels() {
 }
 
 #[test]
+fn task_card_validation_rejects_negative_pass_phrases() {
+    let mut card = task_card("1", "Failed validation", "completed");
+    card.validation.result = Some("failed: tests did not pass".to_string());
+
+    assert!(!task_card_validated(&card));
+}
+
+#[test]
 fn escape_and_event_class_helpers_are_stable() {
     assert_eq!(
         html_escape("<tag & 'quote'>"),

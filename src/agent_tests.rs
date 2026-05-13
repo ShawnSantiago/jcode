@@ -206,6 +206,35 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
 }
 
 #[tokio::test]
+async fn set_working_dir_persists_refreshed_initial_session_context() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
+        open_delay: Duration::from_millis(0),
+        first_event_delay: Duration::from_millis(0),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let session_id = agent.session_id().to_string();
+
+    let real_workspace = tempfile::Builder::new()
+        .prefix("jcode-real-workspace-")
+        .tempdir()
+        .expect("create temp workspace");
+    let real_workspace = real_workspace.path().display().to_string();
+
+    agent.set_working_dir(&real_workspace);
+
+    let persisted = std::fs::read_to_string(
+        crate::session::session_path(&session_id).expect("resolve session path"),
+    )
+    .expect("read persisted session");
+    assert!(
+        persisted.contains(&format!("Working directory: {real_workspace}")),
+        "persisted initial system reminder should contain refreshed workspace, got: {persisted}"
+    );
+}
+
+#[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
