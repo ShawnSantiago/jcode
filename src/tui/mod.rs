@@ -1019,10 +1019,20 @@ pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000)
 const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 fn idle_donut_active_with_policy(
-    _state: &dyn TuiState,
-    _policy: &crate::perf::TuiPerfPolicy,
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
 ) -> bool {
-    false
+    if state.remote_startup_phase_active() {
+        return false;
+    }
+
+    policy.enable_decorative_animations
+        && crate::config::config().display.idle_animation
+        && policy.tier.idle_animation_enabled()
+        && state.display_messages().is_empty()
+        && !state.is_processing()
+        && state.streaming_text().is_empty()
+        && state.queued_messages().is_empty()
 }
 
 pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
