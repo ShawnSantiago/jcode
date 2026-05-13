@@ -368,7 +368,7 @@ impl PrWatchState {
         }
         if matches!(
             self.pr.merge_state.as_deref(),
-            Some("DIRTY" | "BLOCKED" | "UNKNOWN" | "UNSTABLE" | "HAS_HOOKS" | "BEHIND")
+            Some("DIRTY" | "BLOCKED" | "UNKNOWN" | "UNSTABLE" | "HAS_HOOKS" | "BEHIND" | "DRAFT")
         ) {
             return Readiness::BlockedByPolicy;
         }
