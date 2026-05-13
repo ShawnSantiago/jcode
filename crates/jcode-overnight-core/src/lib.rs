@@ -445,6 +445,9 @@ pub fn task_card_validated(card: &OvernightTaskCard) -> bool {
         || result.contains("not passed")
         || result.contains("not validated")
         || result.contains("not ok")
+        || result.contains("not successful")
+        || result.contains("not succeeded")
+        || result.contains("not success")
     {
         return false;
     }

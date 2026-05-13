@@ -851,6 +851,23 @@ fn update_state_from_collection(
 
     match collection.metadata {
         Ok(metadata) => {
+            let previous_head_sha = state.pr.head_sha.clone();
+            let next_head_sha = metadata.identity.head_sha.clone();
+            if previous_head_sha.is_some()
+                && next_head_sha.is_some()
+                && previous_head_sha != next_head_sha
+            {
+                state.polling.quiet_cycles = 0;
+                state.baseline.head_sha = next_head_sha.clone();
+                state.push_event(WatchEvent {
+                    at: collected_at.to_string(),
+                    kind: "head_changed".to_string(),
+                    data: json!({
+                        "previous_head_sha": previous_head_sha,
+                        "new_head_sha": next_head_sha,
+                    }),
+                });
+            }
             state.pr = metadata.identity;
             state
                 .last_successful_fetch
