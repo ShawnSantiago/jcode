@@ -1,7 +1,8 @@
 use super::{Tool, ToolContext, ToolOutput};
+use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use jcode_pr_watch_core::{
     ActionableItem, CheckRunState, CycleOutcome, Marker, PrTarget, PrWatchState, SurfaceError,
     WatchEvent, normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments,
@@ -42,6 +43,12 @@ struct PrWatchInput {
     pr: Option<u64>,
     watch_id: Option<String>,
     dry_run: Option<bool>,
+    #[serde(default)]
+    schedule_next: bool,
+    #[serde(default)]
+    poll_interval_seconds: Option<u64>,
+    #[serde(default)]
+    target: Option<String>,
 }
 
 #[async_trait]
@@ -68,7 +75,10 @@ impl Tool for PrWatchTool {
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
                 "pr": {"type": "integer", "description": "Pull request number."},
                 "watch_id": {"type": "string", "description": "Existing watch ID, e.g. owner-repo-pr-123."},
-                "dry_run": {"type": "boolean", "description": "Preview changes without writing state."}
+                "dry_run": {"type": "boolean", "description": "Preview changes without writing state."},
+                "schedule_next": {"type": "boolean", "description": "If true, schedule the next visible poll wakeup after start, poll_now, or ack_baseline."},
+                "poll_interval_seconds": {"type": "integer", "description": "Interval for the next scheduled poll. Defaults to state polling interval."},
+                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."}
             }
         })
     }
@@ -81,10 +91,10 @@ impl Tool for PrWatchTool {
             .unwrap_or_else(|| PathBuf::from("."));
         let store = watch_dir(&root);
         match params.action {
-            PrWatchAction::Start => start_watch(&store, params),
+            PrWatchAction::Start => start_watch(&store, params, &ctx),
             PrWatchAction::List => list_watches(&store),
-            PrWatchAction::PollNow => poll_now(&root, &store, params),
-            PrWatchAction::AckBaseline => ack_baseline(&root, &store, params),
+            PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx),
+            PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx),
             PrWatchAction::Status | PrWatchAction::Readiness | PrWatchAction::Handoff => {
                 status_like(&store, params)
             }
@@ -107,10 +117,12 @@ fn target_from_params(params: &PrWatchInput) -> Result<PrTarget> {
     Ok(PrTarget { repo, number })
 }
 
-fn start_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<ToolOutput> {
     let target = target_from_params(&params)?;
-    let state = PrWatchState::new(target);
+    let mut state = PrWatchState::new(target);
     let path = state_path(store, &state.watch_id);
+    apply_schedule_fields(&mut state, &params);
+    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         fs::create_dir_all(store)?;
@@ -120,9 +132,10 @@ fn start_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
         fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
     }
     Ok(ToolOutput::new(format!(
-        "PR watch initialized: {}\nPath: {}\nMode: local state initialized. Use poll_now for read-only gh collection{}",
+        "PR watch initialized: {}\nPath: {}\nMode: local state initialized. Use poll_now for read-only gh collection{}{}",
         state.watch_id,
         path.display(),
+        scheduled.as_deref().map(|s| format!("\nScheduled: {s}")).unwrap_or_default(),
         if would_write {
             ""
         } else {
@@ -154,18 +167,91 @@ fn list_watches(store: &Path) -> Result<ToolOutput> {
         .with_metadata(json!({"watches": states.into_iter().map(|(_, s)| s).collect::<Vec<_>>() })))
 }
 
-fn ack_baseline(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
+    if let Some(seconds) = params.poll_interval_seconds {
+        state.polling.poll_interval_seconds = seconds.max(60);
+    }
+    if params.schedule_next {
+        let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
+        state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+}
+
+fn maybe_schedule_next(
+    ctx: &ToolContext,
+    state: &PrWatchState,
+    params: &PrWatchInput,
+) -> Result<Option<String>> {
+    if !params.schedule_next || params.dry_run.unwrap_or(false) {
+        return Ok(None);
+    }
+    let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
+    let task = scheduled_poll_prompt(state);
+    let target = match params.target.as_deref() {
+        Some("spawn") => ScheduleTarget::Spawn {
+            parent_session_id: ctx.session_id.clone(),
+        },
+        Some("resume") | None => ScheduleTarget::Session {
+            session_id: ctx.session_id.clone(),
+        },
+        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
+    };
+    let mut manager = AmbientManager::new()?;
+    let id = manager.schedule(ScheduleRequest {
+        wake_in_minutes: None,
+        wake_at: Some(wake_at),
+        context: task.clone(),
+        priority: Priority::Normal,
+        target,
+        created_by_session: ctx.session_id.clone(),
+        working_dir: ctx
+            .working_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        task_description: Some(task),
+        relevant_files: vec![format!(
+            ".jcode/pr-feedback-watch/{}-state.json",
+            state.watch_id
+        )],
+        git_branch: None,
+        additional_context: Some(
+            "Scheduled by pr_watch schedule_next; read-only poll only.".to_string(),
+        ),
+    })?;
+    super::ambient::nudge_schedule_runner();
+    Ok(Some(format!(
+        "{} at {}",
+        id,
+        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
+    )))
+}
+
+fn scheduled_poll_prompt(state: &PrWatchState) -> String {
+    format!(
+        "Run the next read-only PR watch poll for {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
+        state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+    )
+}
+
+fn ack_baseline(
+    root: &Path,
+    store: &Path,
+    params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
     let collected_at = now_iso();
     let collection = collect_with_gh(root, &state.pr.repo, state.pr.number);
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
+    apply_schedule_fields(&mut state, &params);
+    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
     }
     let text = format!(
-        "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}",
+        "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}{}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -174,6 +260,10 @@ fn ack_baseline(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolO
         state.last_seen.issue_comments.len(),
         state.last_seen.reviews.len(),
         partial_failure,
+        scheduled
+            .as_deref()
+            .map(|s| format!("\nScheduled: {s}"))
+            .unwrap_or_default(),
         if would_write {
             ""
         } else {
@@ -383,19 +473,26 @@ fn apply_baseline_from_collection(
     partial_failure
 }
 
-fn poll_now(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+fn poll_now(
+    root: &Path,
+    store: &Path,
+    params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number);
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
+    apply_schedule_fields(&mut state, &params);
+    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
     }
     let readiness = state.readiness();
     let text = format!(
-        "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}",
+        "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -408,6 +505,10 @@ fn poll_now(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutpu
         state.last_cycle.failed_check_count,
         outcome.partial_failure,
         failed_surface_names(&state).join(", "),
+        scheduled
+            .as_deref()
+            .map(|s| format!("\nScheduled: {s}"))
+            .unwrap_or_default(),
         if would_write {
             ""
         } else {
@@ -1056,6 +1157,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn schedule_fields_set_interval_and_next_poll() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        let params = PrWatchInput {
+            action: PrWatchAction::PollNow,
+            repo: None,
+            pr: None,
+            watch_id: Some(state.watch_id.clone()),
+            dry_run: Some(true),
+            schedule_next: true,
+            poll_interval_seconds: Some(1),
+            target: None,
+        };
+        apply_schedule_fields(&mut state, &params);
+        assert_eq!(state.polling.poll_interval_seconds, 60);
+        assert!(state.polling.next_poll_at.is_some());
+    }
+
+    #[test]
+    fn scheduled_prompt_is_read_only_and_specific() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 13,
+        });
+        let prompt = scheduled_poll_prompt(&state);
+        assert!(prompt.contains("action=poll_now"));
+        assert!(prompt.contains("repo=owner/repo"));
+        assert!(prompt.contains("pr=13"));
+        assert!(prompt.contains("Do not push"));
+        assert!(prompt.contains("merge"));
+    }
     #[test]
     fn ack_baseline_marks_current_feedback_seen_without_actionable() {
         let mut state = PrWatchState::new(PrTarget {
