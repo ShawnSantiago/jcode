@@ -12,6 +12,7 @@ use super::{
     update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
+use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -291,6 +292,7 @@ pub(super) async fn spawn_swarm_agent(
     swarm_id: &str,
     working_dir: Option<String>,
     initial_message: Option<String>,
+    spawn_mode: Option<SwarmSpawnMode>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
@@ -321,7 +323,9 @@ pub(super) async fn spawn_swarm_agent(
             })
             .unwrap_or((None, None, false))
     };
-    let configured_swarm_model = crate::config::config().agents.swarm_model.clone();
+    let agents_config = &crate::config::config().agents;
+    let configured_swarm_model = agents_config.swarm_model.clone();
+    let resolved_spawn_mode = spawn_mode.unwrap_or(agents_config.swarm_spawn_mode);
     let spawn_model = coordinator_model.or(configured_swarm_model);
     let spawn_provider_key = coordinator_provider_key
         .or_else(|| provider_key_for_spawn_model(spawn_model.as_deref(), None));
@@ -330,14 +334,17 @@ pub(super) async fn spawn_swarm_agent(
         .as_deref()
         .map(append_swarm_completion_report_instructions);
 
-    let visible_spawn = prepare_visible_spawn_session(
-        resolved_working_dir.as_deref(),
-        spawn_model.as_deref(),
-        spawn_provider_key.as_deref(),
-        coordinator_is_canary,
-        startup_message.as_deref(),
-        spawn_visible_session_window,
-    );
+    let visible_spawn = match resolved_spawn_mode {
+        SwarmSpawnMode::Headless => Err(anyhow::anyhow!("headless spawn requested")),
+        SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
+            resolved_working_dir.as_deref(),
+            spawn_model.as_deref(),
+            spawn_provider_key.as_deref(),
+            coordinator_is_canary,
+            startup_message.as_deref(),
+            spawn_visible_session_window,
+        ),
+    };
 
     let (new_session_id, is_headless_fallback) = match visible_spawn {
         Ok((new_session_id, true)) => Ok((new_session_id, false)),
@@ -511,6 +518,7 @@ pub(super) async fn handle_comm_spawn(
     working_dir: Option<String>,
     initial_message: Option<String>,
     request_nonce: Option<String>,
+    spawn_mode: Option<SwarmSpawnMode>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
@@ -552,6 +560,9 @@ pub(super) async fn handle_comm_spawn(
             working_dir.clone().unwrap_or_default(),
             initial_message.clone().unwrap_or_default(),
             request_nonce.clone().unwrap_or_default(),
+            spawn_mode
+                .map(|mode| format!("{mode:?}"))
+                .unwrap_or_default(),
         ],
     );
     let Some(mutation_state) = begin_or_replay(
@@ -572,6 +583,7 @@ pub(super) async fn handle_comm_spawn(
         &swarm_id,
         working_dir,
         initial_message,
+        spawn_mode,
         sessions,
         global_session_id,
         provider_template,

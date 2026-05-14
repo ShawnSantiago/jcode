@@ -9,7 +9,7 @@ pub use jcode_config_types::{
     DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, KeybindingsConfig,
     MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
     NamedProviderType, NativeScrollbarConfig, ProviderConfig, SafetyConfig,
-    SessionPickerResumeAction, UpdateChannel,
+    SessionPickerResumeAction, SwarmSpawnMode, UpdateChannel,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
