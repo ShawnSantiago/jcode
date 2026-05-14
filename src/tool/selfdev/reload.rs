@@ -234,13 +234,14 @@ pub(super) fn resolve_selfdev_reload_repo_dir_from(
     working_dir: Option<&std::path::Path>,
     recent_build_repo_dir: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    primary
-        .or_else(|| working_dir.and_then(build::find_repo_in_ancestors))
+    working_dir
+        .and_then(build::find_repo_in_ancestors)
         .or_else(|| {
             recent_build_repo_dir
                 .as_deref()
                 .and_then(build::find_repo_in_ancestors)
         })
+        .or(primary)
 }
 
 fn latest_completed_build_repo_dir_for_session(session_id: &str) -> Option<std::path::PathBuf> {
@@ -277,7 +278,7 @@ fn selfdev_reload_repo_discovery_error(
         .unwrap_or_else(|error| format!("<unavailable: {}>", error));
 
     anyhow::anyhow!(
-        "Could not find jcode repository directory for selfdev reload. Tried build/executable/current-dir fallbacks, ToolContext working_dir={}, and latest completed selfdev build repo_dir={} for session {}. Process current_dir={}. Run `selfdev build` from a jcode checkout or use `selfdev enter` to create a self-dev session with a valid repo working directory.",
+        "Could not find jcode repository directory for selfdev reload. Tried ToolContext working_dir={}, latest completed selfdev build repo_dir={} for session {}, and build/executable/current-dir fallbacks. Process current_dir={}. Run `selfdev build` from a jcode checkout or use `selfdev enter` to create a self-dev session with a valid repo working directory.",
         working_dir,
         recent_build_repo_dir,
         session_id,
