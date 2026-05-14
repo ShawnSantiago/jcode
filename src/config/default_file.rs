@@ -148,6 +148,18 @@ message_timestamps = true
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
 
+[websearch]
+# Preferred websearch engine: "duckduckgo" or "bing".
+engine = "duckduckgo"
+# Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
+fallback_engines = ["bing"]
+# Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
+# Fallback Bing searches intentionally use keyless HTML search.
+# bing_api_key_env = "JCODE_BING_API_KEY"
+# bing_api_key = ""
+# Bing market/region, for example "en-US" or "zh-CN".
+bing_market = "en-US"
+
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+D to save as default
