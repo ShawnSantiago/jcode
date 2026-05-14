@@ -546,6 +546,8 @@ fn install_native_host_manifest() -> Result<bool> {
         && let Some(existing_path) = existing["path"].as_str()
         && std::path::Path::new(existing_path).exists()
     {
+        #[cfg(target_os = "windows")]
+        register_windows_native_host_manifest(&manifest_path)?;
         return Ok(false);
     }
 
