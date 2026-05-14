@@ -340,7 +340,34 @@ fn reload_repo_resolver_uses_working_dir_when_primary_detection_fails() {
     let nested = repo.path().join("crates").join("jcode-build-support");
     std::fs::create_dir_all(&nested).expect("nested dir");
 
-    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, Some(&nested));
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, Some(&nested), None);
+    assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn reload_repo_resolver_uses_recent_build_repo_when_other_detection_fails() {
+    let repo = create_repo_fixture();
+    let nested = repo.path().join("src").join("cli");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, None, Some(nested));
+    assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn reload_repo_resolver_prefers_working_dir_before_recent_build_repo() {
+    let repo = create_repo_fixture();
+    let recent_repo = create_repo_fixture();
+    let nested = repo.path().join("src").join("tool");
+    let recent_nested = recent_repo.path().join("src").join("cli");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    std::fs::create_dir_all(&recent_nested).expect("recent nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
+        None,
+        Some(&nested),
+        Some(recent_nested),
+    );
     assert_eq!(resolved.as_deref(), Some(repo.path()));
 }
 
