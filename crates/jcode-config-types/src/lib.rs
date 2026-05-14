@@ -357,10 +357,36 @@ pub struct AuthConfig {
 pub struct AgentsConfig {
     /// Optional default model override for spawned swarm/subagent sessions.
     pub swarm_model: Option<String>,
+    /// Default terminal mode for swarm-created agents.
+    pub swarm_spawn_mode: SwarmSpawnMode,
     /// Optional default model override for the memory sidecar.
     pub memory_model: Option<String>,
     /// Whether memory should use the sidecar for relevance/extraction.
     pub memory_sidecar_enabled: bool,
+}
+
+/// How swarm-created agents should be spawned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SwarmSpawnMode {
+    /// Open a visible/headed terminal window. This preserves historical behavior.
+    #[default]
+    Visible,
+    /// Create the worker in-process without opening a terminal window.
+    Headless,
+    /// Try visible first and fall back to headless if a window cannot be opened.
+    Auto,
+}
+
+impl SwarmSpawnMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "visible" | "headed" => Some(Self::Visible),
+            "headless" => Some(Self::Headless),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
 }
 
 /// Automatic end-of-turn code review configuration.
@@ -582,6 +608,62 @@ impl Default for FeatureConfig {
             swarm: true,
             message_timestamps: true,
             update_channel: UpdateChannel::default(),
+        }
+    }
+}
+
+/// Search engine used by the websearch tool.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchEngine {
+    /// DuckDuckGo HTML search, no API key required.
+    #[default]
+    Duckduckgo,
+    /// Bing search. Uses the Bing API when configured, otherwise Bing HTML search.
+    Bing,
+}
+
+impl WebSearchEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Duckduckgo => "duckduckgo",
+            Self::Bing => "bing",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
+            "bing" => Some(Self::Bing),
+            _ => None,
+        }
+    }
+}
+
+/// Configuration for the websearch tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// Preferred engine when the tool input does not specify one.
+    pub engine: WebSearchEngine,
+    /// Keyless HTML engines to try after the preferred engine fails.
+    pub fallback_engines: Vec<WebSearchEngine>,
+    /// Optional Bing API key for primary Bing searches. Fallback Bing uses keyless HTML search.
+    pub bing_api_key: Option<String>,
+    /// Environment variable containing the Bing API key.
+    pub bing_api_key_env: String,
+    /// Bing market, e.g. "en-US" or "zh-CN".
+    pub bing_market: String,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            engine: WebSearchEngine::Duckduckgo,
+            fallback_engines: vec![WebSearchEngine::Bing],
+            bing_api_key: None,
+            bing_api_key_env: "JCODE_BING_API_KEY".to_string(),
+            bing_market: "en-US".to_string(),
         }
     }
 }

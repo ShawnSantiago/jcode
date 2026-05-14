@@ -912,8 +912,12 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 crate::provider_catalog::OPENAI_COMPAT_PROFILE,
             );
             lines.push("**Settings**".to_string());
-            lines.push(format!("- API base: `{}`", compat.api_base));
-            lines.push(format!("- API key variable: `{}`", compat.api_key_env));
+            lines.push("Configure custom OpenAI-compatible endpoints in this order: base URL first, then API key variable/key.".to_string());
+            lines.push(format!("- Step 1, API base URL: `{}`", compat.api_base));
+            lines.push(format!(
+                "- Step 2, API key variable: `{}`",
+                compat.api_key_env
+            ));
             lines.push(format!("- Env file: `{}`", compat.env_file));
             lines.push(format!(
                 "- Default model hint: `{}`",

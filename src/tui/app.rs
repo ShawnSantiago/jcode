@@ -505,6 +505,11 @@ pub(super) struct OvernightAutoPokeState {
     pub final_wrap_poked: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+struct CommandCandidatesCache {
+    candidates: Vec<(String, &'static str)>,
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
 pub struct App {
@@ -520,6 +525,7 @@ pub struct App {
     display_edit_tool_message_count: usize,
     compacted_history_lazy: CompactedHistoryLazyState,
     input: String,
+    command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     cursor_pos: usize,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming
@@ -955,6 +961,8 @@ pub struct App {
     pending_login: Option<PendingLogin>,
     /// Pending account picker follow-up input (new label or setting value)
     pending_account_input: Option<auth::PendingAccountInput>,
+    /// Pending SSH remote target prompt. Stores the friendly remote name.
+    pending_ssh_remote_name: Option<String>,
     /// One-shot flag: force the next paint to clear the terminal first.
     /// Needed after native terminal scrolls mutate the screen outside ratatui's diff model.
     force_full_redraw: bool,
@@ -1072,6 +1080,12 @@ impl App {
             .and_then(|baseline| baseline.signature.as_ref())
             .map(|previous| Self::kv_cache_signatures_prefix_match(&signature, previous));
 
+        self.maybe_push_cold_cache_warning(
+            turn_number,
+            self.kv_cache_turn_call_index,
+            baseline.as_ref(),
+        );
+
         self.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache_turn_call_index,
@@ -1106,6 +1120,11 @@ impl App {
             .as_ref()
             .and_then(|baseline| baseline.signature.as_ref())
             .map(|previous| Self::kv_cache_signatures_prefix_match(&signature, previous));
+        self.maybe_push_cold_cache_warning(
+            turn_number,
+            self.kv_cache_turn_call_index,
+            baseline.as_ref(),
+        );
         self.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache_turn_call_index,
@@ -1116,6 +1135,42 @@ impl App {
             baseline_messages_prefix_matches,
             baseline,
         });
+    }
+
+    fn maybe_push_cold_cache_warning(
+        &mut self,
+        turn_number: usize,
+        call_index: u16,
+        baseline: Option<&KvCacheBaseline>,
+    ) {
+        if turn_number <= 1 || call_index != 1 {
+            return;
+        }
+        let Some(baseline) = baseline else {
+            return;
+        };
+        let Some(ttl_secs) =
+            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
+        else {
+            return;
+        };
+        let age_secs = baseline.completed_at.elapsed().as_secs();
+        if age_secs < ttl_secs {
+            return;
+        }
+
+        let tokens = baseline.input_tokens;
+        let token_label = if tokens >= 1_000_000 {
+            format!("{:.1}M", tokens as f64 / 1_000_000.0)
+        } else if tokens >= 1_000 {
+            format!("{}K", tokens / 1_000)
+        } else {
+            tokens.to_string()
+        };
+        self.push_display_message(DisplayMessage::system(format!(
+            "🧊 Prompt cache is cold: ~{} input tokens may be resent on this request ({}s TTL expired after {}s). Use /cache to extend the timer before long breaks, or start a fresh/compacted session for very large histories.",
+            token_label, ttl_secs, age_secs
+        )));
     }
 
     pub(super) fn record_completed_stream_cache_usage(&mut self) {

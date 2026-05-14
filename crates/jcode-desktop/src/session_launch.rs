@@ -1846,6 +1846,92 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn desktop_workers_reconnect_independently_across_same_fake_reload() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let socket_path = std::env::temp_dir().join(format!(
+            "jcode-desktop-worker-multi-reload-old-{}-{nonce}.sock",
+            std::process::id(),
+        ));
+        let new_socket_path = std::env::temp_dir().join(format!(
+            "jcode-desktop-worker-multi-reload-new-{}-{nonce}.sock",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_file(&new_socket_path);
+        let listener = UnixListener::bind(&socket_path)?;
+        let new_listener = UnixListener::bind(&new_socket_path)?;
+        let previous_socket = std::env::var_os("JCODE_SOCKET");
+        unsafe {
+            std::env::set_var("JCODE_SOCKET", &socket_path);
+        }
+
+        let server = std::thread::spawn(move || {
+            fake_desktop_server_multi_client_reload_roundtrip(
+                listener,
+                new_listener,
+                new_socket_path,
+            )
+        });
+        let (event_tx_one, event_rx_one) = mpsc::channel();
+        let (event_tx_two, event_rx_two) = mpsc::channel();
+        let (_command_tx_one, command_rx_one) = mpsc::channel();
+        let (_command_tx_two, command_rx_two) = mpsc::channel();
+
+        let client_one = std::thread::spawn(move || {
+            run_server_session(
+                None,
+                "client one",
+                Vec::new(),
+                Some(event_tx_one),
+                command_rx_one,
+            )
+        });
+        let client_two = std::thread::spawn(move || {
+            run_server_session(
+                None,
+                "client two",
+                Vec::new(),
+                Some(event_tx_two),
+                command_rx_two,
+            )
+        });
+
+        let result_one = client_one.join().unwrap()?;
+        let result_two = client_two.join().unwrap()?;
+        restore_env_var("JCODE_SOCKET", previous_socket);
+        let _ = std::fs::remove_file(&socket_path);
+
+        let mut results = vec![result_one.clone(), result_two.clone()];
+        results.sort();
+        assert_eq!(
+            results,
+            vec![
+                "session_desktop_multi_reload_1".to_string(),
+                "session_desktop_multi_reload_2".to_string(),
+            ]
+        );
+
+        let requests = server.join().unwrap()?;
+        let reconnect_targets = requests
+            .iter()
+            .filter(|request| request.get("type").and_then(Value::as_str) == Some("subscribe"))
+            .filter_map(|request| request.get("target_session_id").and_then(Value::as_str))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(reconnect_targets.len(), 2);
+        assert!(reconnect_targets.contains("session_desktop_multi_reload_1"));
+        assert!(reconnect_targets.contains("session_desktop_multi_reload_2"));
+
+        assert_client_reload_sequence(event_rx_one.try_iter().collect(), &result_one);
+        assert_client_reload_sequence(event_rx_two.try_iter().collect(), &result_two);
+        Ok(())
+    }
+
+    #[cfg(unix)]
     fn fake_desktop_server_roundtrip(listener: UnixListener) -> Result<Vec<Value>> {
         let (mut reader, mut writer, subscribe) = accept_first_requesting_client(&listener)?;
         write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
@@ -1925,6 +2011,144 @@ mod tests {
 
         let _ = std::fs::remove_file(new_socket_path);
         Ok(vec![subscribe, state, message, reconnect_subscribe])
+    }
+
+    #[cfg(unix)]
+    fn fake_desktop_server_multi_client_reload_roundtrip(
+        listener: UnixListener,
+        new_listener: UnixListener,
+        new_socket_path: PathBuf,
+    ) -> Result<Vec<Value>> {
+        let first = fake_desktop_server_accept_old_reload_client(
+            &listener,
+            "session_desktop_multi_reload_1",
+            &new_socket_path,
+        )?;
+        let second = fake_desktop_server_accept_old_reload_client(
+            &listener,
+            "session_desktop_multi_reload_2",
+            &new_socket_path,
+        )?;
+        let message_ids = std::collections::HashMap::from([
+            (first.session_id.clone(), first.message["id"].clone()),
+            (second.session_id.clone(), second.message["id"].clone()),
+        ]);
+
+        let mut reconnect_requests = Vec::new();
+        for _ in 0..2 {
+            let (new_reader, mut new_writer, reconnect_subscribe) =
+                accept_first_requesting_client(&new_listener)?;
+            let session_id = reconnect_subscribe
+                .get("target_session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("missing-session")
+                .to_string();
+            write_json_line(
+                &mut new_writer,
+                json!({
+                    "type": "session",
+                    "session_id": session_id,
+                }),
+            )?;
+            let message_id = message_ids
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_else(|| json!(3));
+            write_json_line(&mut new_writer, json!({"type": "done", "id": message_id}))?;
+            drop(new_reader);
+            reconnect_requests.push(reconnect_subscribe);
+        }
+
+        let _ = std::fs::remove_file(new_socket_path);
+        let mut requests = vec![
+            first.subscribe,
+            first.state,
+            first.message,
+            second.subscribe,
+            second.state,
+            second.message,
+        ];
+        requests.extend(reconnect_requests);
+        Ok(requests)
+    }
+
+    #[cfg(unix)]
+    struct FakeReloadClientRequests {
+        session_id: String,
+        subscribe: Value,
+        state: Value,
+        message: Value,
+    }
+
+    #[cfg(unix)]
+    fn fake_desktop_server_accept_old_reload_client(
+        listener: &UnixListener,
+        session_id: &str,
+        new_socket_path: &PathBuf,
+    ) -> Result<FakeReloadClientRequests> {
+        let (mut reader, mut writer, subscribe) = accept_first_requesting_client(listener)?;
+        write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
+        write_json_line(&mut writer, json!({"type": "done", "id": subscribe["id"]}))?;
+
+        let state = read_fake_server_request(&mut reader)?;
+        write_json_line(
+            &mut writer,
+            json!({
+                "type": "state",
+                "id": state["id"],
+                "session_id": session_id,
+                "message_count": 0,
+                "is_processing": false,
+            }),
+        )?;
+
+        let message = read_fake_server_request(&mut reader)?;
+        write_json_line(&mut writer, json!({"type": "ack", "id": message["id"]}))?;
+        write_json_line(
+            &mut writer,
+            json!({"type": "reloading", "new_socket": new_socket_path.display().to_string()}),
+        )?;
+        let _ = write_json_line(&mut writer, json!({"type": "done", "id": message["id"]}));
+        drop(writer);
+        drop(reader);
+
+        Ok(FakeReloadClientRequests {
+            session_id: session_id.to_string(),
+            subscribe,
+            state,
+            message,
+        })
+    }
+
+    fn assert_client_reload_sequence(events: Vec<DesktopSessionEvent>, session_id: &str) {
+        let reload_index = events
+            .iter()
+            .position(|event| matches!(event, DesktopSessionEvent::Reloading { .. }))
+            .expect("client should see reload start");
+        let reloaded_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DesktopSessionEvent::Reloaded { session_id: reloaded }
+                        if reloaded == session_id
+                )
+            })
+            .expect("client should see reload completion for its own session");
+        let done_indices = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event, DesktopSessionEvent::Done).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            done_indices.len(),
+            1,
+            "stale old-socket Done must not be forwarded: {events:?}"
+        );
+        assert!(reload_index < reloaded_index, "{events:?}");
+        assert!(reloaded_index < done_indices[0], "{events:?}");
     }
 
     #[cfg(unix)]
