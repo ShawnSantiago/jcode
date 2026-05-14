@@ -654,7 +654,7 @@ fn handwritten_welcome_bounds_for_phrase_with_scale(
     let source_width = (source_max[0] - source_min[0]).max(1.0);
     let source_height = (source_max[1] - source_min[1]).max(1.0);
     let normal_draft_top = single_session_draft_top(size);
-    let target_width = size.width as f32 * 0.44 * ui_scale;
+    let target_width = size.width as f32 * 0.68 * ui_scale;
     let scale = target_width / source_width;
     let left = (size.width as f32 - target_width) * 0.5;
     let top = PANEL_BODY_TOP_PADDING + (normal_draft_top - PANEL_BODY_TOP_PADDING) * 0.31;
@@ -666,7 +666,7 @@ fn handwritten_welcome_bounds_for_phrase_with_scale(
 
 fn glyph_welcome_hero_bounds(size: PhysicalSize<u32>, ui_scale: f32) -> ([f32; 2], [f32; 2]) {
     let normal_draft_top = single_session_draft_top(size);
-    let target_width = size.width as f32 * 0.44 * ui_scale;
+    let target_width = size.width as f32 * 0.68 * ui_scale;
     let font_size = glyph_welcome_hero_font_size(size, ui_scale);
     let left = (size.width as f32 - target_width) * 0.5;
     let top = PANEL_BODY_TOP_PADDING + (normal_draft_top - PANEL_BODY_TOP_PADDING) * 0.31;
@@ -676,7 +676,7 @@ fn glyph_welcome_hero_bounds(size: PhysicalSize<u32>, ui_scale: f32) -> ([f32; 2
 fn glyph_welcome_hero_font_size(size: PhysicalSize<u32>, ui_scale: f32) -> f32 {
     let normal_draft_top = single_session_draft_top(size);
     let available_height = (normal_draft_top - PANEL_BODY_TOP_PADDING).max(1.0);
-    (available_height * 0.15 * ui_scale).clamp(54.0 * ui_scale, 118.0 * ui_scale)
+    (available_height * 0.24 * ui_scale).clamp(82.0 * ui_scale, 170.0 * ui_scale)
 }
 
 fn handwritten_welcome_paths_for_phrase(phrase: &str) -> Vec<Vec<[f32; 2]>> {
@@ -4784,7 +4784,7 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
         single_session_text_buffer_with_family(
             font_system,
             &key.welcome_hero,
-            SINGLE_SESSION_ASSISTANT_FONT_FAMILY,
+            SINGLE_SESSION_WELCOME_FONT_FAMILY,
             hero_font_size,
             hero_font_size * 1.18,
             hero_width,

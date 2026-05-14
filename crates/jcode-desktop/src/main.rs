@@ -20,10 +20,10 @@ use glyphon::{
 use image::RgbaImage;
 use render_helpers::*;
 use single_session::{
-    SINGLE_SESSION_ASSISTANT_FONT_FAMILY, SINGLE_SESSION_FONT_FAMILY, SelectionPoint,
-    SingleSessionApp, SingleSessionLineStyle, SingleSessionMessage, SingleSessionStyledLine,
-    handwritten_welcome_phrase, single_session_surface, single_session_typography,
-    single_session_typography_for_scale,
+    SINGLE_SESSION_ASSISTANT_FONT_FAMILY, SINGLE_SESSION_FONT_FAMILY,
+    SINGLE_SESSION_WELCOME_FONT_FAMILY, SelectionPoint, SingleSessionApp, SingleSessionLineStyle,
+    SingleSessionMessage, SingleSessionStyledLine, handwritten_welcome_phrase,
+    single_session_surface, single_session_typography, single_session_typography_for_scale,
 };
 use single_session_render::*;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
