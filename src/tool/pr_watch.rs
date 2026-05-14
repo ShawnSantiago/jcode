@@ -302,6 +302,17 @@ fn monitor_should_schedule_followup(status: MonitorStatus) -> bool {
     )
 }
 
+fn watch_state_changed_since_load(
+    current_state: &PrWatchState,
+    loaded_existing_state: bool,
+    loaded_updated_at: &Option<String>,
+    loaded_cycle_number: u64,
+) -> bool {
+    !loaded_existing_state
+        || current_state.updated_at != *loaded_updated_at
+        || current_state.polling.cycle_number != loaded_cycle_number
+}
+
 fn maybe_schedule_next(
     ctx: &ToolContext,
     state: &PrWatchState,
@@ -817,7 +828,8 @@ async fn monitor_once(
         .with_metadata(json!({"watch_id": watch_id, "monitor_status": MonitorStatus::AlreadyRunning.as_str(), "written": false})));
     };
 
-    let mut state = if path.exists() {
+    let loaded_existing_state = path.exists();
+    let mut state = if loaded_existing_state {
         load_state_for_params(store, &params)?
     } else {
         let target = target_from_params(&params)?;
@@ -828,6 +840,8 @@ async fn monitor_once(
         state.created_at = Some(now_iso());
         state
     };
+    let loaded_updated_at = state.updated_at.clone();
+    let loaded_cycle_number = state.polling.cycle_number;
 
     let max_runtime_seconds = monitor_max_runtime_seconds(&params);
     let would_write = !params.dry_run.unwrap_or(false);
@@ -871,6 +885,41 @@ async fn monitor_once(
 
     if would_write {
         fs::create_dir_all(store)?;
+        if path.exists() {
+            let current_text = fs::read_to_string(&path).with_context(|| {
+                format!(
+                    "failed to re-read {} before writing monitor result",
+                    path.display()
+                )
+            })?;
+            let current_state = normalize_watch_state_json(&current_text).with_context(|| {
+                format!(
+                    "failed to parse {} before writing monitor result",
+                    path.display()
+                )
+            })?;
+            if watch_state_changed_since_load(
+                &current_state,
+                loaded_existing_state,
+                &loaded_updated_at,
+                loaded_cycle_number,
+            ) {
+                let readiness = current_state.readiness();
+                return Ok(ToolOutput::new(format!(
+                    "PR watch monitor result is stale: {}\nRepo: {}\nPR: #{}\nNo state was changed because another watch action updated the state first.",
+                    current_state.watch_id, current_state.pr.repo, current_state.pr.number
+                ))
+                .with_title(format!("{} stale monitor", current_state.watch_id))
+                .with_metadata(json!({"watch": current_state, "readiness": readiness, "monitor_status": "stale", "written": false, "stale_monitor": true})));
+            }
+        } else if loaded_existing_state {
+            return Ok(ToolOutput::new(format!(
+                "PR watch monitor result is stale: {watch_id}\nState path disappeared before write: {}\nNo state was changed.",
+                path.display()
+            ))
+            .with_title(format!("{} stale monitor", watch_id))
+            .with_metadata(json!({"watch_id": watch_id, "monitor_status": "stale", "written": false, "stale_monitor": true})));
+        }
         write_state_atomic(&path, &state)?;
     }
     let status = monitor_status_for_state(&state, partial_failure);
@@ -2023,6 +2072,48 @@ mod tests {
             MonitorStatus::QuietSatisfied
         ));
         assert!(!monitor_should_schedule_followup(MonitorStatus::Stopped));
+    }
+
+    #[test]
+    fn monitor_stale_guard_detects_concurrent_state_changes() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.updated_at = Some("2026-05-14T11:00:00Z".into());
+        state.polling.cycle_number = 2;
+
+        assert!(!watch_state_changed_since_load(
+            &state,
+            true,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+
+        let mut updated_at_changed = state.clone();
+        updated_at_changed.updated_at = Some("2026-05-14T11:01:00Z".into());
+        assert!(watch_state_changed_since_load(
+            &updated_at_changed,
+            true,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+
+        let mut cycle_changed = state.clone();
+        cycle_changed.polling.cycle_number += 1;
+        assert!(watch_state_changed_since_load(
+            &cycle_changed,
+            true,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+
+        assert!(watch_state_changed_since_load(
+            &state,
+            false,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
     }
 
     #[test]
