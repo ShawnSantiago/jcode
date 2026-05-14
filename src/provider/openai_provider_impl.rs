@@ -18,13 +18,7 @@ impl Provider for OpenAIProvider {
         let model_id = self.model_id().await;
         let (instructions, is_chatgpt_mode) = {
             let credentials = self.credentials.read().await;
-            let is_chatgpt = Self::is_chatgpt_mode(&credentials);
-            let instructions = if is_chatgpt {
-                Self::chatgpt_instructions_with_selfdev(system)
-            } else {
-                system.to_string()
-            };
-            (instructions, is_chatgpt)
+            (system.to_string(), Self::is_chatgpt_mode(&credentials))
         };
         let reasoning_effort = self
             .reasoning_effort
