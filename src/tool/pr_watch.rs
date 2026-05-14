@@ -15,6 +15,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration as StdDuration;
 use tokio::process::Command;
 
 pub struct PrWatchTool;
@@ -311,6 +312,18 @@ fn watch_state_changed_since_load(
     !loaded_existing_state
         || current_state.updated_at != *loaded_updated_at
         || current_state.polling.cycle_number != loaded_cycle_number
+}
+
+fn timed_out_collection(max_runtime_seconds: u64) -> GhCollection {
+    let message = format!("monitor collection exceeded max_runtime_seconds={max_runtime_seconds}");
+    GhCollection {
+        metadata: Err(SurfaceError::transient("metadata", message.clone())),
+        checks: Err(SurfaceError::transient("checks", message.clone())),
+        review_comments: Err(SurfaceError::transient("review_comments", message.clone())),
+        issue_comments: Err(SurfaceError::transient("issue_comments", message.clone())),
+        reviews: Err(SurfaceError::transient("reviews", message.clone())),
+        review_threads: Err(SurfaceError::transient("review_threads", message)),
+    }
 }
 
 fn maybe_schedule_next(
@@ -852,7 +865,15 @@ async fn monitor_once(
         mode = "terminal";
     } else {
         let collected_at = now_iso();
-        let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
+        let collection = match tokio::time::timeout(
+            StdDuration::from_secs(max_runtime_seconds),
+            collect_with_gh(root, &state.pr.repo, state.pr.number),
+        )
+        .await
+        {
+            Ok(collection) => collection,
+            Err(_) => timed_out_collection(max_runtime_seconds),
+        };
         if state.last_successful_fetch.is_empty() {
             partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
             mode = "baseline";
@@ -2114,6 +2135,24 @@ mod tests {
             &state.updated_at,
             state.polling.cycle_number,
         ));
+    }
+
+    #[test]
+    fn timed_out_collection_marks_all_surfaces_transient() {
+        let collection = timed_out_collection(12);
+        for (surface, result) in [
+            ("metadata", collection.metadata.map(|_| ())),
+            ("checks", collection.checks.map(|_| ())),
+            ("review_comments", collection.review_comments.map(|_| ())),
+            ("issue_comments", collection.issue_comments.map(|_| ())),
+            ("reviews", collection.reviews.map(|_| ())),
+            ("review_threads", collection.review_threads.map(|_| ())),
+        ] {
+            let err = result.expect_err("surface should time out");
+            assert_eq!(err.surface, surface);
+            assert!(err.transient);
+            assert!(err.message.contains("max_runtime_seconds=12"));
+        }
     }
 
     #[test]
