@@ -1306,9 +1306,11 @@ fn update_state_from_collection(
     let mut pending_actionable = Vec::new();
     let mut pending_check_count = 0;
     let mut failed_check_count = 0;
+    let mut any_surface_success = false;
 
     match collection.metadata {
         Ok(metadata) => {
+            any_surface_success = true;
             let previous_head_sha = state.pr.head_sha.clone();
             let next_head_sha = metadata.identity.head_sha.clone();
             if previous_head_sha.is_some()
@@ -1343,6 +1345,7 @@ fn update_state_from_collection(
 
     match collection.checks {
         Ok(checks) => {
+            any_surface_success = true;
             pending_check_count = checks
                 .iter()
                 .filter(|check| is_pending_check(check))
@@ -1366,6 +1369,7 @@ fn update_state_from_collection(
 
     match collection.review_comments {
         Ok(comments) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1416,6 +1420,7 @@ fn update_state_from_collection(
 
     match collection.issue_comments {
         Ok(comments) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1466,6 +1471,7 @@ fn update_state_from_collection(
 
     match collection.review_threads {
         Ok(threads) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1526,6 +1532,7 @@ fn update_state_from_collection(
 
     match collection.reviews {
         Ok(reviews) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1563,6 +1570,12 @@ fn update_state_from_collection(
             partial_failure = true;
             state.push_event(surface_error_event(collected_at, err));
         }
+    }
+
+    if partial_failure && !any_surface_success {
+        pending_actionable = state.pending_actionable.clone();
+        pending_check_count = state.last_cycle.pending_check_count;
+        failed_check_count = state.last_cycle.failed_check_count;
     }
 
     let outcome = CycleOutcome {
@@ -2153,6 +2166,39 @@ mod tests {
             assert!(err.transient);
             assert!(err.message.contains("max_runtime_seconds=12"));
         }
+    }
+
+    #[test]
+    fn total_transient_failure_preserves_existing_blockers() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pending_actionable.push(ActionableItem {
+            id: "THREAD_BLOCKER".into(),
+            surface: "review_threads".into(),
+            summary: "Existing unresolved thread".into(),
+            url: Some("https://thread".into()),
+            path: Some("src/lib.rs".into()),
+            status: Some("unresolved".into()),
+        });
+        state.last_cycle.pending_check_count = 1;
+        state.last_cycle.failed_check_count = 1;
+
+        let outcome = update_state_from_collection(
+            &mut state,
+            timed_out_collection(12),
+            "2026-05-14T13:00:00Z",
+        );
+
+        assert!(outcome.partial_failure);
+        assert_eq!(outcome.pending_actionable.len(), 1);
+        assert_eq!(outcome.pending_actionable[0].id, "THREAD_BLOCKER");
+        assert_eq!(outcome.pending_check_count, 1);
+        assert_eq!(outcome.failed_check_count, 1);
+        assert_eq!(state.pending_actionable.len(), 1);
+        assert_eq!(state.last_cycle.pending_check_count, 1);
+        assert_eq!(state.last_cycle.failed_check_count, 1);
     }
 
     #[test]
