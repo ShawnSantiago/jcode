@@ -603,12 +603,13 @@ impl CompactionManager {
     /// Get the active (uncompacted) messages from a full message list.
     /// Skips the first `compacted_count` messages.
     fn active_messages<'a>(&self, all_messages: &'a [Message]) -> &'a [Message] {
-        if self.compacted_count <= all_messages.len() {
-            &all_messages[self.compacted_count..]
-        } else {
-            // Edge case: messages were cleared/replaced with fewer items
-            all_messages
-        }
+        // If session restore/replay leaves the manager with bookkeeping from a
+        // longer message vector, never fall back to the full transcript. That
+        // makes already-compacted messages active again and can drive repeated
+        // emergency compaction loops. Clamp to the end instead: all available
+        // messages are covered by the summary until new turns arrive.
+        let start = self.compacted_count.min(all_messages.len());
+        &all_messages[start..]
     }
 
     fn active_message_chars_with(&self, all_messages: &[Message]) -> usize {
@@ -1196,6 +1197,17 @@ impl CompactionManager {
     /// exceed the token budget, progressively keeps fewer turns down to
     /// `MIN_TURNS_TO_KEEP`.
     pub fn hard_compact_with(&mut self, all_messages: &[Message]) -> Result<usize, String> {
+        if self.compacted_count > all_messages.len() {
+            crate::logging::warn(&format!(
+                "[compaction] compacted_count {} exceeded messages.len() {}; clamping before hard compact",
+                self.compacted_count,
+                all_messages.len()
+            ));
+            self.compacted_count = all_messages.len();
+            self.active_message_chars = 0;
+            self.active_message_chars_dirty = false;
+        }
+
         let active = self.active_messages(all_messages);
 
         if active.len() <= MIN_TURNS_TO_KEEP {
@@ -1257,12 +1269,15 @@ impl CompactionManager {
             original_turn_count: cutoff,
         };
 
-        self.compacted_count += cutoff;
+        self.compacted_count = self
+            .compacted_count
+            .saturating_add(cutoff)
+            .min(all_messages.len());
         self.active_message_chars = remaining_suffix_chars[cutoff];
         self.active_message_chars_dirty = false;
         self.active_summary = Some(summary);
         self.observed_input_tokens = None;
-        let post_tokens = self.effective_token_count() as u64;
+        let post_tokens = self.effective_token_count_with(all_messages) as u64;
         self.last_compaction = Some(CompactionEvent {
             trigger: "hard_compact".to_string(),
             pre_tokens: Some(pre_tokens),
