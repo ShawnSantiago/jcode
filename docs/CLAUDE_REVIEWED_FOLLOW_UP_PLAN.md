@@ -71,7 +71,7 @@ Claude judged the plan conditionally actionable but required two corrections bef
 1. Add this exact ignore rule:
 
 ```gitignore
-/.jcode/pr-feedback-watch/
+.jcode/pr-feedback-watch/
 ```
 
 2. Do not delete existing local state/logs unless the user explicitly asks.
@@ -171,8 +171,8 @@ Add a native `pr_watch` action or mode for bounded monitor execution, but do not
 Example interface:
 
 ```text
-pr_watch action="monitor" owner="..." repo="..." pull_number=N \
-  poll_interval_minutes=5 quiet_cycles_required=3 max_runtime_minutes=10
+pr_watch action="monitor" owner="..." repo="..." pr=N \
+  poll_interval_seconds=300 quiet_cycles_required=3 max_runtime_minutes=10
 ```
 
 Behavior:
@@ -228,9 +228,9 @@ The watchdog should alert if:
 | Compile-time `CARGO_MANIFEST_DIR` mismatches runtime source path | Prefer explicit selfdev context repo dir and add diagnostics |
 | Monitor loop becomes another long-running fragile task | Bound max runtime, emit progress, return before timeout, persist state every cycle |
 | GitHub CLI behavior varies by version | Add parser tests for observed outputs and fallback handling |
-| Runtime state leaks into commits | Add `/.jcode/pr-feedback-watch/` to `.gitignore` before broad edits |
+| Runtime state leaks into commits | Add `.jcode/pr-feedback-watch/` to `.gitignore` before broad edits and untrack existing live state |
 | Accidental GitHub mutations | Keep native monitor read-only unless explicit authorization is stored in policy |
-| Dead repo-resolution helper causes future divergence | Remove or consolidate `SelfDevTool::resolve_repo_dir` |
+| Repo-resolution helpers diverge | Audit `SelfDevTool::resolve_repo_dir` usage in Slice 1A and consolidate during Slice 1B when reload behavior is changed |
 
 ## Final First Slice
 
@@ -238,9 +238,10 @@ Claude recommended splitting the first work into two small slices.
 
 ### Slice 1A: Zero-risk hygiene
 
-1. Add `/.jcode/pr-feedback-watch/` to `.gitignore`.
-2. Remove or consolidate dead duplicated selfdev repo-resolution code if it is obviously unused and covered by tests.
-3. Validate with a narrow test or at least `cargo check -p jcode --bin jcode` if code changed.
+1. Add `.jcode/pr-feedback-watch/` to `.gitignore`.
+2. Untrack any already tracked live PR watch state with `git rm --cached`, leaving local artifacts untouched.
+3. Audit `SelfDevTool::resolve_repo_dir` references. If it is still used by build/enter paths, defer consolidation to Slice 1B instead of removing it in a hygiene-only PR.
+4. Validate with a narrow test or at least `cargo check -p jcode --bin jcode` if code changed.
 
 ### Slice 1B: Reload fix
 
