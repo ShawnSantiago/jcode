@@ -785,7 +785,9 @@ async fn install_extension() -> Result<String> {
     }
 
     // Try to open Firefox with the XPI to trigger install prompt
-    let xpi_url = format!("file://{}", xpi.to_string_lossy());
+    let xpi_url = url::Url::from_file_path(&xpi)
+        .map_err(|_| anyhow::anyhow!("Could not convert XPI path to file URL: {}", xpi.display()))?
+        .to_string();
 
     #[cfg(target_os = "linux")]
     {
