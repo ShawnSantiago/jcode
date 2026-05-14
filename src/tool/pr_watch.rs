@@ -2093,14 +2093,12 @@ mod tests {
         });
 
         let output = watch_locked_output(temp.path(), &state, "poll_now");
-        assert!(output.text.contains("already running or locked"));
-        assert!(output.text.contains("owner/repo"));
+        assert!(output.output.contains("already running or locked"));
+        assert!(output.output.contains("owner/repo"));
+        let metadata = output.metadata.expect("metadata");
+        assert_eq!(metadata.pointer("/watch_locked"), Some(&Value::Bool(true)));
         assert_eq!(
-            output.metadata.pointer("/watch_locked"),
-            Some(&Value::Bool(true))
-        );
-        assert_eq!(
-            output.metadata.pointer("/action"),
+            metadata.pointer("/action"),
             Some(&Value::String("poll_now".to_string()))
         );
     }
