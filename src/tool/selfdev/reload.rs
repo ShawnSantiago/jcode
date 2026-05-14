@@ -244,7 +244,9 @@ pub(super) fn resolve_selfdev_reload_repo_dir_from(
         .or(primary)
 }
 
-fn latest_completed_build_repo_dir_for_session(session_id: &str) -> Option<std::path::PathBuf> {
+pub(super) fn latest_completed_build_repo_dir_for_session(
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let requests = BuildRequest::load_all().ok()?;
     requests
         .into_iter()

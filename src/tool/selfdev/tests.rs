@@ -665,6 +665,11 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     assert_eq!(first_status.status, BackgroundTaskStatus::Completed);
     assert_eq!(second_status.status, BackgroundTaskStatus::Completed);
 
+    let producer_request = BuildRequest::load(first_meta["request_id"].as_str().unwrap())
+        .expect("load producer request")
+        .expect("producer request exists");
+    assert!(producer_request.validated);
+
     let watcher_request = BuildRequest::load(second_meta["request_id"].as_str().unwrap())
         .expect("load watcher request")
         .expect("watcher request exists");
@@ -672,6 +677,19 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     assert_eq!(
         watcher_request.attached_to_request_id.as_deref(),
         first_meta["request_id"].as_str()
+    );
+    assert!(
+        watcher_request.validated,
+        "attached watcher should inherit validated producer metadata for reload discovery"
+    );
+    assert_eq!(watcher_request.built_source, producer_request.built_source);
+    assert_eq!(
+        watcher_request.published_version,
+        producer_request.published_version
+    );
+    assert_eq!(
+        reload::latest_completed_build_repo_dir_for_session(&session_two.id).as_deref(),
+        Some(repo.path())
     );
 }
 
