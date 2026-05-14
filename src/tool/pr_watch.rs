@@ -143,8 +143,9 @@ fn acquire_watch_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>>
     let path = lock_path(store, watch_id);
     match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
+            let lock = WatchLock { path: path.clone() };
             writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
-            Ok(Some(WatchLock { path }))
+            Ok(Some(lock))
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
@@ -290,6 +291,15 @@ fn monitor_status_for_state(state: &PrWatchState, partial_failure: bool) -> Moni
     } else {
         MonitorStatus::PendingNextPoll
     }
+}
+
+fn monitor_should_schedule_followup(status: MonitorStatus) -> bool {
+    matches!(
+        status,
+        MonitorStatus::PendingNextPoll
+            | MonitorStatus::ChecksPending
+            | MonitorStatus::TransientFailure
+    )
 }
 
 fn maybe_schedule_next(
@@ -864,21 +874,21 @@ async fn monitor_once(
         write_state_atomic(&path, &state)?;
     }
     let status = monitor_status_for_state(&state, partial_failure);
-    let scheduled = if matches!(status, MonitorStatus::PendingNextPoll) {
+    let scheduled = if monitor_should_schedule_followup(status) {
         maybe_schedule_next_monitor(ctx, &state, &params)?
     } else {
         None
     };
     let readiness = state.readiness();
     let text = format!(
-        "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
+        "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
         mode,
         status.as_str(),
         state.last_cycle.status,
-        readiness,
+        readiness_label(&readiness),
         state.polling.quiet_cycles,
         state.polling.required_quiet_cycles,
         state.pending_actionable.len(),
@@ -1990,6 +2000,29 @@ mod tests {
             monitor_status_for_state(&state, false),
             MonitorStatus::QuietSatisfied
         );
+    }
+
+    #[test]
+    fn monitor_should_schedule_recoverable_statuses() {
+        assert!(monitor_should_schedule_followup(
+            MonitorStatus::PendingNextPoll
+        ));
+        assert!(monitor_should_schedule_followup(
+            MonitorStatus::ChecksPending
+        ));
+        assert!(monitor_should_schedule_followup(
+            MonitorStatus::TransientFailure
+        ));
+        assert!(!monitor_should_schedule_followup(
+            MonitorStatus::ActionRequired
+        ));
+        assert!(!monitor_should_schedule_followup(
+            MonitorStatus::ChecksFailed
+        ));
+        assert!(!monitor_should_schedule_followup(
+            MonitorStatus::QuietSatisfied
+        ));
+        assert!(!monitor_should_schedule_followup(MonitorStatus::Stopped));
     }
 
     #[test]
