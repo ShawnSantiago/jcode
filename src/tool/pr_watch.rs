@@ -32,6 +32,7 @@ enum PrWatchAction {
     Status,
     List,
     PollNow,
+    Monitor,
     Stop,
     Readiness,
     Handoff,
@@ -50,8 +51,15 @@ struct PrWatchInput {
     #[serde(default)]
     poll_interval_seconds: Option<u64>,
     #[serde(default)]
+    quiet_cycles_required: Option<u64>,
+    #[serde(default)]
+    max_runtime_seconds: Option<u64>,
+    #[serde(default)]
     target: Option<String>,
 }
+
+const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
+const MAX_MONITOR_MAX_RUNTIME_SECONDS: u64 = 900;
 
 #[async_trait]
 impl Tool for PrWatchTool {
@@ -71,7 +79,7 @@ impl Tool for PrWatchTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "list", "poll_now", "ack_baseline", "stop", "readiness", "handoff"],
+                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "stop", "readiness", "handoff"],
                     "description": "Action. poll_now performs read-only gh CLI collection and updates local state; no mutations are performed."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
@@ -80,6 +88,8 @@ impl Tool for PrWatchTool {
                 "dry_run": {"type": "boolean", "description": "Preview changes without writing state."},
                 "schedule_next": {"type": "boolean", "description": "If true, schedule the next visible poll wakeup after start, poll_now, or ack_baseline."},
                 "poll_interval_seconds": {"type": "integer", "description": "Interval for the next scheduled poll. Defaults to state polling interval."},
+                "quiet_cycles_required": {"type": "integer", "description": "Quiet cycles required before the monitor stops as satisfied. Defaults to watch state or 3."},
+                "max_runtime_seconds": {"type": "integer", "description": "Maximum monitor runtime budget. Single-cycle monitor caps this to 900 and records the bounded value."},
                 "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."}
             }
         })
@@ -96,6 +106,7 @@ impl Tool for PrWatchTool {
             PrWatchAction::Start => start_watch(&store, params, &ctx),
             PrWatchAction::List => list_watches(&store),
             PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx).await,
+            PrWatchAction::Monitor => monitor_once(&root, &store, params, &ctx).await,
             PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx).await,
             PrWatchAction::Status => status_like(&store, params),
             PrWatchAction::Readiness => readiness_report(&store, params),
@@ -111,6 +122,33 @@ fn watch_dir(root: &Path) -> PathBuf {
 
 fn state_path(store: &Path, watch_id: &str) -> PathBuf {
     store.join(format!("{watch_id}-state.json"))
+}
+
+fn lock_path(store: &Path, watch_id: &str) -> PathBuf {
+    store.join(format!("{watch_id}.lock"))
+}
+
+struct WatchLock {
+    path: PathBuf,
+}
+
+impl Drop for WatchLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_watch_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>> {
+    fs::create_dir_all(store)?;
+    let path = lock_path(store, watch_id);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
+            Ok(Some(WatchLock { path }))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
+    }
 }
 
 fn write_state_atomic(path: &Path, state: &PrWatchState) -> Result<()> {
@@ -188,9 +226,69 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     if let Some(seconds) = params.poll_interval_seconds {
         state.polling.poll_interval_seconds = seconds.max(60);
     }
+    if let Some(required) = params.quiet_cycles_required {
+        state.polling.required_quiet_cycles = required.max(1);
+    }
     if params.schedule_next {
         let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
         state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+}
+
+fn monitor_max_runtime_seconds(params: &PrWatchInput) -> u64 {
+    params
+        .max_runtime_seconds
+        .unwrap_or(DEFAULT_MONITOR_MAX_RUNTIME_SECONDS)
+        .clamp(1, MAX_MONITOR_MAX_RUNTIME_SECONDS)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorStatus {
+    QuietSatisfied,
+    PendingNextPoll,
+    ActionRequired,
+    ChecksPending,
+    ChecksFailed,
+    TransientFailure,
+    AlreadyRunning,
+    Stopped,
+}
+
+impl MonitorStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            MonitorStatus::QuietSatisfied => "quiet_satisfied",
+            MonitorStatus::PendingNextPoll => "pending_next_poll",
+            MonitorStatus::ActionRequired => "action_required",
+            MonitorStatus::ChecksPending => "checks_pending",
+            MonitorStatus::ChecksFailed => "checks_failed",
+            MonitorStatus::TransientFailure => "transient_failure",
+            MonitorStatus::AlreadyRunning => "already_running",
+            MonitorStatus::Stopped => "stopped",
+        }
+    }
+}
+
+fn monitor_status_for_state(state: &PrWatchState, partial_failure: bool) -> MonitorStatus {
+    if state.terminal {
+        return if state.stop_reason.as_deref() == Some("quiet_cycles_satisfied") {
+            MonitorStatus::QuietSatisfied
+        } else {
+            MonitorStatus::Stopped
+        };
+    }
+    if !state.pending_actionable.is_empty() {
+        MonitorStatus::ActionRequired
+    } else if state.last_cycle.failed_check_count > 0 {
+        MonitorStatus::ChecksFailed
+    } else if state.last_cycle.pending_check_count > 0 {
+        MonitorStatus::ChecksPending
+    } else if partial_failure || state.polling.consecutive_transient_failures > 0 {
+        MonitorStatus::TransientFailure
+    } else if state.polling.quiet_cycles >= state.polling.required_quiet_cycles {
+        MonitorStatus::QuietSatisfied
+    } else {
+        MonitorStatus::PendingNextPoll
     }
 }
 
@@ -243,6 +341,55 @@ fn maybe_schedule_next(
     )))
 }
 
+fn maybe_schedule_next_monitor(
+    ctx: &ToolContext,
+    state: &PrWatchState,
+    params: &PrWatchInput,
+) -> Result<Option<String>> {
+    if !params.schedule_next || params.dry_run.unwrap_or(false) || state.terminal {
+        return Ok(None);
+    }
+    let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
+    let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
+    let target = match params.target.as_deref() {
+        Some("spawn") => ScheduleTarget::Spawn {
+            parent_session_id: ctx.session_id.clone(),
+        },
+        Some("resume") | None => ScheduleTarget::Session {
+            session_id: ctx.session_id.clone(),
+        },
+        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
+    };
+    let mut manager = AmbientManager::new()?;
+    let id = manager.schedule(ScheduleRequest {
+        wake_in_minutes: None,
+        wake_at: Some(wake_at),
+        context: task.clone(),
+        priority: Priority::Normal,
+        target,
+        created_by_session: ctx.session_id.clone(),
+        working_dir: ctx
+            .working_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        task_description: Some(task),
+        relevant_files: vec![format!(
+            ".jcode/pr-feedback-watch/{}-state.json",
+            state.watch_id
+        )],
+        git_branch: None,
+        additional_context: Some(
+            "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string(),
+        ),
+    })?;
+    super::ambient::nudge_schedule_runner();
+    Ok(Some(format!(
+        "{} at {}",
+        id,
+        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
+    )))
+}
+
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
     if state.last_successful_fetch.is_empty() {
         return format!(
@@ -253,6 +400,19 @@ fn scheduled_poll_prompt(state: &PrWatchState) -> String {
     format!(
         "Run the next read-only PR watch poll for {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
         state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+    )
+}
+
+fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> String {
+    format!(
+        "Run the next structured PR watch monitor cycle for {}. Use pr_watch with action=monitor, repo={}, pr={}, watch_id={}, schedule_next=true, poll_interval_seconds={}, quiet_cycles_required={}, max_runtime_seconds={}. The monitor is read-only: do not push, comment, resolve threads, or merge.",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        state.watch_id,
+        state.polling.poll_interval_seconds,
+        state.polling.required_quiet_cycles,
+        max_runtime_seconds,
     )
 }
 
@@ -625,6 +785,129 @@ async fn poll_now(
     Ok(ToolOutput::new(text)
         .with_title(format!("{} {:?}", state.watch_id, state.last_cycle.status))
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": would_write})))
+}
+
+async fn monitor_once(
+    root: &Path,
+    store: &Path,
+    params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let watch_id = match &params.watch_id {
+        Some(id) => id.clone(),
+        None => target_from_params(&params)?.watch_id(),
+    };
+    let path = state_path(store, &watch_id);
+    let Some(_lock) = acquire_watch_lock(store, &watch_id)? else {
+        return Ok(ToolOutput::new(format!(
+            "PR watch monitor already running: {watch_id}\nLock: {}\nNo state was changed.",
+            lock_path(store, &watch_id).display()
+        ))
+        .with_title(format!("{} monitor locked", watch_id))
+        .with_metadata(json!({"watch_id": watch_id, "monitor_status": MonitorStatus::AlreadyRunning.as_str(), "written": false})));
+    };
+
+    let mut state = if path.exists() {
+        load_state_for_params(store, &params)?
+    } else {
+        let target = target_from_params(&params)?;
+        let mut state = PrWatchState::new(target);
+        if let Some(id) = &params.watch_id {
+            state.watch_id = id.clone();
+        }
+        state.created_at = Some(now_iso());
+        state
+    };
+
+    let max_runtime_seconds = monitor_max_runtime_seconds(&params);
+    let would_write = !params.dry_run.unwrap_or(false);
+    let mut partial_failure = false;
+    let mode;
+
+    if state.terminal {
+        mode = "terminal";
+    } else {
+        let collected_at = now_iso();
+        let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
+        if state.last_successful_fetch.is_empty() {
+            partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
+            mode = "baseline";
+        } else {
+            let outcome = update_state_from_collection(&mut state, collection, &collected_at);
+            partial_failure = outcome.partial_failure;
+            mode = "poll";
+        }
+        apply_schedule_fields(&mut state, &params);
+        if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
+            && state.pending_actionable.is_empty()
+            && state.last_cycle.pending_check_count == 0
+            && state.last_cycle.failed_check_count == 0
+            && !partial_failure
+        {
+            state.terminal = true;
+            state.stop_reason = Some("quiet_cycles_satisfied".to_string());
+            state.polling.next_poll_at = None;
+        }
+        state.push_event(WatchEvent {
+            at: collected_at,
+            kind: "monitor_cycle_completed".to_string(),
+            data: json!({
+                "mode": mode,
+                "max_runtime_seconds": max_runtime_seconds,
+                "partial_failure": partial_failure,
+            }),
+        });
+    }
+
+    if would_write {
+        fs::create_dir_all(store)?;
+        write_state_atomic(&path, &state)?;
+    }
+    let status = monitor_status_for_state(&state, partial_failure);
+    let scheduled = if matches!(status, MonitorStatus::PendingNextPoll) {
+        maybe_schedule_next_monitor(ctx, &state, &params)?
+    } else {
+        None
+    };
+    let readiness = state.readiness();
+    let text = format!(
+        "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        mode,
+        status.as_str(),
+        state.last_cycle.status,
+        readiness,
+        state.polling.quiet_cycles,
+        state.polling.required_quiet_cycles,
+        state.pending_actionable.len(),
+        state.last_cycle.pending_check_count,
+        state.last_cycle.failed_check_count,
+        partial_failure,
+        max_runtime_seconds,
+        path.display(),
+        scheduled
+            .as_deref()
+            .map(|s| format!("\nScheduled: {s}"))
+            .unwrap_or_default(),
+        if would_write {
+            ""
+        } else {
+            "\nDry run: no file written"
+        }
+    );
+    Ok(ToolOutput::new(text)
+        .with_title(format!("{} monitor {}", state.watch_id, status.as_str()))
+        .with_metadata(json!({
+            "watch": state,
+            "readiness": readiness,
+            "monitor_status": status.as_str(),
+            "monitor_mode": mode,
+            "max_runtime_seconds": max_runtime_seconds,
+            "scheduled": scheduled,
+            "written": would_write,
+        })))
 }
 
 async fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
@@ -1612,8 +1895,119 @@ mod tests {
             .unwrap();
         assert!(actions.iter().any(|value| value == "start"));
         assert!(actions.iter().any(|value| value == "poll_now"));
+        assert!(actions.iter().any(|value| value == "monitor"));
         assert!(actions.iter().any(|value| value == "ack_baseline"));
+        assert!(
+            schema
+                .pointer("/properties/quiet_cycles_required")
+                .is_some()
+        );
+        assert!(schema.pointer("/properties/max_runtime_seconds").is_some());
         assert!(!actions.iter().any(|value| value == "authorize"));
+    }
+
+    fn monitor_params(max_runtime_seconds: Option<u64>) -> PrWatchInput {
+        PrWatchInput {
+            action: PrWatchAction::Monitor,
+            repo: Some("owner/repo".to_string()),
+            pr: Some(7),
+            watch_id: None,
+            dry_run: None,
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds,
+            target: None,
+        }
+    }
+
+    #[test]
+    fn monitor_defaults_are_bounded() {
+        assert_eq!(
+            monitor_max_runtime_seconds(&monitor_params(None)),
+            DEFAULT_MONITOR_MAX_RUNTIME_SECONDS
+        );
+        assert!(DEFAULT_MONITOR_MAX_RUNTIME_SECONDS <= 540);
+        assert_eq!(
+            monitor_max_runtime_seconds(&monitor_params(Some(5_000))),
+            MAX_MONITOR_MAX_RUNTIME_SECONDS
+        );
+        assert_eq!(monitor_max_runtime_seconds(&monitor_params(Some(0))), 1);
+    }
+
+    #[test]
+    fn monitor_lock_prevents_concurrent_runs() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first = acquire_watch_lock(temp.path(), "owner-repo-pr-7")
+            .expect("first lock")
+            .expect("lock acquired");
+        let second = acquire_watch_lock(temp.path(), "owner-repo-pr-7").expect("second lock");
+        assert!(second.is_none());
+        drop(first);
+        let third = acquire_watch_lock(temp.path(), "owner-repo-pr-7")
+            .expect("third lock")
+            .expect("lock reacquired");
+        drop(third);
+    }
+
+    #[test]
+    fn monitor_status_maps_actionable_and_checks() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pending_actionable.push(ActionableItem {
+            id: "thread-1".into(),
+            surface: "review_threads".into(),
+            summary: "fix it".into(),
+            url: None,
+            path: None,
+            status: Some("unresolved".into()),
+        });
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::ActionRequired
+        );
+        state.pending_actionable.clear();
+        state.last_cycle.failed_check_count = 1;
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::ChecksFailed
+        );
+        state.last_cycle.failed_check_count = 0;
+        state.last_cycle.pending_check_count = 1;
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::ChecksPending
+        );
+        state.last_cycle.pending_check_count = 0;
+        assert_eq!(
+            monitor_status_for_state(&state, true),
+            MonitorStatus::TransientFailure
+        );
+        state.polling.quiet_cycles = state.polling.required_quiet_cycles;
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::QuietSatisfied
+        );
+    }
+
+    #[test]
+    fn scheduled_monitor_prompt_is_structured() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.polling.poll_interval_seconds = 120;
+        state.polling.required_quiet_cycles = 2;
+        let prompt = scheduled_monitor_prompt(&state, 540);
+        assert!(prompt.contains("action=monitor"));
+        assert!(prompt.contains("repo=owner/repo"));
+        assert!(prompt.contains("pr=7"));
+        assert!(prompt.contains("poll_interval_seconds=120"));
+        assert!(prompt.contains("quiet_cycles_required=2"));
+        assert!(prompt.contains("max_runtime_seconds=540"));
+        assert!(prompt.contains("read-only"));
     }
 
     #[test]
@@ -1791,6 +2185,8 @@ mod tests {
             dry_run: Some(true),
             schedule_next: true,
             poll_interval_seconds: Some(1),
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
             target: None,
         };
         apply_schedule_fields(&mut state, &params);
