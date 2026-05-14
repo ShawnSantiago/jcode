@@ -371,6 +371,21 @@ fn reload_repo_resolver_prefers_working_dir_before_recent_build_repo() {
     assert_eq!(resolved.as_deref(), Some(repo.path()));
 }
 
+#[test]
+fn reload_repo_resolver_prefers_recent_build_repo_before_primary_fallback() {
+    let primary_repo = create_repo_fixture();
+    let recent_repo = create_repo_fixture();
+    let recent_nested = recent_repo.path().join("src").join("tool");
+    std::fs::create_dir_all(&recent_nested).expect("recent nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
+        Some(primary_repo.path().to_path_buf()),
+        None,
+        Some(recent_nested),
+    );
+    assert_eq!(resolved.as_deref(), Some(recent_repo.path()));
+}
+
 #[tokio::test]
 async fn enter_creates_selfdev_session_in_test_mode() {
     let _storage_guard = crate::storage::lock_test_env();
