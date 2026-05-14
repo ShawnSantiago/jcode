@@ -6370,7 +6370,15 @@ impl<'window> Canvas<'window> {
             frame_profile.checkpoint("text_areas");
         }
         frame_profile.checkpoint("text_prepare_static");
-        if self.streaming_text_needs_prepare {
+        if single_session_uses_stroke_streaming {
+            // While a response is actively streaming, the tail is rendered by the
+            // primitive/stroke path so it can update cheaply every frame. In that
+            // mode we intentionally do not create the secondary glyphon renderer
+            // above. `sync_single_session_streaming_text_buffer` can still mark
+            // the cached tail buffer dirty, so clear that stale prepare request
+            // before the glyphon prepare path tries to unwrap the absent atlas.
+            self.streaming_text_needs_prepare = false;
+        } else if self.streaming_text_needs_prepare {
             let streaming_text_areas = if let (
                 DesktopApp::SingleSession(single_session),
                 Some(viewport),
