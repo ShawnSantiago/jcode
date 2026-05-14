@@ -6282,20 +6282,13 @@ impl<'window> Canvas<'window> {
         if !self.single_session_text_buffers.is_empty() {
             self.ensure_text_renderer();
         }
-        let single_session_uses_stroke_streaming = matches!(
-            app,
-            DesktopApp::SingleSession(single_session) if !single_session.streaming_response.is_empty()
-        );
-        if self.single_session_streaming_text_buffer.is_some()
-            && !single_session_uses_stroke_streaming
-        {
+        if self.single_session_streaming_text_buffer.is_some() {
             self.ensure_streaming_text_renderer();
         }
         frame_profile.checkpoint("text_renderer");
         let text_buffers = &self.single_session_text_buffers;
         let has_text_buffers = !text_buffers.is_empty();
-        let has_streaming_text_buffer = self.single_session_streaming_text_buffer.is_some()
-            && !single_session_uses_stroke_streaming;
+        let has_streaming_text_buffer = self.single_session_streaming_text_buffer.is_some();
         let mut text_area_count = 0usize;
         let mut text_prepared = false;
         let single_session_viewport = if let DesktopApp::SingleSession(single_session) = app {
@@ -6370,15 +6363,7 @@ impl<'window> Canvas<'window> {
             frame_profile.checkpoint("text_areas");
         }
         frame_profile.checkpoint("text_prepare_static");
-        if single_session_uses_stroke_streaming {
-            // While a response is actively streaming, the tail is rendered by the
-            // primitive/stroke path so it can update cheaply every frame. In that
-            // mode we intentionally do not create the secondary glyphon renderer
-            // above. `sync_single_session_streaming_text_buffer` can still mark
-            // the cached tail buffer dirty, so clear that stale prepare request
-            // before the glyphon prepare path tries to unwrap the absent atlas.
-            self.streaming_text_needs_prepare = false;
-        } else if self.streaming_text_needs_prepare {
+        if self.streaming_text_needs_prepare {
             let streaming_text_areas = if let (
                 DesktopApp::SingleSession(single_session),
                 Some(viewport),
@@ -6508,26 +6493,6 @@ impl<'window> Canvas<'window> {
                 single_session,
                 self.size,
                 text_buffers.get(2),
-            );
-        }
-        if let (DesktopApp::SingleSession(single_session), Some(viewport), Some(start_line)) = (
-            app,
-            single_session_viewport.as_ref(),
-            self.single_session_streaming_text_start_line,
-        ) && single_session_uses_stroke_streaming
-        {
-            let end_line = self
-                .single_session_body_lines
-                .len()
-                .min(viewport.start_line.saturating_add(viewport.lines.len()));
-            push_single_session_streaming_stroke_text(
-                &mut vertices,
-                single_session,
-                self.size,
-                viewport,
-                start_line,
-                end_line,
-                &self.single_session_body_lines,
             );
         }
         frame_profile.checkpoint("caret");
