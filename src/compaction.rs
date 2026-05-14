@@ -46,6 +46,16 @@ struct CompactionResult {
     summarized_messages: usize,
 }
 
+struct CompactionOutcomeLog<'a> {
+    trigger: &'a str,
+    pre_tokens: u64,
+    post_tokens: u64,
+    messages_compacted: usize,
+    messages_dropped: Option<usize>,
+    duration_ms: u64,
+    all_messages: &'a [Message],
+}
+
 /// Manages background compaction of conversation context.
 ///
 /// Does NOT own message data. The caller owns the messages and passes
@@ -665,34 +675,25 @@ impl CompactionManager {
         ));
     }
 
-    fn log_compaction_outcome(
-        &self,
-        trigger: &str,
-        pre_tokens: u64,
-        post_tokens: u64,
-        messages_compacted: usize,
-        messages_dropped: Option<usize>,
-        duration_ms: u64,
-        all_messages: &[Message],
-    ) {
-        let tokens_saved = pre_tokens.saturating_sub(post_tokens);
-        let grew = post_tokens > pre_tokens;
+    fn log_compaction_outcome(&self, outcome: CompactionOutcomeLog<'_>) {
+        let tokens_saved = outcome.pre_tokens.saturating_sub(outcome.post_tokens);
+        let grew = outcome.post_tokens > outcome.pre_tokens;
         let level = if grew { "warn" } else { "info" };
         let line = format!(
             "[compaction/outcome] level={} trigger={} duration_ms={} pre_tokens={} post_tokens={} tokens_saved={} grew={} messages_len={} active_messages={} compacted_count={} total_turns={} messages_compacted={} messages_dropped={} summary_chars={} observed_input_tokens={:?}",
             level,
-            trigger,
-            duration_ms,
-            pre_tokens,
-            post_tokens,
+            outcome.trigger,
+            outcome.duration_ms,
+            outcome.pre_tokens,
+            outcome.post_tokens,
             tokens_saved,
             grew,
-            all_messages.len(),
-            self.active_messages(all_messages).len(),
+            outcome.all_messages.len(),
+            self.active_messages(outcome.all_messages).len(),
             self.compacted_count,
             self.total_turns,
-            messages_compacted,
-            messages_dropped.unwrap_or(0),
+            outcome.messages_compacted,
+            outcome.messages_dropped.unwrap_or(0),
             self.summary_chars(),
             self.observed_input_tokens,
         );
@@ -1074,15 +1075,15 @@ impl CompactionManager {
                         .unwrap_or(0),
                     self.active_messages_count(),
                 ));
-                self.log_compaction_outcome(
-                    &trigger,
+                self.log_compaction_outcome(CompactionOutcomeLog {
+                    trigger: &trigger,
                     pre_tokens,
                     post_tokens,
-                    result.summarized_messages,
-                    None,
-                    result.duration_ms,
+                    messages_compacted: result.summarized_messages,
+                    messages_dropped: None,
+                    duration_ms: result.duration_ms,
                     all_messages,
-                );
+                });
 
                 // Reset cooldown counter so proactive/semantic modes don't
                 // fire again immediately after a successful compaction.
@@ -1393,15 +1394,15 @@ impl CompactionManager {
                 .map(|summary| summary.text.len()),
             active_messages: Some(self.active_messages_count()),
         });
-        self.log_compaction_outcome(
-            "hard_compact",
+        self.log_compaction_outcome(CompactionOutcomeLog {
+            trigger: "hard_compact",
             pre_tokens,
             post_tokens,
-            dropped_count,
-            Some(dropped_count),
-            0,
+            messages_compacted: dropped_count,
+            messages_dropped: Some(dropped_count),
+            duration_ms: 0,
             all_messages,
-        );
+        });
 
         Ok(dropped_count)
     }

@@ -36,6 +36,13 @@ struct SearchResult {
     snippet: String,
 }
 
+#[derive(Clone, Copy)]
+struct BingSearchOptions<'a> {
+    market: &'a str,
+    configured_api_key: Option<&'a str>,
+    api_key_env: &'a str,
+}
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -96,9 +103,11 @@ impl Tool for WebSearchTool {
                     engine,
                     &params.query,
                     num_results,
-                    market,
-                    config.websearch.bing_api_key.as_deref(),
-                    &config.websearch.bing_api_key_env,
+                    BingSearchOptions {
+                        market,
+                        configured_api_key: config.websearch.bing_api_key.as_deref(),
+                        api_key_env: &config.websearch.bing_api_key_env,
+                    },
                     allow_bing_api,
                 )
                 .await
@@ -148,23 +157,14 @@ impl WebSearchTool {
         engine: WebSearchEngine,
         query: &str,
         num_results: usize,
-        bing_market: &str,
-        bing_api_key: Option<&str>,
-        bing_api_key_env: &str,
+        bing: BingSearchOptions<'_>,
         allow_bing_api: bool,
     ) -> Result<Vec<SearchResult>> {
         match engine {
             WebSearchEngine::Duckduckgo => self.search_duckduckgo(query, num_results).await,
             WebSearchEngine::Bing => {
-                self.search_bing(
-                    query,
-                    num_results,
-                    bing_market,
-                    bing_api_key,
-                    bing_api_key_env,
-                    allow_bing_api,
-                )
-                .await
+                self.search_bing(query, num_results, bing, allow_bing_api)
+                    .await
             }
         }
     }
@@ -203,27 +203,29 @@ impl WebSearchTool {
         &self,
         query: &str,
         num_results: usize,
-        market: &str,
-        configured_api_key: Option<&str>,
-        api_key_env: &str,
+        options: BingSearchOptions<'_>,
         allow_api: bool,
     ) -> Result<Vec<SearchResult>> {
         if allow_api {
-            if let Some(api_key) = configured_api_key.filter(|key| !key.trim().is_empty()) {
+            if let Some(api_key) = options
+                .configured_api_key
+                .filter(|key| !key.trim().is_empty())
+            {
                 return self
-                    .search_bing_api(query, num_results, market, api_key)
+                    .search_bing_api(query, num_results, options.market, api_key)
                     .await;
             }
-            if let Ok(api_key) = std::env::var(api_key_env) {
-                if !api_key.trim().is_empty() {
-                    return self
-                        .search_bing_api(query, num_results, market, &api_key)
-                        .await;
-                }
+            if let Ok(api_key) = std::env::var(options.api_key_env)
+                && !api_key.trim().is_empty()
+            {
+                return self
+                    .search_bing_api(query, num_results, options.market, &api_key)
+                    .await;
             }
         }
 
-        self.search_bing_html(query, num_results, market).await
+        self.search_bing_html(query, num_results, options.market)
+            .await
     }
 
     async fn search_bing_api(
