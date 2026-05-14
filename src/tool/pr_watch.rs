@@ -153,6 +153,23 @@ fn acquire_watch_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>>
     }
 }
 
+fn watch_locked_output(store: &Path, state: &PrWatchState, action: &str) -> ToolOutput {
+    ToolOutput::new(format!(
+        "PR watch {action} already running or locked: {}\nRepo: {}\nPR: #{}\nLock: {}\nNo state was changed.",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        lock_path(store, &state.watch_id).display()
+    ))
+    .with_title(format!("{} locked", state.watch_id))
+    .with_metadata(json!({
+        "watch": state,
+        "watch_locked": true,
+        "action": action,
+        "written": false,
+    }))
+}
+
 fn write_state_atomic(path: &Path, state: &PrWatchState) -> Result<()> {
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, serde_json::to_vec_pretty(state)?)?;
@@ -460,6 +477,7 @@ async fn ack_baseline(
     let path = state_path(store, &state.watch_id);
     let loaded_updated_at = state.updated_at.clone();
     let loaded_cycle_number = state.polling.cycle_number;
+    let would_write = !params.dry_run.unwrap_or(false);
     if state.terminal {
         let readiness = state.readiness();
         return Ok(ToolOutput::new(format!(
@@ -472,11 +490,18 @@ async fn ack_baseline(
         .with_title(format!("{} stopped", state.watch_id))
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": false})));
     }
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "ack_baseline")),
+        }
+    } else {
+        None
+    };
     let collected_at = now_iso();
     let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
     apply_schedule_fields(&mut state, &params);
-    let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
             format!(
@@ -737,6 +762,7 @@ async fn poll_now(
     let path = state_path(store, &state.watch_id);
     let loaded_updated_at = state.updated_at.clone();
     let loaded_cycle_number = state.polling.cycle_number;
+    let would_write = !params.dry_run.unwrap_or(false);
     if state.terminal {
         let readiness = state.readiness();
         return Ok(ToolOutput::new(format!(
@@ -749,6 +775,14 @@ async fn poll_now(
         .with_title(format!("{} stopped", state.watch_id))
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": false})));
     }
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "poll_now")),
+        }
+    } else {
+        None
+    };
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
@@ -763,7 +797,6 @@ async fn poll_now(
         state.stop_reason = Some("quiet_cycles_satisfied".to_string());
         state.polling.next_poll_at = None;
     }
-    let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
             format!(
@@ -1905,14 +1938,22 @@ fn human_next_step(state: &PrWatchState) -> String {
 
 fn stop_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "stop")),
+        }
+    } else {
+        None
+    };
     state.terminal = true;
     state.stop_reason = Some("stopped_by_pr_watch_tool".to_string());
     state.polling.next_poll_at = None;
     state.last_cycle.status = jcode_pr_watch_core::CycleStatus::Stopped;
     let path = state_path(store, &state.watch_id);
-    let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
-        fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
+        write_state_atomic(&path, &state)?;
     }
     Ok(ToolOutput::new(format!(
         "PR watch stopped: {}{}",
@@ -2041,6 +2082,27 @@ mod tests {
             .expect("third lock")
             .expect("lock reacquired");
         drop(third);
+    }
+
+    #[test]
+    fn watch_locked_output_uses_shared_lock_metadata() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+
+        let output = watch_locked_output(temp.path(), &state, "poll_now");
+        assert!(output.text.contains("already running or locked"));
+        assert!(output.text.contains("owner/repo"));
+        assert_eq!(
+            output.metadata.pointer("/watch_locked"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            output.metadata.pointer("/action"),
+            Some(&Value::String("poll_now".to_string()))
+        );
     }
 
     #[test]
