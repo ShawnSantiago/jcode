@@ -658,6 +658,91 @@ fn test_hard_compact_clamps_pathological_compacted_count() {
     );
 }
 
+#[test]
+fn test_hard_compact_reduces_api_payload_and_reports_saved_tokens() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..40 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} {}", i, "payload ".repeat(80)),
+        ));
+        manager.notify_message_added();
+    }
+
+    let pre_api_messages = manager.messages_for_api_with(&messages);
+    let pre_chars: usize = pre_api_messages.iter().map(message_char_count).sum();
+    let pre_tokens = manager.effective_token_count_with(&messages);
+
+    manager
+        .hard_compact_with(&messages)
+        .expect("hard compaction should recover oversized context");
+
+    let post_api_messages = manager.messages_for_api_with(&messages);
+    let post_chars: usize = post_api_messages.iter().map(message_char_count).sum();
+    let post_tokens = manager.effective_token_count_with(&messages);
+    let event = manager
+        .take_compaction_event()
+        .expect("hard compaction should publish an event");
+
+    assert!(
+        post_api_messages.len() < pre_api_messages.len(),
+        "hard compaction should send fewer messages"
+    );
+    assert!(
+        post_chars < pre_chars,
+        "hard compaction should reduce outgoing payload chars: pre={pre_chars}, post={post_chars}"
+    );
+    assert!(
+        post_tokens <= pre_tokens,
+        "hard compaction must not increase effective tokens: pre={pre_tokens}, post={post_tokens}"
+    );
+    assert!(
+        event.tokens_saved.unwrap_or(0) > 0,
+        "event should attribute positive token savings: {event:?}"
+    );
+}
+
+#[test]
+fn test_invalid_compacted_count_does_not_resurrect_full_transcript_after_new_turn() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("old turn {} {}", i, "x".repeat(120)),
+        ));
+        manager.notify_message_added();
+    }
+
+    manager.compacted_count = 500;
+    manager.active_summary = Some(Summary {
+        text: "# Existing summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 500,
+        original_turn_count: 500,
+    });
+    manager.active_message_chars_dirty = true;
+
+    let before_new_turn = manager.messages_for_api_with(&messages);
+    assert_eq!(before_new_turn.len(), 1);
+    assert_eq!(manager.compacted_count(), messages.len());
+
+    messages.push(make_text_message(Role::User, "new turn after restore"));
+    manager.notify_message_added();
+
+    let after_new_turn = manager.messages_for_api_with(&messages);
+    assert_eq!(
+        after_new_turn.len(),
+        2,
+        "request should contain summary plus only the new active turn"
+    );
+    match &after_new_turn[1].content[0] {
+        ContentBlock::Text { text, .. } => assert_eq!(text, "new turn after restore"),
+        _ => panic!("expected new active text turn"),
+    }
+}
+
 // ── messages_for_api_with after compaction ──────────────────────
 
 #[test]
