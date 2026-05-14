@@ -1992,6 +1992,7 @@ impl App {
                     if let Ok(mut shared) = self.registry.skills().try_write() {
                         *shared = reloaded;
                     }
+                    self.invalidate_command_candidates_cache();
                 }
             }
 

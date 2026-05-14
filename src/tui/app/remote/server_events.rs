@@ -662,6 +662,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_model_options = available_model_routes;
             app.invalidate_model_picker_cache();
             app.remote_skills = skills;
+            app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
             app.remote_is_canary = is_canary;
