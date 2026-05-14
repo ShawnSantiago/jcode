@@ -406,7 +406,21 @@ async fn download_browser_binary() -> Result<()> {
     let host_asset_name = get_host_asset_name();
     let host_asset = assets
         .iter()
-        .find(|a| a["name"].as_str() == Some(&host_asset_name));
+        .find(|a| a["name"].as_str() == Some(&host_asset_name))
+        .with_context(|| {
+            let available = assets
+                .iter()
+                .filter_map(|a| a["name"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "No native host asset found for platform: {}. Expected release asset '{}' alongside '{}'. Available assets: {}",
+                std::env::consts::OS,
+                host_asset_name,
+                asset_name,
+                available
+            )
+        })?;
 
     // Download browser CLI
     let browser_bytes = client
@@ -431,21 +445,20 @@ async fn download_browser_binary() -> Result<()> {
 
     write_file_atomically(&xpi_path(), &xpi_bytes, false)?;
 
-    // Download host binary if available
-    if let Some(host) = host_asset
-        && let Some(host_url) = host["browser_download_url"].as_str()
-    {
-        let host_bytes = client
-            .get(host_url)
-            .send()
-            .await?
-            .bytes()
-            .await
-            .context("Failed to download host binary")?;
+    // Download host binary
+    let host_url = host_asset["browser_download_url"]
+        .as_str()
+        .context("No host download URL")?;
+    let host_bytes = client
+        .get(host_url)
+        .send()
+        .await?
+        .bytes()
+        .await
+        .context("Failed to download host binary")?;
 
-        let host_path = host_binary_path();
-        write_file_atomically(&host_path, &host_bytes, true)?;
-    }
+    let host_path = host_binary_path();
+    write_file_atomically(&host_path, &host_bytes, true)?;
 
     Ok(())
 }
@@ -518,10 +531,6 @@ fn get_platform_asset_name() -> String {
 }
 
 fn get_host_asset_name() -> String {
-    // The host binary isn't shipped as a separate release asset yet
-    // It's built from the same codebase, so we'd need to add it to releases
-    // For now, fall back to building from source or using the browser binary
-    // with a `host` subcommand if available
     let base = get_platform_asset_name();
     base.replace("browser-", "host-")
 }
