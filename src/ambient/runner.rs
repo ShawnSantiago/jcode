@@ -23,6 +23,7 @@ use crate::tool;
 use crate::tool::ambient as ambient_tools;
 use chrono::Utc;
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
@@ -539,14 +540,22 @@ impl AmbientRunnerHandle {
             let mut running = self.inner.running.write().await;
             *running = true;
         }
+        {
+            let mut state = self.inner.state.write().await;
+            if matches!(state.status, AmbientStatus::Running { .. }) {
+                logging::warn(
+                    "Ambient runner: resetting stale running state on loop startup/reload",
+                );
+                state.status = AmbientStatus::Idle;
+                let _ = state.save();
+            }
+        }
         logging::info("Ambient runner: starting background loop");
-
-        let ambient_enabled = config().ambient.enabled;
 
         // Spawn reply pollers only when ambient mode is enabled; scheduled
         // session-targeted scheduled tasks should still work without the ambient-only reply
         // infrastructure.
-        if ambient_enabled {
+        if config().ambient.enabled {
             let safety_config = config().safety.clone();
             if safety_config.email_reply_enabled
                 && safety_config.email_imap_host.is_some()
@@ -580,6 +589,7 @@ impl AmbientRunnerHandle {
         loop {
             // Check state
             let state = { self.inner.state.read().await.clone() };
+            let ambient_enabled = config().ambient.enabled;
 
             let ambient_allowed =
                 ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
@@ -588,6 +598,15 @@ impl AmbientRunnerHandle {
                 // Update scheduler's user-active state
                 let active_sessions = *self.inner.active_user_sessions.read().await;
                 scheduler.set_user_active(active_sessions > 0);
+
+                if active_sessions == 0 && matches!(state.status, AmbientStatus::Paused { .. }) {
+                    let mut s = self.inner.state.write().await;
+                    if matches!(s.status, AmbientStatus::Paused { .. }) {
+                        s.status = AmbientStatus::Idle;
+                        let _ = s.save();
+                    }
+                    drop(s);
+                }
 
                 // Check if we should pause
                 if scheduler.should_pause() {
@@ -628,9 +647,15 @@ impl AmbientRunnerHandle {
             }
 
             // Load manager to check should_run and update queue info
-            let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
+            let (should_run, ready_direct_items, ready_ambient_items, next_direct_due) = match AmbientManager::new() {
                 Ok(mut mgr) => {
+                    let has_ready_ambient_items = mgr.has_ready_ambient_items();
                     let ready_direct_items = mgr.take_ready_direct_items();
+                    let ready_ambient_items = if ambient_allowed && has_ready_ambient_items {
+                        mgr.ready_ambient_items()
+                    } else {
+                        Vec::new()
+                    };
                     let next_direct_due = mgr
                         .queue()
                         .items()
@@ -649,14 +674,18 @@ impl AmbientRunnerHandle {
                     }
                     // Also run if there are pending email reply directives
                     (
-                        ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
+                        ambient_allowed
+                            && (mgr.should_run()
+                                || !ready_ambient_items.is_empty()
+                                || ambient::has_pending_directives()),
                         ready_direct_items,
+                        ready_ambient_items,
                         next_direct_due,
                     )
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    (false, Vec::new(), None)
+                    (false, Vec::new(), Vec::new(), None)
                 }
             };
 
@@ -715,7 +744,7 @@ impl AmbientRunnerHandle {
             logging::info("Ambient runner: starting ambient cycle");
             self.set_running_detail("starting cycle").await;
 
-            let cycle_result = self.run_cycle(&provider).await;
+            let cycle_result = self.run_cycle(&provider, &ready_ambient_items).await;
 
             // Clear the soft interrupt queue — cycle is done
             {
@@ -732,6 +761,19 @@ impl AmbientRunnerHandle {
 
                     // Update state
                     if let Ok(mut mgr) = AmbientManager::new() {
+                        if !ready_ambient_items.is_empty() {
+                            let ids: HashSet<String> = ready_ambient_items
+                                .iter()
+                                .map(|item| item.id.clone())
+                                .collect();
+                            let removed = mgr.remove_items_by_id(&ids);
+                            if removed > 0 {
+                                logging::info(&format!(
+                                    "Ambient runner: acknowledged {} ambient queue item(s)",
+                                    removed
+                                ));
+                            }
+                        }
                         let _ = mgr.record_cycle_result(result.clone());
                     }
                     let mut s = self.inner.state.write().await;
@@ -842,11 +884,13 @@ impl AmbientRunnerHandle {
     async fn build_cycle_context(
         &self,
         provider: &Arc<dyn Provider>,
+        ready_items: &[ScheduledItem],
     ) -> anyhow::Result<(String, String)> {
         let state = self.inner.state.read().await.clone();
 
         let mgr = AmbientManager::new()?;
-        let queue_items: Vec<_> = mgr.queue().items().to_vec();
+        let mut queue_items: Vec<_> = ready_items.to_vec();
+        queue_items.extend(mgr.queue().items().iter().cloned());
 
         let memory_manager = MemoryManager::new();
         let graph_health = ambient::gather_memory_graph_health(&memory_manager);
@@ -879,12 +923,16 @@ impl AmbientRunnerHandle {
     }
 
     /// Run a single ambient cycle. Returns the cycle result.
-    async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
+    async fn run_cycle(
+        &self,
+        provider: &Arc<dyn Provider>,
+        ready_items: &[ScheduledItem],
+    ) -> anyhow::Result<AmbientCycleResult> {
         let started_at = Utc::now();
         let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
-        let (system_prompt, initial_message) = self.build_cycle_context(provider).await?;
+        let (system_prompt, initial_message) = self.build_cycle_context(provider, ready_items).await?;
 
         // Visible mode: spawn a full TUI instead of running headlessly
         if visible {
