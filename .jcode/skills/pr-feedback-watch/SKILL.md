@@ -1,28 +1,29 @@
 ---
 name: pr-feedback-watch
-summary: Monitor a GitHub pull request for repeated review feedback cycles, implement actionable fixes, and stop after quiet cycles.
+description: Monitor a GitHub pull request for repeated review feedback cycles, implement actionable fixes, and stop after quiet cycles.
 ---
 
 # PR Feedback Watch
 
-Use this workflow when the user asks to monitor a GitHub pull request for repeated rounds of review feedback, including polling every 5 minutes, inspecting new review comments or unresolved threads across all GitHub PR feedback surfaces, fixing actionable feedback, verifying fixes, optionally pushing and resolving addressed threads, and stopping after 3 consecutive quiet cycles.
+Use this workflow when the user asks to monitor a GitHub pull request for repeated rounds of review feedback, including polling every 5 minutes by default, inspecting new review comments or unresolved threads across all GitHub PR feedback surfaces, fixing actionable feedback, verifying fixes, optionally pushing and resolving addressed threads, and stopping after 3 consecutive quiet cycles.
 
 ## Default behavior
 
 1. Confirm the exact target repo and PR from the user's request or current context. Do not accidentally watch an upstream fork when the user named a fork.
 2. Establish or read local watch state under `.jcode/pr-feedback-watch/<watch-id>-state.json`.
-3. Poll all read-only GitHub surfaces:
+3. Use 5-minute poll cycles by default unless the user explicitly requests a different cadence.
+4. Poll all read-only GitHub surfaces:
    - PR metadata and head SHA
    - check runs/status rollup
    - pull request review comments
    - issue/PR comments
    - submitted reviews
    - unresolved review threads, including new replies on existing threads
-4. Treat new unresolved review threads, new review comments, requested changes, failed checks, and stale validation as actionable.
-5. Implement local fixes for actionable feedback, run targeted validation, commit the fix, and push only when the user's request or an active authorization grant allows pushing.
-6. Never merge. Only provide a human merge handoff after the required quiet cycles are satisfied.
-7. Resolve review threads or post comments only when explicitly authorized for the current session and scope.
-8. Stop automatically after 3 consecutive quiet cycles with no new actionable feedback, no failed checks, no pending checks, and no transient collection failures.
+5. Treat new unresolved review threads, new review comments, requested changes, failed checks, and stale validation as actionable.
+6. Implement local fixes for actionable feedback, run targeted validation, commit the fix, and push only when the user's request or an active authorization grant allows pushing.
+7. Never merge. Only provide a human merge handoff after the required quiet cycles are satisfied.
+8. Resolve review threads or post comments only when explicitly authorized for the current session and scope.
+9. Stop automatically after 3 consecutive quiet cycles with no new actionable feedback, no failed checks, no pending checks, and no transient collection failures.
 
 ## Watchdog requirements
 
