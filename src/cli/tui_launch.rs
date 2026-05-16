@@ -180,6 +180,9 @@ pub async fn run_tui_client(
     cleanup_tui_runtime_for_run_result(&tui_runtime, &run_result, false);
 
     if let Some(code) = run_result.exit_code {
+        if let Some(message) = run_result.fatal_message.as_ref() {
+            eprintln!("{message}");
+        }
         std::process::exit(code);
     }
 

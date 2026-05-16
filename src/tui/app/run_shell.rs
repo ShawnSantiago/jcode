@@ -252,6 +252,7 @@ impl App {
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
             exit_code: self.requested_exit_code,
+            fatal_message: self.requested_fatal_message.take(),
             session_id: Some(self.session.id.clone()),
         })
     }
@@ -403,6 +404,7 @@ impl App {
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
             exit_code: self.requested_exit_code,
+            fatal_message: self.requested_fatal_message.take(),
             session_id: if self.is_remote {
                 self.remote_session_id.clone()
             } else {
