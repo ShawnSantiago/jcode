@@ -1701,12 +1701,16 @@ fn is_failed_check(check: &CheckRunState) -> bool {
     )
 }
 
-fn is_automation_chatter(_author: Option<&str>, body: Option<&str>) -> bool {
+fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
+    let author = author.unwrap_or_default().to_ascii_lowercase();
     let body = body.unwrap_or_default().to_ascii_lowercase();
     body.starts_with("fix-summary:")
         || body.contains("triggered the review bot")
         || body.contains("automation progress")
         || body.contains("<!-- jcode-pr-watch-ignore -->")
+        || (author == "shopify"
+            && body.contains("oxygen deployed a preview")
+            && body.contains("deployment details"))
 }
 
 fn stable_body_hash(body: &str) -> String {
@@ -2637,9 +2641,17 @@ mod tests {
             Some("human"),
             Some("fix-summary: addressed feedback")
         ));
+        assert!(is_automation_chatter(
+            Some("shopify"),
+            Some("Oxygen deployed a preview of your `feature` branch. Details:\n| Storefront | Status | Preview link | Deployment details |")
+        ));
         assert!(!is_automation_chatter(
             Some("reviewer"),
             Some("Please fix this")
+        ));
+        assert!(!is_automation_chatter(
+            Some("shopify"),
+            Some("Please fix the deployment configuration")
         ));
     }
 }
