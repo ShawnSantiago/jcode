@@ -545,6 +545,9 @@ pub(super) async fn handle_remote_event<B: Backend>(
         RemoteRead::Disconnected(reason) => {
             if let RemoteDisconnectReason::Protocol(error) = &reason {
                 let detail = format_disconnect_reason(&reason);
+                let fatal_message = format!(
+                    "Remote protocol error: {detail}\n\nJcode stopped instead of silently retrying. This usually means the client received an invalid server event frame, often from an oversized or interrupted history/tool-output frame. Try updating jcode, restarting the server, or resuming with jcode-dev if you are testing a local fix."
+                );
                 crate::logging::error(&format!(
                     "Remote protocol error is not retryable; stopping reconnect loop: {}",
                     error
@@ -556,6 +559,8 @@ pub(super) async fn handle_remote_event<B: Backend>(
                 app.set_status_notice("Remote protocol error");
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
+                app.requested_exit_code = Some(70);
+                app.requested_fatal_message = Some(fatal_message);
                 return Ok((RemoteEventOutcome::Quit, true));
             }
             handle_disconnect(app, state, Some(reason));

@@ -87,6 +87,7 @@ pub(super) async fn run_replay(
         update_session: None,
         restart_session: None,
         exit_code: None,
+        fatal_message: None,
         session_id: if app.is_remote {
             app.remote_session_id.clone()
         } else {
