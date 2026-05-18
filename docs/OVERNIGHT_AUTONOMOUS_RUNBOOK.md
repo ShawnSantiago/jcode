@@ -11,6 +11,12 @@ An overnight run stops only when either:
 
 Do not stop early for partial success. Partial success becomes a handoff.
 
+For continuous-progress overnights, the configured time budget is authoritative:
+
+1. Do not stop early just because the current backlog, milestone, or PR set completes.
+2. When the active backlog completes and time remains, immediately generate the next prioritized bounded backlog and continue.
+3. Stop before the time budget only for a documented hard blocker that prevents safe work under the safety constraints.
+
 Never deploy, force-push, delete branches/data, expose secrets, or perform destructive cleanup without explicit approval. PR merges must follow the configured quiet-cycle protocol.
 
 ## Durable run record
@@ -82,6 +88,26 @@ Every 30 minutes, append a checkpoint like:
 ```
 
 If stalled but safe to nudge, resume the bounded action or schedule it. If blocked, record the exact blocker and next required action.
+
+## Anti-stall watchdog invariants
+
+Every 30-minute watchdog must enforce these invariants before reporting the run healthy:
+
+1. **No early stop:** if the time budget has not elapsed and no hard blocker exists, the run must have one of:
+   - an active worker,
+   - an open PR in quiet-cycle/final-gate protocol, or
+   - a freshly generated next bounded backlog with a worker started.
+2. **Stale PR-watch recovery:** compare each PR watch `next_poll` time against current UTC. If `next_poll` is in the past, run an immediate read-only `poll_now`, recompute readiness, and reschedule the next poll.
+3. **Source-of-truth PR verification:** do not trust local watch state alone. Before each quiet-cycle/final-gate/merge decision, query GitHub directly for current head SHA, top-level comments, inline review threads, reviews, checks, draft status, and merge state.
+4. **Idle recovery:** if no worker is active, no PR is waiting in protocol, and time remains, update the scorecard/status, choose the next highest-value bounded slice, and start a worker immediately.
+5. **Checkpoint completeness:** every checkpoint must record current PR numbers and heads, active worker/session ids if known, next scheduled watchdog id/time, next PR poll time, current blocker or next backlog, and whether source-of-truth GitHub verification was used.
+6. **Gate reset after mutation:** any new push to a PR resets quiet cycles from the new head. Record the new head SHA and schedule fresh 5-minute cycles plus the final 10-minute gate.
+
+Use this watchdog prompt suffix for future continuous overnights:
+
+```text
+Anti-stall requirements: do not stop early before the target end. If the active backlog is complete and time remains, generate/start the next prioritized bounded backlog. Inspect PR watch next_poll timestamps; if stale, poll_now and reschedule. Verify PR state from GitHub source-of-truth before any quiet-cycle, final-gate, or merge decision. If no active worker and no PR in protocol, spawn/recover a worker. Checkpoint PR heads, active workers, next watchdog, next PR polls, blockers, and next backlog.
+```
 
 ## Stop command
 
