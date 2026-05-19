@@ -641,7 +641,11 @@ fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> S
     )
 }
 
-async fn resolve_pending_review_threads(root: &Path, state: &mut PrWatchState) -> Result<usize> {
+async fn resolve_pending_review_threads(
+    root: &Path,
+    state: &mut PrWatchState,
+    eligible_thread_ids: &std::collections::BTreeSet<String>,
+) -> Result<usize> {
     if !state.policy.resolve_threads {
         return Ok(0);
     }
@@ -649,6 +653,7 @@ async fn resolve_pending_review_threads(root: &Path, state: &mut PrWatchState) -
         .pending_actionable
         .iter()
         .filter_map(|item| item.id.strip_prefix("PRRT_").map(|_| item.id.clone()))
+        .filter(|id| eligible_thread_ids.contains(id))
         .collect();
     if ids.is_empty() {
         return Ok(0);
@@ -1001,12 +1006,24 @@ async fn poll_now(
     } else {
         None
     };
+    let previous_head_sha = state.pr.head_sha.clone();
+    let previous_pending_thread_ids: std::collections::BTreeSet<String> = state
+        .pending_actionable
+        .iter()
+        .filter_map(|item| item.id.strip_prefix("PRRT_").map(|_| item.id.clone()))
+        .collect();
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_schedule_fields(&mut state, &params);
+    let head_changed = previous_head_sha != state.pr.head_sha;
+    let eligible_thread_ids = if head_changed {
+        previous_pending_thread_ids
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let resolved_threads = if would_write {
-        resolve_pending_review_threads(root, &mut state).await?
+        resolve_pending_review_threads(root, &mut state, &eligible_thread_ids).await?
     } else {
         0
     };
