@@ -1,5 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
-use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
+use crate::ambient::{
+    AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem,
+};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -353,6 +355,18 @@ fn maybe_schedule_next(
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_poll_prompt(state);
+    let mut manager = AmbientManager::new()?;
+    if let Some(existing) =
+        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(|| {
+            find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline")
+        })
+    {
+        return Ok(Some(format!(
+            "{} at {} (already scheduled)",
+            existing.id,
+            existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+        )));
+    }
     let target = match params.target.as_deref() {
         Some("spawn") => ScheduleTarget::Spawn {
             parent_session_id: ctx.session_id.clone(),
@@ -362,7 +376,6 @@ fn maybe_schedule_next(
         },
         Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
     };
-    let mut manager = AmbientManager::new()?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -402,6 +415,14 @@ fn maybe_schedule_next_monitor(
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
+    let mut manager = AmbientManager::new()?;
+    if let Some(existing) = find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor") {
+        return Ok(Some(format!(
+            "{} at {} (already scheduled)",
+            existing.id,
+            existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+        )));
+    }
     let target = match params.target.as_deref() {
         Some("spawn") => ScheduleTarget::Spawn {
             parent_session_id: ctx.session_id.clone(),
@@ -411,7 +432,6 @@ fn maybe_schedule_next_monitor(
         },
         Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
     };
-    let mut manager = AmbientManager::new()?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -439,6 +459,22 @@ fn maybe_schedule_next_monitor(
         id,
         wake_at.format("%Y-%m-%dT%H:%M:%SZ")
     )))
+}
+
+fn find_existing_scheduled_watch_item<'a>(
+    items: &'a [ScheduledItem],
+    state: &PrWatchState,
+    action: &str,
+) -> Option<&'a ScheduledItem> {
+    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
+    let action_marker = format!("action={action}");
+    items.iter().find(|item| {
+        let description = item.task_description.as_deref().unwrap_or(&item.context);
+        description.contains(&state.watch_id)
+            && description.contains(&action_marker)
+            && (item.relevant_files.iter().any(|file| file == &state_file)
+                || description.contains(&format!("watch_id={}", state.watch_id)))
+    })
 }
 
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
@@ -2071,6 +2107,80 @@ mod tests {
             MAX_MONITOR_MAX_RUNTIME_SECONDS
         );
         assert_eq!(monitor_max_runtime_seconds(&monitor_params(Some(0))), 1);
+    }
+
+    fn scheduled_item(id: &str, description: &str, relevant_files: Vec<String>) -> ScheduledItem {
+        ScheduledItem {
+            id: id.to_string(),
+            scheduled_for: Utc::now() + Duration::minutes(5),
+            context: description.to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".to_string(),
+            },
+            created_by_session: "parent".to_string(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: Some(description.to_string()),
+            relevant_files,
+            git_branch: None,
+            additional_context: Some("Scheduled by pr_watch schedule_next".to_string()),
+        }
+    }
+
+    #[test]
+    fn scheduled_watch_dedupe_finds_existing_poll_for_same_watch() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        state
+            .last_successful_fetch
+            .insert("comments".to_string(), "2026-05-19T00:00:00Z".to_string());
+        let description = scheduled_poll_prompt(&state);
+        let item = scheduled_item(
+            "sched_existing",
+            &description,
+            vec![format!(
+                ".jcode/pr-feedback-watch/{}-state.json",
+                state.watch_id
+            )],
+        );
+
+        let items = vec![item];
+        let found = find_existing_scheduled_watch_item(&items, &state, "poll_now")
+            .expect("existing poll schedule should be found");
+        assert_eq!(found.id, "sched_existing");
+    }
+
+    #[test]
+    fn scheduled_watch_dedupe_separates_actions_and_watch_ids() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let other = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 8,
+        });
+        let monitor_item = scheduled_item(
+            "sched_monitor",
+            &scheduled_monitor_prompt(&state, 60),
+            vec![],
+        );
+        let other_poll_item = scheduled_item(
+            "sched_other",
+            &scheduled_poll_prompt(&other),
+            vec![],
+        );
+        let items = vec![monitor_item, other_poll_item];
+
+        assert!(find_existing_scheduled_watch_item(&items, &state, "poll_now").is_none());
+        assert_eq!(
+            find_existing_scheduled_watch_item(&items, &state, "monitor")
+                .map(|item| item.id.as_str()),
+            Some("sched_monitor")
+        );
     }
 
     #[test]
