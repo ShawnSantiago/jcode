@@ -124,11 +124,28 @@ fn watch_dir(root: &Path) -> PathBuf {
 }
 
 fn state_path(store: &Path, watch_id: &str) -> PathBuf {
-    store.join(format!("{watch_id}-state.json"))
+    store.join(format!("{}-state.json", watch_id_path_component(watch_id)))
 }
 
 fn lock_path(store: &Path, watch_id: &str) -> PathBuf {
-    store.join(format!("{watch_id}.lock"))
+    store.join(format!("{}.lock", watch_id_path_component(watch_id)))
+}
+
+fn watch_id_path_component(watch_id: &str) -> String {
+    let mut encoded = String::with_capacity(watch_id.len());
+    for byte in watch_id.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    if encoded.is_empty() {
+        "%EMPTY".to_string()
+    } else {
+        encoded
+    }
 }
 
 struct WatchLock {
@@ -144,14 +161,55 @@ impl Drop for WatchLock {
 fn acquire_watch_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>> {
     fs::create_dir_all(store)?;
     let path = lock_path(store, watch_id);
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            let lock = WatchLock { path: path.clone() };
-            writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
-            Ok(Some(lock))
+    for attempt in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let lock = WatchLock { path: path.clone() };
+                writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
+                return Ok(Some(lock));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if attempt == 0 && is_stale_watch_lock(&path) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                return Ok(None);
+            }
+            Err(err) => return Err(err).with_context(|| format!("failed to create {}", path.display())),
         }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
+    }
+    Ok(None)
+}
+
+fn is_stale_watch_lock(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    if let Some(pid) = text
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("pid="))
+        .and_then(|raw| raw.parse::<u32>().ok())
+    {
+        return !process_is_running(pid);
+    }
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+        .map(|age| age > StdDuration::from_secs(30 * 60))
+        .unwrap_or(false)
+}
+
+fn process_is_running(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(target_family = "unix")]
+    {
+        Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_family = "unix"))]
+    {
+        true
     }
 }
 
@@ -2098,6 +2156,22 @@ mod tests {
     }
 
     #[test]
+    fn state_and_lock_paths_encode_unsafe_watch_id_characters() {
+        assert_eq!(
+            watch_id_path_component("../evil/watch"),
+            "%2E%2E%2Fevil%2Fwatch"
+        );
+        assert_eq!(
+            state_path(Path::new("/tmp/watch"), "../evil/watch"),
+            PathBuf::from("/tmp/watch/%2E%2E%2Fevil%2Fwatch-state.json")
+        );
+        assert_eq!(
+            lock_path(Path::new("/tmp/watch"), "../evil/watch"),
+            PathBuf::from("/tmp/watch/%2E%2E%2Fevil%2Fwatch.lock")
+        );
+    }
+
+    #[test]
     fn schema_lists_read_only_actions() {
         let schema = PrWatchTool::new().parameters_schema();
         let actions = schema
@@ -2234,6 +2308,21 @@ mod tests {
             .expect("third lock")
             .expect("lock reacquired");
         drop(third);
+    }
+
+    #[test]
+    fn stale_watch_lock_is_removed_and_reacquired() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let path = lock_path(temp.path(), "owner-repo-pr-7");
+        std::fs::write(&path, "pid=999999999 at=2026-05-19T00:00:00Z")
+            .expect("write stale lock");
+
+        let lock = acquire_watch_lock(temp.path(), "owner-repo-pr-7")
+            .expect("acquire after stale lock")
+            .expect("lock reacquired");
+        let text = std::fs::read_to_string(&path).expect("read replacement lock");
+        assert!(text.contains(&format!("pid={}", std::process::id())));
+        drop(lock);
     }
 
     #[test]
