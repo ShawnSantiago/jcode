@@ -1951,9 +1951,21 @@ fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
         || body.contains("triggered the review bot")
         || body.contains("automation progress")
         || body.contains("<!-- jcode-pr-watch-ignore -->")
+        || is_bare_review_bot_invocation(&body)
         || (author == "shopify"
             && body.contains("oxygen deployed a preview")
             && body.contains("deployment details"))
+}
+
+fn is_bare_review_bot_invocation(body: &str) -> bool {
+    let normalized = body
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation() && ch != '@')
+        .trim();
+    matches!(
+        normalized,
+        "@codex" | "@claude" | "@gemini-code-assist" | "@copilot"
+    )
 }
 
 fn stable_body_hash(body: &str) -> String {
@@ -3047,6 +3059,15 @@ mod tests {
         assert!(is_automation_chatter(
             Some("human"),
             Some("fix-summary: addressed feedback")
+        ));
+        assert!(is_automation_chatter(Some("ShawnSantiago"), Some("@codex")));
+        assert!(is_automation_chatter(
+            Some("ShawnSantiago"),
+            Some(" @claude. ")
+        ));
+        assert!(!is_automation_chatter(
+            Some("ShawnSantiago"),
+            Some("@codex please check whether the lock timeout is safe")
         ));
         assert!(is_automation_chatter(
             Some("shopify"),
