@@ -253,6 +253,7 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
     let path = state_path(store, &state.watch_id);
     apply_schedule_fields(&mut state, &params);
     let would_write = !params.dry_run.unwrap_or(false);
+
     if would_write {
         fs::create_dir_all(store)?;
         let mut file = OpenOptions::new()
@@ -381,6 +382,12 @@ fn monitor_should_schedule_followup(status: MonitorStatus) -> bool {
             | MonitorStatus::ChecksPending
             | MonitorStatus::TransientFailure
     )
+}
+
+fn clear_next_poll_at_if_monitor_will_not_schedule(state: &mut PrWatchState, status: MonitorStatus) {
+    if !monitor_should_schedule_followup(status) {
+        state.polling.next_poll_at = None;
+    }
 }
 
 fn watch_state_changed_since_load(
@@ -1072,6 +1079,9 @@ async fn monitor_once(
         });
     }
 
+    let status = monitor_status_for_state(&state, partial_failure);
+    clear_next_poll_at_if_monitor_will_not_schedule(&mut state, status);
+
     if would_write {
         fs::create_dir_all(store)?;
         if path.exists() {
@@ -1111,7 +1121,6 @@ async fn monitor_once(
         }
         write_state_atomic(&path, &state)?;
     }
-    let status = monitor_status_for_state(&state, partial_failure);
     let scheduled = if monitor_should_schedule_followup(status) {
         maybe_schedule_next_monitor(ctx, &state, &params)?
     } else {
@@ -2419,6 +2428,29 @@ mod tests {
             MonitorStatus::QuietSatisfied
         ));
         assert!(!monitor_should_schedule_followup(MonitorStatus::Stopped));
+    }
+
+    #[test]
+    fn monitor_clears_next_poll_when_followup_is_not_scheduled() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.polling.next_poll_at = Some("2026-05-19T17:30:00Z".to_string());
+
+        clear_next_poll_at_if_monitor_will_not_schedule(&mut state, MonitorStatus::ActionRequired);
+
+        assert!(state.polling.next_poll_at.is_none());
+
+        state.polling.next_poll_at = Some("2026-05-19T17:35:00Z".to_string());
+        clear_next_poll_at_if_monitor_will_not_schedule(
+            &mut state,
+            MonitorStatus::PendingNextPoll,
+        );
+        assert_eq!(
+            state.polling.next_poll_at.as_deref(),
+            Some("2026-05-19T17:35:00Z")
+        );
     }
 
     #[test]

@@ -889,8 +889,7 @@ impl AmbientRunnerHandle {
         let state = self.inner.state.read().await.clone();
 
         let mgr = AmbientManager::new()?;
-        let mut queue_items: Vec<_> = ready_items.to_vec();
-        queue_items.extend(mgr.queue().items().iter().cloned());
+        let queue_items = ambient_prompt_queue_items(ready_items, mgr.queue().items());
 
         let memory_manager = MemoryManager::new();
         let graph_health = ambient::gather_memory_graph_health(&memory_manager);
@@ -1117,6 +1116,20 @@ impl AmbientRunnerHandle {
             }
         }
     }
+}
+
+fn ambient_prompt_queue_items(
+    ready_items: &[ScheduledItem],
+    queued_items: &[ScheduledItem],
+) -> Vec<ScheduledItem> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for item in ready_items.iter().chain(queued_items.iter()) {
+        if seen.insert(item.id.clone()) {
+            items.push(item.clone());
+        }
+    }
+    items
 }
 
 // ---------------------------------------------------------------------------
