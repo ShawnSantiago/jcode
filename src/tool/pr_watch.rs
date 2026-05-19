@@ -59,6 +59,8 @@ struct PrWatchInput {
     max_runtime_seconds: Option<u64>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    resolve_threads: bool,
 }
 
 const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
@@ -93,7 +95,8 @@ impl Tool for PrWatchTool {
                 "poll_interval_seconds": {"type": "integer", "description": "Interval for the next scheduled poll. Defaults to state polling interval."},
                 "quiet_cycles_required": {"type": "integer", "description": "Quiet cycles required before the monitor stops as satisfied. Defaults to watch state or 3."},
                 "max_runtime_seconds": {"type": "integer", "description": "Maximum monitor runtime budget. Single-cycle monitor caps this to 900 and records the bounded value."},
-                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."}
+                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."},
+                "resolve_threads": {"type": "boolean", "description": "If true, persist permission for this watch to resolve review threads after actionable feedback has been fixed."}
             }
         })
     }
@@ -315,6 +318,9 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     if params.schedule_next {
         let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
         state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+    if params.resolve_threads {
+        state.policy.resolve_threads = true;
     }
 }
 
@@ -633,6 +639,50 @@ fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> S
         state.polling.required_quiet_cycles,
         max_runtime_seconds,
     )
+}
+
+async fn resolve_pending_review_threads(root: &Path, state: &mut PrWatchState) -> Result<usize> {
+    if !state.policy.resolve_threads {
+        return Ok(0);
+    }
+    let ids: Vec<String> = state
+        .pending_actionable
+        .iter()
+        .filter_map(|item| item.id.strip_prefix("PRRT_").map(|_| item.id.clone()))
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut resolved = std::collections::BTreeSet::new();
+    for id in ids {
+        let query = "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
+        run_gh(
+            root,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={query}"),
+                "-f",
+                &format!("id={id}"),
+            ],
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!(format!("{err:?}")))?;
+        resolved.insert(id);
+    }
+
+    for id in &resolved {
+        if let Some(thread) = state.last_seen.review_threads.get_mut(id) {
+            thread.resolved = true;
+        }
+    }
+    state
+        .pending_actionable
+        .retain(|item| !resolved.contains(&item.id));
+    state.last_cycle.actionable_count = state.pending_actionable.len();
+    Ok(resolved.len())
 }
 
 async fn ack_baseline(
@@ -955,6 +1005,11 @@ async fn poll_now(
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_schedule_fields(&mut state, &params);
+    let resolved_threads = if would_write {
+        resolve_pending_review_threads(root, &mut state).await?
+    } else {
+        0
+    };
     if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
         && state.pending_actionable.is_empty()
         && state.last_cycle.pending_check_count == 0
@@ -994,7 +1049,7 @@ async fn poll_now(
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let readiness = state.readiness();
     let text = format!(
-        "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}",
+        "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nResolved threads: {}\nFailed surfaces: {}{}{}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -1006,6 +1061,7 @@ async fn poll_now(
         state.last_cycle.pending_check_count,
         state.last_cycle.failed_check_count,
         outcome.partial_failure,
+        resolved_threads,
         failed_surface_names(&state).join(", "),
         scheduled
             .as_deref()
@@ -2248,6 +2304,7 @@ mod tests {
             quiet_cycles_required: None,
             max_runtime_seconds,
             target: None,
+            resolve_threads: false,
         }
     }
 
@@ -2793,6 +2850,7 @@ mod tests {
             quiet_cycles_required: None,
             max_runtime_seconds: None,
             target: None,
+            resolve_threads: false,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
