@@ -313,7 +313,6 @@ impl PrWatchState {
 
     pub fn apply_cycle_outcome(&mut self, outcome: CycleOutcome) {
         self.polling.cycle_number = self.polling.cycle_number.saturating_add(1);
-        self.polling.consecutive_transient_failures = 0;
         self.pending_actionable = outcome.pending_actionable;
         self.last_cycle.actionable_count = self.pending_actionable.len();
         self.last_cycle.pending_check_count = outcome.pending_check_count;
@@ -335,6 +334,7 @@ impl PrWatchState {
                 .consecutive_transient_failures
                 .saturating_add(1);
         } else {
+            self.polling.consecutive_transient_failures = 0;
             self.polling.quiet_cycles = self.polling.quiet_cycles.saturating_add(1);
             self.last_cycle.status =
                 if self.polling.quiet_cycles >= self.polling.required_quiet_cycles {
@@ -366,10 +366,7 @@ impl PrWatchState {
         if self.last_cycle.pending_check_count > 0 {
             return Readiness::NotReadyChecksPending;
         }
-        if matches!(
-            self.pr.review_decision.as_deref(),
-            Some("CHANGES_REQUESTED" | "REVIEW_REQUIRED")
-        ) {
+        if matches!(self.pr.review_decision.as_deref(), Some("CHANGES_REQUESTED")) {
             return Readiness::NotReadyActionRequired;
         }
         if matches!(
@@ -1133,6 +1130,45 @@ mod tests {
         assert_eq!(state.polling.quiet_cycles, 2);
         assert_eq!(state.last_cycle.status, CycleStatus::TransientFailure);
         assert_eq!(state.readiness(), Readiness::NotReadyValidationStale);
+    }
+
+    #[test]
+    fn partial_failures_increment_consecutively_until_success() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 1,
+        });
+        state.pr.state = Some("OPEN".into());
+
+        state.apply_cycle_outcome(CycleOutcome {
+            partial_failure: true,
+            ..CycleOutcome::default()
+        });
+        state.apply_cycle_outcome(CycleOutcome {
+            partial_failure: true,
+            ..CycleOutcome::default()
+        });
+        assert_eq!(state.polling.consecutive_transient_failures, 2);
+
+        state.apply_cycle_outcome(CycleOutcome::default());
+        assert_eq!(state.polling.consecutive_transient_failures, 0);
+        assert_eq!(state.readiness(), Readiness::ReadyForHumanReview);
+    }
+
+    #[test]
+    fn review_required_waits_for_human_review_not_agent_action() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 1,
+        });
+        state.pr.state = Some("OPEN".into());
+        state.pr.review_decision = Some("REVIEW_REQUIRED".into());
+        state.apply_cycle_outcome(CycleOutcome::default());
+
+        assert_eq!(state.readiness(), Readiness::ReadyForHumanReview);
+
+        state.pr.review_decision = Some("CHANGES_REQUESTED".into());
+        assert_eq!(state.readiness(), Readiness::NotReadyActionRequired);
     }
 
     #[test]

@@ -105,7 +105,7 @@ def print_repo(status: RepoStatus) -> None:
 def main(argv: Iterable[str]) -> int:
     args = list(argv)
     root = Path(args[0]).resolve() if args else Path.cwd().resolve()
-    target = Path(os.environ.get("JCODE_OVERNIGHT_TARGET", "/home/shawn/Documents/projects/constructive-toys-headless"))
+    target = Path(os.environ.get("JCODE_OVERNIGHT_TARGET", "."))
 
     print(f"overnight_status_utc: {datetime.now(timezone.utc).isoformat()}")
     print(f"root: {root}")
