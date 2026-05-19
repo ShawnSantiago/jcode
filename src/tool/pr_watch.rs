@@ -208,9 +208,23 @@ fn process_is_running(pid: u32) -> Option<bool> {
     if pid == std::process::id() {
         return Some(true);
     }
-    #[cfg(target_family = "unix")]
+    #[cfg(target_os = "linux")]
     {
         Some(Path::new("/proc").join(pid.to_string()).exists())
+    }
+    #[cfg(all(target_family = "unix", not(target_os = "linux")))]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result == 0 {
+            Some(true)
+        } else {
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            match errno {
+                Some(code) if code == libc::ESRCH => Some(false),
+                Some(code) if code == libc::EPERM => Some(true),
+                _ => None,
+            }
+        }
     }
     #[cfg(not(target_family = "unix"))]
     {
@@ -557,17 +571,11 @@ fn maybe_schedule_next_monitor(
 
 fn cancel_queued_watch_items(state: &PrWatchState) -> Result<usize> {
     let mut manager = AmbientManager::new()?;
-    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
     let ids: HashSet<String> = manager
         .queue()
         .items()
         .iter()
-        .filter(|item| {
-            let description = item.task_description.as_deref().unwrap_or(&item.context);
-            description.contains(&state.watch_id)
-                && (item.relevant_files.iter().any(|file| file == &state_file)
-                    || description.contains(&format!("watch_id={}", state.watch_id)))
-        })
+        .filter(|item| scheduled_item_matches_watch(item, state))
         .map(|item| item.id.clone())
         .collect();
     Ok(manager.remove_items_by_id(&ids))
@@ -578,29 +586,46 @@ fn find_existing_scheduled_watch_item<'a>(
     state: &PrWatchState,
     action: &str,
 ) -> Option<&'a ScheduledItem> {
-    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
     let action_marker = format!("action={action}");
     items.iter().find(|item| {
         let description = item.task_description.as_deref().unwrap_or(&item.context);
-        description.contains(&state.watch_id)
-            && description.contains(&action_marker)
-            && (item.relevant_files.iter().any(|file| file == &state_file)
-                || description.contains(&format!("watch_id={}", state.watch_id)))
-        })
+        description.contains(&action_marker) && scheduled_item_matches_watch(item, state)
+    })
 }
 
 fn scheduled_watch_item_ids(items: &[ScheduledItem], state: &PrWatchState) -> Vec<String> {
-    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
     items
         .iter()
-        .filter(|item| {
-            let description = item.task_description.as_deref().unwrap_or(&item.context);
-            description.contains(&state.watch_id)
-                && (item.relevant_files.iter().any(|file| file == &state_file)
-                    || description.contains(&format!("watch_id={}", state.watch_id)))
-        })
+        .filter(|item| scheduled_item_matches_watch(item, state))
         .map(|item| item.id.clone())
         .collect()
+}
+
+fn scheduled_item_matches_watch(item: &ScheduledItem, state: &PrWatchState) -> bool {
+    item.relevant_files
+        .iter()
+        .any(|file| scheduled_relevant_file_matches_watch(file, &state.watch_id))
+        || description_has_exact_watch_id(
+            item.task_description.as_deref().unwrap_or(&item.context),
+            &state.watch_id,
+        )
+}
+
+fn scheduled_relevant_file_matches_watch(file: &str, watch_id: &str) -> bool {
+    let raw_state_file = format!(".jcode/pr-feedback-watch/{watch_id}-state.json");
+    let encoded_state_file = format!(
+        ".jcode/pr-feedback-watch/{}-state.json",
+        watch_id_path_component(watch_id)
+    );
+    file == raw_state_file || file == encoded_state_file
+}
+
+fn description_has_exact_watch_id(description: &str, watch_id: &str) -> bool {
+    description
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '('))
+        .filter_map(|part| part.strip_prefix("watch_id="))
+        .map(|value| value.trim_matches(|ch: char| matches!(ch, '.' | ',' | ';')))
+        .any(|value| value == watch_id)
 }
 
 fn cancel_scheduled_watch_items(state: &PrWatchState) -> Result<usize> {
@@ -2442,6 +2467,34 @@ mod tests {
         ];
 
         assert_eq!(scheduled_watch_item_ids(&items, &state), vec!["poll", "monitor"]);
+    }
+
+    #[test]
+    fn scheduled_watch_matching_does_not_match_watch_id_prefixes() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let prefix_collision = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 77,
+        });
+        let items = vec![scheduled_item(
+            "collision",
+            &scheduled_poll_prompt(&prefix_collision),
+            vec![],
+        )];
+
+        assert!(find_existing_scheduled_watch_item(&items, &state, "poll_now").is_none());
+        assert!(scheduled_watch_item_ids(&items, &state).is_empty());
+        assert!(description_has_exact_watch_id(
+            &scheduled_poll_prompt(&state),
+            &state.watch_id
+        ));
+        assert!(!description_has_exact_watch_id(
+            &scheduled_poll_prompt(&prefix_collision),
+            &state.watch_id
+        ));
     }
 
     #[test]
