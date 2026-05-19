@@ -190,7 +190,9 @@ fn is_stale_watch_lock(path: &Path) -> bool {
         .find_map(|part| part.strip_prefix("pid="))
         .and_then(|raw| raw.parse::<u32>().ok())
     {
-        return !process_is_running(pid);
+        if let Some(running) = process_is_running(pid) {
+            return !running;
+        }
     }
     path.metadata()
         .and_then(|metadata| metadata.modified())
@@ -199,17 +201,18 @@ fn is_stale_watch_lock(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn process_is_running(pid: u32) -> bool {
+fn process_is_running(pid: u32) -> Option<bool> {
     if pid == std::process::id() {
-        return true;
+        return Some(true);
     }
     #[cfg(target_family = "unix")]
     {
-        Path::new("/proc").join(pid.to_string()).exists()
+        Some(Path::new("/proc").join(pid.to_string()).exists())
     }
     #[cfg(not(target_family = "unix"))]
     {
-        true
+        let _ = pid;
+        None
     }
 }
 
@@ -2323,6 +2326,15 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read replacement lock");
         assert!(text.contains(&format!("pid={}", std::process::id())));
         drop(lock);
+    }
+
+    #[test]
+    fn process_liveness_is_known_on_unix_and_falls_back_elsewhere() {
+        let current = process_is_running(std::process::id());
+        assert_eq!(current, Some(true));
+
+        #[cfg(not(target_family = "unix"))]
+        assert_eq!(process_is_running(u32::MAX), None);
     }
 
     #[test]
