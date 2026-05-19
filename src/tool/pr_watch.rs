@@ -12,7 +12,7 @@ use jcode_pr_watch_core::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -350,7 +350,13 @@ fn maybe_schedule_next(
     state: &PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
-    if !params.schedule_next || params.dry_run.unwrap_or(false) || state.terminal {
+    if params.dry_run.unwrap_or(false) || state.terminal {
+        if state.terminal {
+            let _ = cancel_queued_watch_items(state);
+        }
+        return Ok(None);
+    }
+    if !params.schedule_next {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
@@ -361,11 +367,15 @@ fn maybe_schedule_next(
             find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline")
         })
     {
-        return Ok(Some(format!(
-            "{} at {} (already scheduled)",
-            existing.id,
-            existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
-        )));
+        if existing.scheduled_for > Utc::now() {
+            return Ok(Some(format!(
+                "{} at {} (already scheduled)",
+                existing.id,
+                existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+            )));
+        }
+        let stale_id = existing.id.clone();
+        manager.cancel_schedule(&stale_id)?;
     }
     let target = match params.target.as_deref() {
         Some("spawn") => ScheduleTarget::Spawn {
@@ -410,18 +420,28 @@ fn maybe_schedule_next_monitor(
     state: &PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
-    if !params.schedule_next || params.dry_run.unwrap_or(false) || state.terminal {
+    if params.dry_run.unwrap_or(false) || state.terminal {
+        if state.terminal {
+            let _ = cancel_queued_watch_items(state);
+        }
+        return Ok(None);
+    }
+    if !params.schedule_next {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
     let mut manager = AmbientManager::new()?;
     if let Some(existing) = find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor") {
-        return Ok(Some(format!(
-            "{} at {} (already scheduled)",
-            existing.id,
-            existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
-        )));
+        if existing.scheduled_for > Utc::now() {
+            return Ok(Some(format!(
+                "{} at {} (already scheduled)",
+                existing.id,
+                existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+            )));
+        }
+        let stale_id = existing.id.clone();
+        manager.cancel_schedule(&stale_id)?;
     }
     let target = match params.target.as_deref() {
         Some("spawn") => ScheduleTarget::Spawn {
@@ -459,6 +479,24 @@ fn maybe_schedule_next_monitor(
         id,
         wake_at.format("%Y-%m-%dT%H:%M:%SZ")
     )))
+}
+
+fn cancel_queued_watch_items(state: &PrWatchState) -> Result<usize> {
+    let mut manager = AmbientManager::new()?;
+    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
+    let ids: HashSet<String> = manager
+        .queue()
+        .items()
+        .iter()
+        .filter(|item| {
+            let description = item.task_description.as_deref().unwrap_or(&item.context);
+            description.contains(&state.watch_id)
+                && (item.relevant_files.iter().any(|file| file == &state_file)
+                    || description.contains(&format!("watch_id={}", state.watch_id)))
+        })
+        .map(|item| item.id.clone())
+        .collect();
+    Ok(manager.remove_items_by_id(&ids))
 }
 
 fn find_existing_scheduled_watch_item<'a>(
