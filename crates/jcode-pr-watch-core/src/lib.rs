@@ -317,6 +317,9 @@ impl PrWatchState {
         self.last_cycle.actionable_count = self.pending_actionable.len();
         self.last_cycle.pending_check_count = outcome.pending_check_count;
         self.last_cycle.failed_check_count = outcome.failed_check_count;
+        if !outcome.partial_failure {
+            self.polling.consecutive_transient_failures = 0;
+        }
 
         if !self.pending_actionable.is_empty() {
             self.polling.quiet_cycles = 0;
@@ -334,7 +337,6 @@ impl PrWatchState {
                 .consecutive_transient_failures
                 .saturating_add(1);
         } else {
-            self.polling.consecutive_transient_failures = 0;
             self.polling.quiet_cycles = self.polling.quiet_cycles.saturating_add(1);
             self.last_cycle.status =
                 if self.polling.quiet_cycles >= self.polling.required_quiet_cycles {
@@ -1153,6 +1155,31 @@ mod tests {
         state.apply_cycle_outcome(CycleOutcome::default());
         assert_eq!(state.polling.consecutive_transient_failures, 0);
         assert_eq!(state.readiness(), Readiness::ReadyForHumanReview);
+    }
+
+    #[test]
+    fn non_transient_actionable_cycle_resets_transient_streak() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 1,
+        });
+        state.pr.state = Some("OPEN".into());
+        state.polling.consecutive_transient_failures = 2;
+
+        state.apply_cycle_outcome(CycleOutcome {
+            pending_actionable: vec![ActionableItem {
+                id: "thread-1".into(),
+                surface: "review_threads".into(),
+                summary: "fix it".into(),
+                url: None,
+                path: None,
+                status: None,
+            }],
+            ..CycleOutcome::default()
+        });
+
+        assert_eq!(state.polling.consecutive_transient_failures, 0);
+        assert_eq!(state.readiness(), Readiness::NotReadyActionRequired);
     }
 
     #[test]

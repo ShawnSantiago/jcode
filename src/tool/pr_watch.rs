@@ -580,7 +580,33 @@ fn find_existing_scheduled_watch_item<'a>(
             && description.contains(&action_marker)
             && (item.relevant_files.iter().any(|file| file == &state_file)
                 || description.contains(&format!("watch_id={}", state.watch_id)))
-    })
+        })
+}
+
+fn scheduled_watch_item_ids(items: &[ScheduledItem], state: &PrWatchState) -> Vec<String> {
+    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
+    items
+        .iter()
+        .filter(|item| {
+            let description = item.task_description.as_deref().unwrap_or(&item.context);
+            description.contains(&state.watch_id)
+                && (item.relevant_files.iter().any(|file| file == &state_file)
+                    || description.contains(&format!("watch_id={}", state.watch_id)))
+        })
+        .map(|item| item.id.clone())
+        .collect()
+}
+
+fn cancel_scheduled_watch_items(state: &PrWatchState) -> Result<usize> {
+    let mut manager = AmbientManager::new()?;
+    let ids = scheduled_watch_item_ids(manager.queue().items(), state);
+    let mut cancelled = 0;
+    for id in ids {
+        if manager.cancel_schedule(&id)?.is_some() {
+            cancelled += 1;
+        }
+    }
+    Ok(cancelled)
 }
 
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
@@ -2100,12 +2126,18 @@ fn stop_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     state.polling.next_poll_at = None;
     state.last_cycle.status = jcode_pr_watch_core::CycleStatus::Stopped;
     let path = state_path(store, &state.watch_id);
+    let cancelled_schedules = if would_write {
+        cancel_scheduled_watch_items(&state)?
+    } else {
+        0
+    };
     if would_write {
         write_state_atomic(&path, &state)?;
     }
     Ok(ToolOutput::new(format!(
-        "PR watch stopped: {}{}",
+        "PR watch stopped: {}\nCancelled queued schedules: {}{}",
         state.watch_id,
+        cancelled_schedules,
         if would_write {
             ""
         } else {
@@ -2305,6 +2337,25 @@ mod tests {
                 .map(|item| item.id.as_str()),
             Some("sched_monitor")
         );
+    }
+
+    #[test]
+    fn scheduled_watch_item_ids_selects_all_actions_for_watch() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let other = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 8,
+        });
+        let items = vec![
+            scheduled_item("poll", &scheduled_poll_prompt(&state), vec![]),
+            scheduled_item("monitor", &scheduled_monitor_prompt(&state, 60), vec![]),
+            scheduled_item("other", &scheduled_poll_prompt(&other), vec![]),
+        ];
+
+        assert_eq!(scheduled_watch_item_ids(&items, &state), vec!["poll", "monitor"]);
     }
 
     #[test]
