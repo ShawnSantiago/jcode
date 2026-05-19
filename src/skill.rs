@@ -349,6 +349,9 @@ impl SkillRegistry {
                 let skill = Self::parse_skill(&path)?;
                 self.skills.insert(skill.name.clone(), skill);
                 Ok(true)
+            } else if Skill::is_builtin_path(&path) {
+                self.load_builtin_omx_workflows();
+                Ok(self.skills.contains_key(name))
             } else {
                 // Skill file was deleted
                 self.skills.remove(name);
@@ -432,6 +435,10 @@ impl SkillRegistry {
 }
 
 impl Skill {
+    fn is_builtin_path(path: &Path) -> bool {
+        path.to_string_lossy().starts_with("<builtin>/")
+    }
+
     fn builtin(name: &str, description: &str, content: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -705,6 +712,18 @@ mod tests {
         assert!(registry.get("ralph").is_some());
         assert!(registry.get("ultrawork").is_some());
         assert!(registry.get("team").is_some());
+    }
+
+    #[test]
+    fn reload_preserves_builtin_omx_workflow() {
+        let mut registry = SkillRegistry::with_builtins();
+
+        assert!(registry.reload("autopilot").expect("reload builtin"));
+        assert!(registry.get("autopilot").is_some());
+        assert_eq!(
+            registry.get("autopilot").unwrap().path,
+            PathBuf::from("<builtin>/omx/autopilot/SKILL.md")
+        );
     }
 
     #[test]

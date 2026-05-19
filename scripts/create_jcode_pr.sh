@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-    --repo|-R)
+    --repo|-R|--repo=*|-R=*)
       echo "error: --repo is managed by this wrapper; use --upstream only when explicitly targeting 1jehuang/jcode" >&2
       exit 2
       ;;
