@@ -175,6 +175,7 @@ fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Res
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
     child.provider_key = parent.provider_key.clone();
+    child.model = parent.model.clone();
     child.reasoning_effort = parent.reasoning_effort.clone();
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
@@ -1129,6 +1130,17 @@ mod tests {
                 .unwrap(),
             OvernightCommand::Cancel
         );
+    }
+
+    #[test]
+    fn coordinator_session_preserves_reasoning_effort() {
+        let mut parent = Session::create(None, Some("parent".to_string()));
+        parent.reasoning_effort = Some("high".to_string());
+
+        let child = create_coordinator_session(&parent, &Some("mission".to_string()))
+            .expect("create coordinator session");
+
+        assert_eq!(child.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

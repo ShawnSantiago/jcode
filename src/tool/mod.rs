@@ -22,6 +22,7 @@ mod memory;
 mod multiedit;
 mod open;
 mod patch;
+mod pr_watch;
 mod read;
 pub mod selfdev;
 mod session_search;
@@ -135,6 +136,7 @@ impl Registry {
                 multiedit::MultiEditTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "pr_watch", pr_watch::PrWatchTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,

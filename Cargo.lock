@@ -3306,6 +3306,7 @@ dependencies = [
  "jcode-overnight-core",
  "jcode-pdf",
  "jcode-plan",
+ "jcode-pr-watch-core",
  "jcode-protocol",
  "jcode-provider-core",
  "jcode-provider-gemini",
@@ -3588,6 +3589,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-pr-watch-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jcode-protocol"
 version = "0.1.0"
 dependencies = [
@@ -3859,6 +3868,21 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-workflow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "jcode-background-types",
+ "jcode-plan",
+ "jcode-task-types",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

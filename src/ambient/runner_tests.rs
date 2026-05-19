@@ -1,4 +1,4 @@
-use super::AmbientRunnerHandle;
+use super::{AmbientRunnerHandle, ambient_prompt_queue_items};
 use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
 use crate::message::{Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -34,6 +34,23 @@ impl Drop for EnvVarGuard {
 }
 
 struct TestProvider;
+
+fn scheduled_item(id: &str, context: &str) -> ScheduledItem {
+    ScheduledItem {
+        id: id.to_string(),
+        scheduled_for: chrono::Utc::now(),
+        context: context.to_string(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "session_test".to_string(),
+        created_at: chrono::Utc::now(),
+        working_dir: None,
+        task_description: Some(context.to_string()),
+        relevant_files: vec![],
+        git_branch: None,
+        additional_context: None,
+    }
+}
 
 #[derive(Clone, Default)]
 struct StreamingTestProvider {
@@ -99,6 +116,22 @@ impl Provider for StreamingTestProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
     }
+}
+
+#[test]
+fn ambient_prompt_queue_items_deduplicates_ready_items() {
+    let ready = vec![scheduled_item("due", "due task")];
+    let queued = vec![
+        scheduled_item("due", "due task duplicate from queue"),
+        scheduled_item("future", "future task"),
+    ];
+
+    let items = ambient_prompt_queue_items(&ready, &queued);
+
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].id, "due");
+    assert_eq!(items[0].context, "due task");
+    assert_eq!(items[1].id, "future");
 }
 
 #[tokio::test]

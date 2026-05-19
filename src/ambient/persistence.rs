@@ -89,6 +89,18 @@ impl ScheduledQueue {
         Ok(Some(item))
     }
 
+    /// Put an already-created item back in the queue after a delivery failure.
+    ///
+    /// Ready direct-delivery items are removed before delivery so one broken live
+    /// session or transient server problem does not block the rest of the queue.
+    /// Requeueing failed items avoids silently losing scheduled checks, which is
+    /// especially important for visible overnight/PR-monitor tasks.
+    pub fn requeue_after(&mut self, mut item: ScheduledItem, delay: chrono::Duration) {
+        item.scheduled_for = Utc::now() + delay;
+        self.items.push(item);
+        let _ = self.save();
+    }
+
     /// Pop items whose `scheduled_for` is in the past, sorted by priority
     /// (highest first) then by time (earliest first).
     pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {
@@ -111,6 +123,65 @@ impl ScheduledQueue {
         }
 
         ready
+    }
+
+    /// Remove and return ready items targeted at the ambient agent, leaving
+    /// direct-delivery items in place for the delivery path.
+    pub fn take_ready_ambient_items(&mut self) -> Vec<ScheduledItem> {
+        let now = Utc::now();
+        let mut ready_ambient = Vec::new();
+        let mut remaining = Vec::with_capacity(self.items.len());
+
+        for item in self.items.drain(..) {
+            let is_ready = item.scheduled_for <= now;
+            if is_ready && !item.target.is_direct_delivery() {
+                ready_ambient.push(item);
+            } else {
+                remaining.push(item);
+            }
+        }
+
+        self.items = remaining;
+
+        if !ready_ambient.is_empty() {
+            let _ = self.save();
+        }
+
+        ready_ambient.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
+        });
+
+        ready_ambient
+    }
+
+    /// Return ready items targeted at the ambient agent without removing them.
+    pub fn ready_ambient_items(&self) -> Vec<ScheduledItem> {
+        let now = Utc::now();
+        let mut ready: Vec<_> = self
+            .items
+            .iter()
+            .filter(|item| item.scheduled_for <= now && !item.target.is_direct_delivery())
+            .cloned()
+            .collect();
+        ready.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
+        });
+        ready
+    }
+
+    /// Remove queued items by ID after successful processing.
+    pub fn remove_by_ids(&mut self, ids: &std::collections::HashSet<String>) -> usize {
+        let before = self.items.len();
+        self.items.retain(|item| !ids.contains(&item.id));
+        let removed = before.saturating_sub(self.items.len());
+        if removed > 0 {
+            let _ = self.save();
+        }
+        removed
     }
 
     /// Remove and return ready items targeted at a specific direct-delivery session,

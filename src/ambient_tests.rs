@@ -223,6 +223,170 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
 }
 
 #[test]
+fn test_ready_ambient_items_peeks_without_removing_and_excludes_direct_targets() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path);
+    let past = Utc::now() - Duration::minutes(5);
+    let future = Utc::now() + Duration::minutes(5);
+
+    queue.push(ScheduledItem {
+        id: "ambient_due_low".into(),
+        scheduled_for: past,
+        context: "scheduled ambient task".into(),
+        priority: Priority::Low,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "ambient_due_high".into(),
+        scheduled_for: past,
+        context: "scheduled ambient task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "ambient_future".into(),
+        scheduled_for: future,
+        context: "future ambient task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "session_due".into(),
+        scheduled_for: past,
+        context: "direct session task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Session {
+            session_id: "session_123".into(),
+        },
+        created_by_session: "session_123".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let ready = queue.ready_ambient_items();
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[0].id, "ambient_due_high");
+    assert_eq!(ready[1].id, "ambient_due_low");
+    assert_eq!(queue.len(), 4, "peek should not remove queued items");
+}
+
+#[test]
+fn test_take_ready_ambient_items_and_remove_by_ids() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path);
+    let past = Utc::now() - Duration::minutes(5);
+
+    queue.push(ScheduledItem {
+        id: "ambient_due".into(),
+        scheduled_for: past,
+        context: "scheduled ambient task".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "session_due".into(),
+        scheduled_for: past,
+        context: "direct session task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Session {
+            session_id: "session_123".into(),
+        },
+        created_by_session: "session_123".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let ambient = queue.take_ready_ambient_items();
+    assert_eq!(ambient.len(), 1);
+    assert_eq!(ambient[0].id, "ambient_due");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].id, "session_due");
+
+    let mut ids = std::collections::HashSet::new();
+    ids.insert("session_due".to_string());
+    assert_eq!(queue.remove_by_ids(&ids), 1);
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn test_requeue_after_preserves_failed_direct_item() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path);
+    let past = Utc::now() - Duration::minutes(5);
+
+    queue.push(ScheduledItem {
+        id: "session_due".into(),
+        scheduled_for: past,
+        context: "scheduled session task".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Session {
+            session_id: "session_123".into(),
+        },
+        created_by_session: "session_123".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let mut ready = queue.take_ready_direct_items();
+    assert_eq!(ready.len(), 1);
+    assert!(queue.is_empty());
+
+    let item = ready.pop().unwrap();
+    queue.requeue_after(item, Duration::minutes(5));
+
+    assert_eq!(queue.len(), 1);
+    let requeued = queue.peek_next().unwrap();
+    assert_eq!(requeued.id, "session_due");
+    assert!(requeued.scheduled_for > Utc::now());
+}
+
+#[test]
 fn test_ambient_state_record_cycle() {
     let mut state = AmbientState::default();
     assert_eq!(state.total_cycles, 0);
