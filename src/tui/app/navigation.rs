@@ -509,7 +509,7 @@ impl App {
                 ],
             );
         }
-        self.drain_mouse_scroll_animation(1);
+        self.drain_mouse_scroll_animation(Self::MOUSE_SCROLL_INTENT_LINES as usize);
     }
 
     fn mouse_scroll_drain_amount(&self) -> usize {
@@ -1265,8 +1265,12 @@ impl App {
     pub(super) fn scroll_up(&mut self, amount: usize) {
         let max = self.scroll_max_estimate();
         if !self.auto_scroll_paused {
+            let rendered_max = super::super::ui::last_max_scroll();
             let current_abs = max.saturating_sub(self.scroll_offset);
             self.scroll_offset = current_abs.saturating_sub(amount);
+            if rendered_max > 0 {
+                self.scroll_offset = self.scroll_offset.min(rendered_max.saturating_sub(amount));
+            }
         } else {
             self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         }
@@ -1290,9 +1294,17 @@ impl App {
             return;
         }
         let max = self.scroll_max_estimate();
-        self.scroll_offset = (self.scroll_offset + amount).min(max);
-        if self.scroll_offset >= max {
+        let rendered_max = super::super::ui::last_max_scroll();
+        let bottom_threshold = if rendered_max > 0 {
+            rendered_max.min(max)
+        } else {
+            max
+        };
+        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        if self.scroll_offset >= bottom_threshold {
             self.follow_chat_bottom();
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max);
         }
     }
 

@@ -392,6 +392,46 @@ fn test_chat_mouse_scroll_requests_immediate_redraw_during_streaming() {
 }
 
 #[test]
+fn test_chat_mouse_scroll_down_reaches_bottom_without_dead_zone() {
+    let _lock = scroll_render_test_lock();
+
+    let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 36);
+    let bottom = render_and_snap(&app, &mut terminal);
+
+    assert!(
+        crate::tui::ui::last_max_scroll() > 2,
+        "expected scrollable chat content"
+    );
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    let scrolled_up = render_and_snap(&app, &mut terminal);
+    assert_ne!(scrolled_up, bottom, "first wheel-up should visibly move");
+    assert!(app.auto_scroll_paused);
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    let back_at_bottom = render_and_snap(&app, &mut terminal);
+
+    assert_eq!(
+        back_at_bottom, bottom,
+        "one opposite wheel detent should return to bottom"
+    );
+    assert!(
+        !app.auto_scroll_paused,
+        "state should follow bottom as soon as the rendered viewport reaches bottom"
+    );
+}
+
+#[test]
 fn test_queued_file_activity_repaint_does_not_leave_trailing_digit_artifact() {
     let _lock = scroll_render_test_lock();
 

@@ -1,3 +1,4 @@
+use crate::logging;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "jemalloc")]
 use libc::c_char;
@@ -123,9 +124,13 @@ pub fn snapshot() -> ProcessMemorySnapshot {
 
 #[cfg(target_os = "linux")]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    let source = source.into();
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        logging::warn(&format!(
+            "process memory snapshot source={source} missing /proc/self/status; using defaults"
+        ));
         let snapshot = ProcessMemorySnapshot::default();
-        record_snapshot(source.into(), snapshot.clone());
+        record_snapshot(source, snapshot.clone());
         return snapshot;
     };
 
@@ -136,19 +141,31 @@ pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot 
         os: read_linux_memory_info(&status),
         allocator: allocator_info(),
     };
-    record_snapshot(source.into(), snapshot.clone());
+    logging::debug(&format!(
+        "process memory snapshot source={source} rss={:?} peak_rss={:?} virtual={:?} allocator={}",
+        snapshot.rss_bytes,
+        snapshot.peak_rss_bytes,
+        snapshot.virtual_bytes,
+        snapshot.allocator.name
+    ));
+    record_snapshot(source, snapshot.clone());
     snapshot
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    let source = source.into();
+    logging::debug(&format!(
+        "process memory snapshot source={source} using default non-linux implementation"
+    ));
     let snapshot = ProcessMemorySnapshot::default();
-    record_snapshot(source.into(), snapshot.clone());
+    record_snapshot(source, snapshot.clone());
     snapshot
 }
 
 pub fn history(limit: usize) -> Vec<ProcessMemoryHistoryEntry> {
     let Ok(history) = memory_history().lock() else {
+        logging::error("process memory history lock poisoned; returning empty history");
         return Vec::new();
     };
     history.iter().rev().take(limit).cloned().collect()
@@ -183,6 +200,7 @@ pub fn allocator_info() -> AllocatorInfo {
 pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
     #[cfg(feature = "jemalloc")]
     {
+        logging::info("purging jemalloc allocator arenas");
         let _ = jemalloc_void_ctl("thread.idle");
         let arena_count = tikv_jemalloc_ctl::arenas::narenas::read()
             .map_err(|e| anyhow!("failed to read jemalloc arena count: {}", e))?;
@@ -205,6 +223,7 @@ pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
 
     #[cfg(not(feature = "jemalloc"))]
     {
+        logging::warn("allocator purge requested but jemalloc feature is disabled");
         Err(anyhow!(
             "allocator purge unavailable: rebuild with --features jemalloc"
         ))
@@ -212,6 +231,9 @@ pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
 }
 
 pub fn set_allocator_decay_ms(dirty_ms: isize, muzzy_ms: isize) -> Result<AllocatorTuningInfo> {
+    logging::info(&format!(
+        "setting allocator decay dirty_ms={dirty_ms} muzzy_ms={muzzy_ms}"
+    ));
     #[cfg(feature = "jemalloc")]
     {
         unsafe {
@@ -243,6 +265,7 @@ pub fn set_allocator_decay_ms(dirty_ms: isize, muzzy_ms: isize) -> Result<Alloca
     #[cfg(not(feature = "jemalloc"))]
     {
         let _ = (dirty_ms, muzzy_ms);
+        logging::warn("allocator decay update requested but jemalloc feature is disabled");
         Err(anyhow!(
             "allocator decay controls unavailable: rebuild with --features jemalloc"
         ))
@@ -327,9 +350,11 @@ pub fn estimate_json_bytes<T: Serialize>(value: &T) -> usize {
 
 fn record_snapshot(source: String, snapshot: ProcessMemorySnapshot) {
     let Ok(mut history) = memory_history().lock() else {
+        logging::error("process memory history lock poisoned; dropping snapshot");
         return;
     };
     if history.len() >= MAX_HISTORY_SAMPLES {
+        logging::debug("process memory history full; dropping oldest snapshot");
         history.pop_front();
     }
     history.push_back(ProcessMemoryHistoryEntry {

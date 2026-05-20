@@ -3,6 +3,7 @@
 //! Provides the same public API as the real embedding module but all
 //! operations return errors or no-ops.
 
+use crate::logging;
 use anyhow::Result;
 use serde::Serialize;
 use std::cmp::Reverse;
@@ -45,6 +46,7 @@ where
     I: IntoIterator<Item = (T, f32)>,
 {
     if limit == 0 {
+        logging::debug("embedding top_k requested with zero limit");
         return Vec::new();
     }
 
@@ -106,27 +108,39 @@ pub struct Embedder;
 
 impl Embedder {
     pub fn load() -> Result<Self> {
+        logging::warn("embedding load requested but embeddings feature is disabled");
         anyhow::bail!("Embeddings feature not compiled in this build")
     }
 }
 
 pub fn get_embedder() -> Result<std::sync::Arc<Embedder>> {
+    logging::warn("embedding handle requested but embeddings feature is disabled");
     anyhow::bail!("Embeddings feature not compiled in this build")
 }
 
-pub fn embed(_text: &str) -> Result<EmbeddingVec> {
+pub fn embed(text: &str) -> Result<EmbeddingVec> {
+    logging::warn(&format!(
+        "embedding request rejected because embeddings feature is disabled bytes={}",
+        text.len()
+    ));
     anyhow::bail!("Embeddings feature not compiled in this build")
 }
 
-pub fn maybe_unload_if_idle(_idle_for: Duration) -> bool {
+pub fn maybe_unload_if_idle(idle_for: Duration) -> bool {
+    logging::debug(&format!(
+        "embedding idle unload skipped in stub idle_secs={}",
+        idle_for.as_secs()
+    ));
     false
 }
 
 pub fn unload_now() -> bool {
+    logging::debug("embedding unload skipped in stub");
     false
 }
 
 pub fn stats() -> EmbedderStats {
+    logging::debug("returning embedding stub stats");
     EmbedderStats {
         loaded: false,
         model_artifact_bytes: 0,
@@ -149,12 +163,18 @@ pub fn stats() -> EmbedderStats {
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
+        logging::debug(&format!(
+            "embedding cosine similarity returning zero len_a={} len_b={}",
+            a.len(),
+            b.len()
+        ));
         return 0.0;
     }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
+        logging::debug("embedding cosine similarity returning zero for zero norm vector");
         return 0.0;
     }
     dot / (norm_a * norm_b)
@@ -163,6 +183,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 pub fn batch_cosine_similarity(query: &[f32], candidates: &[&[f32]]) -> Vec<f32> {
     let dim = query.len();
     if dim == 0 || candidates.is_empty() {
+        logging::debug(&format!(
+            "embedding batch similarity short-circuited query_dim={} candidates={}",
+            dim,
+            candidates.len()
+        ));
         return vec![0.0; candidates.len()];
     }
     candidates
@@ -183,6 +208,10 @@ pub fn find_similar(
     threshold: f32,
     top_k: usize,
 ) -> Vec<(usize, f32)> {
+    logging::debug(&format!(
+        "embedding stub find_similar candidates={} threshold={threshold} top_k={top_k}",
+        candidates.len()
+    ));
     let refs: Vec<&[f32]> = candidates.iter().map(|v| v.as_slice()).collect();
     let scores = batch_cosine_similarity(query, &refs);
     top_k_scored(
@@ -195,6 +224,7 @@ pub fn find_similar(
 }
 
 pub fn is_model_available() -> bool {
+    logging::debug("embedding model availability checked in stub: false");
     false
 }
 

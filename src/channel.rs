@@ -32,6 +32,10 @@ impl ChannelRegistry {
                 config.telegram_chat_id.clone(),
             )
         {
+            logging::info(&format!(
+                "registering telegram notification channel reply_enabled={}",
+                config.telegram_reply_enabled
+            ));
             channels.push(Arc::new(TelegramChannel::new(
                 token,
                 chat_id,
@@ -45,6 +49,10 @@ impl ChannelRegistry {
                 config.discord_channel_id.clone(),
             )
         {
+            logging::info(&format!(
+                "registering discord notification channel reply_enabled={}",
+                config.discord_reply_enabled
+            ));
             channels.push(Arc::new(DiscordChannel::new(
                 token,
                 channel_id,
@@ -53,17 +61,23 @@ impl ChannelRegistry {
             )));
         }
 
+        logging::debug(&format!(
+            "channel registry initialized channel_count={}",
+            channels.len()
+        ));
         Self { channels }
     }
 
     pub fn send_all(&self, text: &str) {
         if tokio::runtime::Handle::try_current().is_err() {
+            logging::warn("skipping channel send_all because no Tokio runtime is active");
             return;
         }
         for ch in self.channels.iter().filter(|c| c.is_send_enabled()) {
             let ch = Arc::clone(ch);
             let text = text.to_string();
             tokio::spawn(async move {
+                logging::debug(&format!("sending notification via {}", ch.name()));
                 if let Err(e) = ch.send(&text).await {
                     logging::error(&format!("{} notification failed: {}", ch.name(), e));
                 }
@@ -87,7 +101,11 @@ impl ChannelRegistry {
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<Arc<dyn MessageChannel>> {
-        self.channels.iter().find(|c| c.name() == name).cloned()
+        let channel = self.channels.iter().find(|c| c.name() == name).cloned();
+        if channel.is_none() {
+            logging::debug(&format!("channel lookup missed name={name}"));
+        }
+        channel
     }
 
     pub fn send_enabled(&self) -> Vec<Arc<dyn MessageChannel>> {
@@ -136,6 +154,10 @@ impl MessageChannel for TelegramChannel {
     }
 
     async fn send(&self, text: &str) -> anyhow::Result<()> {
+        logging::debug(&format!(
+            "sending telegram notification bytes={}",
+            text.len()
+        ));
         crate::telegram::send_message(&self.client, &self.token, &self.chat_id, text).await
     }
 
@@ -145,6 +167,12 @@ impl MessageChannel for TelegramChannel {
         loop {
             match crate::telegram::get_updates(&self.client, &self.token, offset, 30).await {
                 Ok(updates) => {
+                    if !updates.is_empty() {
+                        logging::debug(&format!(
+                            "telegram reply loop received update_count={}",
+                            updates.len()
+                        ));
+                    }
                     for update in updates {
                         offset = Some(update.update_id + 1);
 
@@ -196,6 +224,10 @@ impl MessageChannel for TelegramChannel {
                             }
                         } else {
                             let injected = runner.inject_message(trimmed, "telegram").await;
+                            logging::info(&format!(
+                                "telegram reply injected into session injected={}",
+                                injected
+                            ));
                             let ack = if injected {
                                 format!("💬 Message sent to active session: _{}_", trimmed)
                             } else {
@@ -243,6 +275,10 @@ impl DiscordChannel {
     }
 
     async fn poll_messages(&self, after: Option<&str>) -> anyhow::Result<Vec<DiscordMessage>> {
+        logging::debug(&format!(
+            "polling discord messages after_present={}",
+            after.is_some()
+        ));
         let mut url = format!(
             "https://discord.com/api/v10/channels/{}/messages?limit=10",
             self.channel_id
@@ -261,10 +297,15 @@ impl DiscordChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            logging::warn(&format!("discord message poll returned status={status}"));
             anyhow::bail!("Discord messages error ({}): {}", status, body);
         }
 
         let messages: Vec<DiscordMessage> = resp.json().await?;
+        logging::debug(&format!(
+            "discord message poll returned count={}",
+            messages.len()
+        ));
         Ok(messages)
     }
 }
@@ -392,6 +433,10 @@ impl MessageChannel for DiscordChannel {
                             }
                         } else {
                             let injected = runner.inject_message(trimmed, "discord").await;
+                            logging::info(&format!(
+                                "discord reply injected into session injected={}",
+                                injected
+                            ));
                             let ack = if injected {
                                 format!("💬 Message sent to active session: *{}*", trimmed)
                             } else {

@@ -1,3 +1,4 @@
+use crate::logging;
 use crate::storage;
 mod lifecycle;
 mod state_support;
@@ -255,11 +256,13 @@ enum DeliveryMode {
 
 pub fn is_enabled() -> bool {
     if std::env::var("JCODE_NO_TELEMETRY").is_ok() || std::env::var("DO_NOT_TRACK").is_ok() {
+        logging::debug("telemetry disabled by environment");
         return false;
     }
     if let Ok(dir) = storage::jcode_dir()
         && dir.join("no_telemetry").exists()
     {
+        logging::debug("telemetry disabled by no_telemetry marker");
         return false;
     }
     true
@@ -297,6 +300,7 @@ fn send_onboarding_step_for_id(
     auth_method: Option<&str>,
     auth_failure_reason: Option<&str>,
 ) -> bool {
+    logging::debug(&format!("emitting telemetry onboarding step={step}"));
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = OnboardingStepEvent {
         event_id: new_event_id(),
@@ -317,8 +321,11 @@ fn send_onboarding_step_for_id(
         is_ci: ci,
         ran_from_cargo: from_cargo,
     };
-    if let Ok(payload) = serde_json::to_value(&event) {
-        return send_payload(payload, DeliveryMode::Background);
+    match serde_json::to_value(&event) {
+        Ok(payload) => return send_payload(payload, DeliveryMode::Background),
+        Err(err) => logging::error(&format!(
+            "failed to serialize telemetry onboarding step={step}: {err}"
+        )),
     }
     false
 }
@@ -356,8 +363,10 @@ pub fn record_feedback(text: &str) {
     };
     let feedback_text = sanitize_feedback_text(text);
     if feedback_text.is_empty() {
+        logging::debug("skipping empty telemetry feedback after sanitization");
         return;
     }
+    logging::info("recording telemetry feedback event");
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = FeedbackEvent {
         event_id: new_event_id(),
@@ -790,23 +799,40 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
         .build()
     {
         Ok(client) => client,
-        Err(_) => return false,
+        Err(err) => {
+            logging::error(&format!("failed to build telemetry HTTP client: {err}"));
+            return false;
+        }
     };
     match client.post(TELEMETRY_ENDPOINT).json(&payload).send() {
-        Ok(response) => response.error_for_status().is_ok(),
-        Err(_) => false,
+        Ok(response) => match response.error_for_status() {
+            Ok(_) => true,
+            Err(err) => {
+                logging::warn(&format!("telemetry endpoint rejected payload: {err}"));
+                false
+            }
+        },
+        Err(err) => {
+            logging::warn(&format!("telemetry payload send failed: {err}"));
+            false
+        }
     }
 }
 
 fn send_payload(payload: serde_json::Value, mode: DeliveryMode) -> bool {
     match mode {
         DeliveryMode::Background => {
+            logging::debug("queueing telemetry payload for background delivery");
             std::thread::spawn(move || {
                 let _ = post_payload(payload, ASYNC_SEND_TIMEOUT);
             });
             true
         }
         DeliveryMode::Blocking(timeout) => {
+            logging::debug(&format!(
+                "sending telemetry payload with blocking timeout={}ms",
+                timeout.as_millis()
+            ));
             if tokio::runtime::Handle::try_current().is_ok() {
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
                 std::thread::spawn(move || {
@@ -871,8 +897,13 @@ fn session_has_meaningful_activity(state: &SessionTelemetry, errors: &ErrorCount
 }
 
 fn emit_turn_end_event(event: TurnEndEvent, mode: DeliveryMode) -> bool {
-    if let Ok(payload) = serde_json::to_value(&event) {
-        return send_payload(payload, mode);
+    logging::debug(&format!(
+        "emitting telemetry turn_end turn_index={} reason={}",
+        event.turn_index, event.turn_end_reason
+    ));
+    match serde_json::to_value(&event) {
+        Ok(payload) => return send_payload(payload, mode),
+        Err(err) => logging::error(&format!("failed to serialize telemetry turn_end: {err}")),
     }
     false
 }
@@ -1274,6 +1305,13 @@ fn begin_session_with_mode(
     if !is_enabled() {
         return;
     }
+    logging::info(&format!(
+        "begin telemetry session provider={} model={} resumed={} parent={}",
+        sanitize_telemetry_label(provider),
+        sanitize_telemetry_label(model),
+        resumed_session,
+        parent_session_id.is_some()
+    ));
     let started_at = Instant::now();
     let started_at_utc = Utc::now();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -1398,6 +1436,7 @@ pub fn record_turn() {
             finalize_current_turn(id, state, now, "next_user_prompt", DeliveryMode::Background);
         }
         state.turns += 1;
+        logging::debug(&format!("recording telemetry turn index={}", state.turns));
         state.had_user_prompt = true;
         let idle_before_turn_ms = previous_last_activity.and_then(|last| {
             now.checked_duration_since(last)

@@ -1,4 +1,5 @@
 use crate::bus::{BackgroundTaskCompleted, BackgroundTaskProgressEvent, BackgroundTaskStatus};
+use crate::logging;
 use base64::Engine as _;
 use regex::Regex;
 use std::collections::HashSet;
@@ -27,6 +28,7 @@ fn compile_static_regex(pattern: &str) -> Option<Regex> {
     match Regex::new(pattern) {
         Ok(regex) => Some(regex),
         Err(err) => {
+            logging::error(&format!("failed to compile static message regex: {err}"));
             eprintln!("jcode: failed to compile static regex: {err}");
             None
         }
@@ -58,8 +60,14 @@ pub fn redact_secrets(text: &str) -> String {
         && !lower.contains("api_key")
         && !lower.contains("token")
     {
+        logging::debug("secret redaction fast path skipped regex scan");
         return text.to_string();
     }
+
+    logging::debug(&format!(
+        "running secret redaction scan bytes={}",
+        text.len()
+    ));
 
     static DIRECT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     static ASSIGNMENT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
@@ -177,6 +185,9 @@ pub fn redact_secrets(text: &str) -> String {
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
         {
+            logging::warn(&format!(
+                "ignoring invalid custom secret key name from {source}"
+            ));
             continue;
         }
         if !redacted_keys.insert(key_name.clone()) {
@@ -185,10 +196,17 @@ pub fn redact_secrets(text: &str) -> String {
 
         let pattern = format!(r"(?m)^\s*({}\s*=\s*)[^\r\n]+", regex::escape(&key_name));
         if let Ok(re) = Regex::new(&pattern) {
+            logging::debug(&format!(
+                "adding custom secret redaction pattern for key={key_name}"
+            ));
             redacted = re
                 .replace_all(&redacted, "${1}[REDACTED_SECRET]")
                 .into_owned();
         }
+    }
+
+    if redacted != text {
+        logging::info("redacted secrets from message text");
     }
 
     redacted
@@ -203,6 +221,11 @@ pub fn generated_image_tool_input(
     output_format: &str,
     revised_prompt: Option<&str>,
 ) -> serde_json::Value {
+    logging::debug(&format!(
+        "building generated image tool input path={path} format={output_format} has_metadata={} has_revised_prompt={}",
+        metadata_path.is_some(),
+        revised_prompt.is_some()
+    ));
     serde_json::json!({
         "path": path,
         "metadata_path": metadata_path,
@@ -217,6 +240,11 @@ pub fn generated_image_summary(
     output_format: &str,
     revised_prompt: Option<&str>,
 ) -> String {
+    logging::debug(&format!(
+        "building generated image summary path={path} format={output_format} has_metadata={} has_revised_prompt={}",
+        metadata_path.is_some(),
+        revised_prompt.is_some()
+    ));
     let mut summary = format!("Generated image ({}) saved to `{}`.", output_format, path);
     if let Some(metadata_path) = metadata_path {
         summary.push_str(&format!("\nMetadata saved to `{}`.", metadata_path));
@@ -234,13 +262,30 @@ pub fn generated_image_visual_context_blocks(
     output_format: &str,
     revised_prompt: Option<&str>,
 ) -> Option<Vec<ContentBlock>> {
+    logging::debug(&format!(
+        "building generated image visual context path={path} format={output_format}"
+    ));
     let path_ref = Path::new(path);
     let metadata = std::fs::metadata(path_ref).ok()?;
     if !metadata.is_file() || metadata.len() > GENERATED_IMAGE_MAX_AUTO_VISION_BYTES {
+        logging::warn(&format!(
+            "skipping generated image visual context path={path} is_file={} bytes={} limit={}",
+            metadata.is_file(),
+            metadata.len(),
+            GENERATED_IMAGE_MAX_AUTO_VISION_BYTES
+        ));
         return None;
     }
 
-    let data = std::fs::read(path_ref).ok()?;
+    let data = match std::fs::read(path_ref) {
+        Ok(data) => data,
+        Err(err) => {
+            logging::error(&format!(
+                "failed to read generated image visual context path={path}: {err}"
+            ));
+            return None;
+        }
+    };
     let media_type = generated_image_media_type(path_ref, output_format).to_string();
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
     let mut reminder = format!(
@@ -271,6 +316,10 @@ pub fn generated_image_visual_context_blocks(
 }
 
 fn generated_image_media_type(path: &Path, output_format: &str) -> &'static str {
+    logging::debug(&format!(
+        "resolving generated image media type path={} format={output_format}",
+        path.display()
+    ));
     let ext = path
         .extension()
         .and_then(|value| value.to_str())
