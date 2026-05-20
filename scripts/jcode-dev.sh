@@ -55,11 +55,11 @@ remote_exists() {
 }
 
 is_worktree_clean() {
-  git diff-index --quiet HEAD --
+  [[ -z "$(git status --porcelain)" ]]
 }
 
 list_dirty_files() {
-  git status --short --untracked-files=no | sed 's/^/  /' >&2
+  git status --short | sed 's/^/  /' >&2
 }
 
 git_divergence() {
