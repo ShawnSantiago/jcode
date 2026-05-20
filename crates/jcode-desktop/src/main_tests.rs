@@ -3184,7 +3184,12 @@ fn code_block_header_placement_is_stable_across_sizes_and_text_scales() {
             );
 
             let mut previous_glyph_bottom = None;
-            for line_index in header_run.line..header_run.line + header_run.line_count {
+            for (line_index, line) in lines
+                .iter()
+                .enumerate()
+                .skip(header_run.line)
+                .take(header_run.line_count)
+            {
                 let row_offset = line_index - header_run.line;
                 let row_top = geometry.card_rect.y - 3.0 + row_offset as f32 * geometry.line_height;
                 let glyph_top = row_top + (geometry.line_height - typography.body_size) * 0.5;
@@ -3205,7 +3210,7 @@ fn code_block_header_placement_is_stable_across_sizes_and_text_scales() {
                 }
                 previous_glyph_bottom = Some(glyph_bottom);
 
-                let line_text = &lines[line_index].text;
+                let line_text = &line.text;
                 let text_glyph_right =
                     geometry.text_left + line_text.chars().count() as f32 * char_width;
                 assert!(

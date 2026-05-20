@@ -2382,9 +2382,7 @@ fn run_resize_render_benchmark(frames: usize) -> Result<()> {
     ) {
         app.body_scroll_lines = metrics.max_scroll_lines as f32 / 2.0;
     }
-    let sizes = (0..frames)
-        .map(|frame| benchmark_resize_size(frame))
-        .collect::<Vec<_>>();
+    let sizes = (0..frames).map(benchmark_resize_size).collect::<Vec<_>>();
 
     let mut legacy_font_system = benchmark_font_system();
     let (legacy_samples, legacy_checksum) = benchmark_frame_samples(frames, |frame| {

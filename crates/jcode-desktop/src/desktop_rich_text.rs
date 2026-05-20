@@ -1921,7 +1921,7 @@ mod tests {
             "▾ shell running: cargo test\n  input: cargo test\n  \x1b[32mok\x1b[0m",
         );
         let expanded = build_rich_transcript(
-            &[message.clone()],
+            std::slice::from_ref(&message),
             &RichTranscriptBuildOptions {
                 tool_render_mode: ToolCardRenderMode::Expanded,
                 ..RichTranscriptBuildOptions::default()

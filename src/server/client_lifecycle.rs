@@ -219,18 +219,34 @@ fn request_payload_summary(kind: &str, line: &str) -> Vec<(String, String)> {
     fields
 }
 
-fn server_request_lifecycle_fields(
-    phase: &str,
+struct ServerRequestLifecycleFields<'a> {
+    phase: &'a str,
     request_id: u64,
-    request_kind: &str,
-    client_session_id: &str,
-    client_connection_id: &str,
-    client_instance_id: Option<&str>,
+    request_kind: &'a str,
+    client_session_id: &'a str,
+    client_connection_id: &'a str,
+    client_instance_id: Option<&'a str>,
     client_is_processing: bool,
     message_id: Option<u64>,
-    processing_session_id: Option<&str>,
+    processing_session_id: Option<&'a str>,
     line_bytes: usize,
+}
+
+fn server_request_lifecycle_fields(
+    input: ServerRequestLifecycleFields<'_>,
 ) -> Vec<(String, String)> {
+    let ServerRequestLifecycleFields {
+        phase,
+        request_id,
+        request_kind,
+        client_session_id,
+        client_connection_id,
+        client_instance_id,
+        client_is_processing,
+        message_id,
+        processing_session_id,
+        line_bytes,
+    } = input;
     let mut fields = vec![
         ("phase".to_string(), phase.to_string()),
         ("request_id".to_string(), request_id.to_string()),
@@ -1486,18 +1502,18 @@ pub(super) async fn handle_client(
         let request_lifecycle_logged = !request_type_is_read_only(&request_kind);
         let request_lifecycle_start = Instant::now();
         if request_lifecycle_logged {
-            let mut fields = server_request_lifecycle_fields(
-                "received",
+            let mut fields = server_request_lifecycle_fields(ServerRequestLifecycleFields {
+                phase: "received",
                 request_id,
-                &request_kind,
-                &client_session_id,
-                &client_connection_id,
-                current_client_instance_id.as_deref(),
+                request_kind: &request_kind,
+                client_session_id: &client_session_id,
+                client_connection_id: &client_connection_id,
+                client_instance_id: current_client_instance_id.as_deref(),
                 client_is_processing,
-                processing_message_id,
-                processing_session_id.as_deref(),
-                line.len(),
-            );
+                message_id: processing_message_id,
+                processing_session_id: processing_session_id.as_deref(),
+                line_bytes: line.len(),
+            });
             fields.extend(request_payload_summary(&request_kind, &line));
             crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
         }
@@ -1573,18 +1589,19 @@ pub(super) async fn handle_client(
             let mut w = writer.lock().await;
             if w.write_all(json.as_bytes()).await.is_err() {
                 if request_lifecycle_logged {
-                    let mut fields = server_request_lifecycle_fields(
-                        "ack_write_failed",
-                        request_id,
-                        &request_kind,
-                        &client_session_id,
-                        &client_connection_id,
-                        current_client_instance_id.as_deref(),
-                        client_is_processing,
-                        processing_message_id,
-                        processing_session_id.as_deref(),
-                        line.len(),
-                    );
+                    let mut fields =
+                        server_request_lifecycle_fields(ServerRequestLifecycleFields {
+                            phase: "ack_write_failed",
+                            request_id,
+                            request_kind: &request_kind,
+                            client_session_id: &client_session_id,
+                            client_connection_id: &client_connection_id,
+                            client_instance_id: current_client_instance_id.as_deref(),
+                            client_is_processing,
+                            message_id: processing_message_id,
+                            processing_session_id: processing_session_id.as_deref(),
+                            line_bytes: line.len(),
+                        });
                     fields.push((
                         "ack_write_ms".to_string(),
                         ack_start.elapsed().as_millis().to_string(),
@@ -1594,18 +1611,18 @@ pub(super) async fn handle_client(
                 break;
             }
             if request_lifecycle_logged {
-                let mut fields = server_request_lifecycle_fields(
-                    "acked",
+                let mut fields = server_request_lifecycle_fields(ServerRequestLifecycleFields {
+                    phase: "acked",
                     request_id,
-                    &request_kind,
-                    &client_session_id,
-                    &client_connection_id,
-                    current_client_instance_id.as_deref(),
+                    request_kind: &request_kind,
+                    client_session_id: &client_session_id,
+                    client_connection_id: &client_connection_id,
+                    client_instance_id: current_client_instance_id.as_deref(),
                     client_is_processing,
-                    processing_message_id,
-                    processing_session_id.as_deref(),
-                    line.len(),
-                );
+                    message_id: processing_message_id,
+                    processing_session_id: processing_session_id.as_deref(),
+                    line_bytes: line.len(),
+                });
                 fields.push((
                     "ack_write_ms".to_string(),
                     ack_start.elapsed().as_millis().to_string(),
@@ -2963,18 +2980,18 @@ pub(super) async fn handle_client(
             }
         }
         if request_lifecycle_logged {
-            let mut fields = server_request_lifecycle_fields(
-                "handled",
+            let mut fields = server_request_lifecycle_fields(ServerRequestLifecycleFields {
+                phase: "handled",
                 request_id,
-                &request_kind,
-                &client_session_id,
-                &client_connection_id,
-                current_client_instance_id.as_deref(),
+                request_kind: &request_kind,
+                client_session_id: &client_session_id,
+                client_connection_id: &client_connection_id,
+                client_instance_id: current_client_instance_id.as_deref(),
                 client_is_processing,
-                processing_message_id,
-                processing_session_id.as_deref(),
-                line.len(),
-            );
+                message_id: processing_message_id,
+                processing_session_id: processing_session_id.as_deref(),
+                line_bytes: line.len(),
+            });
             fields.push((
                 "handler_total_ms".to_string(),
                 request_lifecycle_start.elapsed().as_millis().to_string(),

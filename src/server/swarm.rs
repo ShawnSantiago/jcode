@@ -448,10 +448,10 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
     let participant_count = participants.len();
     let mut delivered_count = 0usize;
     for sid in participants {
-        if let Some(member) = members.get(&sid) {
-            if member.event_tx.send(event.clone()).is_ok() {
-                delivered_count += 1;
-            }
+        if let Some(member) = members.get(&sid)
+            && member.event_tx.send(event.clone()).is_ok()
+        {
+            delivered_count += 1;
         }
     }
     log_swarm_lifecycle(

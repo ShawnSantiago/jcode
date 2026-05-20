@@ -323,6 +323,7 @@ impl SimulatorStore {
         let mut pending = vec![action];
         let mut transitions = Vec::new();
         let mut effect_records = Vec::new();
+        let backend = FakeJcodeBackend;
 
         while let Some(action) = pending.pop() {
             let before = self.state.clone();
@@ -353,7 +354,7 @@ impl SimulatorStore {
                 };
                 self.effect_log.push(effect_record.clone());
                 effect_records.push(effect_record);
-                let follow_ups = FakeJcodeBackend::default().handle_effect(effect);
+                let follow_ups = backend.handle_effect(effect);
                 for next in follow_ups.into_iter().rev() {
                     pending.push(next);
                 }
