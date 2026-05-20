@@ -58,6 +58,89 @@ pub(crate) use routing::{
     is_transient_transport_error, should_eager_detect_copilot_tier,
 };
 
+fn cached_live_models_for_openai_compatible_profile(
+    resolved: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
+) -> Option<Vec<String>> {
+    let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
+    let source_api_base = cache
+        .source_api_base
+        .as_deref()
+        .and_then(crate::provider_catalog::normalize_api_base)?;
+    let expected_api_base = crate::provider_catalog::normalize_api_base(&resolved.api_base)?;
+    if source_api_base != expected_api_base {
+        return None;
+    }
+
+    let models = cache
+        .models
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
+}
+
+fn direct_openai_compatible_profile_routes(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+) -> Vec<ModelRoute> {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    let static_models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
+    let (mut models, from_live_catalog) =
+        if let Some(models) = cached_live_models_for_openai_compatible_profile(&resolved) {
+            (models, true)
+        } else {
+            let mut models = static_models;
+            if models.is_empty()
+                && let Some(default_model) = resolved.default_model.as_ref()
+                && !default_model.trim().is_empty()
+            {
+                models.push(default_model.trim().to_string());
+            }
+            (models, false)
+        };
+
+    let provider = resolved.display_name.clone();
+    let api_method = format!("openai-compatible:{}", resolved.id);
+    let detail = if from_live_catalog {
+        resolved.api_base.clone()
+    } else if resolved.api_base.trim().is_empty() {
+        "fallback: static provider model list".to_string()
+    } else {
+        format!(
+            "{}; fallback: static provider model list",
+            resolved.api_base
+        )
+    };
+
+    let mut routes = Vec::new();
+    for model in models.drain(..) {
+        if !is_listable_model_name(&model)
+            || !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+                &resolved.id,
+                &model,
+            )
+            || routes.iter().any(|route: &ModelRoute| route.model == model)
+        {
+            continue;
+        }
+
+        routes.push(ModelRoute {
+            model,
+            provider: provider.clone(),
+            api_method: api_method.clone(),
+            available: true,
+            detail: detail.clone(),
+            cheapness: None,
+        });
+    }
+
+    routes
+}
+
 pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Result<()> {
     match provider.set_model(model) {
         Ok(()) => Ok(()),
@@ -1108,6 +1191,10 @@ impl Provider for MultiProvider {
             }
         }
 
+        let active_direct_openai_compatible_api_method = self
+            .openrouter_provider()
+            .and_then(|openrouter| openrouter.direct_openai_compatible_route_parts())
+            .map(|(_, api_method, _)| api_method);
         let mut added_direct_openai_compatible_routes = false;
         for profile in crate::provider_catalog::openai_compatible_profiles()
             .iter()
@@ -1118,27 +1205,18 @@ impl Provider for MultiProvider {
             }
             let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
             let api_method = format!("openai-compatible:{}", resolved.id);
-            for model in crate::provider_catalog::openai_compatible_profile_static_models(profile) {
-                let already_present = routes.iter().any(|route| {
-                    route.model == model
-                        && route.provider == resolved.display_name
-                        && (route.api_method == "openai-compatible"
-                            || route.api_method == api_method)
-                });
-                if already_present {
-                    added_direct_openai_compatible_routes = true;
-                    continue;
-                }
-                routes.push(ModelRoute {
-                    model,
-                    provider: resolved.display_name.clone(),
-                    api_method: api_method.clone(),
-                    available: true,
-                    detail: resolved.api_base.clone(),
-                    cheapness: None,
-                });
-                added_direct_openai_compatible_routes = true;
+
+            // The active OpenRouter/OpenAI-compatible provider contributes its own
+            // live memory/disk catalog below. Do not preempt it with the generic
+            // configured-profile path, because its in-memory catalog may be newer
+            // than the disk snapshot that this non-active profile path can read.
+            if active_direct_openai_compatible_api_method.as_deref() == Some(api_method.as_str()) {
+                continue;
             }
+
+            let profile_routes = direct_openai_compatible_profile_routes(profile);
+            added_direct_openai_compatible_routes |= !profile_routes.is_empty();
+            routes.extend(profile_routes);
         }
 
         // GitHub Copilot models

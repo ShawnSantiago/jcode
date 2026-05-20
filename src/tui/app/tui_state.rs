@@ -9,6 +9,7 @@ const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
 enum WidgetProviderKind {
     Anthropic,
     OpenAI,
+    OpenCode,
     OpenRouter,
     Copilot,
     Gemini,
@@ -19,6 +20,9 @@ impl WidgetProviderKind {
     fn from_provider_key(raw: Option<&str>) -> Self {
         match raw.map(|provider| provider.trim().to_ascii_lowercase()) {
             Some(provider) if provider == "openrouter" => Self::OpenRouter,
+            Some(provider) if matches!(provider.as_str(), "opencode" | "opencode-go") => {
+                Self::OpenCode
+            }
             Some(provider) if provider == "copilot" => Self::Copilot,
             Some(provider) if provider == "gemini" => Self::Gemini,
             Some(provider) if provider == "openai" => Self::OpenAI,
@@ -164,6 +168,7 @@ impl App {
                     crate::tui::info_widget::AuthMethod::Unknown
                 }
             }
+            WidgetProviderKind::OpenCode => crate::tui::info_widget::AuthMethod::OpenCodeApiKey,
             WidgetProviderKind::OpenRouter => crate::tui::info_widget::AuthMethod::OpenRouterApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
@@ -260,22 +265,24 @@ impl App {
                 })
             }
             WidgetProviderKind::Gemini => None,
-            WidgetProviderKind::OpenRouter => Some(crate::tui::info_widget::UsageInfo {
-                provider: crate::tui::info_widget::UsageProvider::CostBased,
-                five_hour: 0.0,
-                five_hour_resets_at: None,
-                seven_day: 0.0,
-                seven_day_resets_at: None,
-                spark: None,
-                spark_resets_at: None,
-                total_cost: self.total_cost,
-                input_tokens: self.total_input_tokens,
-                output_tokens: self.total_output_tokens,
-                cache_read_tokens: self.streaming_cache_read_tokens,
-                cache_write_tokens: self.streaming_cache_creation_tokens,
-                output_tps,
-                available: true,
-            }),
+            WidgetProviderKind::OpenRouter | WidgetProviderKind::OpenCode => {
+                Some(crate::tui::info_widget::UsageInfo {
+                    provider: crate::tui::info_widget::UsageProvider::CostBased,
+                    five_hour: 0.0,
+                    five_hour_resets_at: None,
+                    seven_day: 0.0,
+                    seven_day_resets_at: None,
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: self.total_cost,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    cache_read_tokens: self.streaming_cache_read_tokens,
+                    cache_write_tokens: self.streaming_cache_creation_tokens,
+                    output_tps,
+                    available: true,
+                })
+            }
             WidgetProviderKind::Unknown => None,
         }
     }
@@ -457,7 +464,18 @@ impl crate::tui::TuiState for App {
     }
 
     fn time_since_activity(&self) -> Option<std::time::Duration> {
-        self.last_stream_activity.map(|t| t.elapsed())
+        if let Some(last_activity) = self.last_stream_activity {
+            return Some(last_activity.elapsed());
+        }
+
+        // Restored/resumed clients often have a full transcript but no stream event in this
+        // process yet. Treat those as already idle so reopening many historical sessions does not
+        // spend the first warm-up window rerendering large static transcripts at idle FPS.
+        if !self.display_messages.is_empty() && !self.is_processing {
+            return Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + std::time::Duration::from_secs(1));
+        }
+
+        Some(self.app_started.elapsed())
     }
 
     fn stream_message_ended(&self) -> bool {

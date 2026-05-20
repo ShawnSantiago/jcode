@@ -864,17 +864,36 @@ impl Provider for OpenRouterProvider {
                     String::new(),
                 )
             });
+        let live_model_ids = self.cached_live_model_ids_for_display();
+        let static_model_ids: HashSet<String> = self.static_models.iter().cloned().collect();
+        let is_direct_profile = self.profile_id.is_some();
 
         self.available_models_display()
             .into_iter()
             .filter(|model| crate::provider::is_listable_model_name(model))
-            .map(|model| crate::provider::ModelRoute {
-                model,
-                provider: provider_label.clone(),
-                api_method: api_method.clone(),
-                available: true,
-                detail: detail.clone(),
-                cheapness: None,
+            .map(|model| {
+                let fallback_not_live = is_direct_profile
+                    && live_model_ids
+                        .as_ref()
+                        .map(|live| !live.contains(&model))
+                        .unwrap_or_else(|| static_model_ids.contains(&model));
+                let route_detail = if fallback_not_live {
+                    if detail.trim().is_empty() {
+                        "fallback: static provider model list".to_string()
+                    } else {
+                        format!("{}; fallback: static provider model list", detail)
+                    }
+                } else {
+                    detail.clone()
+                };
+                crate::provider::ModelRoute {
+                    model,
+                    provider: provider_label.clone(),
+                    api_method: api_method.clone(),
+                    available: true,
+                    detail: route_detail,
+                    cheapness: None,
+                }
             })
             .collect()
     }

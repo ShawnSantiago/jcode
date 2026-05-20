@@ -1564,11 +1564,41 @@ pub(crate) fn render_tool_message(
         Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
     ]);
 
-    lines.push(super::truncate_line_preserving_suffix_to_width(
+    let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
         &token_suffix,
         row_width,
-    ));
+    );
+    let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
+    lines.push(rendered_tool_line);
+
+    if tools_ui::canonical_tool_name(&tc.name) == "bash"
+        && !rendered_tool_line_text.contains('$')
+        && let Some(command) = tc.input.get("command").and_then(|v| v.as_str())
+    {
+        let detail_width = row_width.saturating_sub(4).max(1);
+        let command_detail = tools_ui::get_tool_summary_with_budget(tc, 80, Some(detail_width));
+        if !command_detail.trim().is_empty() {
+            let detail_line = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(command_detail, Style::default().fg(dim_color())),
+            ]);
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &detail_line,
+                row_width,
+            ));
+        } else if !command.trim().is_empty() {
+            let fallback = format!("$ {}", command.trim());
+            let detail_line = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(fallback, Style::default().fg(dim_color())),
+            ]);
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &detail_line,
+                row_width,
+            ));
+        }
+    }
 
     if tc.name == "batch"
         && let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array())

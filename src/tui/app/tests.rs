@@ -96,3 +96,38 @@ fn cold_cache_warning_is_persisted_when_starting_next_request() {
     assert!(warning.content.contains("911K"));
     assert!(warning.content.contains("300s TTL expired"));
 }
+
+#[test]
+fn oversized_pasted_submit_is_rejected_and_preserves_input() {
+    let mut app = create_test_app();
+    let pasted = format!(
+        "{}tail",
+        "x\n".repeat(crate::tui::app::input::MAX_SUBMITTED_TEXT_BYTES / 2 + 1)
+    );
+
+    crate::tui::app::input::handle_text_paste(&mut app, pasted);
+    let placeholder = app.input.clone();
+    assert!(placeholder.starts_with("[pasted "));
+
+    app.submit_input();
+
+    assert!(
+        !app.is_processing,
+        "oversized input must not enter sending state"
+    );
+    assert_eq!(
+        app.input, placeholder,
+        "placeholder input should be preserved"
+    );
+    assert_eq!(
+        app.pasted_contents.len(),
+        1,
+        "expanded paste should remain recoverable"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.role == "system"
+                && message.content.contains("Message is too large to send"))
+    );
+}

@@ -1,6 +1,6 @@
 use super::{
     AmbientConfig, Config, DiffDisplayMode, DisplayConfig, ProviderConfig,
-    SessionPickerResumeAction, SwarmSpawnMode,
+    SessionPickerResumeAction, SwarmSpawnMode, config_env_fingerprint,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -130,6 +130,57 @@ fn config_save_invalidates_global_config_cache() {
 }
 
 #[test]
+fn config_env_fingerprint_ignores_runtime_only_jcode_vars() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_runtime_provider = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+    let prev_active_provider = std::env::var_os("JCODE_ACTIVE_PROVIDER");
+    let prev_display_centered = std::env::var_os("JCODE_DISPLAY_CENTERED");
+
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+    crate::env::remove_var("JCODE_DISPLAY_CENTERED");
+    let baseline = config_env_fingerprint();
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai");
+    crate::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
+    assert_eq!(baseline, config_env_fingerprint());
+
+    crate::env::set_var("JCODE_DISPLAY_CENTERED", "1");
+    assert_ne!(baseline, config_env_fingerprint());
+
+    restore_env_var("JCODE_RUNTIME_PROVIDER", prev_runtime_provider);
+    restore_env_var("JCODE_ACTIVE_PROVIDER", prev_active_provider);
+    restore_env_var("JCODE_DISPLAY_CENTERED", prev_display_centered);
+}
+
+#[test]
+fn config_env_fingerprint_tracks_every_apply_env_override_var() {
+    let override_source = include_str!("config/env_overrides.rs");
+    let mut missing = Vec::new();
+
+    for line in override_source.lines() {
+        let Some(start) = line.find("std::env::var(\"") else {
+            continue;
+        };
+        let rest = &line[start + "std::env::var(\"".len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let key = &rest[..end];
+        if !crate::config::CONFIG_ENV_KEYS.contains(&key) {
+            missing.push(key.to_string());
+        }
+    }
+
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "CONFIG_ENV_KEYS must include every env var read by Config::apply_env_overrides; missing: {missing:?}"
+    );
+}
+
+#[test]
 fn cached_external_auth_trust_observes_manual_revocation() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -195,14 +246,14 @@ fn test_native_scrollbars_default_to_enabled() {
 }
 
 #[test]
-fn test_session_picker_resume_action_defaults_to_new_terminal() {
+fn test_session_picker_resume_action_defaults_to_current_terminal() {
     assert_eq!(
         Config::default().keybindings.session_picker_enter,
-        SessionPickerResumeAction::NewTerminal
+        SessionPickerResumeAction::CurrentTerminal
     );
     assert_eq!(
-        SessionPickerResumeAction::NewTerminal.alternate(),
-        SessionPickerResumeAction::CurrentTerminal
+        SessionPickerResumeAction::CurrentTerminal.alternate(),
+        SessionPickerResumeAction::NewTerminal
     );
 }
 

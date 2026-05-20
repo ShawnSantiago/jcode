@@ -15,24 +15,43 @@ impl Config {
         config
     }
 
+    /// Load config from file, with environment variable overrides.
+    ///
+    /// Unlike [`Self::load`], this returns TOML/read errors to callers that need
+    /// to distinguish a malformed config from an absent config.
+    pub fn load_strict() -> anyhow::Result<Self> {
+        let mut config = Self::load_from_file_strict()?.unwrap_or_default();
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
     /// Load config from file only (no env overrides)
     fn load_from_file() -> Option<Self> {
-        let path = Self::path()?;
-        if !path.exists() {
-            return None;
-        }
-
-        let content = std::fs::read_to_string(&path).ok()?;
-        match toml::from_str::<Self>(&content) {
-            Ok(mut config) => {
-                config.display.apply_legacy_compat();
-                Some(config)
-            }
+        match Self::load_from_file_strict() {
+            Ok(config) => config,
             Err(e) => {
                 crate::logging::error(&format!("Failed to parse config file: {}", e));
                 None
             }
         }
+    }
+
+    /// Load config from file only (no env overrides), preserving parse/read errors.
+    fn load_from_file_strict() -> anyhow::Result<Option<Self>> {
+        let Some(path) = Self::path() else {
+            return Ok(None);
+        };
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
+        let mut config = toml::from_str::<Self>(&content).map_err(|e| {
+            anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
+        })?;
+        config.display.apply_legacy_compat();
+        Ok(Some(config))
     }
 
     /// Save config to file

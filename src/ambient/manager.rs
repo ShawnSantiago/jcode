@@ -69,6 +69,31 @@ impl AmbientManager {
         self.queue.take_ready_direct_items()
     }
 
+    /// Remove and return only ready items targeted at the ambient agent.
+    pub fn take_ready_ambient_items(&mut self) -> Vec<ScheduledItem> {
+        self.queue.take_ready_ambient_items()
+    }
+
+    /// Return ready ambient-targeted items without removing them. The runner
+    /// removes them only after a cycle completes, so reloads/crashes do not
+    /// silently drop scheduled ambient work.
+    pub fn ready_ambient_items(&self) -> Vec<ScheduledItem> {
+        self.queue.ready_ambient_items()
+    }
+
+    pub fn remove_items_by_id(&mut self, ids: &std::collections::HashSet<String>) -> usize {
+        self.queue.remove_by_ids(ids)
+    }
+
+    /// True when at least one ambient-targeted item is due now.
+    pub fn has_ready_ambient_items(&self) -> bool {
+        let now = Utc::now();
+        self.queue
+            .items()
+            .iter()
+            .any(|item| item.scheduled_for <= now && !item.target.is_direct_delivery())
+    }
+
     /// Add a schedule request to the queue. Returns the item ID.
     pub fn schedule(&mut self, request: ScheduleRequest) -> Result<String> {
         let id = format!("sched_{:08x}", rand::random::<u32>());
@@ -93,6 +118,11 @@ impl AmbientManager {
 
         self.queue.push(item);
         Ok(id)
+    }
+
+    /// Cancel a queued scheduled item by ID.
+    pub fn cancel_schedule(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
+        self.queue.remove_by_id(id)
     }
 
     /// Requeue a scheduled item that was popped as ready but could not be

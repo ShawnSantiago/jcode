@@ -369,26 +369,28 @@ pub(super) async fn handle_bus_event(
     app: &mut App,
     remote: &mut RemoteConnection,
     bus_event: std::result::Result<BusEvent, tokio::sync::broadcast::error::RecvError>,
-) {
+) -> bool {
     match bus_event {
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
+            true
         }
         Ok(BusEvent::ClipboardPasteCompleted(result)) => {
-            app.handle_clipboard_paste_completed(result);
+            app.handle_clipboard_paste_completed(result)
         }
         Ok(BusEvent::ModelRefreshCompleted(result)) => {
             app.handle_model_refresh_completed(result);
+            true
         }
-        Ok(BusEvent::UiActivity(activity)) => {
-            super::local::handle_ui_activity(app, activity);
-        }
+        Ok(BusEvent::UiActivity(activity)) => super::local::handle_ui_activity(app, activity),
         Ok(BusEvent::GitStatusCompleted(result)) => {
             super::commands::handle_git_status_completed(app, result);
+            true
         }
-        Ok(BusEvent::MermaidRenderCompleted) => {}
+        Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
+            true
         }
         Ok(BusEvent::LoginCompleted(login)) => {
             let success = login.success && login.provider != "copilot_code";
@@ -398,12 +400,15 @@ pub(super) async fn handle_bus_event(
             if success {
                 remote.notify_auth_changed_detached_event(provider_hint, auth);
             }
+            true
         }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
+            true
         }
         Ok(BusEvent::SessionUpdateStatus(status)) => {
             app.handle_session_update_status(status);
+            true
         }
         Ok(BusEvent::DictationCompleted {
             dictation_id,
@@ -412,12 +417,13 @@ pub(super) async fn handle_bus_event(
             mode,
         }) => {
             if !app.owns_dictation_event(&dictation_id, session_id.as_deref()) {
-                return;
+                return false;
             }
             match remote.send_transcript(text, mode).await {
                 Ok(()) => app.mark_dictation_delivered(),
                 Err(error) => app.handle_dictation_failure(error.to_string()),
             }
+            true
         }
         Ok(BusEvent::DictationFailed {
             dictation_id,
@@ -425,11 +431,12 @@ pub(super) async fn handle_bus_event(
             message,
         }) => {
             if !app.owns_dictation_event(&dictation_id, session_id.as_deref()) {
-                return;
+                return false;
             }
             app.handle_dictation_failure(message);
+            true
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -538,6 +545,9 @@ pub(super) async fn handle_remote_event<B: Backend>(
         RemoteRead::Disconnected(reason) => {
             if let RemoteDisconnectReason::Protocol(error) = &reason {
                 let detail = format_disconnect_reason(&reason);
+                let fatal_message = format!(
+                    "Remote protocol error: {detail}\n\nJcode stopped instead of silently retrying. This usually means the client received an invalid server event frame, often from an oversized or interrupted history/tool-output frame. Try updating jcode, restarting the server, or resuming with jcode-dev if you are testing a local fix."
+                );
                 crate::logging::error(&format!(
                     "Remote protocol error is not retryable; stopping reconnect loop: {}",
                     error
@@ -549,6 +559,8 @@ pub(super) async fn handle_remote_event<B: Backend>(
                 app.set_status_notice("Remote protocol error");
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
+                app.requested_exit_code = Some(70);
+                app.requested_fatal_message = Some(fatal_message);
                 return Ok((RemoteEventOutcome::Quit, true));
             }
             handle_disconnect(app, state, Some(reason));
@@ -914,7 +926,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                     .map(|t| t.elapsed())
                     .or(app.processing_started.map(|t| t.elapsed()))
             ));
-            let _ = remote.cancel().await;
+            let _ = remote.cancel_with_reason("stall_guard").await;
             app.is_processing = false;
             app.clear_visible_turn_started();
             app.status = ProcessingStatus::Idle;

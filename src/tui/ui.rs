@@ -199,6 +199,7 @@ thread_local! {
     static TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
+    static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_PROMPT_VIEWPORT_STATE: RefCell<PromptViewportState> = RefCell::new(PromptViewportState::default());
     static TEST_COPY_VIEWPORT: RefCell<CopyViewportSnapshots> = RefCell::new(CopyViewportSnapshots::default());
@@ -950,6 +951,44 @@ fn full_prep_cache() -> &'static Mutex<FullPrepCacheState> {
     FULL_PREP_CACHE.get_or_init(|| Mutex::new(FullPrepCacheState::default()))
 }
 
+#[cfg(not(test))]
+static LAST_STATUS_AREA: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn last_status_area_state() -> &'static Mutex<Option<Rect>> {
+    LAST_STATUS_AREA.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn record_status_area(area: Rect) {
+    #[cfg(test)]
+    {
+        TEST_LAST_STATUS_AREA.with(|snapshot| {
+            *snapshot.borrow_mut() = Some(area);
+        });
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut snapshot) = last_status_area_state().lock() {
+            *snapshot = Some(area);
+        }
+    }
+}
+
+pub(crate) fn last_status_area() -> Option<Rect> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_STATUS_AREA.with(|snapshot| *snapshot.borrow());
+    }
+    #[cfg(not(test))]
+    {
+        last_status_area_state()
+            .lock()
+            .ok()
+            .and_then(|snapshot| *snapshot)
+    }
+}
+
 use frame_metrics::{
     ChatLayoutMetrics, FLICKER_NOTICE_COPY_KEY, ViewportMetrics, finalize_frame_metrics,
     note_body_built, note_body_cache_hit, note_body_cache_miss, note_body_incremental_reuse,
@@ -1036,6 +1075,9 @@ pub(crate) fn clear_test_render_state_for_tests() {
     set_last_diff_pane_effective_scroll(0);
     update_user_prompt_positions(&[]);
     TEST_LAST_LAYOUT.with(|snapshot| {
+        *snapshot.borrow_mut() = None;
+    });
+    TEST_LAST_STATUS_AREA.with(|snapshot| {
         *snapshot.borrow_mut() = None;
     });
     set_visible_copy_targets(Vec::new());
@@ -1927,6 +1969,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ]
         })
         .split(chat_area);
+    record_status_area(chunks[2]);
 
     // Capture layout info for visual debug
     if let Some(ref mut capture) = debug_capture {

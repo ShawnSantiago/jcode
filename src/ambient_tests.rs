@@ -66,6 +66,52 @@ fn test_scheduled_queue_push_and_pop() {
 }
 
 #[test]
+fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path.clone());
+    let future = Utc::now() + Duration::hours(1);
+
+    queue.push(ScheduledItem {
+        id: "keep".into(),
+        scheduled_for: future,
+        context: "keep item".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "cancel".into(),
+        scheduled_for: future,
+        context: "cancel item".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let removed = queue.remove_by_id("cancel").unwrap().unwrap();
+    assert_eq!(removed.id, "cancel");
+    assert!(queue.remove_by_id("missing").unwrap().is_none());
+
+    let reloaded = ScheduledQueue::load(path);
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded.items()[0].id, "keep");
+}
+
+#[test]
 fn test_pop_ready_sorts_by_priority_then_time() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
@@ -174,6 +220,132 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
     assert_eq!(ready_direct[1].id, "session_due");
     assert_eq!(queue.len(), 1);
     assert_eq!(queue.items()[0].id, "ambient_due");
+}
+
+#[test]
+fn test_ready_ambient_items_peeks_without_removing_and_excludes_direct_targets() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path);
+    let past = Utc::now() - Duration::minutes(5);
+    let future = Utc::now() + Duration::minutes(5);
+
+    queue.push(ScheduledItem {
+        id: "ambient_due_low".into(),
+        scheduled_for: past,
+        context: "scheduled ambient task".into(),
+        priority: Priority::Low,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "ambient_due_high".into(),
+        scheduled_for: past,
+        context: "scheduled ambient task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "ambient_future".into(),
+        scheduled_for: future,
+        context: "future ambient task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "session_due".into(),
+        scheduled_for: past,
+        context: "direct session task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Session {
+            session_id: "session_123".into(),
+        },
+        created_by_session: "session_123".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let ready = queue.ready_ambient_items();
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[0].id, "ambient_due_high");
+    assert_eq!(ready[1].id, "ambient_due_low");
+    assert_eq!(queue.len(), 4, "peek should not remove queued items");
+}
+
+#[test]
+fn test_take_ready_ambient_items_and_remove_by_ids() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path);
+    let past = Utc::now() - Duration::minutes(5);
+
+    queue.push(ScheduledItem {
+        id: "ambient_due".into(),
+        scheduled_for: past,
+        context: "scheduled ambient task".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "ambient".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "session_due".into(),
+        scheduled_for: past,
+        context: "direct session task".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Session {
+            session_id: "session_123".into(),
+        },
+        created_by_session: "session_123".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let ambient = queue.take_ready_ambient_items();
+    assert_eq!(ambient.len(), 1);
+    assert_eq!(ambient[0].id, "ambient_due");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].id, "session_due");
+
+    let mut ids = std::collections::HashSet::new();
+    ids.insert("session_due".to_string());
+    assert_eq!(queue.remove_by_ids(&ids), 1);
+    assert!(queue.is_empty());
 }
 
 #[test]

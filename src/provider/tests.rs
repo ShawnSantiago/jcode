@@ -117,6 +117,32 @@ fn save_test_openai_compatible_login_config(default_model: &str) {
     .expect("save default model");
 }
 
+fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, model_ids: &[&str]) {
+    let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+    let cache_dir = std::path::PathBuf::from(jcode_home).join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create model cache dir");
+    let cache = jcode_provider_openrouter::DiskCache {
+        cached_at: jcode_provider_openrouter::current_unix_secs().expect("current unix time"),
+        source_api_base: Some(source_api_base.to_string()),
+        models: model_ids
+            .iter()
+            .map(|id| jcode_provider_openrouter::ModelInfo {
+                id: (*id).to_string(),
+                name: String::new(),
+                context_length: None,
+                pricing: jcode_provider_openrouter::ModelPricing::default(),
+                created: None,
+            })
+            .collect(),
+    };
+    let path = cache_dir.join(format!("{namespace}_models.json"));
+    std::fs::write(
+        path,
+        serde_json::to_string(&cache).expect("serialize model cache"),
+    )
+    .expect("write model cache");
+}
+
 fn clear_openai_compatible_runtime_env() {
     for key in [
         "JCODE_OPENAI_COMPAT_API_BASE",
@@ -207,6 +233,51 @@ fn openai_compatible_api_key_setup_survives_process_restart_without_relogin() {
             )
             .expect("saved credentials should be selectable after a fresh process restart");
         assert_eq!(provider.model(), "restart-visible-model");
+    });
+}
+
+#[test]
+fn configured_openai_compatible_profile_routes_use_live_cache_when_not_active_provider() {
+    with_clean_provider_test_env(|| {
+        crate::provider_catalog::save_env_value_to_env_file(
+            "OPENROUTER_API_KEY",
+            "openrouter.env",
+            Some("sk-test-openrouter"),
+        )
+        .expect("save openrouter key");
+        crate::provider_catalog::save_env_value_to_env_file(
+            "OPENCODE_API_KEY",
+            "opencode.env",
+            Some("oc-test-opencode"),
+        )
+        .expect("save opencode key");
+        save_test_openrouter_model_cache(
+            "opencode",
+            "https://opencode.ai/zen/v1",
+            &["kimi-k2.6", "zen-live-only-model"],
+        );
+
+        let provider = MultiProvider::new();
+        let routes = provider.model_routes();
+        let opencode_routes = routes
+            .iter()
+            .filter(|route| route.provider == "OpenCode Zen")
+            .collect::<Vec<_>>();
+
+        assert!(
+            opencode_routes
+                .iter()
+                .any(|route| route.model == "zen-live-only-model"
+                    && route.api_method == "openai-compatible:opencode"
+                    && !route
+                        .detail
+                        .contains("fallback: static provider model list")),
+            "non-active configured direct profile should expose its live /models cache, routes: {opencode_routes:?}"
+        );
+        assert!(
+            !opencode_routes.iter().any(|route| route.model == "glm-4.7"),
+            "static fallback models should drop out once a live profile catalog is available, routes: {opencode_routes:?}"
+        );
     });
 }
 

@@ -180,6 +180,9 @@ pub async fn run_tui_client(
     cleanup_tui_runtime_for_run_result(&tui_runtime, &run_result, false);
 
     if let Some(code) = run_result.exit_code {
+        if let Some(message) = run_result.fatal_message.as_ref() {
+            eprintln!("{message}");
+        }
         std::process::exit(code);
     }
 
@@ -991,15 +994,15 @@ pub fn list_sessions() -> Result<()> {
 
             Ok(())
         }
-        Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
-            let recovered = session::recover_crashed_sessions()?;
+        Some(tui::session_picker::PickerResult::RestoreCrashedGroup(session_ids)) => {
+            let recovered = session::recover_crashed_sessions_by_ids(&session_ids)?;
             if recovered.is_empty() {
-                eprintln!("No crashed sessions found.");
+                eprintln!("No crashed sessions found in the selected restore group.");
                 return Ok(());
             }
 
             eprintln!(
-                "Recovered {} crashed session(s) from the last crash window.",
+                "Recovered {} crashed session(s) from the selected restore group.",
                 recovered.len()
             );
 

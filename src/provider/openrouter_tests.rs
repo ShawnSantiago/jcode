@@ -8,7 +8,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+struct SharedEnvLock;
+
+static ENV_LOCK: SharedEnvLock = SharedEnvLock;
+
+impl SharedEnvLock {
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'static, ()>> {
+        crate::storage::test_env_lock().lock()
+    }
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -326,6 +334,7 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
             jcode_provider_metadata::FIREWORKS_PROFILE,
             "accounts/fireworks/routers/kimi-k2p5-turbo",
         ),
+        (jcode_provider_metadata::XIAOMI_MIMO_PROFILE, "mimo-v2.5"),
         (
             jcode_provider_metadata::ALIBABA_CODING_PLAN_PROFILE,
             "qwen3-coder-plus",
@@ -883,6 +892,31 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
     assert!(
         !display.iter().any(|model| model == "gpt-oss-120b"),
         "Cerebras models that 404 on chat/completions should not be advertised after a live catalog refresh: {display:?}"
+    );
+}
+
+#[test]
+fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_catalog() {
+    let provider = OpenRouterProvider {
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("opencode".to_string()),
+        static_models: vec!["minimax-m2.7".to_string()],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let routes = provider.model_routes();
+    let route = routes
+        .iter()
+        .find(|route| route.model == "minimax-m2.7")
+        .expect("static fallback route should be present before live catalog fetch");
+
+    assert!(
+        route
+            .detail
+            .contains("fallback: static provider model list"),
+        "fallback routes should be clearly labeled in the model picker: {route:?}"
     );
 }
 

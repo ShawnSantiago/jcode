@@ -20,7 +20,9 @@ static PROVIDER_INPUT_BASELINES: LazyLock<Mutex<HashMap<String, ProviderInputSna
 
 pub(crate) fn stable_hash_str(value: &str) -> u64 {
     let digest = Sha256::digest(value.as_bytes());
-    u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest is 32 bytes"))
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(bytes)
 }
 
 pub(crate) fn stable_hash_json<T: Serialize + ?Sized>(value: &T) -> u64 {

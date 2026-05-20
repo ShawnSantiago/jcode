@@ -120,6 +120,22 @@ pub(super) struct PreparedInput {
     pub images: Vec<(String, String)>,
 }
 
+// Roughly 500k English words at ~6 bytes/word including spaces. This is still
+// low enough to avoid multi-megabyte submit-path hangs while allowing very large logs.
+pub(super) const MAX_SUBMITTED_TEXT_BYTES: usize = 3 * 1024 * 1024;
+
+fn oversized_message_notice(size: usize) -> String {
+    format!(
+        "Message is too large to send ({} bytes). Save it as a file or attach it instead. Your input was preserved.",
+        crate::util::format_number(size)
+    )
+}
+
+fn input_exceeds_submit_limit(input: &str) -> Option<String> {
+    let size = input.len();
+    (size > MAX_SUBMITTED_TEXT_BYTES).then(|| oversized_message_notice(size))
+}
+
 pub(super) fn paste_image_from_clipboard(app: &mut App) {
     app.set_status_notice("Reading clipboard image...");
     spawn_clipboard_paste(app, ClipboardPasteKind::ImageOnly);
@@ -472,7 +488,7 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     handle_text_paste(app, text);
 }
 
-fn handle_text_paste(app: &mut App, text: String) {
+pub(super) fn handle_text_paste(app: &mut App, text: String) {
     crate::logging::info(&format!(
         "Text paste: {} chars, {} lines",
         text.len(),
@@ -750,7 +766,12 @@ impl App {
 
         let incomplete = super::commands::incomplete_poke_todos(self);
         if incomplete.is_empty() {
+            let had_todos = crate::todo::todos_exist(&super::commands::active_session_id(self))
+                .unwrap_or(false);
             self.auto_poke_incomplete_todos = false;
+            if !had_todos {
+                return false;
+            }
             self.push_display_message(DisplayMessage::system(
                 "✅ Todos complete. Auto-poke finished.".to_string(),
             ));
@@ -1208,6 +1229,22 @@ pub(super) fn handle_visible_copy_shortcut(
     let implicit_shift = c.is_ascii_uppercase();
     if !explicit_shift && !implicit_shift {
         return false;
+    }
+
+    if c.eq_ignore_ascii_case(&'e') && app.diff_mode.is_inline() {
+        app.diff_mode = if app.diff_mode.is_full_inline() {
+            crate::config::DiffDisplayMode::Inline
+        } else {
+            crate::config::DiffDisplayMode::FullInline
+        };
+        app.record_copy_badge_key_press('e');
+        let action = if app.diff_mode.is_full_inline() {
+            "Expanded edit diffs"
+        } else {
+            "Collapsed edit diffs"
+        };
+        app.set_status_notice(format!("{} · Diffs: {}", action, app.diff_mode.label()));
+        return true;
     }
 
     if let Some(target) = crate::tui::ui::recent_flicker_copy_target_for_key(c)
@@ -1894,6 +1931,13 @@ impl App {
 
         let raw_input = std::mem::take(&mut self.input);
         let input = self.expand_paste_placeholders(&raw_input);
+        if let Some(notice) = input_exceeds_submit_limit(&input) {
+            self.input = raw_input;
+            self.cursor_pos = self.input.len();
+            self.set_status_notice(notice.clone());
+            self.push_display_message(DisplayMessage::system(notice));
+            return;
+        }
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();

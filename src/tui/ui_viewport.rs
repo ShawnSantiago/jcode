@@ -273,6 +273,11 @@ pub(super) fn draw_messages(
     } else {
         None
     };
+    let active_inline_edit_context = if app.diff_mode().is_inline() {
+        active_file_diff_context(prepared.as_ref(), scroll, visible_height)
+    } else {
+        None
+    };
 
     let visible_end = (scroll + visible_height).min(total_lines);
     let visible_user_start = lower_bound(wrapped_user_indices, scroll);
@@ -469,6 +474,48 @@ pub(super) fn draw_messages(
                 } else {
                     line.spans.insert(0, Span::styled("  │ ", accent_style));
                 }
+            }
+        }
+    }
+
+    if let Some(active) = &active_inline_edit_context {
+        let badge_line = active.start_line;
+        if badge_line >= scroll && badge_line < visible_end {
+            let rel_idx = badge_line - scroll;
+            if let Some(line) = visible_lines.get_mut(rel_idx) {
+                let badge_text = if app.diff_mode().is_full_inline() {
+                    " collapse"
+                } else {
+                    " expand"
+                };
+                let reserved = UnicodeWidthStr::width(" [Alt] [⇧] [E] collapse");
+                let max_content_width = (content_area.width as usize).saturating_sub(reserved);
+                truncate_line_in_place_to_width(line, max_content_width);
+
+                let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
+                    Style::default().fg(queued_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+                let shift_style = if copy_badge_ui.shift_is_active(copy_badge_now) {
+                    Style::default().fg(queued_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+                let key_style = if copy_badge_ui.key_is_active('e', copy_badge_now) {
+                    Style::default().fg(accent_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+
+                line.spans.push(Span::raw(" "));
+                line.spans.push(Span::styled("[Alt]", alt_style));
+                line.spans.push(Span::raw(" "));
+                line.spans.push(Span::styled("[⇧]", shift_style));
+                line.spans.push(Span::raw(" "));
+                line.spans.push(Span::styled("[E]", key_style));
+                line.spans
+                    .push(Span::styled(badge_text, Style::default().fg(dim_color())));
             }
         }
     }

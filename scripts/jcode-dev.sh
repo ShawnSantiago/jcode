@@ -151,4 +151,12 @@ if [[ "${JCODE_DEV_USE_SELFDEV:-0}" == "1" ]] && command -v selfdev >/dev/null 2
   exec selfdev enter "$@"
 fi
 
-exec "$repo_root/scripts/dev_cargo.sh" run --profile selfdev -p jcode --bin jcode -- "$@"
+profile="${JCODE_DEV_CARGO_PROFILE:-selfdev}"
+profile_args=()
+if [[ "$profile" != "dev" ]]; then
+  profile_args=(--profile "$profile")
+fi
+
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+
+exec "$repo_root/scripts/dev_cargo.sh" run "${profile_args[@]}" -p jcode --bin jcode -- "$@"

@@ -10,6 +10,13 @@
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases. When cutting a new release, look at all the changes that happened since the last release and determine what the version bump should be ie patch or minor, etc. 
 - **Remote builds available** - Use `scripts/remote_build.sh` to offload heavy cargo work to another machine. If your build is terminated, likely is because there are not enough resources on this machine to build. use remote build in that case. Try checking the resource avaliablity on the machine before you run a build. 
 
+## Pull Request Safety
+
+- **Default PR target is ShawnSantiago/jcode** - Create pull requests against `ShawnSantiago/jcode` by default. Do not create PRs against `1jehuang/jcode` unless the user explicitly asks for an upstream PR.
+- **Use the safe wrapper** - Prefer `scripts/create_jcode_pr.sh` instead of direct `gh pr create`. The wrapper defaults to `ShawnSantiago/jcode`, requires `--upstream` for `1jehuang/jcode`, and blocks PRs from `master` unless explicitly overridden.
+- **Do not PR from master by default** - Use a feature branch as the PR head. Only create a PR from `master` if the user explicitly approves it.
+- **Pre-PR sensitive data check** - Before creating any PR, review the diff for `.env`, tokens, API keys, cookies, private keys, credentials, local logs, `.omx/artifacts/`, `.jcode/pr-feedback-watch/`, and overnight/runtime state.
+
 ## Logs
 - Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
@@ -24,4 +31,3 @@
 - `~/.jcode/builds/canary/jcode` still exists for canary/testing flows, but it is not the primary self-dev install path.
 - On Windows, the equivalents are `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe` for the launcher, `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe` for stable, and `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe` for immutable installs; `scripts/install.ps1` currently installs the stable channel.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
-

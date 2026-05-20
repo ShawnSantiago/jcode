@@ -333,6 +333,13 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("qwen-3-235b-a22b-instruct-2507");
             push("llama3.1-8b");
         }
+        "xiaomi-mimo" => {
+            push("mimo-v2.5");
+            push("mimo-v2.5-pro");
+            push("mimo-v2-pro");
+            push("mimo-v2-flash");
+            push("mimo-v2-omni");
+        }
         // MiniMax's `/models` endpoint is authenticated and live, but post-login
         // model activation should not depend on the catalog refresh completing
         // before the picker/routes are rebuilt. Keep the documented text models
@@ -476,8 +483,8 @@ fn inline_key_env_name(profile_name: &str) -> String {
 }
 
 pub fn apply_named_provider_profile_env(profile_name: &str) -> anyhow::Result<String> {
-    let config = crate::config::config();
-    apply_named_provider_profile_env_from_config(profile_name, config)
+    let config = crate::config::Config::load_strict()?;
+    apply_named_provider_profile_env_from_config(profile_name, &config)
 }
 
 pub fn apply_named_provider_profile_env_from_config(

@@ -136,27 +136,6 @@ fn push_raw_search_excerpt(dst: &mut String, raw: &str, budget: &mut usize) {
     push_with_byte_budget(dst, raw, budget);
 }
 
-fn read_transcript_search_text(path: &Path) -> String {
-    let Ok(file) = File::open(path) else {
-        return String::new();
-    };
-    let mut reader = BufReader::new(file);
-    let mut text = String::new();
-    let mut budget = INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES;
-    let mut line = String::new();
-    while budget > 0 {
-        line.clear();
-        let Ok(read) = reader.read_line(&mut line) else {
-            break;
-        };
-        if read == 0 {
-            break;
-        }
-        push_raw_search_excerpt(&mut text, line.trim(), &mut budget);
-    }
-    text
-}
-
 fn raw_value_search_excerpt(raw: &RawValue) -> String {
     let raw = raw.get();
     let mut budget = MESSAGE_SEARCH_EXCERPT_BYTES;
@@ -1246,6 +1225,7 @@ pub(super) fn crashed_sessions_from_all_sessions(
         return None;
     }
 
+    let total_unrecovered_crashed = crashed.len();
     let crash_timestamp =
         |session: &SessionInfo| session.last_active_at.unwrap_or(session.last_message_time);
     let most_recent = crashed
@@ -1267,6 +1247,7 @@ pub(super) fn crashed_sessions_from_all_sessions(
         session_ids: crashed.iter().map(|s| s.id.clone()).collect(),
         display_names: crashed.iter().map(|s| s.short_name.clone()).collect(),
         most_recent_crash: most_recent,
+        omitted_crashed_count: total_unrecovered_crashed.saturating_sub(crashed.len()),
     })
 }
 
@@ -1446,19 +1427,17 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                 .and_then(|name| name.to_str())
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| format!("claude {}", &session_id[..session_id.len().min(8)]));
+            // Keep /resume startup focused on cheap metadata. Transcript-backed
+            // search text is intentionally loaded lazily through preview loading;
+            // reading tens of KiB from every external transcript can dominate the
+            // initial picker load on accounts with many Claude Code sessions.
             let search_index = build_search_index(
                 &format!("claude:{session_id}"),
                 &short_name,
                 &title,
                 working_dir.as_deref(),
                 None,
-                &[PreviewMessage {
-                    role: "transcript".to_string(),
-                    content: read_transcript_search_text(Path::new(&session.full_path)),
-                    tool_calls: Vec::new(),
-                    tool_data: None,
-                    timestamp: None,
-                }],
+                &[],
             );
 
             SessionInfo {
@@ -1592,20 +1571,13 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .map(|s| s.to_string());
     let short_name = format!("codex {}", &session_id[..session_id.len().min(8)]);
     let title = format!("Codex session {}", &session_id[..session_id.len().min(8)]);
-    let transcript_search_text = read_transcript_search_text(path);
     let search_index = build_search_index(
         &format!("codex:{session_id}"),
         &short_name,
         &title,
         working_dir.as_deref(),
         None,
-        &[PreviewMessage {
-            role: "transcript".to_string(),
-            content: transcript_search_text,
-            tool_calls: Vec::new(),
-            tool_data: None,
-            timestamp: None,
-        }],
+        &[],
     );
 
     Ok(Some(SessionInfo {
@@ -1783,20 +1755,13 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         .map(|s| s.to_string());
     let short_name = format!("pi {}", &session_id[..session_id.len().min(8)]);
     let title = format!("Pi session {}", &session_id[..session_id.len().min(8)]);
-    let transcript_search_text = read_transcript_search_text(path);
     let search_index = build_search_index(
         &format!("pi:{session_id}"),
         &short_name,
         &title,
         working_dir.as_deref(),
         None,
-        &[PreviewMessage {
-            role: "transcript".to_string(),
-            content: transcript_search_text,
-            tool_calls: Vec::new(),
-            tool_data: None,
-            timestamp: None,
-        }],
+        &[],
     );
 
     Ok(Some(SessionInfo {

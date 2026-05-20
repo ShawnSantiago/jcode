@@ -423,6 +423,8 @@ pub struct RunResult {
     pub restart_session: Option<String>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
+    /// Fatal message to print after the TUI restores the terminal.
+    pub fatal_message: Option<String>,
     /// The session ID that was active (for resume hints on exit)
     pub session_id: Option<String>,
 }
@@ -766,6 +768,8 @@ pub struct App {
     resume_session_id: Option<String>,
     // Exit code to use when quitting (for canary wrapper communication)
     requested_exit_code: Option<i32>,
+    // Fatal message to print after the TUI restores the terminal.
+    requested_fatal_message: Option<String>,
     // Memory feature toggle for this session
     memory_enabled: bool,
     // Automatic end-of-turn review toggle for this session

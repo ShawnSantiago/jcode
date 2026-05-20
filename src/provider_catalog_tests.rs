@@ -412,6 +412,56 @@ fn named_provider_config_accepts_openai_compatible_spelling() {
 }
 
 #[test]
+fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() {
+    let _lock = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::invalidate_cache();
+
+    let config_path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config dir");
+    std::fs::write(
+        &config_path,
+        r#"
+        [providers.antigravity]
+        type = "anthropic-compatible"
+        base_url = "http://192.168.1.202:8080"
+        api_key_env = "ANTIGRAVITY_API_KEY"
+        default_model = "gemini-3.1-pro-low"
+
+        [[providers.antigravity.models]]
+        id = "gemini-3.1-pro-low"
+        context_window = 128000
+        "#,
+    )
+    .expect("write config");
+
+    let err = apply_named_provider_profile_env("antigravity").expect_err("malformed config");
+    let message = err.to_string();
+    assert!(
+        message.contains("Failed to parse config file"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("anthropic-compatible"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        !message.contains("Unknown provider profile"),
+        "unexpected error: {message}"
+    );
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
 fn named_provider_profile_maps_to_openai_compatible_runtime_env() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[

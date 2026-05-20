@@ -636,6 +636,25 @@ fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
 }
 
 #[test]
+fn test_info_widget_remote_opencode_shows_cost_based_usage() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("opencode".to_string());
+    app.remote_provider_model = Some("qwen3-coder".to_string());
+    app.total_input_tokens = 12_000;
+    app.total_output_tokens = 3_400;
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+
+    assert_eq!(data.provider_name.as_deref(), Some("opencode"));
+    let usage = data.usage_info.as_ref().expect("opencode usage info");
+    assert_eq!(usage.provider, crate::tui::info_widget::UsageProvider::CostBased);
+    assert!(usage.available);
+    assert_eq!(usage.input_tokens, 12_000);
+    assert_eq!(usage.output_tokens, 3_400);
+}
+
+#[test]
 fn test_info_widget_local_gemini_shows_oauth_auth_method() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");

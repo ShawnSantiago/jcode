@@ -32,6 +32,7 @@ impl App {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
         let mut redraw_period = crate::tui::redraw_interval(self);
         let mut redraw_interval = interval(redraw_period);
+        let mut status_spinner_interval = super::run_shell::status_spinner_interval();
 
         'turn_loop: loop {
             let desired_redraw = crate::tui::redraw_interval(self);
@@ -42,6 +43,7 @@ impl App {
 
             self.status = ProcessingStatus::Sending;
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+            status_spinner_interval.reset();
             self.flush_pending_session_save();
 
             let repaired = self.repair_missing_tool_outputs();
@@ -140,30 +142,41 @@ impl App {
                                     }
                                     if !scroll_only {
                                         self.redraw_now(terminal)?;
+                                        status_spinner_interval.reset();
                                     }
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
                                 self.handle_paste(text);
                                 self.redraw_now(terminal)?;
+                                status_spinner_interval.reset();
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
                                 let scroll_only = self.handle_mouse_event(mouse);
                                 if !scroll_only {
                                     self.redraw_now(terminal)?;
+                                    status_spinner_interval.reset();
                                 }
                             }
                             Some(Ok(Event::Resize(_, _))) => {
                                 if self.should_redraw_after_resize() {
                                     self.redraw_now(terminal)?;
+                                    status_spinner_interval.reset();
                                 }
                             }
                             _ => {}
                         }
                     }
                     // Redraw periodically
+                    _ = status_spinner_interval.tick(), if super::run_shell::status_spinner_only_symbol(self).is_some() => {
+                        if !super::run_shell::draw_status_spinner_only(self, terminal)? {
+                            terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                            status_spinner_interval.reset();
+                        }
+                    }
                     _ = redraw_interval.tick() => {
                         terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                        status_spinner_interval.reset();
                     }
                     bus_event = async {
                         match bus_receiver.as_mut() {
@@ -173,6 +186,7 @@ impl App {
                     } => {
                         if super::local::handle_bus_event(self, bus_event) {
                             self.redraw_now(terminal)?;
+                            status_spinner_interval.reset();
                         }
                     }
                     // Poll API call
@@ -190,6 +204,7 @@ impl App {
                                         listener: plan.listener_summary.clone(),
                                     };
                                     terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                                    status_spinner_interval.reset();
                                     crate::network_retry::wait_until_probably_online().await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
@@ -477,8 +492,9 @@ impl App {
                                     StreamEvent::ToolUseEnd => {
                                         self.pause_streaming_tps(false);
                                         if let Some(mut tool) = current_tool.take() {
-                                            tool.input = serde_json::from_str(&current_tool_input)
-                                                .unwrap_or(serde_json::Value::Null);
+                                            tool.input = crate::message::ToolCall::parse_streamed_input_to_object(
+                                                &current_tool_input,
+                                            );
                                             tool.refresh_intent_from_input();
                                             if let Some(key) = Self::experimental_feature_key_for_tool(&tool) {
                                                 self.note_experimental_feature_use(key);
@@ -811,7 +827,14 @@ impl App {
                                             graceful_shutdown_signal: None,
                                             execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
                                         };
-                                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                                        let tool_result = self
+                                            .registry
+                                            .execute(
+                                                &tool_name,
+                                                crate::message::ToolCall::normalize_input_to_object(input),
+                                                ctx,
+                                            )
+                                            .await;
                                         crate::telemetry::record_tool_call();
                                         if tool_result.is_err() {
                                             crate::telemetry::record_tool_failure();

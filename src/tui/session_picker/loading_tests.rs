@@ -433,7 +433,7 @@ fn session_matches_query_searches_external_codex_transcript_contents() {
         .find(|candidate| candidate.id == "codex:codex-transcript-search")
         .expect("codex session present");
 
-    assert!(loaded.search_index.contains("kiwi comet"));
+    assert!(!loaded.search_index.contains("kiwi comet"));
     assert!(loaded.messages_preview.is_empty());
     assert!(session_matches_query(loaded, "kiwi comet"));
     assert!(!session_matches_query(loaded, "dragonfruit meteor"));

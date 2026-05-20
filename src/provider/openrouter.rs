@@ -1488,6 +1488,23 @@ impl OpenRouterProvider {
         String::new()
     }
 
+    pub(crate) fn cached_live_model_ids_for_display(&self) -> Option<HashSet<String>> {
+        if let Ok(cache) = self.models_cache.try_read()
+            && cache.fetched
+            && !cache.models.is_empty()
+        {
+            return Some(cache.models.iter().map(|model| model.id.clone()).collect());
+        }
+
+        self.load_usable_model_disk_cache_entry().and_then(|entry| {
+            if entry.models.is_empty() {
+                None
+            } else {
+                Some(entry.models.into_iter().map(|model| model.id).collect())
+            }
+        })
+    }
+
     fn cached_endpoints_fingerprint(&self, model: &str) -> String {
         if let Some(endpoints) = load_endpoints_disk_cache(model) {
             return endpoints_fingerprint(&endpoints);

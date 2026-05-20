@@ -97,6 +97,7 @@ pub enum KeyInput {
     SubmitDraft,
     SpawnPanel,
     HotkeyHelp,
+    ToggleInputMode,
     ToggleSessionInfo,
     RefreshSessions,
     AdjustTextScale(i8),
@@ -159,11 +160,31 @@ pub struct DesktopPreferences {
     pub panel_size: PanelSizePreset,
     pub focused_session_id: Option<String>,
     pub workspace_lane: i32,
+    pub space_hold_toggle_ms: u64,
+}
+
+pub const DEFAULT_SPACE_HOLD_TOGGLE_MS: u64 = 225;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceKind {
+    Session,
+    Scratch,
+    WorkspacePlaceholder,
+    HotkeyHelp,
+    Loading,
+    Empty,
+}
+
+impl SurfaceKind {
+    fn contributes_to_lane_bounds(self) -> bool {
+        matches!(self, Self::Session | Self::Scratch | Self::HotkeyHelp)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Surface {
     pub id: u64,
+    pub kind: SurfaceKind,
     pub title: String,
     pub body_lines: Vec<String>,
     pub detail_lines: Vec<String>,
@@ -179,6 +200,7 @@ impl Surface {
     fn new(id: u64, title: impl Into<String>, lane: i32, column: i32, color_index: usize) -> Self {
         Self {
             id,
+            kind: SurfaceKind::Scratch,
             title: title.into(),
             body_lines: Vec::new(),
             detail_lines: Vec::new(),
@@ -205,6 +227,7 @@ impl Surface {
 
         Self {
             id,
+            kind: SurfaceKind::Session,
             title: card.title,
             body_lines,
             detail_lines,
@@ -215,8 +238,46 @@ impl Surface {
         }
     }
 
-    fn is_placeholder_workspace(&self) -> bool {
-        self.title == format!("workspace {}", self.lane)
+    fn apply_session_card(&mut self, card: SessionCard) {
+        let updated = Self::session(self.id, card, self.lane, self.column, self.color_index);
+        self.kind = updated.kind;
+        self.title = updated.title;
+        self.body_lines = updated.body_lines;
+        self.detail_lines = updated.detail_lines;
+        self.session_id = updated.session_id;
+    }
+
+    fn workspace_placeholder(id: u64, lane: i32, column: i32, color_index: usize) -> Self {
+        Self {
+            id,
+            kind: SurfaceKind::WorkspacePlaceholder,
+            title: format!("workspace {lane}"),
+            body_lines: Vec::new(),
+            detail_lines: Vec::new(),
+            session_id: None,
+            lane,
+            column,
+            color_index,
+        }
+    }
+
+    fn non_session_state(
+        id: u64,
+        kind: SurfaceKind,
+        title: impl Into<String>,
+        body_lines: Vec<String>,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            title: title.into(),
+            body_lines,
+            detail_lines: Vec::new(),
+            session_id: None,
+            lane: 0,
+            column: 0,
+            color_index: 0,
+        }
     }
 }
 
@@ -230,6 +291,7 @@ pub struct Workspace {
     pub draft: String,
     pub pending_images: Vec<(String, String)>,
     panel_size: PanelSizePreset,
+    space_hold_toggle_ms: u64,
     next_id: u64,
 }
 
@@ -255,6 +317,7 @@ impl Workspace {
             draft: String::new(),
             pending_images: Vec::new(),
             panel_size: PanelSizePreset::Quarter,
+            space_hold_toggle_ms: DEFAULT_SPACE_HOLD_TOGGLE_MS,
             next_id: 8,
         }
     }
@@ -284,38 +347,63 @@ impl Workspace {
             draft: String::new(),
             pending_images: Vec::new(),
             panel_size: PanelSizePreset::Quarter,
+            space_hold_toggle_ms: DEFAULT_SPACE_HOLD_TOGGLE_MS,
             next_id,
         }
     }
 
-    fn empty_sessions() -> Self {
+    pub fn loading_sessions() -> Self {
         Self {
             mode: InputMode::Navigation,
-            surfaces: vec![Surface {
-                id: 1,
-                title: "no jcode sessions found".to_string(),
-                body_lines: vec![
-                    "start a session in the tui".to_string(),
-                    "then restart this desktop prototype".to_string(),
+            surfaces: vec![Surface::non_session_state(
+                1,
+                SurfaceKind::Loading,
+                "loading jcode sessions…",
+                vec![
+                    "reading recent sessions off the UI thread".to_string(),
+                    "the workspace will populate as soon as they are ready".to_string(),
                 ],
-                detail_lines: Vec::new(),
-                session_id: None,
-                lane: 0,
-                column: 0,
-                color_index: 0,
-            }],
+            )],
             focused_id: 1,
             zoomed: false,
             detail_scroll: 0,
             draft: String::new(),
             pending_images: Vec::new(),
             panel_size: PanelSizePreset::Quarter,
+            space_hold_toggle_ms: DEFAULT_SPACE_HOLD_TOGGLE_MS,
+            next_id: 2,
+        }
+    }
+
+    fn empty_sessions() -> Self {
+        Self {
+            mode: InputMode::Navigation,
+            surfaces: vec![Surface::non_session_state(
+                1,
+                SurfaceKind::Empty,
+                "no jcode sessions found",
+                vec![
+                    "start a session in the tui".to_string(),
+                    "then restart this desktop prototype".to_string(),
+                ],
+            )],
+            focused_id: 1,
+            zoomed: false,
+            detail_scroll: 0,
+            draft: String::new(),
+            pending_images: Vec::new(),
+            panel_size: PanelSizePreset::Quarter,
+            space_hold_toggle_ms: DEFAULT_SPACE_HOLD_TOGGLE_MS,
             next_id: 2,
         }
     }
 
     pub fn preferred_panel_screen_fraction(&self) -> f32 {
         self.panel_size.screen_fraction()
+    }
+
+    pub fn space_hold_toggle_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.space_hold_toggle_ms)
     }
 
     pub fn current_workspace(&self) -> i32 {
@@ -365,28 +453,79 @@ impl Workspace {
     }
 
     pub fn replace_session_cards(&mut self, cards: Vec<SessionCard>) {
-        let previous_mode = self.mode;
-        let previous_panel_size = self.panel_size;
+        let previous_focused_id = self.focused_id;
         let previous_session_id = self
             .focused_surface()
             .and_then(|surface| surface.session_id.clone());
+        let previous_lane = self.current_workspace();
+        let mut pending_cards = cards;
+        let old_surfaces = std::mem::take(&mut self.surfaces);
 
-        let mut replacement = Self::from_session_cards(cards);
-        replacement.mode = previous_mode;
-        replacement.panel_size = previous_panel_size;
-        replacement.detail_scroll = self.detail_scroll;
-        replacement.draft = self.draft.clone();
-        replacement.pending_images = self.pending_images.clone();
+        for mut surface in old_surfaces {
+            match surface.session_id.as_deref() {
+                Some(session_id) => {
+                    if let Some(card_index) = pending_cards
+                        .iter()
+                        .position(|card| card.session_id == session_id)
+                    {
+                        let card = pending_cards.remove(card_index);
+                        surface.apply_session_card(card);
+                        self.surfaces.push(surface);
+                    }
+                }
+                None if !matches!(surface.kind, SurfaceKind::Loading | SurfaceKind::Empty) => {
+                    self.surfaces.push(surface);
+                }
+                None => {}
+            }
+        }
+
+        for card in pending_cards {
+            let lane = 0;
+            let column = self.next_available_column(lane);
+            let id = self.allocate_surface_id();
+            self.surfaces
+                .push(Surface::session(id, card, lane, column, id as usize));
+        }
+
+        if self.surfaces.is_empty() {
+            let empty = Self::empty_sessions();
+            self.surfaces = empty.surfaces;
+            self.next_id = self.next_id.max(empty.next_id);
+        } else {
+            self.next_id = self.next_id.max(
+                self.surfaces
+                    .iter()
+                    .map(|surface| surface.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1,
+            );
+        }
+
         if let Some(previous_session_id) = previous_session_id
-            && let Some(surface) = replacement
+            && let Some(surface) = self
                 .surfaces
                 .iter()
                 .find(|surface| surface.session_id.as_deref() == Some(previous_session_id.as_str()))
         {
-            replacement.focused_id = surface.id;
+            self.focused_id = surface.id;
+        } else if self
+            .surfaces
+            .iter()
+            .any(|surface| surface.id == previous_focused_id)
+        {
+            self.focused_id = previous_focused_id;
+        } else if let Some(surface) = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.lane == previous_lane)
+            .min_by_key(|surface| (surface.column.abs(), surface.id))
+            .or_else(|| self.surfaces.iter().min_by_key(|surface| surface.id))
+        {
+            self.focused_id = surface.id;
         }
-
-        *self = replacement;
+        self.zoomed = false;
         self.clamp_detail_scroll();
     }
 
@@ -397,11 +536,13 @@ impl Workspace {
                 .focused_surface()
                 .and_then(|surface| surface.session_id.clone()),
             workspace_lane: self.current_workspace(),
+            space_hold_toggle_ms: self.space_hold_toggle_ms,
         }
     }
 
     pub fn apply_preferences(&mut self, preferences: DesktopPreferences) {
         self.panel_size = preferences.panel_size;
+        self.space_hold_toggle_ms = preferences.space_hold_toggle_ms;
 
         if let Some(focused_session_id) = preferences.focused_session_id
             && let Some(surface) = self
@@ -415,8 +556,14 @@ impl Workspace {
             return;
         }
 
-        if self.is_lane_navigable(preferences.workspace_lane) {
-            self.focused_id = self.ensure_workspace_surface(preferences.workspace_lane, 0);
+        if self.is_lane_navigable(preferences.workspace_lane)
+            && let Some(surface) = self
+                .surfaces
+                .iter()
+                .filter(|surface| surface.lane == preferences.workspace_lane)
+                .min_by_key(|surface| (surface.column.abs(), surface.id))
+        {
+            self.focused_id = surface.id;
             self.zoomed = false;
             self.detail_scroll = 0;
         }
@@ -483,6 +630,10 @@ impl Workspace {
                 if let Some((session_id, title)) = self.focused_session_target() {
                     return KeyOutcome::OpenSession { session_id, title };
                 }
+                self.mode = InputMode::Insert;
+                return KeyOutcome::Redraw;
+            }
+            KeyInput::ToggleInputMode => {
                 self.mode = InputMode::Insert;
                 return KeyOutcome::Redraw;
             }
@@ -570,6 +721,10 @@ impl Workspace {
             KeyInput::RefreshSessions => KeyOutcome::Redraw,
             KeyInput::SetPanelSize(size) => {
                 self.panel_size = size;
+                KeyOutcome::Redraw
+            }
+            KeyInput::ToggleInputMode => {
+                self.mode = InputMode::Navigation;
                 KeyOutcome::Redraw
             }
             KeyInput::SubmitDraft | KeyInput::QueueDraft => self.submit_draft(),
@@ -694,7 +849,7 @@ impl Workspace {
     fn occupied_lane_bounds(&self) -> (i32, i32) {
         self.surfaces
             .iter()
-            .filter(|surface| !surface.is_placeholder_workspace())
+            .filter(|surface| surface.kind.contributes_to_lane_bounds())
             .map(|surface| surface.lane)
             .fold(None::<(i32, i32)>, |bounds, lane| match bounds {
                 Some((min_lane, max_lane)) => Some((min_lane.min(lane), max_lane.max(lane))),
@@ -731,19 +886,18 @@ impl Workspace {
             return false;
         }
 
-        if let Some(neighbor_id) = self.column_neighbor_id(direction) {
-            if let Some(neighbor_index) = self
+        if let Some(neighbor_id) = self.column_neighbor_id(direction)
+            && let Some(neighbor_index) = self
                 .surfaces
                 .iter()
                 .position(|surface| surface.id == neighbor_id)
-            {
-                let focused_column = self.surfaces[focused_index].column;
-                let neighbor_column = self.surfaces[neighbor_index].column;
-                self.surfaces[focused_index].column = neighbor_column;
-                self.surfaces[neighbor_index].column = focused_column;
-                self.detail_scroll = 0;
-                return true;
-            }
+        {
+            let focused_column = self.surfaces[focused_index].column;
+            let neighbor_column = self.surfaces[neighbor_index].column;
+            self.surfaces[focused_index].column = neighbor_column;
+            self.surfaces[neighbor_index].column = focused_column;
+            self.detail_scroll = 0;
+            return true;
         }
         false
     }
@@ -779,11 +933,9 @@ impl Workspace {
             return surface.id;
         }
 
-        let id = self.next_id;
-        self.next_id += 1;
-        self.surfaces.push(Surface::new(
+        let id = self.allocate_surface_id();
+        self.surfaces.push(Surface::workspace_placeholder(
             id,
-            format!("workspace {lane}"),
             lane,
             preferred_column,
             id as usize,
@@ -793,16 +945,8 @@ impl Workspace {
 
     fn add_surface(&mut self) {
         let lane = self.current_workspace();
-        let column = self
-            .surfaces
-            .iter()
-            .filter(|surface| surface.lane == lane)
-            .map(|surface| surface.column)
-            .max()
-            .unwrap_or(-1)
-            + 1;
-        let id = self.next_id;
-        self.next_id += 1;
+        let column = self.next_available_column(lane);
+        let id = self.allocate_surface_id();
         self.surfaces.push(Surface::new(
             id,
             format!("new session {id}"),
@@ -830,17 +974,10 @@ impl Workspace {
             return;
         }
 
-        let column = self
-            .surfaces
-            .iter()
-            .filter(|surface| surface.lane == lane)
-            .map(|surface| surface.column)
-            .max()
-            .unwrap_or(-1)
-            + 1;
-        let id = self.next_id;
-        self.next_id += 1;
+        let column = self.next_available_column(lane);
+        let id = self.allocate_surface_id();
         let mut help = Surface::new(id, "hotkey help", lane, column, id as usize);
+        help.kind = SurfaceKind::HotkeyHelp;
         help.body_lines = body_lines;
         self.surfaces.push(help);
         self.focused_id = id;
@@ -888,6 +1025,29 @@ impl Workspace {
                 "ctrl slash help".to_string(),
             ],
         }
+    }
+
+    fn next_available_column(&self, lane: i32) -> i32 {
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.lane == lane)
+            .map(|surface| surface.column)
+            .max()
+            .unwrap_or(-1)
+            + 1
+    }
+
+    fn allocate_surface_id(&mut self) -> u64 {
+        while self
+            .surfaces
+            .iter()
+            .any(|surface| surface.id == self.next_id)
+        {
+            self.next_id += 1;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     fn close_focused(&mut self) -> bool {

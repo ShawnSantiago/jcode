@@ -48,7 +48,7 @@ static AUTH_STATUS_FAST_CACHE: std::sync::LazyLock<RwLock<Option<(AuthStatus, In
     std::sync::LazyLock::new(|| RwLock::new(None));
 
 const AUTH_STATUS_CACHE_TTL_SECS: u64 = 30;
-const AUTH_STATUS_FAST_CACHE_TTL_SECS: u64 = 5;
+const AUTH_STATUS_FAST_CACHE_TTL_SECS: u64 = 60;
 
 /// Per-process cache for command existence lookups.
 /// CLI tools don't get installed/uninstalled while jcode is running, so caching

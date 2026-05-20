@@ -232,6 +232,7 @@ pub struct RemoteConnection {
     next_request_id: u64,
     tool_diff: RemoteDiffTracker,
     line_buffer: String,
+    line_bytes: Vec<u8>,
     has_loaded_history: bool,
     call_output_tokens_seen: u64,
 }
@@ -289,6 +290,7 @@ impl RemoteConnection {
             next_request_id: 1,
             tool_diff: RemoteDiffTracker::default(),
             line_buffer: String::new(),
+            line_bytes: Vec::new(),
             has_loaded_history: false,
             call_output_tokens_seen: 0,
         };
@@ -340,11 +342,85 @@ impl RemoteConnection {
         Ok(conn)
     }
 
-    async fn send_request(&self, request: Request) -> Result<()> {
+    fn interrupt_request_log_fields(
+        &self,
+        request: &Request,
+        trigger: Option<&str>,
+    ) -> Option<String> {
+        let trigger = trigger.unwrap_or("unspecified");
+        let base = |kind: &str, id: u64| {
+            format!(
+                "kind={} id={} trigger={} session={:?} client_instance={:?}",
+                kind, id, trigger, self.session_id, self.client_instance_id
+            )
+        };
+
+        match request {
+            Request::Cancel { id } => Some(base("cancel", *id)),
+            Request::SoftInterrupt {
+                id,
+                content,
+                urgent,
+            } => Some(format!(
+                "{} urgent={} content_bytes={} content_chars={}",
+                base("soft_interrupt", *id),
+                urgent,
+                content.len(),
+                content.chars().count()
+            )),
+            Request::CancelSoftInterrupts { id } => Some(base("cancel_soft_interrupts", *id)),
+            Request::BackgroundTool { id } => Some(base("background_tool", *id)),
+            _ => None,
+        }
+    }
+
+    async fn send_request_with_interrupt_trigger(
+        &self,
+        request: Request,
+        interrupt_trigger: Option<&str>,
+    ) -> Result<()> {
         let json = serde_json::to_string(&request)? + "\n";
+        let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
+        if let Some(fields) = &interrupt_log {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_SEND_START {} json_bytes={}",
+                fields,
+                json.len()
+            ));
+        }
+
+        let total_start = Instant::now();
+        let writer_wait_start = Instant::now();
         let mut w = self.writer.lock().await;
-        w.write_all(json.as_bytes()).await?;
+        let writer_wait_ms = writer_wait_start.elapsed().as_millis();
+        let write_start = Instant::now();
+        let result = w.write_all(json.as_bytes()).await;
+        if let Some(fields) = &interrupt_log {
+            match &result {
+                Ok(()) => crate::logging::info(&format!(
+                    "REMOTE_INTERRUPT_SEND_OK {} writer_wait_ms={} write_ms={} total_ms={}",
+                    fields,
+                    writer_wait_ms,
+                    write_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis()
+                )),
+                Err(error) => crate::logging::warn(&format!(
+                    "REMOTE_INTERRUPT_SEND_ERR {} writer_wait_ms={} write_ms={} total_ms={} error={}",
+                    fields,
+                    writer_wait_ms,
+                    write_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis(),
+                    error
+                )),
+            }
+        }
+        result?;
         Ok(())
+    }
+
+    async fn send_request(&self, request: Request) -> Result<()> {
+        self.send_request_with_interrupt_trigger(request, None)
+            .await
     }
 
     fn send_request_detached(&self, request: Request, label: &'static str) {
@@ -660,11 +736,17 @@ impl RemoteConnection {
 
     /// Cancel the current generation on the server
     pub async fn cancel(&mut self) -> Result<()> {
+        self.cancel_with_reason("remote.cancel").await
+    }
+
+    /// Cancel the current generation on the server, tagging logs with the UI trigger.
+    pub async fn cancel_with_reason(&mut self, reason: &'static str) -> Result<()> {
         let request = Request::Cancel {
             id: self.next_request_id,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request_with_interrupt_trigger(request, Some(reason))
+            .await
     }
 
     /// Move the currently executing tool to background
@@ -673,7 +755,8 @@ impl RemoteConnection {
             id: self.next_request_id,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request_with_interrupt_trigger(request, Some("background_tool"))
+            .await
     }
 
     /// Queue a soft interrupt message to be injected at the next safe point
@@ -686,7 +769,8 @@ impl RemoteConnection {
             urgent,
         };
         self.next_request_id += 1;
-        self.send_request(request).await?;
+        self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
+            .await?;
         Ok(id)
     }
 
@@ -695,7 +779,8 @@ impl RemoteConnection {
             id: self.next_request_id,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
+            .await
     }
 
     /// Split the current session — ask server to clone conversation into a new session
@@ -805,7 +890,13 @@ impl RemoteConnection {
     pub async fn next_event(&mut self) -> RemoteRead {
         loop {
             self.line_buffer.clear();
-            match self.reader.read_line(&mut self.line_buffer).await {
+            // `read_line` is not cancellation-safe when used inside the TUI
+            // `tokio::select!` loop. Large history/tool-output frames can be
+            // partially consumed if another branch wins the select, causing the
+            // next read to start in the middle of a JSON frame. `read_until` is
+            // cancellation-safe and appends into our retained buffer, so partial
+            // bytes survive until this future is polled again.
+            match self.reader.read_until(b'\n', &mut self.line_bytes).await {
                 Ok(0) => {
                     crate::logging::warn(&format!(
                         "RemoteConnection::next_event: peer closed (session_id={:?}, client_instance_id={:?})",
@@ -814,6 +905,23 @@ impl RemoteConnection {
                     return RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed);
                 }
                 Ok(_) => {
+                    let line_bytes = std::mem::take(&mut self.line_bytes);
+                    let line_len = line_bytes.len();
+                    self.line_buffer = match String::from_utf8(line_bytes) {
+                        Ok(line) => line,
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "RemoteConnection::next_event: invalid utf8={} bytes={} (session_id={:?}, client_instance_id={:?})",
+                                error,
+                                line_len,
+                                self.session_id,
+                                self.client_instance_id
+                            ));
+                            return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
+                                error.to_string(),
+                            ));
+                        }
+                    };
                     if self.line_buffer.trim().is_empty() {
                         crate::logging::warn(&format!(
                             "RemoteConnection::next_event: skipping blank line (session_id={:?}, client_instance_id={:?})",
@@ -870,6 +978,7 @@ impl RemoteConnection {
             next_request_id: 1,
             tool_diff: RemoteDiffTracker::default(),
             line_buffer: String::new(),
+            line_bytes: Vec::new(),
             has_loaded_history: false,
             call_output_tokens_seen: 0,
         }
@@ -1022,6 +1131,7 @@ impl RemoteEventState for ReplayRemoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ServerEvent;
     use std::time::Duration;
 
     #[tokio::test]
@@ -1094,5 +1204,51 @@ mod tests {
             serde_json::from_str::<Request>(&line).expect("clear request should deserialize"),
             Request::Clear { id: 1 }
         ));
+    }
+
+    #[tokio::test]
+    async fn next_event_preserves_partial_large_frame_after_cancelled_read() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (_reader, mut writer) = peer.into_split();
+
+        let payload = "x".repeat(256 * 1024);
+        let event = ServerEvent::Error {
+            id: 42,
+            message: payload.clone(),
+            retry_after_secs: None,
+        };
+        let encoded = crate::protocol::encode_event(&event);
+        let split = encoded.len() / 2;
+
+        writer
+            .write_all(encoded[..split].as_bytes())
+            .await
+            .expect("first partial frame write should succeed");
+
+        let cancelled = tokio::time::timeout(Duration::from_millis(10), remote.next_event()).await;
+        assert!(
+            cancelled.is_err(),
+            "partial frame read should still be pending until newline arrives"
+        );
+
+        writer
+            .write_all(encoded[split..].as_bytes())
+            .await
+            .expect("second partial frame write should succeed");
+
+        match tokio::time::timeout(Duration::from_secs(1), remote.next_event())
+            .await
+            .expect("complete frame should be read before timeout")
+        {
+            RemoteRead::Event(ServerEvent::Error { id, message, .. }) => {
+                assert_eq!(id, 42);
+                assert_eq!(message, payload);
+            }
+            other => panic!("expected error event after completing partial frame, got {other:?}"),
+        }
     }
 }

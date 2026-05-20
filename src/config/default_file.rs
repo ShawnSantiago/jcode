@@ -56,9 +56,9 @@ workspace_down = "alt+j"
 workspace_up = "alt+k"
 workspace_right = "alt+l"
 
-# /resume picker behavior. Options: "new-terminal" or "current-terminal".
+# /resume picker behavior. Options: "current-terminal" or "new-terminal".
 # Ctrl+Enter performs the alternate action.
-session_picker_enter = "new-terminal"
+session_picker_enter = "current-terminal"
 
 [dictation]
 # External speech-to-text command.
