@@ -39,7 +39,7 @@ pub mod linux {
                 let fd = parts[1];
                 // read syscall: 0 on x86_64, 63 on aarch64
                 let is_read = syscall_nr == "0" || syscall_nr == "63";
-                let is_stdin = fd == "0x0";
+                let is_stdin = read_fd_is_stdin(pid, fd);
                 if is_read && is_stdin {
                     return StdinState::Reading;
                 }
@@ -77,6 +77,30 @@ pub mod linux {
             return path.contains("pipe") || path.contains("pts") || path.contains("ptmx");
         }
         false
+    }
+
+    fn read_fd_is_stdin(pid: u32, fd_arg: &str) -> bool {
+        let Some(fd) = parse_syscall_fd(fd_arg) else {
+            return false;
+        };
+        if fd == 0 {
+            return true;
+        }
+
+        // Some programs, notably GNU coreutils `head`, duplicate stdin and
+        // block in read(duplicated_fd, ...) rather than read(0, ...). Treat it
+        // as stdin when the fd target is the same pipe/pty as fd 0.
+        let stdin_link = std::fs::read_link(format!("/proc/{}/fd/0", pid)).ok();
+        let read_link = std::fs::read_link(format!("/proc/{}/fd/{}", pid, fd)).ok();
+        stdin_link.is_some() && stdin_link == read_link
+    }
+
+    fn parse_syscall_fd(fd_arg: &str) -> Option<u32> {
+        if let Some(hex) = fd_arg.strip_prefix("0x") {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            fd_arg.parse().ok()
+        }
     }
 
     /// Check all threads in a process group (for cases where a child is the one reading)
