@@ -6,17 +6,20 @@ cd "$repo_root"
 
 sync_mode="${JCODE_DEV_SYNC:-auto}"
 passthrough_args=()
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --no-sync)
       sync_mode="skip"
+      shift
       ;;
     --help-sync)
       cat <<'USAGE'
-Usage: jcode-dev [--no-sync] [jcode args...]
+Usage: jcode-dev [--no-sync] [--] [jcode args...]
 
 Options:
   --no-sync          Skip git fetch/rebase preflight before launching jcode.
+  --                 Stop parsing jcode-dev options and pass remaining args
+                     through to jcode.
 
 Environment:
   JCODE_DEV_SYNC=skip  Same as --no-sync.
@@ -30,8 +33,14 @@ Environment:
 USAGE
       exit 0
       ;;
+    --)
+      shift
+      passthrough_args+=("$@")
+      break
+      ;;
     *)
-      passthrough_args+=("$arg")
+      passthrough_args+=("$1")
+      shift
       ;;
   esac
 done
@@ -46,11 +55,11 @@ remote_exists() {
 }
 
 is_worktree_clean() {
-  [[ -z "$(git status --porcelain)" ]]
+  git diff-index --quiet HEAD --
 }
 
 list_dirty_files() {
-  git status --short | sed 's/^/  /' >&2
+  git status --short --untracked-files=no | sed 's/^/  /' >&2
 }
 
 git_divergence() {
@@ -151,7 +160,7 @@ if [[ "${JCODE_DEV_USE_SELFDEV:-0}" == "1" ]] && command -v selfdev >/dev/null 2
   exec selfdev enter "$@"
 fi
 
-profile="${JCODE_DEV_CARGO_PROFILE:-selfdev}"
+profile="${JCODE_DEV_CARGO_PROFILE:-dev}"
 profile_args=()
 if [[ "$profile" != "dev" ]]; then
   profile_args=(--profile "$profile")
