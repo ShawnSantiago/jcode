@@ -2712,6 +2712,176 @@ fn code_block_header_placement_is_stable_across_sizes_and_text_scales() {
 }
 
 #[test]
+fn code_block_header_actual_glyph_rasters_stay_inside_rendered_card() {
+    let markdown = "```text\njcode-desktop\n  indented code\n```";
+    let sizes = [
+        PhysicalSize::new(520, 420),
+        PhysicalSize::new(900, 640),
+        PhysicalSize::new(1440, 900),
+    ];
+    let scale_steps: [i8; 3] = [-2, 0, 3];
+
+    for size in sizes {
+        for scale_step in scale_steps {
+            let mut app = SingleSessionApp::new(Some(test_session_card(
+                "code-geometry",
+                "Code geometry",
+                "ready",
+            )));
+            for _ in 0..scale_step.unsigned_abs() {
+                app.handle_key(workspace::KeyInput::AdjustTextScale(scale_step.signum()));
+            }
+            app.messages.push(SingleSessionMessage::assistant(markdown));
+
+            let lines = single_session_rendered_body_lines_for_tick(&app, size, 0);
+            let header_index = lines
+                .iter()
+                .position(|line| line.text == "  text")
+                .unwrap_or_else(|| {
+                    panic!("missing code header at size {size:?}, scale {scale_step}")
+                });
+            let header_run = single_session_transcript_card_runs(&lines)
+                .into_iter()
+                .find(|run| run.line <= header_index && header_index < run.line + run.line_count)
+                .unwrap_or_else(|| {
+                    panic!("missing code card run at size {size:?}, scale {scale_step}")
+                });
+
+            let vertices = build_single_session_vertices(&app, size, 0.0, 0);
+            let card_bounds = pixel_bounds_for_color(&vertices, CODE_BLOCK_BACKGROUND_COLOR, size)
+                .unwrap_or_else(|| {
+                    panic!("missing rendered code card at size {size:?}, scale {scale_step}")
+                });
+            let viewport = single_session_body_viewport_from_lines(&app, size, 0.0, &lines);
+            let viewport_header_run = single_session_transcript_card_runs(&viewport.lines)
+                .into_iter()
+                .find(|run| run.style == SingleSessionLineStyle::CodeHeader)
+                .unwrap_or_else(|| {
+                    panic!("missing visible code card run at size {size:?}, scale {scale_step}")
+                });
+            assert_eq!(
+                viewport_header_run.line_count, header_run.line_count,
+                "code card should be fully visible in the actual glyph fixture at size {size:?}, scale {scale_step}"
+            );
+            let typography = single_session_typography_for_scale(app.text_scale());
+            let line_height = typography.body_size * typography.body_line_height;
+            let text_left = card_bounds.min_x + 6.0;
+            let text_top = card_bounds.min_y
+                - 3.0
+                - viewport_header_run.line as f32 * line_height
+                - viewport.top_offset_pixels;
+
+            let mut font_system = FontSystem::new();
+            let body_buffer = single_session_body_text_buffer_from_lines(
+                &mut font_system,
+                &viewport.lines,
+                size,
+                app.text_scale(),
+            );
+            let layout_runs = body_buffer.layout_runs().collect::<Vec<_>>();
+
+            let mut swash_cache = SwashCache::new();
+            let mut previous_raster_bottom = None;
+            for line_index in
+                viewport_header_run.line..viewport_header_run.line + viewport_header_run.line_count
+            {
+                let line = &viewport.lines[line_index];
+                let layout_run = layout_runs
+                    .iter()
+                    .find(|run| run.line_i == line_index)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing glyphon layout run for line {line_index}, size {size:?}, scale {scale_step}"
+                        )
+                    });
+                assert_eq!(layout_run.text, line.text);
+
+                let (highlight_x, highlight_width) = layout_run
+                    .highlight(
+                        glyphon::Cursor::new(line_index, 0),
+                        glyphon::Cursor::new(line_index, line.text.len()),
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "glyphon did not expose text bounds for line {line_index}, size {size:?}, scale {scale_step}"
+                        )
+                    });
+                let highlight_left = text_left + highlight_x;
+                let highlight_right = highlight_left + highlight_width;
+                assert!(
+                    highlight_left >= card_bounds.min_x,
+                    "actual glyphon text starts left of rendered card at line {line_index}, size {size:?}, scale {scale_step}"
+                );
+                assert!(
+                    highlight_right <= card_bounds.max_x,
+                    "actual glyphon text exceeds rendered card width at line {line_index}, size {size:?}, scale {scale_step}"
+                );
+
+                let baseline_y = text_top + layout_run.line_y;
+                assert!(
+                    baseline_y > card_bounds.min_y && baseline_y < card_bounds.max_y,
+                    "actual glyphon baseline escaped rendered card at line {line_index}, size {size:?}, scale {scale_step}"
+                );
+
+                let mut raster_bounds: Option<PixelBounds> = None;
+                for glyph in layout_run.glyphs {
+                    let physical_glyph = glyph.physical((text_left, text_top), 1.0);
+                    let Some(image) =
+                        swash_cache.get_image_uncached(&mut font_system, physical_glyph.cache_key)
+                    else {
+                        continue;
+                    };
+                    if image.placement.width == 0 || image.placement.height == 0 {
+                        continue;
+                    }
+                    let x = physical_glyph.x as f32 + image.placement.left as f32;
+                    let y = layout_run.line_y.round() + physical_glyph.y as f32
+                        - image.placement.top as f32;
+                    let glyph_bounds = PixelBounds {
+                        min_x: x,
+                        max_x: x + image.placement.width as f32,
+                        min_y: y,
+                        max_y: y + image.placement.height as f32,
+                    };
+                    raster_bounds = Some(match raster_bounds {
+                        Some(bounds) => PixelBounds {
+                            min_x: bounds.min_x.min(glyph_bounds.min_x),
+                            max_x: bounds.max_x.max(glyph_bounds.max_x),
+                            min_y: bounds.min_y.min(glyph_bounds.min_y),
+                            max_y: bounds.max_y.max(glyph_bounds.max_y),
+                        },
+                        None => glyph_bounds,
+                    });
+                }
+                let raster_bounds = raster_bounds.unwrap_or_else(|| {
+                    panic!(
+                        "missing actual glyph rasters for line {line_index}, size {size:?}, scale {scale_step}"
+                    )
+                });
+                let tolerance = 1.0;
+                assert!(
+                    raster_bounds.min_x >= card_bounds.min_x - tolerance
+                        && raster_bounds.max_x <= card_bounds.max_x + tolerance,
+                    "actual glyph raster escaped rendered card horizontally at line {line_index}, size {size:?}, scale {scale_step}: {raster_bounds:?} vs {card_bounds:?}"
+                );
+                assert!(
+                    raster_bounds.min_y >= card_bounds.min_y - tolerance
+                        && raster_bounds.max_y <= card_bounds.max_y + tolerance,
+                    "actual glyph raster escaped rendered card vertically at line {line_index}, size {size:?}, scale {scale_step}: {raster_bounds:?} vs {card_bounds:?}"
+                );
+                if let Some(previous_raster_bottom) = previous_raster_bottom {
+                    assert!(
+                        previous_raster_bottom < raster_bounds.min_y,
+                        "actual glyph rasters overlap between code rows at line {line_index}, size {size:?}, scale {scale_step}"
+                    );
+                }
+                previous_raster_bottom = Some(raster_bounds.max_y);
+            }
+        }
+    }
+}
+
+#[test]
 fn single_session_vertices_include_transcript_card_backgrounds() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::assistant(
