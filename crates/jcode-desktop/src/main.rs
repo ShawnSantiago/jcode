@@ -248,6 +248,7 @@ const DESKTOP_PRESENT_STALL_BUDGET: Duration = Duration::from_millis(33);
 const DESKTOP_INPUT_LATENCY_BUDGET: Duration = Duration::from_millis(25);
 const DESKTOP_NO_PAINT_BUDGET: Duration = Duration::from_millis(250);
 const DESKTOP_FRAME_PROFILE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+const DESKTOP_RESIZE_TEXT_PREPARE_DEBOUNCE: Duration = Duration::from_millis(75);
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -544,6 +545,7 @@ async fn run() -> Result<()> {
             backend_wake,
             space_hold_wake,
             surface_timeout_redraw_at,
+            canvas.deferred_resize_text_prepare_at(),
         ]
             .into_iter()
             .flatten()
@@ -1246,6 +1248,11 @@ async fn run() -> Result<()> {
                         if surface_renderable {
                             window.request_redraw();
                         }
+                    }
+                }
+                if let Some(redraw_at) = canvas.deferred_resize_text_prepare_at() {
+                    if surface_renderable && Instant::now() >= redraw_at {
+                        window.request_redraw();
                     }
                 }
                 if surface_renderable && app.is_single_session() {
@@ -6001,6 +6008,7 @@ struct Canvas {
     welcome_hero_reveal_key: Option<String>,
     welcome_hero_reveal_started_at: Option<Instant>,
     frame_profiler: DesktopFrameProfiler,
+    resize_text_prepare_at: Option<Instant>,
 }
 
 impl Canvas {
@@ -6112,7 +6120,12 @@ impl Canvas {
             welcome_hero_reveal_key: None,
             welcome_hero_reveal_started_at: None,
             frame_profiler: DesktopFrameProfiler::new(),
+            resize_text_prepare_at: None,
         })
+    }
+
+    fn deferred_resize_text_prepare_at(&self) -> Option<Instant> {
+        self.resize_text_prepare_at
     }
 
     fn suspend_for_zero_size(&mut self, size: PhysicalSize<u32>) {
@@ -6165,7 +6178,8 @@ impl Canvas {
         self.primitive_vertices_cache.clear();
         self.primitive_frame_vertices.clear();
         self.first_render_completed = false;
-        self.text_needs_prepare = true;
+        self.text_needs_prepare = false;
+        self.resize_text_prepare_at = Some(Instant::now() + DESKTOP_RESIZE_TEXT_PREPARE_DEBOUNCE);
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
@@ -6775,6 +6789,16 @@ impl Canvas {
                 label: Some("jcode-desktop-render-workspace"),
             });
         let now = Instant::now();
+        let resize_text_prepare_deferred = self
+            .resize_text_prepare_at
+            .is_some_and(|prepare_at| now < prepare_at);
+        if self
+            .resize_text_prepare_at
+            .is_some_and(|prepare_at| now >= prepare_at)
+        {
+            self.resize_text_prepare_at = None;
+            self.text_needs_prepare = true;
+        }
         let spinner_tick = desktop_spinner_tick(now);
         frame_profile.checkpoint("frame_setup");
 
@@ -6803,6 +6827,8 @@ impl Canvas {
             self.single_session_body_text_scroll_start = None;
             self.single_session_body_text_window_start = None;
             self.single_session_body_text_window_end = None;
+        } else if resize_text_prepare_deferred {
+            single_session_rendered_body_key = None;
         } else if let DesktopApp::SingleSession(single_session) = app {
             let (rendered_body_key, rendered_body_changed) =
                 self.cached_single_session_body_lines(single_session, spinner_tick);
@@ -6830,10 +6856,10 @@ impl Canvas {
             self.single_session_body_text_window_end = None;
         }
         frame_profile.checkpoint("text_cache");
-        if !self.single_session_text_buffers.is_empty() {
+        if !resize_text_prepare_deferred && !self.single_session_text_buffers.is_empty() {
             self.ensure_text_renderer();
         }
-        if self.single_session_streaming_text_buffer.is_some() {
+        if !resize_text_prepare_deferred && self.single_session_streaming_text_buffer.is_some() {
             self.ensure_streaming_text_renderer();
         }
         frame_profile.checkpoint("text_renderer");
