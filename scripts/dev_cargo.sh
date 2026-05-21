@@ -17,6 +17,7 @@ selected_linker_desc=""
 sccache_status="disabled"
 selfdev_low_memory_status="disabled"
 feature_profile_status="default"
+rust_min_stack_status="external"
 
 append_rustflags() {
   local new_flag="$1"
@@ -42,6 +43,22 @@ maybe_enable_sccache() {
     sccache_status="not-found"
     log "sccache not found; using direct rustc"
   fi
+}
+
+configure_rust_min_stack() {
+  # rustc 1.93/LLVM can segfault in SelectionDAG lowering on this crate when
+  # invoked with the platform default worker-thread stack. rustc itself
+  # recommends increasing RUST_MIN_STACK for this class of crash. Keep an
+  # existing caller-provided value, but make dev/selfdev builds resilient by
+  # defaulting to 16 MiB.
+  if [[ -n "${RUST_MIN_STACK:-}" ]]; then
+    rust_min_stack_status="external:${RUST_MIN_STACK}"
+    return
+  fi
+
+  export RUST_MIN_STACK=16777216
+  rust_min_stack_status="default:${RUST_MIN_STACK}"
+  log "using RUST_MIN_STACK=${RUST_MIN_STACK}"
 }
 
 uses_selfdev_profile() {
@@ -274,6 +291,7 @@ sccache_status=$sccache_status
 selfdev_low_memory_status=$selfdev_low_memory_status
 feature_profile_status=$feature_profile_status
 rustc_wrapper=${RUSTC_WRAPPER:-<unset>}
+rust_min_stack=${RUST_MIN_STACK:-<unset>} (${rust_min_stack_status})
 linker_mode=$selected_linker_mode
 linker_desc=${selected_linker_desc:-<none>}
 linker=${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-<unset>}
@@ -389,6 +407,7 @@ run_local_cargo() {
 
 validate_feature_profile
 maybe_configure_low_memory_selfdev "$@"
+configure_rust_min_stack
 maybe_enable_sccache
 
 if [[ "$(uname -s)" == "Linux" ]] && [[ "$(uname -m)" == "x86_64" ]]; then
