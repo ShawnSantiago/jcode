@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+caller_pwd=$(pwd)
 cd "$repo_root"
 
 sync_mode="${JCODE_DEV_SYNC:-auto}"
@@ -162,10 +163,21 @@ fi
 
 profile="${JCODE_DEV_CARGO_PROFILE:-dev}"
 profile_args=()
+profile_dir="debug"
 if [[ "$profile" != "dev" ]]; then
   profile_args=(--profile "$profile")
+  profile_dir="$profile"
 fi
 
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
-exec "$repo_root/scripts/dev_cargo.sh" run "${profile_args[@]}" -p jcode --bin jcode -- "$@"
+"$repo_root/scripts/dev_cargo.sh" build "${profile_args[@]}" -p jcode --bin jcode
+
+binary="$repo_root/target/$profile_dir/jcode"
+if [[ ! -x "$binary" ]]; then
+  log "built jcode binary is missing or not executable: $binary"
+  exit 1
+fi
+
+cd "$caller_pwd"
+exec "$binary" "$@"
