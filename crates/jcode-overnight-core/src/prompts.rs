@@ -4,6 +4,18 @@ use super::{
     OvernightManifest, OvernightPreflight, OvernightRunStatus, format_minutes, preflight_summary,
 };
 
+const ANTI_STALL_CONTRACT: &str = r#"Anti-stall defaults learned from prior overnight runs:
+- Treat the target wake time as the reporting/handoff time, not permission to stop early. If time remains and no hard blocker exists, continue with the next bounded, verified slice.
+- Every health checkpoint must include: manifest/status, cancellation state, git branch/status for each touched repo, active worker/session ids, open PR numbers and head SHAs, next scheduled watchdog time, next PR poll time, current blocker or next backlog, and latest validation evidence.
+- Avoid rapid duplicate auto-pokes. If a watchdog wakes before a PR poll/quiet-cycle is due, record a lightweight checkpoint and keep the scheduled cadence instead of burning quota with duplicate polls.
+- Recover stale PR watches. Compare next_poll/final-gate times with current UTC; if overdue, run a read-only poll, verify GitHub source-of-truth state, then reschedule.
+- Verify PR gates from GitHub directly before quiet-cycle, merge-ready, or auto-merge decisions: head SHA, draft/open/merged state, checks, top-level comments, inline review threads, reviews, and mergeability.
+- After any push to a PR, reset quiet cycles from the new head SHA and record the new head plus the next poll time.
+- If no worker is active and no PR is waiting in protocol, immediately score/select the next safe bounded backlog instead of waiting for the user.
+- Before changing repos or worktrees, snapshot `git status --short --branch`, `git worktree list` when relevant, and avoid destructive cleanup unless explicitly approved.
+- Keep environment/setup blockers explicit: missing credentials, `.env` paths, services, or ports should be recorded with the exact non-secret key/path and a safe alternate task should be chosen.
+"#;
+
 pub(crate) fn overnight_phase(manifest: &OvernightManifest, now: DateTime<Utc>) -> &'static str {
     match manifest.status {
         OvernightRunStatus::Completed => "completed",
@@ -120,6 +132,8 @@ Review/log requirements:
 - Put reproduction/test/command outputs in `{validation}` when useful.
 - The generated review page is `{review_html}` and will be regenerated from logs plus your review notes.
 
+{anti_stall_contract}
+
 Preflight summary:
 {preflight_summary}
 
@@ -145,6 +159,7 @@ Initial steps:
         validation = manifest.validation_dir.display(),
         review_html = manifest.review_path.display(),
         preflight_summary = preflight_summary(preflight),
+        anti_stall_contract = ANTI_STALL_CONTRACT,
     )
 }
 
@@ -181,6 +196,8 @@ Review/log requirements:
 - The generated review page is `{review_html}`.
 - Manifest path: `{manifest_path}`. If cancellation is requested or the run completes, update the manifest/status consistently when safe.
 
+{anti_stall_contract}
+
 Initial steps:
 1. Inspect current repo/session state, including git status and current todos.
 2. Build a ranked queue of verifiable candidate tasks.
@@ -201,6 +218,7 @@ Initial steps:
         validation = manifest.validation_dir.display(),
         review_html = manifest.review_path.display(),
         manifest_path = manifest.run_dir.join("manifest.json").display(),
+        anti_stall_contract = ANTI_STALL_CONTRACT,
     )
 }
 
@@ -211,10 +229,110 @@ pub fn build_continuation_prompt(manifest: &OvernightManifest) -> String {
         .num_minutes()
         .max(0) as u32;
     format!(
-        "Overnight continuation: there is about {} remaining until the target wake/report time. If your current task is complete, run another discovery/scoring pass and choose another high-confidence, verifiable task. If you are stuck, record why in `{}` and the relevant task-card JSON, then switch to a smaller bounded task. Update review notes and task cards before continuing.",
+        "Overnight continuation: there is about {} remaining until the target wake/report time. If your current task is complete, run another discovery/scoring pass and choose another high-confidence, verifiable task. If you are stuck, record why in `{}` and the relevant task-card JSON, then switch to a smaller bounded task. Enforce stale PR-watch recovery, avoid duplicate pre-due polls, verify PR gates from GitHub source-of-truth, snapshot git/worktree state before repo changes, and update review notes/task cards before continuing.",
         format_minutes(remaining),
         manifest.review_notes_path.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        GitSnapshot, OVERNIGHT_VERSION, OvernightManifest, OvernightRunStatus,
+        ResourceSnapshot, UsageProjection,
+    };
+    use chrono::Utc;
+    use std::path::PathBuf;
+
+    fn test_manifest() -> OvernightManifest {
+        let now = Utc::now();
+        let run_dir = PathBuf::from("/tmp/overnight-run");
+        OvernightManifest {
+            version: OVERNIGHT_VERSION,
+            run_id: "run-1".to_string(),
+            parent_session_id: "parent".to_string(),
+            coordinator_session_id: "coord".to_string(),
+            coordinator_session_name: "coordinator".to_string(),
+            started_at: now,
+            target_wake_at: now + chrono::Duration::hours(8),
+            handoff_ready_at: now + chrono::Duration::hours(7),
+            post_wake_grace_until: now + chrono::Duration::hours(10),
+            morning_report_posted_at: None,
+            completed_at: None,
+            cancel_requested_at: None,
+            status: OvernightRunStatus::Running,
+            mission: Some("ship safe slices".to_string()),
+            working_dir: Some("/tmp/project".to_string()),
+            provider_name: "provider".to_string(),
+            model: "model".to_string(),
+            max_agents_guidance: 1,
+            process_id: 123,
+            run_dir: run_dir.clone(),
+            events_path: run_dir.join("events.jsonl"),
+            human_log_path: run_dir.join("run.log"),
+            review_path: run_dir.join("review.html"),
+            review_notes_path: run_dir.join("review-notes.md"),
+            preflight_path: run_dir.join("preflight.json"),
+            task_cards_dir: run_dir.join("task-cards"),
+            issue_drafts_dir: run_dir.join("issue-drafts"),
+            validation_dir: run_dir.join("validation"),
+            last_activity_at: now,
+        }
+    }
+
+    fn test_preflight() -> OvernightPreflight {
+        let now = Utc::now();
+        OvernightPreflight {
+            captured_at: now,
+            usage: UsageProjection {
+                captured_at: now,
+                risk: "low".to_string(),
+                confidence: "medium".to_string(),
+                projected_delta_min_percent: None,
+                projected_delta_max_percent: None,
+                projected_end_min_percent: None,
+                projected_end_max_percent: None,
+                providers: Vec::new(),
+                notes: Vec::new(),
+            },
+            resources: ResourceSnapshot {
+                captured_at: now,
+                ..Default::default()
+            },
+            git: GitSnapshot {
+                captured_at: now,
+                branch: Some("main".to_string()),
+                dirty_count: Some(0),
+                dirty_summary: Vec::new(),
+                error: None,
+            },
+        }
+    }
+
+    #[test]
+    fn coordinator_prompt_includes_anti_stall_defaults() {
+        let manifest = test_manifest();
+        let preflight = test_preflight();
+        let prompt = build_coordinator_prompt(&manifest, &preflight);
+
+        assert!(prompt.contains("Anti-stall defaults learned from prior overnight runs"));
+        assert!(prompt.contains("Recover stale PR watches"));
+        assert!(prompt.contains("Verify PR gates from GitHub directly"));
+        assert!(prompt.contains("git worktree list"));
+    }
+
+    #[test]
+    fn visible_and_continuation_prompts_include_operational_guards() {
+        let manifest = test_manifest();
+        let visible = build_visible_current_session_prompt(&manifest);
+        let continuation = build_continuation_prompt(&manifest);
+
+        assert!(visible.contains("Anti-stall defaults learned from prior overnight runs"));
+        assert!(continuation.contains("stale PR-watch recovery"));
+        assert!(continuation.contains("GitHub source-of-truth"));
+        assert!(continuation.contains("snapshot git/worktree state"));
+    }
 }
 
 pub fn build_handoff_ready_prompt(manifest: &OvernightManifest) -> String {

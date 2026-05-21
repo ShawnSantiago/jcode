@@ -24,8 +24,10 @@ Never deploy, force-push, delete branches/data, expose secrets, or perform destr
 Each run stores inspectable state under:
 
 ```text
-.jcode/overnight-runs/<run-id>/status.md
-.jcode/overnight-runs/current -> <run-id>
+~/.jcode/overnight/runs/<run-id>/manifest.json
+~/.jcode/overnight/runs/<run-id>/review-notes.md
+~/.jcode/overnight/runs/<run-id>/task-cards/
+~/.jcode/overnight/runs/<run-id>/validation/
 ```
 
 The status file should include:
@@ -103,6 +105,19 @@ Every 30-minute watchdog must enforce these invariants before reporting the run 
 5. **Checkpoint completeness:** every checkpoint must record current PR numbers and heads, active worker/session ids if known, next scheduled watchdog id/time, next PR poll time, current blocker or next backlog, and whether source-of-truth GitHub verification was used.
 6. **Gate reset after mutation:** any new push to a PR resets quiet cycles from the new head. Record the new head SHA and schedule fresh 5-minute cycles plus the final 10-minute gate.
 
+These invariants are now embedded in the native `/overnight` coordinator prompts, but the watchdog should still verify them from artifacts instead of assuming the agent remembered them.
+
+## Setup defaults from prior runs
+
+Before starting a future overnight, prefer these defaults so the run is easier to resume and less likely to stall:
+
+1. Start from the intended target repo/worktree, not the Jcode source checkout, and record `pwd`, `git status --short --branch`, and `git worktree list` when worktrees exist.
+2. If a repo uses `.env`, record the expected non-secret path and required key names only. Do not print values. If credentials are unavailable, choose a non-secret/docs/test slice instead of waiting.
+3. Keep generated QA artifacts under the repo's existing `audit/`, `artifacts/`, `memory-bank/`, or run `validation/` directory and explicitly mark whether they should be committed.
+4. Use one active implementation branch/PR per bounded slice. Avoid starting another branch while a PR is in a near-term quiet-cycle window unless the changed files are clearly disjoint.
+5. If duplicate scheduled wakes arrive before the next PR poll is due, do a lightweight manifest/git checkpoint and preserve the existing cadence rather than polling repeatedly.
+6. Before cleanup of extra worktrees/branches, capture a safety snapshot and require explicit approval for destructive removal.
+
 Use this watchdog prompt suffix for future continuous overnights:
 
 ```text
@@ -133,7 +148,9 @@ Resume from the current symlink:
 
 ```bash
 python3 scripts/overnight_status.py
-sed -n '1,220p' .jcode/overnight-runs/current/status.md
+ls -td ~/.jcode/overnight/runs/* | head
+sed -n '1,220p' ~/.jcode/overnight/runs/<run-id>/review-notes.md
+cat ~/.jcode/overnight/runs/<run-id>/manifest.json
 ```
 
 Then continue the next safe action from the latest checkpoint. Before mutating code, re-check git status and active PR watch state.
