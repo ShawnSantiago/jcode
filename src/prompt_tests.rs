@@ -145,7 +145,30 @@ fn test_non_selfdev_prompt_includes_lightweight_selfdev_hint() {
 fn test_selfdev_prompt_uses_full_selfdev_instructions() {
     let prompt = build_system_prompt_with_selfdev(None, &[], true);
     assert!(prompt.contains("You are working on the jcode codebase itself."));
+    assert!(prompt.contains("launched from the TUI/root jcode context"));
+    assert!(prompt.contains("selfdev build target=tui"));
     assert!(!prompt.contains("Self-Development Access"));
+}
+
+#[test]
+fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
+    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop/src");
+    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop_dir));
+    assert!(prompt.contains("launched from the desktop app context"));
+    assert!(prompt.contains("selfdev build target=desktop"));
+    assert!(!prompt.contains("launched from the TUI/root jcode context"));
+}
+
+#[test]
+fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
+    let repo_dir = std::path::Path::new("/tmp/jcode");
+    let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir));
+    assert!(
+        split
+            .static_part
+            .contains("launched from the TUI/root jcode context")
+    );
+    assert!(split.static_part.contains("selfdev build target=tui"));
 }
 
 #[test]
@@ -166,6 +189,8 @@ fn test_selfdev_prompt_template_placeholders_are_resolved() {
     let dynamic_prompt = build_selfdev_prompt();
     assert!(!static_prompt.contains("__DEBUG_SOCKET_BLOCK__"));
     assert!(!dynamic_prompt.contains("__DEBUG_SOCKET_BLOCK__"));
+    assert!(!static_prompt.contains("__SELFDEV_PRODUCT_FOCUS__"));
+    assert!(!dynamic_prompt.contains("__SELFDEV_PRODUCT_FOCUS__"));
     assert_eq!(static_prompt, dynamic_prompt);
 }
 

@@ -124,13 +124,29 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
     app.pending_split_label = Some("Prompt".to_string());
     app.pending_split_started_at = Some(Instant::now());
 
+    app.pending_split_request = false;
     if app.is_processing {
-        app.pending_split_request = true;
-        app.set_status_notice("Prompt queued for new session");
+        app.set_status_notice("Prompt launching in new session");
+        if let Err(error) = remote.split().await {
+            let pending = app
+                .pending_split_prompt
+                .take()
+                .map(|prompt| input::PreparedInput {
+                    raw_input: prepared.raw_input,
+                    expanded: prompt.content,
+                    images: prompt.images,
+                });
+            app.pending_split_model_override = None;
+            app.pending_split_provider_key_override = None;
+            app.pending_split_label = None;
+            if let Some(prepared) = pending {
+                restore_prepared_remote_input(app, prepared);
+            }
+            return Err(error);
+        }
         return Ok(());
     }
 
-    app.pending_split_request = false;
     begin_remote_split_launch(app, "Prompt");
     if let Err(error) = remote.split().await {
         finish_remote_split_launch(app);

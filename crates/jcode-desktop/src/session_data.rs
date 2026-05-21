@@ -39,6 +39,60 @@ pub fn load_session_card_by_id(session_id: &str) -> Result<Option<SessionCard>> 
         .find(|card| card.session_id == session_id))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTranscriptMessage {
+    pub role: String,
+    pub content: String,
+}
+
+pub fn load_session_transcript_by_id(
+    session_id: &str,
+) -> Result<Option<Vec<SessionTranscriptMessage>>> {
+    let sessions_dir = jcode_sessions_dir()?;
+    let direct_path = sessions_dir.join(format!("{session_id}.json"));
+    if direct_path.exists() {
+        let session = load_stored_session(&direct_path)?;
+        return Ok(Some(session_transcript_messages(&session)));
+    }
+
+    if !sessions_dir.exists() {
+        return Ok(None);
+    }
+
+    for entry in fs::read_dir(&sessions_dir)
+        .with_context(|| format!("failed to read {}", sessions_dir.display()))?
+    {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        if session_file_candidate(path.clone()).is_none() {
+            continue;
+        }
+        let session = match load_stored_session(&path) {
+            Ok(session) => session,
+            Err(error) => {
+                crate::desktop_log::warn(format_args!(
+                    "jcode-desktop: skipped transcript {}: {error:#}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let id = stored_string(session.id.as_deref())
+            .or_else(|| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        if id == session_id {
+            return Ok(Some(session_transcript_messages(&session)));
+        }
+    }
+
+    Ok(None)
+}
+
 fn load_recent_session_cards_with_limit(limit: usize) -> Result<Vec<SessionCard>> {
     let sessions_dir = jcode_sessions_dir()?;
     if !sessions_dir.exists() {
@@ -118,7 +172,7 @@ struct StoredSession {
     custom_title: Option<String>,
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_status_string")]
     status: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -142,11 +196,15 @@ struct StoredMessage {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct StoredContentBlock {
-    #[serde(default, rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_optional_string"
+    )]
     block_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     text: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     name: Option<String>,
 }
 
@@ -178,11 +236,31 @@ where
     })
 }
 
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(text)) if !text.trim().is_empty() => Some(text),
+        _ => None,
+    })
+}
+
+fn deserialize_status_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(status)) if !status.trim().is_empty() => Some(status),
+        Some(Value::Object(map)) => map.keys().next().map(|key| key.to_ascii_lowercase()),
+        _ => None,
+    })
+}
+
 fn load_session_card(path: &Path, modified: SystemTime) -> Result<Option<SessionCard>> {
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let session: StoredSession = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let session = load_stored_session(path)?;
 
     let id = stored_string(session.id.as_deref())
         .or_else(|| {
@@ -232,6 +310,12 @@ fn load_session_card(path: &Path, modified: SystemTime) -> Result<Option<Session
         preview_lines,
         detail_lines,
     }))
+}
+
+fn load_stored_session(path: &Path) -> Result<StoredSession> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 fn jcode_sessions_dir() -> Result<PathBuf> {
@@ -290,6 +374,67 @@ fn transcript_preview_messages(messages: &[StoredMessage]) -> Vec<(String, Strin
             Some((role, text))
         })
         .collect()
+}
+
+fn session_transcript_messages(messages: &StoredSession) -> Vec<SessionTranscriptMessage> {
+    messages
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let role = transcript_display_role(message.role.as_deref());
+            let content = message_transcript_text(message)?;
+            if should_skip_desktop_transcript_message(&role, &content) {
+                return None;
+            }
+            Some(SessionTranscriptMessage { role, content })
+        })
+        .collect()
+}
+
+fn transcript_display_role(role: Option<&str>) -> String {
+    match role.unwrap_or("meta") {
+        role @ ("user" | "assistant" | "system" | "background_task" | "tool") => role.to_string(),
+        _ => "meta".to_string(),
+    }
+}
+
+fn message_transcript_text(message: &StoredMessage) -> Option<String> {
+    let mut fragments = Vec::new();
+    for block in &message.content {
+        match block.block_type.as_deref() {
+            Some("text") | None => {
+                if let Some(text) = block.text.as_deref() {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        fragments.push(text.to_string());
+                    }
+                }
+            }
+            Some("tool_use") => {
+                if let Some(name) = block
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                {
+                    fragments.push(format!("tool {name}"));
+                }
+            }
+            Some("tool_result") => {}
+            _ => {}
+        }
+    }
+
+    let joined = fragments.join("\n\n");
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
+fn should_skip_desktop_transcript_message(role: &str, content: &str) -> bool {
+    role == "user" && content.trim_start().starts_with("<system-reminder>")
 }
 
 fn message_preview_text(message: &StoredMessage) -> Option<String> {
@@ -407,6 +552,39 @@ mod tests {
         assert_eq!(
             recent_message_preview_lines(&session.messages, 4, SESSION_PREVIEW_CHAR_LIMIT),
             vec!["user hello there", "asst tool bash", "asst done now"]
+        );
+    }
+
+    #[test]
+    fn session_transcript_messages_skip_startup_reminder_and_keep_chat_roles() {
+        let session = stored_session(json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "<system-reminder>startup context</system-reminder>"}]},
+                {"role": "user", "content": [{"type": "text", "text": "resume prompt"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "resume answer"}]},
+                {"role": "assistant", "content": [{"type": "tool_use", "name": "agentgrep"}]},
+                {"role": "user", "content": [{"type": "tool_result", "content": "ignored"}]}
+            ]
+        }));
+
+        let messages = session_transcript_messages(&session);
+
+        assert_eq!(
+            messages,
+            vec![
+                SessionTranscriptMessage {
+                    role: "user".to_string(),
+                    content: "resume prompt".to_string(),
+                },
+                SessionTranscriptMessage {
+                    role: "assistant".to_string(),
+                    content: "resume answer".to_string(),
+                },
+                SessionTranscriptMessage {
+                    role: "assistant".to_string(),
+                    content: "tool agentgrep".to_string(),
+                },
+            ]
         );
     }
 

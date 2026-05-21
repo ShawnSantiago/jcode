@@ -103,6 +103,36 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
 }
 
 #[test]
+fn slash_resume_opens_session_picker_overlay_locally() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+
+    app.input = "/resume".to_string();
+    app.submit_input();
+
+    assert!(app.session_picker_overlay.is_some());
+    assert_eq!(app.session_picker_mode, SessionPickerMode::Resume);
+    assert!(app.pending_session_picker_load.is_some());
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn slash_sessions_alias_opens_session_picker_overlay_locally() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+
+    app.input = "/sessions".to_string();
+    app.submit_input();
+
+    assert!(app.session_picker_overlay.is_some());
+    assert_eq!(app.session_picker_mode, SessionPickerMode::Resume);
+    assert!(app.pending_session_picker_load.is_some());
+    assert!(app.input.is_empty());
+}
+
+#[test]
 fn test_resize_redraw_is_debounced() {
     let mut app = create_test_app();
 
@@ -158,6 +188,38 @@ fn test_help_topic_shows_git_command_details() {
     assert!(msg.content.contains("`/git`"));
     assert!(msg.content.contains("git status --short --branch"));
     assert!(msg.content.contains("`/git status`"));
+}
+
+#[test]
+fn test_help_topic_shows_commit_command_details() {
+    let mut app = create_test_app();
+    app.input = "/help commit".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing help response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("`/commit`"));
+    assert!(msg.content.contains("logical commits"));
+    assert!(msg.content.contains("preserve unrelated work"));
+}
+
+#[test]
+fn test_commit_command_starts_synthetic_user_turn() {
+    let mut app = create_test_app();
+    app.input = "/commit".to_string();
+    app.submit_input();
+
+    assert!(app.is_processing);
+    assert!(app.pending_turn);
+    let notice = app
+        .display_messages()
+        .last()
+        .expect("missing launch notice");
+    assert_eq!(notice.role, "system");
+    assert!(notice.content.contains("Starting logical commits"));
 }
 
 #[test]

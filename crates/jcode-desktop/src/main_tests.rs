@@ -182,6 +182,86 @@ fn desktop_hot_reload_prefers_newer_selfdev_binary() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn desktop_reload_window_placement_roundtrips_position_and_size() {
+    let placement = DesktopReloadWindowPlacement {
+        position: Some(PhysicalPosition::new(-24, 48)),
+        inner_size: PhysicalSize::new(1280, 800),
+    };
+
+    let encoded = placement.to_env_value();
+
+    assert_eq!(encoded, "-24,48,1280,800");
+    assert_eq!(
+        DesktopReloadWindowPlacement::from_env_value(&encoded),
+        Some(placement)
+    );
+}
+
+#[test]
+fn desktop_reload_window_placement_allows_size_without_position() {
+    let placement = DesktopReloadWindowPlacement {
+        position: None,
+        inner_size: PhysicalSize::new(1024, 720),
+    };
+
+    let encoded = placement.to_env_value();
+
+    assert_eq!(encoded, "_,_,1024,720");
+    assert_eq!(
+        DesktopReloadWindowPlacement::from_env_value(&encoded),
+        Some(placement)
+    );
+}
+
+#[test]
+fn desktop_reload_window_placement_rejects_invalid_values() {
+    for raw in [
+        "",
+        "1,2,3",
+        "1,2,3,4,5",
+        "_,2,1280,800",
+        "1,_,1280,800",
+        "x,2,1280,800",
+        "1,y,1280,800",
+        "1,2,0,800",
+        "1,2,1280,0",
+        "1,2,32769,800",
+        "1,2,1280,32769",
+        "1,2,width,800",
+        "1,2,1280,height",
+    ] {
+        assert_eq!(
+            DesktopReloadWindowPlacement::from_env_value(raw),
+            None,
+            "expected {raw:?} to be rejected"
+        );
+    }
+}
+
+#[test]
+fn desktop_reload_handoff_watcher_releases_ready_child() -> Result<()> {
+    let dir = desktop_reload_handoff_temp_dir();
+    std::fs::create_dir_all(&dir)?;
+    let ready_file = dir.join("ready");
+    let release_file = dir.join("release");
+    let watcher = DesktopReloadHandoffWatcher {
+        ready_file: ready_file.clone(),
+        release_file: release_file.clone(),
+        spawned_at: Instant::now(),
+    };
+
+    assert_eq!(watcher.poll()?, DesktopReloadHandoffPoll::Waiting);
+    std::fs::write(&ready_file, b"ready")?;
+
+    assert_eq!(watcher.poll()?, DesktopReloadHandoffPoll::Ready);
+    assert!(release_file.exists());
+
+    watcher.cleanup();
+    assert!(!dir.exists());
+    Ok(())
+}
+
 fn unique_desktop_test_dir(name: &str) -> Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!(
         "jcode-{name}-{}-{}",
@@ -743,6 +823,67 @@ fn single_session_streaming_text_fades_in() {
 }
 
 #[test]
+fn single_session_streaming_text_fade_does_not_restart_for_each_delta() {
+    let first = Instant::now();
+    let second = first + Duration::from_millis(40);
+
+    let started = streaming_text_fade_start_after_len_change(0, 5, None, first);
+    assert_eq!(started, Some(first));
+
+    let unchanged = streaming_text_fade_start_after_len_change(5, 12, started, second);
+    assert_eq!(unchanged, Some(first));
+}
+
+#[test]
+fn single_session_streaming_text_fade_restarts_after_previous_fade_finishes() {
+    let first = Instant::now();
+    let later = first + STREAMING_TEXT_FADE_DURATION + Duration::from_millis(1);
+
+    let started = streaming_text_fade_start_after_len_change(0, 5, None, first);
+    assert_eq!(started, Some(first));
+
+    let restarted = streaming_text_fade_start_after_len_change(5, 12, started, later);
+    assert_eq!(restarted, Some(later));
+}
+
+#[test]
+fn single_session_streaming_text_fade_restarts_after_renderer_clears_finished_fade() {
+    let later = Instant::now() + STREAMING_TEXT_FADE_DURATION + Duration::from_millis(1);
+
+    let restarted = streaming_text_fade_start_after_len_change(5, 12, None, later);
+    assert_eq!(restarted, Some(later));
+}
+
+#[test]
+fn single_session_streaming_text_fade_stays_idle_without_response_change() {
+    let now = Instant::now();
+
+    assert_eq!(
+        streaming_text_fade_start_after_len_change(5, 5, None, now),
+        None
+    );
+}
+
+#[test]
+fn single_session_streaming_text_fade_keeps_active_fade_without_response_change() {
+    let first = Instant::now();
+    let during = first + Duration::from_millis(40);
+
+    let unchanged = streaming_text_fade_start_after_len_change(5, 5, Some(first), during);
+    assert_eq!(unchanged, Some(first));
+}
+
+#[test]
+fn single_session_streaming_text_fade_resets_when_streaming_finishes() {
+    let first = Instant::now();
+    let started = streaming_text_fade_start_after_len_change(0, 5, None, first);
+    assert_eq!(
+        streaming_text_fade_start_after_len_change(5, 0, started, first),
+        None
+    );
+}
+
+#[test]
 fn single_session_streaming_text_opacity_scales_rich_text_segments() {
     let lines = vec![SingleSessionStyledLine::new(
         "streaming answer",
@@ -837,6 +978,32 @@ fn single_session_tab_autocompletes_desktop_slash_command() {
 
     assert_eq!(app.handle_key(KeyInput::UndoInput), KeyOutcome::Redraw);
     assert_eq!(app.draft, "/cop");
+}
+
+#[test]
+fn single_session_slash_suggestions_support_tui_style_fuzzy_abbreviations() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/cp".to_string()));
+
+    assert_eq!(app.active_inline_widget(), Some(InlineWidgetKind::SlashSuggestions));
+    let suggestions = app.inline_widget_styled_lines();
+    assert!(suggestions.iter().any(|line| {
+        line.style == SingleSessionLineStyle::OverlaySelection && line.text.contains("/copy")
+    }));
+
+    assert_eq!(app.handle_key(KeyInput::Autocomplete), KeyOutcome::Redraw);
+    assert_eq!(app.draft, "/copy");
+}
+
+#[test]
+fn single_session_slash_suggestions_keep_prefix_matches_before_fuzzy_matches() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/c".to_string()));
+
+    let suggestions = app.inline_widget_styled_lines();
+    assert!(suggestions.iter().any(|line| {
+        line.style == SingleSessionLineStyle::OverlaySelection && line.text.contains("/commands")
+    }));
 }
 
 #[test]
@@ -947,6 +1114,47 @@ fn single_session_slash_suggestions_use_inline_card_geometry() {
 }
 
 #[test]
+fn read_only_inline_widgets_use_per_widget_visible_height_limits() {
+    let mut app = SingleSessionApp::new(None);
+
+    app.show_session_info = true;
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SessionInfo)
+    );
+    assert_eq!(
+        app.inline_widget_visible_line_count(),
+        app.inline_widget_line_count().min(10)
+    );
+
+    app.show_session_info = false;
+    assert_eq!(app.handle_key(KeyInput::HotkeyHelp), KeyOutcome::Redraw);
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::HotkeyHelp)
+    );
+    assert_eq!(
+        app.inline_widget_visible_line_count(),
+        app.inline_widget_line_count().min(18)
+    );
+
+    app.show_help = false;
+    assert_eq!(
+        app.handle_key(KeyInput::Character("/".to_string())),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SlashSuggestions)
+    );
+    assert_eq!(
+        app.inline_widget_visible_line_count(),
+        app.inline_widget_line_count()
+            .min(DESKTOP_SLASH_SUGGESTION_ROW_LIMIT + 1)
+    );
+}
+
+#[test]
 fn single_session_composer_uses_next_prompt_number() {
     let mut app = SingleSessionApp::new(None);
     assert_eq!(app.next_prompt_number(), 1);
@@ -1013,6 +1221,48 @@ fn single_session_commands_alias_opens_help_without_sending_prompt() {
         app.active_inline_widget(),
         Some(InlineWidgetKind::HotkeyHelp)
     );
+}
+
+#[test]
+fn single_session_slash_resume_opens_session_switcher_without_sending_prompt() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("/resume".to_string()));
+
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SlashSuggestions)
+    );
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    assert!(app.session_switcher.open);
+    assert!(app.session_switcher.loading);
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SessionSwitcher)
+    );
+    assert_eq!(
+        app.active_inline_widget_mode(),
+        Some(InlineWidgetMode::Interactive)
+    );
+    assert!(app.draft.is_empty());
+    assert!(app.messages.is_empty());
+}
+
+#[test]
+fn single_session_slash_resume_completion_opens_session_switcher() {
+    let mut app = SingleSessionApp::new(None);
+    for ch in ["/", "r", "e", "s"] {
+        app.handle_key(KeyInput::Character(ch.to_string()));
+    }
+
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    assert_eq!(app.draft, "");
+    assert!(app.session_switcher.open);
 }
 
 #[test]
@@ -2351,6 +2601,14 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
     assert_visual_text_contains(&markdown_key, "streaming tail");
 
     let markdown_vertices = build_single_session_vertices(&markdown_app, size, 0.0, 0);
+    assert!(vertices_have_color(
+        &markdown_vertices,
+        COMPOSER_INPUT_BACKGROUND_COLOR
+    ));
+    assert!(vertices_have_color(
+        &markdown_vertices,
+        COMPOSER_INPUT_BORDER_COLOR
+    ));
     assert!(vertices_have_color(
         &markdown_vertices,
         QUOTE_CARD_BACKGROUND_COLOR
@@ -3993,8 +4251,11 @@ fn single_session_session_switcher_loads_filters_and_resumes_session() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(switcher.contains("desktop session switcher"));
+    assert!(switcher.contains("sessions ›"));
+    assert!(switcher.contains("preview"));
     assert!(switcher.contains("alpha"));
     assert!(switcher.contains("beta"));
+    assert!(switcher.contains("assistant alpha response"));
 
     assert_eq!(app.handle_key(KeyInput::MoveToLineEnd), KeyOutcome::Redraw);
     assert_eq!(app.session_switcher.selected, 1);
@@ -4032,6 +4293,106 @@ fn single_session_session_switcher_loads_filters_and_resumes_session() {
     let resumed = app.body_lines().join("\n");
     assert!(resumed.contains("beta status"));
     assert!(!resumed.contains("stale live transcript"));
+}
+
+#[test]
+fn single_session_resume_switcher_reopens_without_stale_filter_but_refresh_preserves_it() {
+    let mut app = SingleSessionApp::new(None);
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    app.apply_session_switcher_cards(vec![
+        test_session_card("session_alpha", "alpha", "active"),
+        test_session_card("session_beta", "beta", "closed"),
+    ]);
+
+    assert_eq!(
+        app.handle_key(KeyInput::Character("beta".to_string())),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(app.session_switcher.filter, "beta");
+
+    assert_eq!(
+        app.handle_key(KeyInput::RefreshSessions),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    assert_eq!(
+        app.session_switcher.filter, "beta",
+        "explicit refresh should keep the user's current filter"
+    );
+
+    assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
+    assert!(!app.session_switcher.open);
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    assert_eq!(
+        app.session_switcher.filter, "",
+        "fresh /resume opens must not inherit a stale filter that hides sessions"
+    );
+}
+
+#[test]
+fn single_session_resume_picker_switches_to_preview_pane_and_opens_terminal() {
+    let mut app = SingleSessionApp::new(None);
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    app.apply_session_switcher_cards(vec![
+        test_session_card("session_alpha", "alpha", "active"),
+        test_session_card("session_beta", "beta", "closed"),
+    ]);
+
+    assert_eq!(
+        app.handle_key(KeyInput::MoveCursorRight),
+        KeyOutcome::Redraw
+    );
+    let switcher = app
+        .inline_widget_styled_lines()
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(switcher.contains("focus: preview"));
+    assert!(switcher.contains("preview ›"));
+
+    assert_eq!(app.handle_key(KeyInput::MoveCursorLeft), KeyOutcome::Redraw);
+    assert_eq!(
+        app.handle_key(KeyInput::ModelPickerMove(1)),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(
+        app.handle_key(KeyInput::QueueDraft),
+        KeyOutcome::OpenSession {
+            session_id: "session_beta".to_string(),
+            title: "beta".to_string(),
+        }
+    );
+}
+
+#[test]
+fn single_session_resumed_transcript_hydration_replaces_card_preview() {
+    let mut app =
+        SingleSessionApp::new(Some(test_session_card("session_alpha", "alpha", "closed")));
+
+    app.apply_resumed_session_transcript(vec![
+        session_data::SessionTranscriptMessage {
+            role: "user".to_string(),
+            content: "previous prompt".to_string(),
+        },
+        session_data::SessionTranscriptMessage {
+            role: "assistant".to_string(),
+            content: "previous answer".to_string(),
+        },
+    ]);
+
+    let body = app.body_lines().join("\n");
+    assert!(body.contains("previous prompt"));
+    assert!(body.contains("previous answer"));
+    assert!(!body.contains("assistant alpha response"));
 }
 
 #[test]

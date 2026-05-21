@@ -16,3 +16,5 @@ When you make code changes to jcode:
 5. Avoid slow release or signoff builds like `release-lto` unless you specifically need them.
 6. After reload, continue automatically. Do not wait for user input.
 7. For UI changes, use `debug_socket` testers and frames.
+
+__SELFDEV_PRODUCT_FOCUS__

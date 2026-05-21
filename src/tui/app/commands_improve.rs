@@ -398,7 +398,7 @@ fn persist_improve_mode_local(app: &mut App, mode: Option<ImproveMode>) {
     let _ = app.session.save();
 }
 
-fn start_synthetic_user_turn(app: &mut App, content: String) {
+pub(super) fn start_synthetic_user_turn(app: &mut App, content: String) {
     app.commit_pending_streaming_assistant_message();
     app.add_provider_message(Message::user(&content));
     app.session.add_message(
@@ -436,7 +436,7 @@ fn start_synthetic_user_turn(app: &mut App, content: String) {
     app.pending_turn = true;
 }
 
-fn interrupt_and_queue_synthetic_message(
+pub(super) fn interrupt_and_queue_synthetic_message(
     app: &mut App,
     content: String,
     status_notice: &str,

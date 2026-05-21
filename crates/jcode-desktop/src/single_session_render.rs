@@ -18,6 +18,8 @@ pub(crate) const MARKDOWN_LIST_MARKER_COLOR: [f32; 4] = [0.060, 0.110, 0.240, 0.
 pub(crate) const MARKDOWN_TASK_DONE_COLOR: [f32; 4] = [0.025, 0.350, 0.190, 1.000];
 pub(crate) const MARKDOWN_TASK_OPEN_COLOR: [f32; 4] = [0.420, 0.320, 0.075, 0.980];
 pub(crate) const MARKDOWN_STRIKE_TEXT_COLOR: [f32; 4] = [0.310, 0.330, 0.380, 0.880];
+pub(crate) const COMPOSER_INPUT_BACKGROUND_COLOR: [f32; 4] = [0.985, 0.992, 1.000, 0.46];
+pub(crate) const COMPOSER_INPUT_BORDER_COLOR: [f32; 4] = [0.055, 0.125, 0.270, 0.18];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SingleSessionTextKey {
@@ -170,6 +172,7 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
     if app.has_activity_indicator() {
         push_streaming_activity_cue(&mut vertices, app, size, spinner_tick, None);
     }
+    push_single_session_composer_input_box(&mut vertices, app, size);
     push_single_session_selection(&mut vertices, app, size);
     push_single_session_scrollbar(&mut vertices, app, size, spinner_tick, smooth_scroll_lines);
 
@@ -279,6 +282,7 @@ pub(crate) fn build_single_session_vertices_with_cached_body(
     if app.has_activity_indicator() {
         push_streaming_activity_cue(&mut vertices, app, size, spinner_tick, Some(&viewport));
     }
+    push_single_session_composer_input_box(&mut vertices, app, size);
     push_single_session_selection(&mut vertices, app, size);
     push_single_session_scrollbar_for_total_lines(
         &mut vertices,
@@ -289,6 +293,44 @@ pub(crate) fn build_single_session_vertices_with_cached_body(
     );
 
     vertices
+}
+
+fn push_single_session_composer_input_box(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+) {
+    if app.stdin_response.is_some() {
+        return;
+    }
+
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let line_height = typography.code_size * typography.code_line_height;
+    let draft_top = single_session_draft_top_for_app(app, size);
+    let max_bottom = (size.height as f32 - PANEL_TITLE_TOP_PADDING).max(draft_top);
+    let padding_x = 13.0 * app.text_scale().clamp(0.65, 1.35);
+    let padding_y = 7.0 * app.text_scale().clamp(0.65, 1.35);
+    let left = PANEL_TITLE_LEFT_PADDING - padding_x;
+    let right = size.width as f32 - PANEL_TITLE_LEFT_PADDING + padding_x;
+    let rect = Rect {
+        x: left.max(6.0),
+        y: (draft_top - padding_y).max(4.0),
+        width: (right - left).max(1.0),
+        height: (line_height + padding_y * 2.0).min(max_bottom - draft_top + padding_y),
+    };
+    if rect.width <= 1.0 || rect.height <= 1.0 {
+        return;
+    }
+
+    let radius = (rect.height * 0.42).clamp(8.0, 18.0);
+    push_rounded_rect(vertices, rect, radius, COMPOSER_INPUT_BORDER_COLOR, size);
+    push_rounded_rect(
+        vertices,
+        inset_rect(rect, 1.2),
+        (radius - 1.2).max(1.0),
+        COMPOSER_INPUT_BACKGROUND_COLOR,
+        size,
+    );
 }
 
 #[cfg(test)]
@@ -715,7 +757,7 @@ fn fresh_welcome_inline_widget_visual_offset(
     let visual_bottom = fresh_welcome_visual_bottom_for_scale(size, app.text_scale());
     let gap = fresh_welcome_inline_widget_gap_for_scale(app.text_scale());
     let draft_top = single_session_draft_top_for_app(app, size);
-    let inline_height = inline_widget_text_height(app).max(line_height);
+    let inline_height = inline_widget_visible_text_height(app).max(line_height);
     let available = (draft_top - visual_bottom - gap).max(0.0);
 
     if inline_height <= available {
@@ -732,7 +774,7 @@ fn push_single_session_inline_widget_card(
     welcome_chrome_offset_pixels: f32,
     total_lines: usize,
 ) {
-    let line_count = app.inline_widget_line_count();
+    let line_count = app.inline_widget_visible_line_count();
     if line_count == 0 {
         return;
     }
@@ -949,7 +991,8 @@ fn inline_widget_text_left(size: PhysicalSize<u32>) -> f32 {
 
 fn inline_widget_max_text_width(size: PhysicalSize<u32>) -> f32 {
     let gutter = inline_widget_text_left(size);
-    (size.width as f32 - gutter * 2.0).max(1.0)
+    let available_card_width = (size.width as f32 - gutter * 2.0).max(1.0);
+    (available_card_width - INLINE_WIDGET_CARD_PADDING_X * 2.0).max(1.0)
 }
 
 #[cfg(test)]
@@ -3131,8 +3174,8 @@ pub(crate) fn single_session_body_bottom_for_total_lines(
     .max(single_session_body_top_for_app(app, size))
 }
 
-fn inline_widget_text_height(app: &SingleSessionApp) -> f32 {
-    let lines = app.inline_widget_line_count();
+fn inline_widget_visible_text_height(app: &SingleSessionApp) -> f32 {
+    let lines = app.inline_widget_visible_line_count();
     if lines == 0 {
         return 0.0;
     }
@@ -3144,7 +3187,7 @@ fn inline_widget_reserved_height(app: &SingleSessionApp) -> f32 {
     if app.inline_widget_line_count() == 0 {
         0.0
     } else {
-        (inline_widget_text_height(app)
+        (inline_widget_visible_text_height(app)
             + INLINE_WIDGET_CARD_PADDING_Y * 2.0
             + INLINE_WIDGET_BODY_GAP)
             * app.inline_widget_reveal_progress().clamp(0.0, 1.0)
@@ -4116,7 +4159,7 @@ pub(crate) fn single_session_text_areas_for_app_with_scroll<'a>(
         body_top_offset_pixels,
         single_session_body_top_for_app(app, size),
         text_bounds_bottom(single_session_body_bottom_for_app(app, size)),
-        inline_widget_lines.len(),
+        app.inline_widget_visible_line_count(),
         inline_widget_text_width,
         single_session_draft_top_for_app(app, size),
         welcome_chrome_offset_pixels,
@@ -4199,7 +4242,7 @@ pub(crate) fn single_session_text_areas_for_app_with_cached_body_viewport_and_re
             size,
             viewport.total_lines,
         )),
-        inline_widget_lines.len(),
+        app.inline_widget_visible_line_count(),
         inline_widget_text_width,
         single_session_draft_top_for_total_lines(app, size, viewport.total_lines),
         welcome_chrome_offset_pixels,

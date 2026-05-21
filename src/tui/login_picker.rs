@@ -884,6 +884,18 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
 
+    fn buffer_to_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn test_login_picker_preserves_underlying_background_outside_panels() {
         let mut picker = LoginPicker::with_summary(
@@ -962,5 +974,73 @@ mod tests {
             picker.selected_item().map(|item| item.provider.id),
             Some("claude")
         );
+    }
+
+    #[test]
+    fn login_picker_catalog_state_space_renders_and_executes_every_provider_state() {
+        let providers = crate::provider_catalog::login_providers();
+        assert!(
+            !providers.is_empty(),
+            "login provider catalog should not be empty"
+        );
+
+        for auth_state in [
+            AuthState::Available,
+            AuthState::Expired,
+            AuthState::NotConfigured,
+        ] {
+            for (index, provider) in providers.iter().copied().enumerate() {
+                let method_detail =
+                    format!("state-space detail for {} {auth_state:?}", provider.id);
+                let mut picker = LoginPicker::with_summary(
+                    " Login ",
+                    vec![LoginPickerItem::new(
+                        index + 1,
+                        provider,
+                        auth_state,
+                        method_detail.clone(),
+                    )],
+                    LoginPickerSummary {
+                        ready_count: usize::from(matches!(auth_state, AuthState::Available)),
+                        attention_count: usize::from(matches!(auth_state, AuthState::Expired)),
+                        setup_count: usize::from(matches!(auth_state, AuthState::NotConfigured)),
+                        recommended_count: usize::from(provider.recommended),
+                    },
+                );
+
+                let backend = TestBackend::new(140, 46);
+                let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+                terminal
+                    .draw(|frame| picker.render(frame))
+                    .expect("draw failed");
+                let text = buffer_to_text(terminal.backend().buffer());
+
+                for expected in [
+                    provider.display_name,
+                    provider.id,
+                    provider.auth_kind.label(),
+                    provider.menu_detail,
+                    method_detail.as_str(),
+                    "Press Enter to begin login.",
+                ] {
+                    assert!(
+                        text.contains(expected),
+                        "login picker missing {expected:?} for provider={} state={auth_state:?}; rendered:\n{text}",
+                        provider.id
+                    );
+                }
+
+                match picker
+                    .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                    .expect("enter should be handled")
+                {
+                    OverlayAction::Execute(selected) => assert_eq!(selected.id, provider.id),
+                    _ => panic!(
+                        "Enter should execute provider={} state={auth_state:?}",
+                        provider.id
+                    ),
+                }
+            }
+        }
     }
 }

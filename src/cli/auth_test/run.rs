@@ -42,7 +42,8 @@ async fn maybe_run_auth_test_smoke_for_choice(
         match auth_test_choice_plan(choice, model).await {
             Ok(AuthTestChoicePlan::Run { model }) => {
                 if matches!(kind, AuthTestSmokeKind::Tool)
-                    && let Some(detail) = tool_smoke_skip_detail_for_choice(choice, model.as_deref())
+                    && let Some(detail) =
+                        tool_smoke_skip_detail_for_choice(choice, model.as_deref())
                 {
                     report.push_step(kind.step_name(), true, detail);
                     return;
@@ -177,6 +178,40 @@ async fn run_post_login_validation_inner(
             choice.as_arg_value()
         )
     }
+}
+
+pub fn run_auth_test_coverage_command(
+    emit_json: bool,
+    output_path: Option<&str>,
+    coverage_path: Option<&str>,
+    gap_limit: usize,
+) -> Result<()> {
+    let coverage_path = coverage_path.map(std::path::Path::new);
+    let (coverage, path) = crate::live_tests::load_coverage(coverage_path)?;
+    let summary = crate::live_tests::strict_live_provider_model_coverage_summary(
+        &coverage,
+        path.display().to_string(),
+    );
+
+    if emit_json || output_path.is_some() {
+        let json = serde_json::to_string_pretty(&summary)?;
+        if let Some(path) = output_path {
+            std::fs::write(path, &json)
+                .with_context(|| format!("failed to write auth-test coverage report to {path}"))?;
+        }
+        if emit_json {
+            println!("{json}");
+        }
+    } else {
+        print!(
+            "{}",
+            crate::live_tests::format_strict_live_provider_model_coverage_summary(
+                &summary, gap_limit,
+            )
+        );
+    }
+
+    Ok(())
 }
 
 #[expect(
@@ -486,9 +521,16 @@ fn persist_auth_test_live_verification_event(
             }
             "provider_smoke" => {
                 capabilities.push("provider_smoke");
+                capabilities.push("non_streaming_chat_completion");
+                expected.push(crate::live_tests::checkpoints::NON_STREAMING_CHAT_COMPLETION);
+                stages.push(auth_test_step_stage(
+                    crate::live_tests::checkpoints::NON_STREAMING_CHAT_COMPLETION,
+                    step,
+                ));
             }
             "tool_smoke" => {
                 capabilities.push("real_jcode_tool_smoke");
+                expected.push(crate::live_tests::checkpoints::TOOL_CALL_PARSE);
                 expected.push(crate::live_tests::checkpoints::TOOL_EXECUTION_LOOP);
                 expected.push(crate::live_tests::checkpoints::TOOL_RESULT_FOLLOWUP);
                 expected.push(crate::live_tests::checkpoints::REAL_JCODE_TOOL_SMOKE);
@@ -499,6 +541,10 @@ fn persist_auth_test_live_verification_event(
                 .with_evidence("tool_name", serde_json::json!(AUTH_TEST_TOOL_NAME))
                 .with_evidence("tool_command", serde_json::json!(AUTH_TEST_TOOL_COMMAND));
                 stages.push(stage.clone());
+                stages.push(auth_test_tool_derived_stage(
+                    crate::live_tests::checkpoints::TOOL_CALL_PARSE,
+                    step,
+                ));
                 stages.push(auth_test_tool_derived_stage(
                     crate::live_tests::checkpoints::TOOL_EXECUTION_LOOP,
                     step,

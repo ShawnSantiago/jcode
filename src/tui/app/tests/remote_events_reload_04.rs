@@ -906,14 +906,21 @@ fn test_remote_super_space_routes_next_prompt_to_new_session() {
             .expect("Super+Space should arm routing");
         assert!(app.route_next_prompt_to_new_session);
 
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.processing_started = Some(std::time::Instant::now());
+        let active_started = app.processing_started;
+
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-            .expect("armed prompt should launch split request");
+            .expect("armed prompt should launch split request immediately");
 
         assert!(!app.route_next_prompt_to_new_session);
         assert!(app.pending_split_prompt.is_some());
         assert_eq!(app.pending_split_label.as_deref(), Some("Prompt"));
+        assert!(!app.pending_split_request);
         assert!(app.is_processing);
-        assert!(matches!(app.status, ProcessingStatus::Sending));
+        assert!(matches!(app.status, ProcessingStatus::Streaming));
+        assert_eq!(app.processing_started, active_started);
         assert!(app.current_message_id.is_none());
 
         app.handle_server_event(

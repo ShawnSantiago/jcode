@@ -364,6 +364,59 @@ fn filters_cover_role_provider_model_flags_and_dates() {
 }
 
 #[test]
+fn role_all_searches_user_assistant_and_metadata() {
+    with_temp_home(|home| {
+        let mut session = save_test_session(
+            "role-all-session",
+            vec![
+                (Role::User, vec![text("shared-needle from the user")]),
+                (
+                    Role::Assistant,
+                    vec![text("shared-needle from the assistant")],
+                ),
+            ],
+        );
+        session.save_label = Some("shared-needle metadata".to_string());
+        session.save().expect("save metadata update");
+
+        let mut options = SearchOptions::for_test("current-session");
+        options.limit = 10;
+        options.max_per_session = 10;
+        options.role_filter = parse_role_filter(Some("all")).expect("parse all role");
+
+        let results = run_search(home, "shared-needle", &options);
+        let roles = results
+            .iter()
+            .map(|result| result.role.as_str())
+            .collect::<Vec<_>>();
+        assert!(roles.contains(&"user"), "all should include user messages");
+        assert!(
+            roles.contains(&"assistant"),
+            "all should include assistant messages"
+        );
+        assert!(roles.contains(&"metadata"), "all should include metadata");
+
+        options.role_filter = Some(RoleFilter::User);
+        let user_results = run_search(home, "shared-needle", &options);
+        assert_eq!(user_results.len(), 1);
+        assert_eq!(user_results[0].role, "user");
+    });
+}
+
+#[test]
+fn role_parser_accepts_all_as_default_all_roles_filter() {
+    assert_eq!(parse_role_filter(None).unwrap(), None);
+    assert_eq!(parse_role_filter(Some("all")).unwrap(), None);
+    assert_eq!(parse_role_filter(Some(" ALL ")).unwrap(), None);
+    assert_eq!(
+        parse_role_filter(Some("assistant")).unwrap(),
+        Some(RoleFilter::Assistant)
+    );
+    let err = parse_role_filter(Some("browser")).expect_err("invalid role should fail");
+    assert!(err.contains("all, user, assistant, or metadata"));
+}
+
+#[test]
 fn context_expansion_returns_neighboring_messages_without_matching_hit() {
     with_temp_home(|home| {
         save_test_session(

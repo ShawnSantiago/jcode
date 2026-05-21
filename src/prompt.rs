@@ -7,6 +7,8 @@ use std::process::Command;
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 const SELFDEV_HINT_PROMPT: &str = include_str!("prompt/selfdev_hint.txt");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
+const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
+const SELFDEV_FOCUS_DESKTOP_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop.txt");
 
 /// Split system prompt for efficient caching
 /// Static content is cached, dynamic content is not
@@ -207,7 +209,7 @@ pub fn build_system_prompt_full(
     // Add self-dev guidance. Full workflow instructions are only included for
     // active self-dev sessions; other sessions get a lightweight hint.
     if is_selfdev {
-        let selfdev_prompt = build_selfdev_prompt();
+        let selfdev_prompt = build_selfdev_prompt_for_working_dir(working_dir);
         info.selfdev_chars = selfdev_prompt.len();
         parts.push(selfdev_prompt);
     } else {
@@ -282,7 +284,7 @@ pub fn build_system_prompt_split(
     // Add self-dev guidance. Full workflow instructions are only included for
     // active self-dev sessions; other sessions get a lightweight hint.
     if is_selfdev {
-        let selfdev_prompt = build_selfdev_prompt_static();
+        let selfdev_prompt = build_selfdev_prompt_static_for_working_dir(working_dir);
         info.selfdev_chars = selfdev_prompt.len();
         static_parts.push(selfdev_prompt);
     } else {
@@ -352,12 +354,56 @@ fn build_selfdev_hint_prompt() -> String {
 
 /// Build self-dev tools prompt section (static version without dynamic socket path)
 fn build_selfdev_prompt_static() -> String {
-    SELFDEV_MODE_PROMPT.replace("__DEBUG_SOCKET_BLOCK__\n\n", "")
+    build_selfdev_prompt_static_for_context(SelfDevProductContext::Tui)
 }
 
 /// Build self-dev tools prompt section
 fn build_selfdev_prompt() -> String {
-    SELFDEV_MODE_PROMPT.to_string()
+    build_selfdev_prompt_for_context(SelfDevProductContext::Tui)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfDevProductContext {
+    Tui,
+    Desktop,
+}
+
+impl SelfDevProductContext {
+    fn from_working_dir(working_dir: Option<&Path>) -> Self {
+        let Some(working_dir) = working_dir else {
+            return Self::Tui;
+        };
+
+        let path = working_dir.to_string_lossy().replace('\\', "/");
+        if path.contains("/crates/jcode-desktop") || path.ends_with("crates/jcode-desktop") {
+            Self::Desktop
+        } else {
+            Self::Tui
+        }
+    }
+
+    fn prompt_block(self) -> &'static str {
+        match self {
+            Self::Tui => SELFDEV_FOCUS_TUI_PROMPT,
+            Self::Desktop => SELFDEV_FOCUS_DESKTOP_PROMPT,
+        }
+    }
+}
+
+fn build_selfdev_prompt_static_for_working_dir(working_dir: Option<&Path>) -> String {
+    build_selfdev_prompt_static_for_context(SelfDevProductContext::from_working_dir(working_dir))
+}
+
+fn build_selfdev_prompt_for_working_dir(working_dir: Option<&Path>) -> String {
+    build_selfdev_prompt_for_context(SelfDevProductContext::from_working_dir(working_dir))
+}
+
+fn build_selfdev_prompt_static_for_context(context: SelfDevProductContext) -> String {
+    build_selfdev_prompt_for_context(context).replace("__DEBUG_SOCKET_BLOCK__\n\n", "")
+}
+
+fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
+    SELFDEV_MODE_PROMPT.replace("__SELFDEV_PRODUCT_FOCUS__", context.prompt_block())
 }
 
 /// Build immutable session context captured once per session.

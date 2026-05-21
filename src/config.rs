@@ -302,7 +302,7 @@ fn config_env_fingerprint() -> Vec<(String, String)> {
     values
 }
 
-pub(crate) fn invalidate_config_cache() {
+pub fn invalidate_config_cache() {
     let mut cache = CONFIG_CACHE
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -43,7 +43,7 @@ use single_session::{
 };
 use single_session_render::*;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -53,7 +53,7 @@ use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -65,6 +65,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
+const DESKTOP_RELOAD_WINDOW_ENV: &str = "JCODE_DESKTOP_RELOAD_WINDOW";
+const DESKTOP_RELOAD_HANDOFF_READY_ENV: &str = "JCODE_DESKTOP_RELOAD_READY_FILE";
+const DESKTOP_RELOAD_HANDOFF_RELEASE_ENV: &str = "JCODE_DESKTOP_RELOAD_RELEASE_FILE";
+const DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const DESKTOP_RELOAD_HANDOFF_TIMEOUT: Duration = Duration::from_secs(8);
+const DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
+const DESKTOP_RELOAD_MAX_RESTORED_DIMENSION: u32 = 32_768;
 const OUTER_PADDING: f32 = 8.0;
 const GAP: f32 = 6.0;
 const STATUS_BAR_HEIGHT: f32 = 30.0;
@@ -245,6 +252,27 @@ fn streaming_text_arrival_style_for_elapsed(elapsed: Duration) -> StreamingTextA
 fn streaming_text_fade_opacity_for_elapsed(elapsed: Duration) -> (f32, bool) {
     let style = streaming_text_arrival_style_for_elapsed(elapsed);
     (style.opacity, style.active)
+}
+
+fn streaming_text_fade_start_after_len_change(
+    previous_len: usize,
+    next_len: usize,
+    current_started_at: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    if next_len == 0 {
+        return None;
+    }
+
+    let response_changed = previous_len != next_len;
+    let fade_active = current_started_at.is_some_and(|started_at| {
+        now.saturating_duration_since(started_at) < STREAMING_TEXT_FADE_DURATION
+    });
+    if response_changed && !fade_active {
+        Some(now)
+    } else {
+        current_started_at
+    }
 }
 const DESKTOP_120FPS_FRAME_BUDGET: Duration = Duration::from_micros(8_333);
 const DESKTOP_PRESENT_STALL_BUDGET: Duration = Duration::from_millis(33);
@@ -450,6 +478,7 @@ async fn run() -> Result<()> {
     let desktop_gallery = desktop_gallery_state.is_some();
     let desktop_mode = desktop_mode_from_args(args.iter().map(String::as_str));
     let resume_session_id = desktop_resume_session_id_from_args(args.iter().map(String::as_str));
+    let desktop_reload_startup = DesktopReloadStartup::from_env();
     emit_desktop_profile_event(
         "jcode-desktop-launch-profile",
         serde_json::json!({
@@ -464,12 +493,19 @@ async fn run() -> Result<()> {
         .context("failed to create event loop")?;
     let event_loop_proxy = event_loop.create_proxy();
     startup_trace.mark("event loop created");
-    let mut window_builder = WindowBuilder::new()
-        .with_title("Jcode Desktop")
-        .with_inner_size(LogicalSize::new(
+    let mut window_builder = WindowBuilder::new().with_title("Jcode Desktop");
+    if let Some(placement) = desktop_reload_startup.window_placement {
+        window_builder = placement.apply_to_window_builder(window_builder);
+    } else {
+        window_builder = window_builder.with_inner_size(LogicalSize::new(
             DEFAULT_WINDOW_WIDTH,
             DEFAULT_WINDOW_HEIGHT,
         ));
+    }
+
+    if desktop_reload_startup.hidden_until_handoff_release() {
+        window_builder = window_builder.with_visible(false);
+    }
 
     if fullscreen {
         window_builder = window_builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
@@ -501,6 +537,12 @@ async fn run() -> Result<()> {
     window.set_title(&app.status_title());
     let mut canvas = Canvas::new(window.clone(), startup_trace).await?;
     startup_trace.mark("canvas ready");
+    if let Some(handoff) = desktop_reload_startup.handoff.as_ref() {
+        handoff.signal_ready_and_wait_for_release();
+        window.set_visible(true);
+        window.request_redraw();
+        startup_trace.mark("reload handoff released");
+    }
     let mut modifiers = ModifiersState::empty();
     let mut cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
     let mut selecting_body = false;
@@ -546,6 +588,7 @@ async fn run() -> Result<()> {
         let backend_wake = pending_backend_redraw_since
             .and(last_backend_redraw_request)
             .map(|last| last + BACKEND_REDRAW_FRAME_INTERVAL);
+        let hot_reload_wake = hot_reloader.next_wake(event_loop_now);
         let space_hold_wake = space_hold_started_at.and_then(|started_at| match &app {
             DesktopApp::Workspace(workspace) if !space_hold_consumed => {
                 Some(started_at + workspace.space_hold_toggle_duration())
@@ -555,6 +598,7 @@ async fn run() -> Result<()> {
         let wake = [
             default_wake,
             backend_wake,
+            hot_reload_wake,
             space_hold_wake,
             surface_timeout_redraw_at,
         ]
@@ -1429,15 +1473,9 @@ async fn run() -> Result<()> {
                         window.request_redraw();
                     }
                 }
-                if let Some(relaunch) = hot_reloader.poll(&app) {
-                    if let Err(error) = relaunch.spawn() {
-                        desktop_log::error(format_args!(
-                            "jcode-desktop: failed to hot reload desktop: {error:#}"
-                        ));
-                    } else {
-                        target.exit();
-                        return;
-                    }
+                if hot_reloader.poll(&app, &window) {
+                    target.exit();
+                    return;
                 }
 
                 if surface_renderable && canvas.needs_initial_frame {
@@ -4120,9 +4158,11 @@ fn initial_single_session_app(resume_session_id: Option<&str>) -> DesktopApp {
     match session_data::load_session_card_by_id(session_id) {
         Ok(Some(card)) => {
             app.replace_session(Some(card));
+            app.hydrate_resumed_session_from_disk(session_id);
         }
         Ok(None) => {
             app.set_status_label(format!("resumed session {session_id}"));
+            app.hydrate_resumed_session_from_disk(session_id);
         }
         Err(error) => {
             desktop_log::error(format_args!(
@@ -4173,10 +4213,265 @@ fn desktop_resume_session_id_from_args<'a>(
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DesktopReloadWindowPlacement {
+    position: Option<PhysicalPosition<i32>>,
+    inner_size: PhysicalSize<u32>,
+}
+
+impl DesktopReloadWindowPlacement {
+    fn from_window(window: &Window) -> Option<Self> {
+        let inner_size = window.inner_size();
+        if !desktop_reload_window_size_is_valid(inner_size) {
+            return None;
+        }
+        Some(Self {
+            position: window.outer_position().ok(),
+            inner_size,
+        })
+    }
+
+    fn from_env_value(raw: &str) -> Option<Self> {
+        let parts = raw.split(',').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            return None;
+        }
+
+        let position = match (parts[0], parts[1]) {
+            ("_", "_") => None,
+            (x, y) => Some(PhysicalPosition::new(x.parse().ok()?, y.parse().ok()?)),
+        };
+        let inner_size = PhysicalSize::new(parts[2].parse().ok()?, parts[3].parse().ok()?);
+        if !desktop_reload_window_size_is_valid(inner_size) {
+            return None;
+        }
+        Some(Self {
+            position,
+            inner_size,
+        })
+    }
+
+    fn to_env_value(self) -> String {
+        let (x, y) = match self.position {
+            Some(position) => (position.x.to_string(), position.y.to_string()),
+            None => ("_".to_string(), "_".to_string()),
+        };
+        format!(
+            "{x},{y},{},{}",
+            self.inner_size.width, self.inner_size.height
+        )
+    }
+
+    fn apply_to_window_builder(self, mut window_builder: WindowBuilder) -> WindowBuilder {
+        window_builder = window_builder.with_inner_size(self.inner_size);
+        if let Some(position) = self.position {
+            window_builder = window_builder.with_position(position);
+        }
+        window_builder
+    }
+}
+
+fn desktop_reload_window_size_is_valid(size: PhysicalSize<u32>) -> bool {
+    (1..=DESKTOP_RELOAD_MAX_RESTORED_DIMENSION).contains(&size.width)
+        && (1..=DESKTOP_RELOAD_MAX_RESTORED_DIMENSION).contains(&size.height)
+}
+
+#[derive(Clone, Debug, Default)]
+struct DesktopReloadStartup {
+    window_placement: Option<DesktopReloadWindowPlacement>,
+    handoff: Option<DesktopReloadStartupHandoff>,
+}
+
+impl DesktopReloadStartup {
+    fn from_env() -> Self {
+        let raw_window_placement = std::env::var(DESKTOP_RELOAD_WINDOW_ENV).ok();
+        let ready_file = std::env::var_os(DESKTOP_RELOAD_HANDOFF_READY_ENV).map(PathBuf::from);
+        let release_file = std::env::var_os(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV).map(PathBuf::from);
+        unsafe {
+            std::env::remove_var(DESKTOP_RELOAD_WINDOW_ENV);
+            std::env::remove_var(DESKTOP_RELOAD_HANDOFF_READY_ENV);
+            std::env::remove_var(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV);
+        }
+
+        let window_placement = raw_window_placement.as_deref().and_then(|raw| {
+            let placement = DesktopReloadWindowPlacement::from_env_value(raw);
+            if placement.is_none() {
+                desktop_log::warn(format_args!(
+                    "jcode-desktop: ignoring invalid reload window placement {raw:?}"
+                ));
+            }
+            placement
+        });
+        let handoff = match (ready_file, release_file) {
+            (Some(ready_file), Some(release_file)) => Some(DesktopReloadStartupHandoff {
+                ready_file,
+                release_file,
+            }),
+            (None, None) => None,
+            _ => {
+                desktop_log::warn(format_args!(
+                    "jcode-desktop: ignoring incomplete reload handoff environment"
+                ));
+                None
+            }
+        };
+
+        Self {
+            window_placement,
+            handoff,
+        }
+    }
+
+    fn hidden_until_handoff_release(&self) -> bool {
+        self.handoff.is_some()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DesktopReloadStartupHandoff {
+    ready_file: PathBuf,
+    release_file: PathBuf,
+}
+
+impl DesktopReloadStartupHandoff {
+    fn signal_ready_and_wait_for_release(&self) {
+        if let Err(error) = write_desktop_reload_marker(&self.ready_file) {
+            desktop_log::warn(format_args!(
+                "jcode-desktop: failed to signal reload readiness: {error:#}"
+            ));
+            return;
+        }
+
+        desktop_log::info(format_args!(
+            "jcode-desktop: reload child ready, waiting for parent release"
+        ));
+        let deadline = Instant::now() + DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.release_file.exists() {
+                cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
+                return;
+            }
+            std::thread::sleep(DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL);
+        }
+
+        desktop_log::warn(format_args!(
+            "jcode-desktop: reload parent did not release handoff within {}ms; showing replacement window anyway",
+            DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT.as_millis()
+        ));
+        cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DesktopReloadHandoff {
+    ready_file: PathBuf,
+    release_file: PathBuf,
+    window_placement: Option<DesktopReloadWindowPlacement>,
+}
+
+impl DesktopReloadHandoff {
+    fn new(window: &Window) -> Result<Self> {
+        let dir = desktop_reload_handoff_temp_dir();
+        fs::create_dir_all(&dir).with_context(|| {
+            format!(
+                "failed to create desktop reload handoff directory {}",
+                dir.display()
+            )
+        })?;
+        Ok(Self {
+            ready_file: dir.join("ready"),
+            release_file: dir.join("release"),
+            window_placement: DesktopReloadWindowPlacement::from_window(window),
+        })
+    }
+
+    fn apply_to_command(&self, command: &mut Command) {
+        if let Some(placement) = self.window_placement {
+            command.env(DESKTOP_RELOAD_WINDOW_ENV, placement.to_env_value());
+        }
+        command.env(DESKTOP_RELOAD_HANDOFF_READY_ENV, &self.ready_file);
+        command.env(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV, &self.release_file);
+    }
+
+    fn watcher(&self) -> DesktopReloadHandoffWatcher {
+        DesktopReloadHandoffWatcher {
+            ready_file: self.ready_file.clone(),
+            release_file: self.release_file.clone(),
+            spawned_at: Instant::now(),
+        }
+    }
+
+    fn cleanup(&self) {
+        cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DesktopReloadHandoffWatcher {
+    ready_file: PathBuf,
+    release_file: PathBuf,
+    spawned_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesktopReloadHandoffPoll {
+    Waiting,
+    Ready,
+    TimedOut,
+}
+
+impl DesktopReloadHandoffWatcher {
+    fn poll(&self) -> Result<DesktopReloadHandoffPoll> {
+        if self.ready_file.exists() {
+            write_desktop_reload_marker(&self.release_file)?;
+            return Ok(DesktopReloadHandoffPoll::Ready);
+        }
+        if self.spawned_at.elapsed() >= DESKTOP_RELOAD_HANDOFF_TIMEOUT {
+            return Ok(DesktopReloadHandoffPoll::TimedOut);
+        }
+        Ok(DesktopReloadHandoffPoll::Waiting)
+    }
+
+    fn cleanup(&self) {
+        cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
+    }
+}
+
+fn desktop_reload_handoff_temp_dir() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "jcode-desktop-reload-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+fn write_desktop_reload_marker(path: &Path) -> Result<()> {
+    fs::write(path, format!("{}\n", std::process::id()))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn cleanup_desktop_reload_handoff_files(ready_file: &Path, release_file: &Path) {
+    let _ = fs::remove_file(ready_file);
+    let _ = fs::remove_file(release_file);
+    if ready_file.parent() == release_file.parent()
+        && let Some(parent) = ready_file.parent()
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("jcode-desktop-reload-"))
+    {
+        let _ = fs::remove_dir(parent);
+    }
+}
+
 struct DesktopHotReloader {
     relaunch: Option<DesktopRelaunch>,
     observed_modified: Option<std::time::SystemTime>,
     last_checked: Instant,
+    pending_handoff: Option<DesktopReloadHandoffWatcher>,
 }
 
 impl DesktopHotReloader {
@@ -4191,24 +4486,85 @@ impl DesktopHotReloader {
             relaunch,
             observed_modified,
             last_checked: Instant::now(),
+            pending_handoff: None,
         }
     }
 
-    fn poll(&mut self, app: &DesktopApp) -> Option<DesktopRelaunch> {
+    fn next_wake(&self, now: Instant) -> Option<Instant> {
+        if self.pending_handoff.is_some() {
+            return Some(now + DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL);
+        }
+        self.relaunch.as_ref()?;
+        Some(std::cmp::max(now, self.last_checked + Self::CHECK_INTERVAL))
+    }
+
+    fn poll(&mut self, app: &DesktopApp, window: &Window) -> bool {
+        if self.poll_pending_handoff() {
+            return true;
+        }
+        if self.pending_handoff.is_some() {
+            return false;
+        }
         if self.last_checked.elapsed() < Self::CHECK_INTERVAL {
-            return None;
+            return false;
         }
         self.last_checked = Instant::now();
 
-        let relaunch = self.relaunch.as_ref()?;
+        let Some(relaunch) = self.relaunch.as_ref() else {
+            return false;
+        };
         let binary = desktop_reload_binary_candidate(&relaunch.binary);
-        let current_modified = binary_modified_time(&binary)?;
+        let Some(current_modified) = binary_modified_time(&binary) else {
+            return false;
+        };
         let observed_modified = self.observed_modified;
         self.observed_modified = Some(current_modified);
         if observed_modified.is_some_and(|observed| current_modified > observed) {
-            return Some(relaunch.for_app(app, binary));
+            let relaunch = relaunch.for_app(app, binary);
+            match relaunch.spawn_for_window(window) {
+                Ok(Some(handoff)) => {
+                    self.pending_handoff = Some(handoff);
+                }
+                Ok(None) => return true,
+                Err(error) => {
+                    desktop_log::error(format_args!(
+                        "jcode-desktop: failed to hot reload desktop: {error:#}"
+                    ));
+                }
+            }
         }
-        None
+        false
+    }
+
+    fn poll_pending_handoff(&mut self) -> bool {
+        let Some(pending_handoff) = self.pending_handoff.as_ref() else {
+            return false;
+        };
+        match pending_handoff.poll() {
+            Ok(DesktopReloadHandoffPoll::Waiting) => false,
+            Ok(DesktopReloadHandoffPoll::Ready) => {
+                desktop_log::info(format_args!(
+                    "jcode-desktop: reload replacement is ready; exiting old process"
+                ));
+                true
+            }
+            Ok(DesktopReloadHandoffPoll::TimedOut) => {
+                desktop_log::warn(format_args!(
+                    "jcode-desktop: reload replacement did not become ready within {}ms; keeping old process alive",
+                    DESKTOP_RELOAD_HANDOFF_TIMEOUT.as_millis()
+                ));
+                if let Some(pending_handoff) = self.pending_handoff.take() {
+                    pending_handoff.cleanup();
+                }
+                false
+            }
+            Err(error) => {
+                desktop_log::error(format_args!(
+                    "jcode-desktop: failed to release reload replacement: {error:#}"
+                ));
+                true
+            }
+        }
     }
 }
 
@@ -4235,17 +4591,42 @@ impl DesktopRelaunch {
         })
     }
 
-    fn spawn(&self) -> Result<()> {
+    fn spawn_for_window(&self, window: &Window) -> Result<Option<DesktopReloadHandoffWatcher>> {
+        let handoff = match DesktopReloadHandoff::new(window) {
+            Ok(handoff) => Some(handoff),
+            Err(error) => {
+                desktop_log::warn(format_args!(
+                    "jcode-desktop: reload handoff unavailable, falling back to immediate relaunch: {error:#}"
+                ));
+                None
+            }
+        };
         desktop_log::info(format_args!(
-            "jcode-desktop: hot reloading into {} with args {:?}",
+            "jcode-desktop: hot reloading into {} with args {:?}{}",
             self.binary.display(),
-            self.args
+            self.args,
+            if handoff.is_some() {
+                " using handoff"
+            } else {
+                ""
+            }
         ));
-        Command::new(&self.binary)
-            .args(&self.args)
-            .spawn()
-            .with_context(|| format!("failed to spawn {}", self.binary.display()))?;
-        Ok(())
+        let mut command = Command::new(&self.binary);
+        command.args(&self.args);
+        command.env_remove(DESKTOP_RELOAD_WINDOW_ENV);
+        command.env_remove(DESKTOP_RELOAD_HANDOFF_READY_ENV);
+        command.env_remove(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV);
+        if let Some(handoff) = handoff.as_ref() {
+            handoff.apply_to_command(&mut command);
+        }
+        if let Err(error) = command.spawn() {
+            if let Some(handoff) = handoff.as_ref() {
+                handoff.cleanup();
+            }
+            return Err(error)
+                .with_context(|| format!("failed to spawn {}", self.binary.display()));
+        }
+        Ok(handoff.as_ref().map(DesktopReloadHandoff::watcher))
     }
 
     fn for_app(&self, app: &DesktopApp, binary: PathBuf) -> Self {
@@ -6725,15 +7106,12 @@ impl Canvas {
 
     fn update_single_session_streaming_fade(&mut self, app: &SingleSessionApp) {
         let response_len = app.streaming_response.len();
-        if response_len == 0 {
-            self.single_session_streaming_response_len = 0;
-            self.single_session_streaming_fade_started_at = None;
-            return;
-        }
-
-        if response_len > self.single_session_streaming_response_len {
-            self.single_session_streaming_fade_started_at = Some(Instant::now());
-        }
+        self.single_session_streaming_fade_started_at = streaming_text_fade_start_after_len_change(
+            self.single_session_streaming_response_len,
+            response_len,
+            self.single_session_streaming_fade_started_at,
+            Instant::now(),
+        );
         self.single_session_streaming_response_len = response_len;
     }
 

@@ -1110,13 +1110,31 @@ fn disable_subscription_runtime_mode() {
     crate::subscription_catalog::clear_runtime_env();
 }
 
+fn disable_subscription_runtime_mode_preserving_active_provider_profile() {
+    if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some()
+        || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
+    {
+        crate::env::remove_var(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
+    } else {
+        disable_subscription_runtime_mode();
+    }
+}
+
 pub fn apply_login_provider_profile_env(provider: LoginProviderDescriptor) {
-    if let LoginProviderTarget::OpenAiCompatible(profile) = provider.target {
-        force_apply_openai_compatible_profile_env(Some(profile));
-        // Bootstrap login still spawns the daemon with `--provider auto`. Mark the
-        // just-selected compatible provider as active so the child process does
-        // not clear these inherited runtime vars before credential detection.
-        crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    match provider.target {
+        LoginProviderTarget::OpenAiCompatible(profile) => {
+            force_apply_openai_compatible_profile_env(Some(profile));
+            // Bootstrap login still spawns the daemon with `--provider auto`. Mark the
+            // just-selected compatible provider as active so the child process does
+            // not clear these inherited runtime vars before credential detection.
+            crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+        }
+        LoginProviderTarget::AutoImport | LoginProviderTarget::Google => {}
+        _ => {
+            // A later non-compatible login selection must not inherit a stale
+            // compatible-provider profile from an earlier bootstrap/login path.
+            force_apply_openai_compatible_profile_env(None);
+        }
     }
 }
 
@@ -1403,10 +1421,12 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             let profile = profile_for_choice(choice)
                 .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
-            if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
-                && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
-            {
-                apply_openai_compatible_profile_env(Some(profile));
+            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none() {
+                // An explicit `--provider <compatible>` selection should win over
+                // any stale active-profile marker inherited from a previous
+                // bootstrap/login flow. Named provider profiles still take
+                // precedence when explicitly configured.
+                force_apply_openai_compatible_profile_env(Some(profile));
             }
             let mut runtime_model_hint = None;
             let display_name = if let Ok(named) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
@@ -1429,9 +1449,7 @@ async fn init_provider_with_options(
                 display_name
             ));
             crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
-            if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some()
-                || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
-            {
+            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
                 let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")?;
                 let cfg = crate::config::config();
                 let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
@@ -1465,7 +1483,7 @@ async fn init_provider_with_options(
             Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Auto => {
-            disable_subscription_runtime_mode();
+            disable_subscription_runtime_mode_preserving_active_provider_profile();
             unlock_model_provider();
             let auto_detect_start = std::time::Instant::now();
             let mut availability = detect_auto_provider_flags().await;

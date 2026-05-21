@@ -73,7 +73,7 @@ struct SearchInput {
     /// Maximum number of hits from a single session. Defaults to 1 for diversity.
     #[serde(default)]
     max_per_session: Option<i64>,
-    /// Restrict matches to user, assistant, or metadata results.
+    /// Restrict matches to user, assistant, metadata results, or all transcript roles.
     #[serde(default)]
     role: Option<String>,
     /// Restrict sessions by provider key/source label substring.
@@ -267,8 +267,8 @@ impl Tool for SessionSearchTool {
                 },
                 "role": {
                     "type": "string",
-                    "enum": ["user", "assistant", "metadata"],
-                    "description": "Restrict results to a role or to metadata-only hits."
+                    "enum": ["all", "user", "assistant", "metadata"],
+                    "description": "Restrict results to a role or to metadata-only hits. Defaults to all transcript roles plus metadata."
                 },
                 "provider": {
                     "type": "string",
@@ -473,9 +473,12 @@ fn parse_role_filter(raw: Option<&str>) -> std::result::Result<Option<RoleFilter
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return Ok(None);
     };
-    RoleFilter::parse(raw)
-        .map(Some)
-        .ok_or_else(|| format!("role must be one of user, assistant, or metadata; received {raw}."))
+    if raw.eq_ignore_ascii_case("all") {
+        return Ok(None);
+    }
+    RoleFilter::parse(raw).map(Some).ok_or_else(|| {
+        format!("role must be one of all, user, assistant, or metadata; received {raw}.")
+    })
 }
 
 fn normalize_optional_filter(raw: Option<String>) -> Option<String> {

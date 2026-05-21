@@ -49,6 +49,9 @@ impl App {
             "git" => {
                 "`/git`\nShow `git status --short --branch` for the current session working directory.\n\n`/git status`\nAlias for `/git`."
             }
+            "commit" => {
+                "`/commit`\nAsk the agent to inspect current uncommitted changes and create interactive, logical commits.\n\nThe agent should group related files or hunks, preserve unrelated work, validate as appropriate, and report the commits created plus anything left uncommitted."
+            }
             "catchup" => {
                 "`/catchup`\nOpen the Catch Up picker for finished sessions that need attention.\n\n`/catchup next`\nTeleport to the next session needing attention and open a Catch Up brief in the side panel.\n\n`/catchup list`\nAlias for opening the picker."
             }

@@ -57,6 +57,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/btw", "Ask a side question in the side panel"),
     RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
     RegisteredCommand::public("/git", "Show git status for the session working directory"),
+    RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public("/transcript", "Open the current session transcript file"),
     RegisteredCommand::public("/subagent-model", "Show/change subagent model policy"),
     RegisteredCommand::public("/autoreview", "Show/toggle automatic end-of-turn review"),
