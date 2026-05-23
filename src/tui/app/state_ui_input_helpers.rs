@@ -40,7 +40,7 @@ impl RegisteredCommand {
 
 const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
-    RegisteredCommand::public("/?", "Alias for /help"),
+    RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/commands", "Alias for /help"),
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
