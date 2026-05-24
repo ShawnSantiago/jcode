@@ -322,6 +322,37 @@ fn desktop_event_parser_maps_streaming_server_events() {
         None,
         "KV cache bookkeeping is internal and should not appear as a system notice"
     );
+    for event_type in [
+        "batch_progress",
+        "mcp_status",
+        "memory_injected",
+        "memory_activity",
+        "notification",
+        "compaction",
+        "soft_interrupt_injected",
+        "side_panel_state",
+        "swarm_status",
+        "swarm_plan",
+        "swarm_plan_proposal",
+        "transcript",
+        "input_shell_result",
+        "split_response",
+        "compacted_history",
+        "comm_request",
+        "comm_response",
+        "comm_status",
+        "comm_presence",
+    ] {
+        assert_eq!(
+            desktop_event_from_server_value(&json!({
+                "type": event_type,
+                "message": "should not render",
+                "status": "running"
+            })),
+            None,
+            "{event_type} is internal protocol state and should not render into desktop chat"
+        );
+    }
     assert_eq!(
         desktop_event_from_server_value(
             &json!({"type": "connection_type", "connection": "websocket"})
