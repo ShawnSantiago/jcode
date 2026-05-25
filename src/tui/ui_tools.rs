@@ -1201,13 +1201,13 @@ pub(super) fn get_tool_summary_with_budget(
                 _ => action.to_string(),
             }
         }
-        "goal" => {
+        "initiative" => {
             let action = tool
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or_else(|| {
-                    log_missing_tool_action_for_display(tool, "goal");
+                    log_missing_tool_action_for_display(tool, "initiative");
                     "action missing"
                 });
             let id = tool.input.get("id").and_then(|v| v.as_str());
