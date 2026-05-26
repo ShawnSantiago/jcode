@@ -830,10 +830,57 @@ impl BashTool {
             }
 
             if started.elapsed() >= timeout_duration {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-                let _ = tokio::fs::remove_file(&info.output_file).await;
-                let _ = tokio::fs::remove_file(&info.status_file).await;
-                return Err(anyhow::anyhow!("Command timed out after {}ms", timeout_ms));
+                let elapsed = started.elapsed();
+                manager
+                    .register_detached_task(
+                        &info,
+                        "bash",
+                        Some(display_name.clone()),
+                        &ctx.session_id,
+                        pid,
+                        &started_at,
+                        params.notify,
+                        params.wake,
+                    )
+                    .await;
+
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                let output = format!(
+                    "Command exceeded the foreground timeout after {:.1}s and is continuing in background.\n\n\
+                     Task ID: {}\n\
+                     Name: {}\n\
+                     Foreground time used: {:.1}s\n\
+                     Output file: {}\n\
+                     Status file: {}\n\n\
+                     The command is still running; do not rerun it unless you intentionally want a second copy.\n\
+                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion or the next progress checkpoint.\n\
+                     Use `bg` with action=\"output\" and task_id=\"{}\" to inspect output.",
+                    timeout_ms as f64 / 1000.0,
+                    info.task_id,
+                    display_name,
+                    elapsed.as_secs_f64(),
+                    info.output_file.display(),
+                    info.status_file.display(),
+                    info.task_id,
+                    info.task_id,
+                );
+                return Ok(ToolOutput::new(output)
+                    .with_title(
+                        params
+                            .intent
+                            .clone()
+                            .unwrap_or_else(|| params.command.clone()),
+                    )
+                    .with_metadata(json!({
+                        "background": true,
+                        "task_id": info.task_id,
+                        "output_file": info.output_file.to_string_lossy(),
+                        "status_file": info.status_file.to_string_lossy(),
+                        "timeout_promoted": true,
+                        "foreground_timeout_ms": timeout_ms,
+                        "foreground_elapsed_ms": elapsed_ms,
+                        "pid": pid,
+                    })));
             }
 
             if shutdown_signal

@@ -521,11 +521,22 @@ impl Provider for OpenRouterProvider {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
-        if let Some(effort) = reasoning_effort.as_deref()
-            && Self::profile_supports_reasoning_effort(self.profile_id.as_deref())
-            && effort != "none"
-        {
-            request["reasoning_effort"] = serde_json::json!(effort);
+        let mut sent_reasoning_config = false;
+        if let Some(effort) = reasoning_effort.as_deref() {
+            if Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
+                if effort != "none" {
+                    request["reasoning_effort"] = serde_json::json!(effort);
+                    sent_reasoning_config = true;
+                }
+            } else if Self::profile_supports_unified_reasoning(
+                self.profile_id.as_deref(),
+                self.send_openrouter_headers,
+            ) {
+                request["reasoning"] = serde_json::json!({
+                    "effort": effort,
+                });
+                sent_reasoning_config = true;
+            }
         }
 
         if !api_tools.is_empty() {
@@ -534,7 +545,9 @@ impl Provider for OpenRouterProvider {
         }
 
         // Optional thinking override for OpenRouter (provider-specific).
-        if let Some(enable) = thinking_enabled {
+        if let Some(enable) = thinking_enabled
+            && !sent_reasoning_config
+        {
             request["thinking"] = serde_json::json!({
                 "type": if enable { "enabled" } else { "disabled" }
             });
@@ -727,7 +740,10 @@ impl Provider for OpenRouterProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        if !Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
+        if !Self::supports_reasoning_effort_for_profile(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
             return None;
         }
         self.reasoning_effort
@@ -737,12 +753,16 @@ impl Provider for OpenRouterProvider {
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
-        if !Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
+        if !Self::supports_reasoning_effort_for_profile(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
             anyhow::bail!(
-                "Reasoning effort is only supported for DeepSeek direct profiles on OpenAI-compatible providers"
+                "Reasoning effort is only supported for OpenRouter and DeepSeek direct profiles"
             );
         }
-        let normalized = Self::normalize_reasoning_effort(effort);
+        let normalized =
+            Self::normalize_reasoning_effort_for_profile(self.profile_id.as_deref(), effort);
         let mut current = self.reasoning_effort.try_write().map_err(|_| {
             anyhow::anyhow!("Cannot change reasoning effort while a request is in progress")
         })?;
@@ -753,6 +773,11 @@ impl Provider for OpenRouterProvider {
     fn available_efforts(&self) -> Vec<&'static str> {
         if Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
             vec!["none", "low", "medium", "high", "max"]
+        } else if Self::profile_supports_unified_reasoning(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
+            vec!["none", "low", "medium", "high", "xhigh"]
         } else {
             vec![]
         }
@@ -974,6 +999,16 @@ impl Provider for OpenRouterProvider {
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache
             && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+            && let Some(ctx) = model.context_length
+        {
+            return ctx as usize;
+        }
+        // A background/profile catalog refresh may have already persisted live
+        // /models metadata before this provider instance has hydrated its
+        // in-memory cache. Use that live catalog context length before falling
+        // back to static defaults.
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry()
+            && let Some(model) = cache_entry.models.iter().find(|m| m.id == model_id)
             && let Some(ctx) = model.context_length
         {
             return ctx as usize;

@@ -40,7 +40,7 @@ impl RegisteredCommand {
 
 const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
-    RegisteredCommand::public("/?", "Alias for /help"),
+    RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/commands", "Alias for /help"),
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
@@ -78,7 +78,12 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
     RegisteredCommand::public("/memory", "Toggle memory feature"),
-    RegisteredCommand::public("/goals", "Open goals overview / resume tracked goals"),
+    RegisteredCommand::public("/test", "Verify a claim/current changes with layered tests"),
+    RegisteredCommand::public(
+        "/initiatives",
+        "Open initiatives overview / resume tracked initiatives",
+    ),
+    RegisteredCommand::public("/goals", "Legacy alias for /initiatives"),
     RegisteredCommand::public("/swarm", "Toggle swarm feature"),
     RegisteredCommand::public("/overnight", "Run a supervised overnight coordinator"),
     RegisteredCommand::public("/context", "Show the full session context snapshot"),
@@ -96,6 +101,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/update", "Background update and auto reload"),
     RegisteredCommand::public("/resume", "Open session picker"),
     RegisteredCommand::public("/sessions", "Alias for /resume"),
+    RegisteredCommand::public("/session", "Alias for /resume"),
     RegisteredCommand::public("/catchup", "Open Catch Up picker"),
     RegisteredCommand::public("/back", "Return to the previous Catch Up session"),
     RegisteredCommand::public("/save", "Bookmark session for easy access"),
@@ -1006,6 +1012,82 @@ impl App {
         self.get_suggestions_for(&self.input)
     }
 
+    fn clamp_command_suggestion_selection(&mut self) -> Vec<(String, &'static str)> {
+        let suggestions = self.command_suggestions();
+        if suggestions.is_empty() {
+            self.command_suggestion_selected = 0;
+        } else {
+            self.command_suggestion_selected = self
+                .command_suggestion_selected
+                .min(suggestions.len().saturating_sub(1));
+        }
+        suggestions
+    }
+
+    pub(super) fn move_command_suggestion_selection(&mut self, delta: i32) -> bool {
+        let suggestions = self.clamp_command_suggestion_selection();
+        if suggestions.is_empty() {
+            return false;
+        }
+
+        let len = suggestions.len() as i32;
+        let selected = self.command_suggestion_selected as i32;
+        self.command_suggestion_selected = (selected + delta).rem_euclid(len) as usize;
+        true
+    }
+
+    fn arrow_modifiers_allow_command_suggestion_navigation(modifiers: KeyModifiers) -> bool {
+        !modifiers.intersects(
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER,
+        )
+    }
+
+    pub(super) fn handle_command_suggestion_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        if self.command_suggestions().is_empty() {
+            return false;
+        }
+
+        match code {
+            KeyCode::Down
+                if Self::arrow_modifiers_allow_command_suggestion_navigation(modifiers) =>
+            {
+                self.move_command_suggestion_selection(1)
+            }
+            KeyCode::Up if Self::arrow_modifiers_allow_command_suggestion_navigation(modifiers) => {
+                self.move_command_suggestion_selection(-1)
+            }
+            KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_command_suggestion_selection(1)
+            }
+            KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_command_suggestion_selection(-1)
+            }
+            KeyCode::Enter if modifiers.is_empty() => self.accept_selected_command_suggestion(),
+            _ => false,
+        }
+    }
+
+    pub(super) fn accept_selected_command_suggestion(&mut self) -> bool {
+        let suggestions = self.clamp_command_suggestion_selection();
+        let Some((cmd, _)) = suggestions.get(self.command_suggestion_selected).cloned() else {
+            return false;
+        };
+        if cmd == self.input.trim() {
+            return false;
+        }
+
+        self.remember_input_undo_state();
+        self.input = cmd;
+        self.cursor_pos = self.input.len();
+        self.tab_completion_state = None;
+        self.command_suggestion_selected = 0;
+        true
+    }
+
     /// Get suggestion prompts for new users on the initial empty screen.
     /// Returns (label, prompt_text) pairs. Empty once user is experienced or not authenticated.
     pub fn suggestion_prompts(&self) -> Vec<(String, String)> {
@@ -1102,7 +1184,10 @@ impl App {
         }
 
         // Apply first suggestion and start tracking the cycle
-        let (cmd, _) = &current_suggestions[0];
+        let selected = self
+            .command_suggestion_selected
+            .min(current_suggestions.len().saturating_sub(1));
+        let (cmd, _) = &current_suggestions[selected];
         let base = self.input.clone();
         self.remember_input_undo_state();
         self.input = cmd.clone();
@@ -1111,13 +1196,15 @@ impl App {
             self.input.push(' ');
         }
         self.cursor_pos = self.input.len();
-        self.tab_completion_state = Some((base, 0));
+        self.tab_completion_state = Some((base, selected));
+        self.command_suggestion_selected = 0;
         true
     }
 
     /// Reset tab completion state (call when user types/modifies input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
+        self.command_suggestion_selected = 0;
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
@@ -1181,6 +1268,9 @@ impl App {
                 | "/subscription"
                 | "/poke"
                 | "/memory"
+                | "/test"
+                | "/initiatives"
+                | "/initiatives show"
                 | "/goals"
                 | "/goals show"
                 | "/swarm"

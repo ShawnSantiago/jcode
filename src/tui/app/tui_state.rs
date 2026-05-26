@@ -451,6 +451,10 @@ impl crate::tui::TuiState for App {
         App::command_suggestions(self)
     }
 
+    fn command_suggestion_selected(&self) -> usize {
+        self.command_suggestion_selected
+    }
+
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
     }
@@ -490,6 +494,18 @@ impl crate::tui::TuiState for App {
         // In remote mode, use tokens from server
         // Independent mode doesn't currently track total tokens
         self.remote_total_tokens
+    }
+
+    fn session_compaction_count(&self) -> usize {
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
+            return 0;
+        }
+        self.registry
+            .compaction()
+            .try_read()
+            .ok()
+            .map(|manager| manager.compacted_count())
+            .unwrap_or(0)
     }
 
     fn is_remote_mode(&self) -> bool {
@@ -758,6 +774,23 @@ impl crate::tui::TuiState for App {
                         ContentBlock::Reasoning { text } => {
                             asst_chars += text.len();
                         }
+                        ContentBlock::AnthropicThinking {
+                            thinking,
+                            signature,
+                        } => {
+                            asst_chars += thinking.len() + signature.len();
+                        }
+                        ContentBlock::OpenAIReasoning {
+                            id,
+                            summary,
+                            encrypted_content,
+                            status,
+                        } => {
+                            asst_chars += id.len()
+                                + summary.iter().map(String::len).sum::<usize>()
+                                + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                                + status.as_ref().map(String::len).unwrap_or(0);
+                        }
                         ContentBlock::Image { data, .. } => {
                             user_chars += data.len();
                         }
@@ -802,6 +835,7 @@ impl crate::tui::TuiState for App {
             + info.selfdev_chars
             + info.memory_chars
             + info.prompt_overlay_chars
+            + info.preferred_tools_chars
             + info.tool_defs_chars
             + info.user_messages_chars
             + info.assistant_messages_chars

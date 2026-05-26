@@ -84,6 +84,22 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) provider_profile: Option<String>,
 
+    /// Tool profile to expose to the model: full, minimal/lite, or none.
+    #[arg(long, global = true)]
+    pub(crate) tool_profile: Option<String>,
+
+    /// Comma-separated explicit allow-list of tools to expose, e.g. bash,read,write,apply_patch. Use '*' or 'all' to expose all tools, including default-disabled tools.
+    #[arg(long, global = true)]
+    pub(crate) tools: Option<String>,
+
+    /// Comma-separated list of tools to hide after applying the selected profile.
+    #[arg(long, global = true)]
+    pub(crate) disabled_tools: Option<String>,
+
+    /// Hide all built-in tools unless --tools or [tools].enabled opts tools back in.
+    #[arg(long, global = true)]
+    pub(crate) disable_base_tools: bool,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -105,6 +121,9 @@ pub(crate) enum Command {
         temp_idle_timeout_secs: Option<u64>,
     },
 
+    /// Run as an Agent Client Protocol (ACP) adapter backed by the Jcode daemon
+    Acp,
+
     /// Connect to a running server
     Connect,
 
@@ -124,6 +143,10 @@ pub(crate) enum Command {
 
     /// Login to a provider via OAuth, API key, or local credentials
     Login {
+        /// Provider to log in to. Equivalent to --provider for this command, e.g. `jcode login google`.
+        #[arg(value_enum)]
+        provider: Option<ProviderChoice>,
+
         /// Account label for multi-account support (stored labels are auto-numbered)
         #[arg(long, short = 'a')]
         account: Option<String>,
@@ -384,6 +407,10 @@ pub(crate) enum Command {
         /// Show strict live provider/model E2E coverage instead of running auth tests
         #[arg(long, conflicts_with_all = ["login", "all_configured", "no_smoke", "no_tool_smoke", "prompt"])]
         coverage: bool,
+
+        /// Fetch live model catalogs and verify context-window resolution for each model with metadata
+        #[arg(long, conflicts_with_all = ["login", "no_smoke", "no_tool_smoke", "prompt", "coverage"])]
+        context_audit: bool,
 
         /// Read coverage from this JSON file instead of the default live-test coverage ledger
         #[arg(long, requires = "coverage")]

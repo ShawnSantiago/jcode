@@ -370,6 +370,7 @@ struct ActiveFileDiffContext {
     file_path: String,
     start_line: usize,
     end_line: usize,
+    expandable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -990,11 +991,12 @@ pub(crate) fn last_status_area() -> Option<Rect> {
 }
 
 use frame_metrics::{
-    ChatLayoutMetrics, FLICKER_NOTICE_COPY_KEY, ViewportMetrics, finalize_frame_metrics,
-    note_body_built, note_body_cache_hit, note_body_cache_miss, note_body_incremental_reuse,
-    note_body_request, note_chat_layout, note_full_prep_built, note_full_prep_cache_hit,
-    note_full_prep_cache_miss, note_full_prep_request, note_viewport_metrics,
-    reset_frame_perf_stats, viewport_stability_hash,
+    ChatLayoutMetrics, FLICKER_NOTICE_COPY_KEY, FullPrepPhaseMetrics, ViewportMetrics,
+    begin_frame_resource_sample, finalize_frame_metrics, note_body_built, note_body_cache_hit,
+    note_body_cache_lookup, note_body_cache_miss, note_body_incremental_reuse, note_body_request,
+    note_chat_layout, note_full_prep_built, note_full_prep_cache_hit, note_full_prep_cache_lookup,
+    note_full_prep_cache_miss, note_full_prep_phase_metrics, note_full_prep_request,
+    note_viewport_metrics, reset_frame_perf_stats, viewport_stability_hash,
 };
 pub(crate) use frame_metrics::{
     debug_flicker_frame_history, debug_slow_frame_history, recent_flicker_copy_target_for_key,
@@ -1122,12 +1124,12 @@ impl CopyViewportSnapshot {
         }
     }
 
-    fn wrapped_plain_line(&self, abs_line: usize) -> Option<String> {
+    fn wrapped_plain_line(&self, abs_line: usize) -> Option<&str> {
         match &self.data {
             CopyViewportData::Dense {
                 wrapped_plain_lines,
                 ..
-            } => wrapped_plain_lines.get(abs_line).cloned(),
+            } => wrapped_plain_lines.get(abs_line).map(String::as_str),
             CopyViewportData::ChatFrame { prepared } => prepared.wrapped_plain_line(abs_line),
         }
     }
@@ -1142,11 +1144,11 @@ impl CopyViewportSnapshot {
         }
     }
 
-    fn raw_plain_line(&self, raw_line: usize) -> Option<String> {
+    fn raw_plain_line(&self, raw_line: usize) -> Option<&str> {
         match &self.data {
             CopyViewportData::Dense {
                 raw_plain_lines, ..
-            } => raw_plain_lines.get(raw_line).cloned(),
+            } => raw_plain_lines.get(raw_line).map(String::as_str),
             CopyViewportData::ChatFrame { prepared } => prepared.raw_plain_line(raw_line),
         }
     }
@@ -1490,7 +1492,9 @@ pub(crate) fn side_pane_point_from_screen(
 }
 
 fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<String> {
-    copy_snapshot_for_pane(pane)?.wrapped_plain_line(abs_line)
+    copy_snapshot_for_pane(pane)?
+        .wrapped_plain_line(abs_line)
+        .map(str::to_owned)
 }
 
 pub(crate) fn copy_viewport_line_text(abs_line: usize) -> Option<String> {
@@ -1562,9 +1566,26 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
         return Some(text);
     }
 
-    let mut out = Vec::new();
+    let selected_lines = end
+        .abs_line
+        .saturating_sub(start.abs_line)
+        .saturating_add(1);
+    let mut out = String::new();
     for abs_line in start.abs_line..=end.abs_line {
+        if abs_line > start.abs_line {
+            out.push('\n');
+        }
         let text = snapshot.wrapped_plain_line(abs_line)?;
+        if abs_line != start.abs_line && abs_line != end.abs_line {
+            let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+            if copy_start == 0 {
+                if abs_line == start.abs_line + 1 {
+                    out.reserve(text.len().saturating_mul(selected_lines.min(8)));
+                }
+                out.push_str(text);
+                continue;
+            }
+        }
         let line_width = line_display_width(&text);
         let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
         let start_col = if abs_line == start.abs_line {
@@ -1579,14 +1600,17 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
         };
 
         if end_col < start_col {
-            out.push(String::new());
             continue;
         }
 
-        out.push(display_col_slice(&text, start_col, end_col).to_string());
+        let slice = display_col_slice(&text, start_col, end_col);
+        if abs_line == start.abs_line {
+            out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
+        }
+        out.push_str(&slice);
     }
 
-    Some(out.join("\n"))
+    Some(out)
 }
 
 pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
@@ -1612,6 +1636,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let total_start = Instant::now();
     reset_frame_perf_stats();
+    begin_frame_resource_sample();
 
     clear_copy_viewport_snapshot();
 

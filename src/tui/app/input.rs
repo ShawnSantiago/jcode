@@ -11,11 +11,89 @@ use crate::bus::{
 use crate::util::truncate_str;
 use anyhow::Result;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::DefaultTerminal;
+use std::io::{Read, Write};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
+
+pub(super) fn edit_input_in_external_editor(app: &mut App) {
+    match edit_text_in_external_editor(&app.input) {
+        Ok(edited) => {
+            if edited != app.input {
+                app.remember_input_undo_state();
+                app.input = edited;
+                app.cursor_pos = app.input.len();
+                app.sync_model_picker_preview_from_input();
+            }
+            app.set_status_notice("Prompt edited in $EDITOR");
+        }
+        Err(err) => app.set_status_notice(&format!("Failed to open $EDITOR: {err}")),
+    }
+}
+
+fn edit_text_in_external_editor(initial_text: &str) -> Result<String> {
+    let mut file = tempfile::Builder::new()
+        .prefix("jcode-prompt-")
+        .suffix(".md")
+        .tempfile()?;
+    file.write_all(initial_text.as_bytes())?;
+    file.flush()?;
+    let path = file.path().to_path_buf();
+
+    let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    if raw_was_enabled {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+
+    let status_result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec ${VISUAL:-${EDITOR:-vi}} \"$@\"")
+        .arg("jcode-editor")
+        .arg(&path)
+        .status();
+
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        crossterm::cursor::Hide
+    );
+    if raw_was_enabled {
+        let _ = crossterm::terminal::enable_raw_mode();
+    }
+
+    let status = status_result?;
+    if !status.success() {
+        anyhow::bail!("editor exited with status {status}");
+    }
+
+    let mut edited = String::new();
+    std::fs::File::open(&path)?.read_to_string(&mut edited)?;
+    Ok(edited)
+}
+
+fn mission_turn_reminder(session_id: &str) -> Option<String> {
+    crate::mission::active_system_reminder(session_id)
+        .map_err(|err| crate::logging::warn(&format!("failed to load active mission: {err}")))
+        .ok()
+        .flatten()
+}
+
+fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{}\n\n{}", a, b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
 
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
@@ -605,6 +683,145 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     true
 }
 
+fn visible_prompt_history(app: &App) -> Vec<String> {
+    app.display_messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
+        .collect()
+}
+
+fn byte_offset_for_line_column(
+    input: &str,
+    line_start: usize,
+    line_end: usize,
+    column: usize,
+) -> usize {
+    let mut offset = line_end;
+    for (idx, (byte_offset, _)) in input[line_start..line_end].char_indices().enumerate() {
+        if idx == column {
+            offset = line_start + byte_offset;
+            break;
+        }
+    }
+    offset
+}
+
+pub(super) fn handle_multiline_input_navigation(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    if !modifiers.is_empty()
+        || !matches!(code, KeyCode::Up | KeyCode::Down)
+        || !app.input.contains('\n')
+    {
+        return false;
+    }
+
+    let input = app.input.as_str();
+    let cursor = app.cursor_pos.min(input.len());
+    let line_start = input[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let line_end = input[cursor..]
+        .find('\n')
+        .map(|idx| cursor + idx)
+        .unwrap_or(input.len());
+    let column = input[line_start..cursor].chars().count();
+
+    let target = match code {
+        KeyCode::Up => {
+            if line_start == 0 {
+                return false;
+            }
+            let previous_line_end = line_start - 1;
+            let previous_line_start = input[..previous_line_end]
+                .rfind('\n')
+                .map(|idx| idx + 1)
+                .unwrap_or(0);
+            byte_offset_for_line_column(input, previous_line_start, previous_line_end, column)
+        }
+        KeyCode::Down => {
+            if line_end >= input.len() {
+                return false;
+            }
+            let next_line_start = line_end + 1;
+            let next_line_end = input[next_line_start..]
+                .find('\n')
+                .map(|idx| next_line_start + idx)
+                .unwrap_or(input.len());
+            byte_offset_for_line_column(input, next_line_start, next_line_end, column)
+        }
+        _ => return false,
+    };
+
+    app.cursor_pos = target;
+    true
+}
+
+pub(super) fn handle_prompt_history_navigation(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    let explicit_history = modifiers == KeyModifiers::CONTROL;
+    if !(modifiers.is_empty() || explicit_history) || !matches!(code, KeyCode::Up | KeyCode::Down) {
+        return false;
+    }
+
+    let history = visible_prompt_history(app);
+    if history.is_empty() {
+        return false;
+    }
+
+    let target = if app.input.is_empty() {
+        match code {
+            KeyCode::Up => Some(history.len() - 1),
+            KeyCode::Down => None,
+            _ => None,
+        }
+    } else {
+        let Some(current_index) = history.iter().rposition(|prompt| prompt == &app.input) else {
+            if explicit_history && matches!(code, KeyCode::Up) {
+                return history
+                    .last()
+                    .map(|prompt| {
+                        app.input = prompt.clone();
+                        app.cursor_pos = app.input.len();
+                        app.reset_tab_completion();
+                        app.sync_model_picker_preview_from_input();
+                    })
+                    .is_some();
+            }
+            return false;
+        };
+        match code {
+            KeyCode::Up => Some(current_index.saturating_sub(1)),
+            KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
+            KeyCode::Down => {
+                app.input.clear();
+                app.cursor_pos = 0;
+                app.reset_tab_completion();
+                app.sync_model_picker_preview_from_input();
+                return true;
+            }
+            _ => None,
+        }
+    };
+
+    let Some(target) = target else {
+        return false;
+    };
+    let Some(prompt) = history.get(target) else {
+        return false;
+    };
+    app.input = prompt.clone();
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    true
+}
+
 fn associated_text_for_key_event(_event: &KeyEvent) -> Option<String> {
     // Future hook: prefer terminal-provided associated text when crossterm exposes it.
     // Today crossterm does not surface this on KeyEvent even though the kitty protocol
@@ -707,8 +924,12 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         && !msg.is_empty()
     {
         parts.push(msg);
+        had_pending = true;
     }
-    parts.extend(std::mem::take(&mut app.queued_messages));
+    if !app.queued_messages.is_empty() {
+        parts.extend(std::mem::take(&mut app.queued_messages));
+        had_pending = true;
+    }
 
     if !parts.is_empty() {
         app.input = parts.join("\n\n");
@@ -891,7 +1112,7 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Char('e') => {
-            app.cursor_pos = app.input.len();
+            edit_input_in_external_editor(app);
             true
         }
         KeyCode::Char('b') => {
@@ -1231,19 +1452,7 @@ pub(super) fn handle_visible_copy_shortcut(
         return false;
     }
 
-    if c.eq_ignore_ascii_case(&'e') && app.diff_mode.is_inline() {
-        app.diff_mode = if app.diff_mode.is_full_inline() {
-            crate::config::DiffDisplayMode::Inline
-        } else {
-            crate::config::DiffDisplayMode::FullInline
-        };
-        app.record_copy_badge_key_press('e');
-        let action = if app.diff_mode.is_full_inline() {
-            "Expanded edit diffs"
-        } else {
-            "Collapsed edit diffs"
-        };
-        app.set_status_notice(format!("{} · Diffs: {}", action, app.diff_mode.label()));
+    if handle_expand_edit_badge_shortcut(app, c) {
         return true;
     }
 
@@ -1262,6 +1471,32 @@ pub(super) fn handle_visible_copy_shortcut(
     }
 
     false
+}
+
+fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
+    if !key.eq_ignore_ascii_case(&'e') {
+        return false;
+    }
+
+    // The inline edit badge is rendered from the inline diff mode itself, while
+    // opening it from other diff modes requires at least one edit tool message.
+    // Keep this predicate in one place so the [Alt] [⇧] [E] badge uses the same
+    // shortcut path as visible copy badges without falling through to copy key E.
+    if !app.diff_mode.is_inline() && app.display_edit_tool_message_count == 0 {
+        return false;
+    }
+
+    if app.diff_mode.is_full_inline() {
+        return false;
+    }
+
+    app.diff_mode = crate::config::DiffDisplayMode::FullInline;
+    app.record_copy_badge_key_press('e');
+    app.set_status_notice(format!(
+        "Expanded edit diffs · Diffs: {}",
+        app.diff_mode.label()
+    ));
+    true
 }
 
 pub(super) fn handle_modal_key(
@@ -1593,17 +1828,34 @@ impl App {
             }
         }
 
-        if handle_pre_control_shortcuts(self, code, modifiers) {
-            return Ok(());
-        }
-
         if is_next_prompt_new_session_hotkey(code, modifiers) {
             self.toggle_next_prompt_new_session_routing();
             return Ok(());
         }
 
+        if self.handle_command_suggestion_key(code, modifiers) {
+            return Ok(());
+        }
+
+        if handle_pre_control_shortcuts(self, code, modifiers) {
+            return Ok(());
+        }
+
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
+
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Up {
+            if retrieve_pending_message_for_edit(self) {
+                return Ok(());
+            }
+            handle_prompt_history_navigation(self, code, modifiers);
+            return Ok(());
+        }
+
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Down {
+            handle_prompt_history_navigation(self, code, modifiers);
+            return Ok(());
+        }
 
         // Handle ctrl combos regardless of processing state
         if modifiers.contains(KeyModifiers::CONTROL)
@@ -1637,6 +1889,12 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if handle_multiline_input_navigation(self, code, modifiers)
+            || handle_prompt_history_navigation(self, code, modifiers)
+        {
+            return Ok(());
         }
 
         if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
@@ -2077,6 +2335,7 @@ impl App {
             ));
         }
         if images.is_empty() {
+            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user(&input));
             self.session.add_message(
                 Role::User,
@@ -2086,6 +2345,7 @@ impl App {
                 }],
             );
         } else {
+            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
@@ -2113,6 +2373,7 @@ impl App {
         self.streaming_output_tokens = 0;
         self.streaming_cache_read_tokens = None;
         self.streaming_cache_creation_tokens = None;
+        self.current_api_usage_recorded = false;
         self.upstream_provider = None;
         self.status_detail = None;
         self.streaming_tps_start = None;
@@ -2156,7 +2417,8 @@ impl App {
                 }
             }
 
-            self.current_turn_system_reminder = reminder;
+            self.current_turn_system_reminder =
+                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
 
             if has_combined {
                 self.add_provider_message(Message::user(&combined));
@@ -2179,6 +2441,7 @@ impl App {
             self.streaming_output_tokens = 0;
             self.streaming_cache_read_tokens = None;
             self.streaming_cache_creation_tokens = None;
+            self.current_api_usage_recorded = false;
             self.upstream_provider = None;
             self.status_detail = None;
             self.streaming_tps_start = None;

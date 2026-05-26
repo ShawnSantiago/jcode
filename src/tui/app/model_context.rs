@@ -487,6 +487,7 @@ impl App {
                             self.streaming_output_tokens = 0;
                             self.streaming_cache_read_tokens = None;
                             self.streaming_cache_creation_tokens = None;
+                            self.current_api_usage_recorded = false;
                             self.thought_line_inserted = false;
                             self.thinking_prefix_emitted = false;
                             self.thinking_buffer.clear();
@@ -525,6 +526,7 @@ impl App {
                                 self.streaming_output_tokens = 0;
                                 self.streaming_cache_read_tokens = None;
                                 self.streaming_cache_creation_tokens = None;
+                                self.current_api_usage_recorded = false;
                                 self.thought_line_inserted = false;
                                 self.thinking_prefix_emitted = false;
                                 self.thinking_buffer.clear();
@@ -568,6 +570,7 @@ impl App {
                                 self.streaming_output_tokens = 0;
                                 self.streaming_cache_read_tokens = None;
                                 self.streaming_cache_creation_tokens = None;
+                                self.current_api_usage_recorded = false;
                                 self.thought_line_inserted = false;
                                 self.thinking_prefix_emitted = false;
                                 self.thinking_buffer.clear();
@@ -662,6 +665,7 @@ impl App {
         self.streaming_output_tokens = 0;
         self.streaming_cache_read_tokens = None;
         self.streaming_cache_creation_tokens = None;
+        self.current_api_usage_recorded = false;
         self.thought_line_inserted = false;
         self.thinking_prefix_emitted = false;
         self.thinking_buffer.clear();

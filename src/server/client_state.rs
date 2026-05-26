@@ -3,7 +3,9 @@ use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::{ContentBlock, Role};
-use crate::protocol::{HistoryMessage, ServerEvent, SessionActivitySnapshot, encode_event};
+use crate::protocol::{
+    HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
+};
 use crate::provider::Provider;
 use crate::session::{Session, SessionStatus};
 use crate::transport::WriteHalf;
@@ -22,6 +24,14 @@ use tokio::sync::{Mutex, RwLock};
 
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
+
+fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
+    (totals.messages_with_token_usage > 0).then_some(totals)
+}
+
+fn optional_total_tokens(totals: TokenUsageTotals) -> Option<(u64, u64)> {
+    (totals.messages_with_token_usage > 0).then_some((totals.input_tokens, totals.output_tokens))
+}
 
 static LAST_ATTACH_MODEL_PREFETCH: LazyLock<StdMutex<HashMap<String, Instant>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
@@ -148,17 +158,37 @@ pub(super) async fn handle_get_model_catalog(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
+    provider: &Arc<dyn Provider>,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
     let started = Instant::now();
-    let (provider_name, provider_model, available_models, available_model_routes) = {
-        let agent_guard = agent.lock().await;
-        (
-            Some(agent_guard.provider_name()),
-            Some(agent_guard.provider_model()),
-            agent_guard.available_models_display(),
-            agent_guard.model_routes(),
-        )
+    let (provider_name, provider_model, available_models, available_model_routes, source) = {
+        match agent.try_lock() {
+            Ok(agent_guard) => (
+                Some(agent_guard.provider_name()),
+                Some(agent_guard.provider_model()),
+                agent_guard.available_models_display(),
+                agent_guard.model_routes(),
+                "live",
+            ),
+            Err(_) => {
+                crate::logging::warn(&format!(
+                    "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
+                    session_id
+                ));
+                let persisted_model = Session::load_for_remote_startup(session_id)
+                    .or_else(|_| Session::load_startup_stub(session_id))
+                    .ok()
+                    .and_then(|session| session.model);
+                (
+                    Some(provider.name().to_string()),
+                    persisted_model.or_else(|| Some(provider.model())),
+                    provider.available_models_display(),
+                    provider.model_routes(),
+                    "fallback",
+                )
+            }
+        }
     };
 
     let event = ServerEvent::History {
@@ -173,6 +203,7 @@ pub(super) async fn handle_get_model_catalog(
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: None,
+        token_usage_totals: None,
         all_sessions: Vec::new(),
         client_count: None,
         is_canary: None,
@@ -198,8 +229,9 @@ pub(super) async fn handle_get_model_catalog(
     let mut writer_guard = writer.lock().await;
     writer_guard.write_all(json.as_bytes()).await?;
     crate::logging::info(&format!(
-        "[TIMING] handle_get_model_catalog: session={}, bytes={}, total={}ms",
+        "[TIMING] handle_get_model_catalog: session={}, source={}, bytes={}, total={}ms",
         session_id,
+        source,
         json.len(),
         started.elapsed().as_millis()
     ));
@@ -288,17 +320,17 @@ fn history_reload_recovery_snapshot(
     session_id: &str,
     was_interrupted: Option<bool>,
 ) -> Option<crate::protocol::ReloadRecoverySnapshot> {
-    match super::reload_recovery::claim_pending_for_session(session_id) {
+    match super::reload_recovery::pending_directive_for_session(session_id) {
         Ok(Some(directive)) => {
             crate::logging::info(&format!(
-                "history_reload_recovery_snapshot: using server-owned recovery intent for session={}",
+                "history_reload_recovery_snapshot: attaching server-owned recovery intent for session={} without marking delivered",
                 session_id
             ));
             return Some(directive);
         }
         Ok(None) => {}
         Err(err) => crate::logging::warn(&format!(
-            "history_reload_recovery_snapshot: failed to claim server-owned recovery intent for session={}: {}",
+            "history_reload_recovery_snapshot: failed to read server-owned recovery intent for session={}: {}",
             session_id, err
         )),
     }
@@ -401,6 +433,7 @@ async fn send_history_from_persisted_session(
 ) -> Result<()> {
     let session = crate::session::Session::load_for_remote_startup(session_id)
         .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
+    let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     let messages = rendered_messages
         .into_iter()
@@ -439,7 +472,8 @@ async fn send_history_from_persisted_session(
         available_model_routes: Vec::new(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
-        total_tokens: None,
+        total_tokens: optional_total_tokens(token_usage_totals),
+        token_usage_totals: optional_token_usage_totals(token_usage_totals),
         all_sessions,
         client_count: Some(current_client_count),
         is_canary: Some(session.is_canary),
@@ -504,6 +538,7 @@ pub(super) async fn send_history(
         reasoning_effort,
         service_tier,
         compaction_mode,
+        token_usage_totals,
         agent_lock_ms,
         history_snapshot_ms,
         image_render_ms,
@@ -577,6 +612,7 @@ pub(super) async fn send_history(
             reasoning_effort,
             service_tier,
             compaction_mode,
+            agent_guard.token_usage_totals(),
             agent_lock_ms,
             history_snapshot_ms,
             image_render_ms,
@@ -649,7 +685,8 @@ pub(super) async fn send_history(
         available_model_routes,
         mcp_servers,
         skills,
-        total_tokens: None,
+        total_tokens: optional_total_tokens(token_usage_totals),
+        token_usage_totals: optional_token_usage_totals(token_usage_totals),
         all_sessions,
         client_count: Some(current_client_count),
         is_canary: Some(is_canary),

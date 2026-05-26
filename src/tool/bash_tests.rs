@@ -233,6 +233,86 @@ async fn test_reload_persistable_bash_continues_in_background() {
 }
 
 #[tokio::test]
+async fn test_reload_persistable_bash_timeout_promotes_to_background() {
+    let tool = BashTool::new();
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let ctx = make_agent_ctx(signal);
+
+    let result = tool
+        .execute(
+            json!({"command": "sleep 0.4; echo timeout_promote_ok", "timeout": 100}),
+            ctx,
+        )
+        .await
+        .expect("timeout should promote the still-running command to background");
+
+    assert!(
+        result.output.contains("continuing in background"),
+        "output should explain background promotion: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("do not rerun"),
+        "output should tell the agent not to rerun duplicate work: {}",
+        result.output
+    );
+
+    let metadata = result.metadata.expect("expected background metadata");
+    assert_eq!(metadata["background"], true);
+    assert_eq!(metadata["timeout_promoted"], true);
+    assert_eq!(metadata["foreground_timeout_ms"], 100);
+    let task_id = metadata["task_id"]
+        .as_str()
+        .expect("task_id should be present")
+        .to_string();
+    let output_file = std::path::PathBuf::from(
+        metadata["output_file"]
+            .as_str()
+            .expect("output_file should be present"),
+    );
+    let status_file = std::path::PathBuf::from(
+        metadata["status_file"]
+            .as_str()
+            .expect("status_file should be present"),
+    );
+
+    let initial_status = crate::background::global()
+        .status(&task_id)
+        .await
+        .expect("status should exist");
+    assert_eq!(initial_status.status, BackgroundTaskStatus::Running);
+
+    let mut final_status = None;
+    for _ in 0..40 {
+        let status = crate::background::global()
+            .status(&task_id)
+            .await
+            .expect("status should exist");
+        if status.status != BackgroundTaskStatus::Running {
+            final_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let status = final_status.expect("promoted background task should finish");
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.exit_code, Some(0));
+
+    let output = crate::background::global()
+        .output(&task_id)
+        .await
+        .expect("output should exist");
+    assert!(
+        output.contains("timeout_promote_ok"),
+        "command should have continued after foreground timeout: {output}"
+    );
+
+    let _ = tokio::fs::remove_file(output_file).await;
+    let _ = tokio::fs::remove_file(status_file).await;
+}
+
+#[tokio::test]
 async fn test_stderr_captured_with_stdin() {
     let (tx, _rx) = mpsc::unbounded_channel::<StdinInputRequest>();
     let tool = BashTool::new();

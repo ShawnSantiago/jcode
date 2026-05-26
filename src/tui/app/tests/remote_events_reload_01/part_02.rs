@@ -241,6 +241,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             mcp_servers: vec![],
             skills: vec![],
             total_tokens: None,
+            token_usage_totals: None,
             all_sessions: vec![],
             client_count: None,
             is_canary: None,

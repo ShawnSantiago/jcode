@@ -955,7 +955,7 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
 }
 
 #[test]
-fn test_model_picker_opens_loading_state_before_async_routes_complete() {
+fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
@@ -980,15 +980,11 @@ fn test_model_picker_opens_loading_state_before_async_routes_complete() {
         .expect("loading picker should open immediately");
     assert_eq!(picker.entries.len(), 1);
     assert_eq!(picker.entries[0].name, "counting-a");
-    assert!(
-        picker.entries[0].options[0]
-            .detail
-            .contains("updating model list")
-    );
+    assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
     assert!(app.pending_model_picker_load.is_some());
     assert_eq!(
         app.status_notice(),
-        Some("Updating model list…".to_string())
+        Some("Updating model routes…".to_string())
     );
 
     wait_for_model_picker_load(&mut app);

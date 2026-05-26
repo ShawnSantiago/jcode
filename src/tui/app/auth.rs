@@ -2168,28 +2168,6 @@ impl App {
         }
     }
 
-    pub(super) fn handle_update_status(&mut self, status: crate::bus::UpdateStatus) {
-        use crate::bus::UpdateStatus;
-        match status {
-            UpdateStatus::Checking => {
-                self.set_status_notice("Checking for updates...");
-            }
-            UpdateStatus::Available { current, latest } => {
-                self.set_status_notice(format!("Update available: {} → {}", current, latest));
-            }
-            UpdateStatus::Downloading { version } => {
-                self.set_status_notice(format!("⬇️  Downloading {}...", version));
-            }
-            UpdateStatus::Installed { version } => {
-                self.set_status_notice(format!("✅ Updated to {} — restarting", version));
-            }
-            UpdateStatus::UpToDate => {}
-            UpdateStatus::Error(e) => {
-                self.set_status_notice(format!("Update failed: {}", e));
-            }
-        }
-    }
-
     async fn claude_token_exchange(
         verifier: String,
         input: String,

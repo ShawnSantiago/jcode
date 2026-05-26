@@ -253,7 +253,14 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(Line::from(Span::styled("  Memory & Swarm", section_style)));
     lines.push(Line::from(""));
     lines.push(help_entry("/memory [on|off]", "Toggle memory features"));
-    lines.push(help_entry("/goals", "Open goals overview / resume a goal"));
+    lines.push(help_entry(
+        "/test [claim]",
+        "Run layered verification and produce proof",
+    ));
+    lines.push(help_entry(
+        "/initiatives",
+        "Open initiatives overview / resume an initiative",
+    ));
     lines.push(help_entry("/swarm [on|off]", "Toggle swarm features"));
 
     lines.push(Line::from(""));
@@ -367,6 +374,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Quit (press twice to confirm)",
     ));
     lines.push(key_entry("Ctrl+X", "Cut entire input line to clipboard"));
+    lines.push(key_entry("Ctrl+E", "Edit prompt in $EDITOR"));
     lines.push(key_entry(
         "Ctrl+A",
         "Copy visible chat viewport plus nearby context",

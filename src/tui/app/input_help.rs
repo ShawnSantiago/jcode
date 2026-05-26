@@ -125,7 +125,7 @@ impl App {
                 "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point."
             }
             "resume" | "sessions" => {
-                "`/resume`\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and open any session in a new terminal window.\n\nPress `Esc` to return to your current session."
+                "`/resume`\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and resume the highlighted session. By default, `Enter` resumes in the current terminal and `Ctrl+Enter` opens a new terminal; `keybindings.session_picker_enter` can swap those actions.\n\nPress `Esc` to return to your current session."
             }
             "info" => "`/info`\nShow session metadata and token usage.",
             "context" => {

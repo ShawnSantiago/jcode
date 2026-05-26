@@ -36,7 +36,14 @@ async fn apply_remote_effort_direction(
     remote: &mut RemoteConnection,
     direction: i8,
 ) -> Result<()> {
-    let efforts = ["none", "low", "medium", "high", "xhigh"];
+    let efforts = app_mod::inferred_reasoning_efforts(
+        app.remote_provider_name.as_deref(),
+        app.remote_provider_model.as_deref(),
+    );
+    if efforts.is_empty() {
+        app.set_status_notice("Reasoning effort not available for this provider");
+        return Ok(());
+    }
     let current = app.remote_reasoning_effort.as_deref();
     let current_index = current
         .and_then(|c| efforts.iter().position(|e| *e == c))
@@ -370,6 +377,10 @@ async fn handle_remote_key_internal(
         }
     }
 
+    if app.handle_command_suggestion_key(code, modifiers) {
+        return Ok(());
+    }
+
     if let Some(amount) = app.scroll_keys.scroll_amount(code, modifiers) {
         if amount < 0 {
             app.scroll_up((-amount) as usize);
@@ -420,6 +431,11 @@ async fn handle_remote_key_internal(
         }
         let status = format!("Diffs: {}", app.diff_mode.label());
         app.set_status_notice(&status);
+        return Ok(());
+    }
+
+    if modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Up | KeyCode::Down) {
+        input::handle_prompt_history_navigation(app, code, modifiers);
         return Ok(());
     }
 
@@ -483,7 +499,7 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('e') => {
-                app.cursor_pos = app.input.len();
+                input::edit_input_in_external_editor(app);
                 return Ok(());
             }
             KeyCode::Char('f') => {
@@ -580,7 +596,13 @@ async fn handle_remote_key_internal(
                 let had_pending = app.retrieve_pending_message_for_edit();
                 if had_pending {
                     let _ = remote.cancel_soft_interrupts().await;
+                } else {
+                    input::handle_prompt_history_navigation(app, code, modifiers);
                 }
+                return Ok(());
+            }
+            KeyCode::Down => {
+                input::handle_prompt_history_navigation(app, code, modifiers);
                 return Ok(());
             }
             _ => {}
@@ -619,6 +641,12 @@ async fn handle_remote_key_internal(
     if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
         input::insert_input_text(app, "\n");
         app.follow_chat_bottom_for_typing();
+        return Ok(());
+    }
+
+    if input::handle_multiline_input_navigation(app, code, modifiers)
+        || input::handle_prompt_history_navigation(app, code, modifiers)
+    {
         return Ok(());
     }
 
@@ -944,7 +972,16 @@ async fn handle_remote_key_internal(
                     let label = current
                         .map(app_mod::effort_display_label)
                         .unwrap_or("default");
-                    let efforts = ["none", "low", "medium", "high", "xhigh"];
+                    let efforts = app_mod::inferred_reasoning_efforts(
+                        app.remote_provider_name.as_deref(),
+                        app.remote_provider_model.as_deref(),
+                    );
+                    if efforts.is_empty() {
+                        app.push_display_message(DisplayMessage::system(
+                            "Reasoning effort not available for this provider.".to_string(),
+                        ));
+                        return Ok(());
+                    }
                     let list: Vec<String> = efforts
                         .iter()
                         .map(|e| {
@@ -969,8 +1006,11 @@ async fn handle_remote_key_internal(
                         app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                         return Ok(());
                     }
-                    const EFFORTS: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
-                    if EFFORTS.contains(&level) {
+                    let efforts = app_mod::inferred_reasoning_efforts(
+                        app.remote_provider_name.as_deref(),
+                        app.remote_provider_model.as_deref(),
+                    );
+                    if efforts.contains(&level) {
                         app.remote_reasoning_effort = Some(level.to_string());
                         app.invalidate_model_picker_cache();
                         app.set_status_notice(format!(
@@ -1459,6 +1499,14 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if app_mod::commands::handle_test_command(app, trimmed) {
+                    return Ok(());
+                }
+
+                if app_mod::commands::handle_disabled_mission_command(app, trimmed) {
+                    return Ok(());
+                }
+
                 if app_mod::commands::handle_goals_command(app, trimmed) {
                     return Ok(());
                 }
@@ -1512,7 +1560,7 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if trimmed == "/resume" || trimmed == "/sessions" {
+                if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
                     app.open_session_picker();
                     return Ok(());
                 }

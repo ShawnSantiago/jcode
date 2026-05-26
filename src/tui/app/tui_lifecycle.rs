@@ -309,6 +309,7 @@ impl App {
             cache_next_optimal_input_tokens: None,
             kv_cache_baseline: None,
             pending_kv_cache_request: None,
+            current_api_usage_recorded: false,
             kv_cache_turn_number: None,
             kv_cache_turn_call_index: 0,
             kv_cache_miss_samples: Vec::new(),
@@ -387,6 +388,7 @@ impl App {
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
             remote_total_tokens: None,
+            remote_token_usage_totals: None,
             remote_is_canary: None,
             remote_server_version: None,
             remote_server_has_update: None,
@@ -514,6 +516,7 @@ impl App {
             auto_server_reload: display.auto_server_reload,
             pending_queued_dispatch: false,
             tab_completion_state: None,
+            command_suggestion_selected: 0,
             app_started: Instant::now(),
             runtime_memory_log,
             client_binary_mtime: std::env::current_exe()
@@ -677,6 +680,7 @@ impl App {
             cache_next_optimal_input_tokens: None,
             kv_cache_baseline: None,
             pending_kv_cache_request: None,
+            current_api_usage_recorded: false,
             kv_cache_turn_number: None,
             kv_cache_turn_call_index: 0,
             kv_cache_miss_samples: Vec::new(),
@@ -755,6 +759,7 @@ impl App {
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
             remote_total_tokens: None,
+            remote_token_usage_totals: None,
             remote_is_canary: None,
             remote_server_version: None,
             remote_server_has_update: None,
@@ -882,6 +887,7 @@ impl App {
             auto_server_reload: display.auto_server_reload,
             pending_queued_dispatch: false,
             tab_completion_state: None,
+            command_suggestion_selected: 0,
             app_started: Instant::now(),
             runtime_memory_log,
             client_binary_mtime: std::env::current_exe()
@@ -1025,11 +1031,10 @@ impl App {
 
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
-            if !fresh_spawn {
-                app.restore_remote_startup_history(session_id);
-            } else {
+            app.restore_remote_startup_history(session_id);
+            if fresh_spawn {
                 crate::logging::info(&format!(
-                    "Remote startup fresh-spawn path: skipping local transcript restore for {}",
+                    "Remote startup fresh-spawn path: restored persisted transcript for {} while awaiting server history",
                     session_id
                 ));
             }
