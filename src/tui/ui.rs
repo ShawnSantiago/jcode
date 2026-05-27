@@ -1672,6 +1672,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some((scroll, content)) = app.model_status_overlay() {
+        overlays::draw_model_status_overlay(frame, area, scroll, content);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(picker_cell) = app.session_picker_overlay() {
         let mut picker = picker_cell.borrow_mut();
         picker.render(frame);

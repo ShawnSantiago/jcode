@@ -892,6 +892,146 @@ pub fn load_coverage(coverage_path: Option<&Path>) -> Result<(LiveVerificationCo
     Ok((coverage, path))
 }
 
+pub fn format_provider_test_coverage_report(
+    provider_query: &str,
+    model_query: &str,
+    coverage_path: Option<&Path>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Provider test coverage\n\n");
+    out.push_str("Developer/live verification evidence recorded by jcode. This is evidence, not a guarantee of future provider availability.\n\n");
+    out.push_str(&format!("Provider: `{}`\n", provider_query));
+    out.push_str(&format!("Model: `{}`\n\n", model_query));
+
+    let (coverage, path) = match load_coverage(coverage_path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            out.push_str("Status: **No verification ledger found on this install**\n\n");
+            out.push_str("No local or bundled developer live-test coverage file could be loaded. ");
+            out.push_str("Once jcode ships a curated developer coverage snapshot, this command should prefer that snapshot and separately show local evidence.\n\n");
+            out.push_str(&format!("Ledger error: `{}`\n\n", err));
+            out.push_str("You can generate local evidence with:\n\n");
+            out.push_str(&format!(
+                "```bash\njcode auth-test --provider {} --model {}\n```",
+                provider_query, model_query
+            ));
+            return out;
+        }
+    };
+
+    let provider_norm = normalize_provider_test_coverage_key(provider_query);
+    let model_norm = normalize_provider_test_coverage_key(model_query);
+    let mut matches = coverage
+        .latest
+        .values()
+        .filter(|entry| {
+            let entry_provider = normalize_provider_test_coverage_key(&entry.provider_id);
+            let entry_label = normalize_provider_test_coverage_key(&entry.provider_label);
+            let entry_model = entry
+                .model
+                .as_deref()
+                .map(normalize_provider_test_coverage_key)
+                .unwrap_or_else(|| "*".to_string());
+            (entry_provider == provider_norm || entry_label == provider_norm)
+                && (entry_model == model_norm || model_norm == "*")
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|entry| entry.recorded_at);
+
+    let Some(entry) = matches.last() else {
+        out.push_str("Status: **Not yet covered by this jcode verification ledger**\n\n");
+        out.push_str(&format!("Ledger: `{}`\n\n", path.display()));
+        out.push_str("This does not mean the provider/model is broken. It only means jcode has no recorded live verification evidence for this exact provider/model pair.\n");
+        return out;
+    };
+
+    let passed = entry
+        .checkpoint_statuses
+        .values()
+        .filter(|status| matches!(status, LiveVerificationStageStatus::Passed))
+        .count();
+    let total = entry
+        .checkpoint_statuses
+        .len()
+        .max(entry.expected_checkpoints.len());
+    let all_expected_passed = entry.expected_checkpoints.iter().all(|checkpoint| {
+        matches!(
+            entry.checkpoint_statuses.get(checkpoint),
+            Some(LiveVerificationStageStatus::Passed)
+        )
+    });
+    let status = if all_expected_passed && total > 0 {
+        "Fully tested"
+    } else if passed > 0 {
+        "Partially tested"
+    } else {
+        "Tested, but no passing checkpoints recorded"
+    };
+
+    out.push_str(&format!("Status: **{}**\n", status));
+    out.push_str(&format!("Last tested: `{}`\n", entry.recorded_at));
+    out.push_str(&format!("Evidence source: `{}`\n", path.display()));
+    out.push_str(&format!("Test name: `{}`\n", entry.test_name));
+    out.push_str(&format!(
+        "Tested with: `jcode {}` ({}){}\n\n",
+        entry.jcode_version,
+        entry.jcode_git_hash,
+        if entry.jcode_git_dirty { ", dirty" } else { "" }
+    ));
+
+    out.push_str("## Checkpoints\n\n");
+    for checkpoint in &entry.expected_checkpoints {
+        let status = entry
+            .checkpoint_statuses
+            .get(checkpoint)
+            .cloned()
+            .unwrap_or(LiveVerificationStageStatus::NotRun);
+        out.push_str(&format!(
+            "{} {} - `{:?}`\n",
+            provider_test_coverage_icon(&status),
+            provider_test_coverage_checkpoint_label(checkpoint),
+            status
+        ));
+    }
+
+    if !entry.readiness_gaps.is_empty() {
+        out.push_str("\n## Readiness gaps\n\n");
+        for gap in &entry.readiness_gaps {
+            out.push_str(&format!("- {}\n", gap));
+        }
+    }
+
+    out.push_str("\n## What this means\n\n");
+    out.push_str("These checks exercise real jcode runtime paths, including basic chat and tool-use smoke tests when present. Missing evidence should be read as 'not yet recorded', not as a failure.\n");
+    out
+}
+
+fn normalize_provider_test_coverage_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn provider_test_coverage_icon(status: &LiveVerificationStageStatus) -> &'static str {
+    match status {
+        LiveVerificationStageStatus::Passed => "✓",
+        LiveVerificationStageStatus::Failed => "✗",
+        LiveVerificationStageStatus::Blocked => "!",
+        LiveVerificationStageStatus::Skipped => "-",
+        LiveVerificationStageStatus::NotRun => "•",
+    }
+}
+
+fn provider_test_coverage_checkpoint_label(checkpoint: &str) -> String {
+    match checkpoint {
+        checkpoints::AUTH_CREDENTIAL_LOADED => "Credential loaded".to_string(),
+        checkpoints::NON_STREAMING_CHAT_COMPLETION => "Basic chat completion".to_string(),
+        checkpoints::TOOL_CALL_PARSE => "Tool call parsed".to_string(),
+        checkpoints::TOOL_EXECUTION_LOOP => "Tool execution loop".to_string(),
+        checkpoints::TOOL_RESULT_FOLLOWUP => "Tool result follow-up".to_string(),
+        checkpoints::REAL_JCODE_TOOL_SMOKE => "Real jcode tool smoke".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
 #[derive(Default)]
 struct ProviderModelCoverageBuilder {
     provider_id: String,

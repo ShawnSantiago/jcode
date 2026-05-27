@@ -683,7 +683,13 @@ impl Provider for OpenRouterProvider {
     }
 
     fn supports_image_input(&self) -> bool {
-        false
+        // Direct OpenAI-compatible local providers such as Ollama and LM Studio
+        // document image content support on /v1/chat/completions. We already
+        // serialize image blocks using OpenAI's image_url content-part shape in
+        // complete(), so advertise support for direct compatibility profiles.
+        // Keep the legacy OpenRouter aggregator behavior unchanged here because
+        // image availability is model/provider-route dependent there.
+        !self.supports_provider_features
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

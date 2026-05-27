@@ -46,9 +46,9 @@ use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 pub(crate) use jcode_tool_core::intent_schema_property;
-pub(crate) use session_search::spawn_recent_index_warmup;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
+pub(crate) use session_search::spawn_recent_index_warmup;
 
 #[derive(Clone, Debug, Default)]
 struct SessionToolPolicy {
