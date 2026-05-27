@@ -11,7 +11,9 @@ use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
 use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
@@ -203,7 +205,13 @@ struct PersistentWsState {
     message_count: usize,
     /// Number of items we sent in the last full request (for detecting conversation changes)
     last_input_item_count: usize,
+    /// Versioned fingerprint of the full input prefix associated with `last_response_id`.
+    last_input_prefix_fingerprint: u64,
+    /// Top-level server item ids that are known to have already been sent in this chain.
+    server_known_item_ids: HashSet<String>,
 }
+
+const RESPONSES_INPUT_FINGERPRINT_VERSION: &str = "responses-input-prefix-v1";
 
 #[derive(Debug, Clone)]
 struct PersistentWsDiagSnapshot {
@@ -320,6 +328,212 @@ fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<
         })
         .collect();
     (incremental_items, skipped_reasoning_items)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponsesInputPath {
+    Full,
+    PersistentDelta,
+}
+
+impl ResponsesInputPath {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full_input",
+            Self::PersistentDelta => "persistent_delta",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResponsesInputIssue {
+    reason: &'static str,
+    id: Option<String>,
+    item_type: Option<String>,
+    positions: Vec<usize>,
+}
+
+fn top_level_item_id(item: &Value) -> Option<&str> {
+    item.get("id").and_then(|value| value.as_str())
+}
+
+fn item_type(item: &Value) -> Option<&str> {
+    item.get("type").and_then(|value| value.as_str())
+}
+
+fn classify_responses_input(
+    items: &[Value],
+    path: ResponsesInputPath,
+    server_known_item_ids: Option<&HashSet<String>>,
+) -> Vec<ResponsesInputIssue> {
+    let mut issues = Vec::new();
+    let mut positions_by_id: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (idx, item) in items.iter().enumerate() {
+        let typ = item_type(item).map(str::to_string);
+        if let Some(id) = top_level_item_id(item) {
+            positions_by_id.entry(id.to_string()).or_default().push(idx);
+            if matches!(path, ResponsesInputPath::PersistentDelta) {
+                let known = server_known_item_ids
+                    .map(|known| known.contains(id))
+                    .unwrap_or(false);
+                if id.starts_with("rs_") || known {
+                    issues.push(ResponsesInputIssue {
+                        reason: "server_assigned_delta_item",
+                        id: Some(id.to_string()),
+                        item_type: typ.clone(),
+                        positions: vec![idx],
+                    });
+                }
+            }
+        }
+        if matches!(path, ResponsesInputPath::PersistentDelta)
+            && typ.as_deref() == Some("reasoning")
+        {
+            issues.push(ResponsesInputIssue {
+                reason: "reasoning_delta_item",
+                id: top_level_item_id(item).map(str::to_string),
+                item_type: typ,
+                positions: vec![idx],
+            });
+        }
+    }
+
+    for (id, positions) in positions_by_id {
+        if positions.len() > 1 {
+            issues.push(ResponsesInputIssue {
+                reason: "duplicate_input_id",
+                id: Some(id.clone()),
+                item_type: positions
+                    .first()
+                    .and_then(|idx| items.get(*idx))
+                    .and_then(item_type)
+                    .map(str::to_string),
+                positions,
+            });
+        }
+    }
+    issues
+}
+
+fn issue_log_fields(
+    issue: &ResponsesInputIssue,
+    path: ResponsesInputPath,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("request_path", path.as_str().to_string()),
+        ("reason", issue.reason.to_string()),
+        ("id", issue.id.clone().unwrap_or_else(|| "none".to_string())),
+        (
+            "item_type",
+            issue
+                .item_type
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+        ("positions", format!("{:?}", issue.positions)),
+    ]
+}
+
+fn log_responses_input_issue(
+    event: &'static str,
+    issue: &ResponsesInputIssue,
+    path: ResponsesInputPath,
+) {
+    log_openai_stream_lifecycle(
+        crate::logging::LogLevel::Warn,
+        event,
+        issue_log_fields(issue, path),
+    );
+}
+
+fn repair_duplicate_response_input_ids(items: &[Value]) -> (Vec<Value>, Vec<ResponsesInputIssue>) {
+    let issues = classify_responses_input(items, ResponsesInputPath::Full, None);
+    if issues.is_empty() {
+        return (items.to_vec(), issues);
+    }
+    let mut seen = HashSet::new();
+    let mut repaired = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(id) = top_level_item_id(item)
+            && !seen.insert(id.to_string())
+        {
+            continue;
+        }
+        repaired.push(item.clone());
+    }
+    (repaired, issues)
+}
+
+fn responses_input_identity(item: &Value, position: usize) -> String {
+    let typ = item_type(item).unwrap_or("unknown");
+    match typ {
+        "reasoning" => format!("reasoning:{}", top_level_item_id(item).unwrap_or("none")),
+        "function_call" => format!(
+            "function_call:{}:{}",
+            item.get("call_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("none"),
+            item.get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("none")
+        ),
+        "function_call_output" => format!(
+            "function_call_output:{}",
+            item.get("call_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("none")
+        ),
+        "message" => {
+            let role = item
+                .get("role")
+                .and_then(|value| value.as_str())
+                .unwrap_or("none");
+            let block_count = item
+                .get("content")
+                .and_then(|value| value.as_array())
+                .map(|blocks| blocks.len())
+                .unwrap_or(0);
+            let length_sum: usize = item
+                .get("content")
+                .and_then(|value| value.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| block.to_string().len())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            format!("message:{}:{}:{}", role, block_count, length_sum)
+        }
+        "compaction" => format!("compaction:{}", item.to_string().len()),
+        other => format!(
+            "other:{}:{}:{}:{}",
+            other,
+            position,
+            top_level_item_id(item).unwrap_or("none"),
+            item.get("call_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("none")
+        ),
+    }
+}
+
+fn responses_input_prefix_fingerprint(items: &[Value]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    RESPONSES_INPUT_FINGERPRINT_VERSION.hash(&mut hasher);
+    for (idx, item) in items.iter().enumerate() {
+        responses_input_identity(item, idx).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn collect_top_level_item_ids(items: &[Value]) -> HashSet<String> {
+    items
+        .iter()
+        .filter_map(top_level_item_id)
+        .map(str::to_string)
+        .collect()
 }
 
 fn persistent_ws_idle_needs_healthcheck(idle_for: Duration) -> bool {

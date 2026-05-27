@@ -392,3 +392,101 @@ fn test_openai_cache_ttl_is_model_aware() {
         Some(300)
     );
 }
+
+#[test]
+fn detects_duplicate_response_item_ids_in_full_input() {
+    let items = vec![
+        serde_json::json!({"type":"reasoning","id":"rs_dup","summary":[]}),
+        serde_json::json!({"type":"reasoning","id":"rs_dup","summary":[]}),
+    ];
+
+    let issues = classify_responses_input(&items, ResponsesInputPath::Full, None);
+
+    assert!(issues.iter().any(|issue| {
+        issue.reason == "duplicate_input_id" && issue.id.as_deref() == Some("rs_dup")
+    }));
+}
+
+#[test]
+fn repairs_duplicate_response_item_ids_order_preserving() {
+    let items = vec![
+        serde_json::json!({"type":"message","role":"user","content":[]}),
+        serde_json::json!({"type":"reasoning","id":"rs_dup","summary":[]}),
+        serde_json::json!({"type":"reasoning","id":"rs_dup","summary":[]}),
+    ];
+
+    let (repaired, issues) = repair_duplicate_response_input_ids(&items);
+
+    assert_eq!(repaired.len(), 2);
+    assert_eq!(response_item_type(&repaired[0]), Some("message"));
+    assert_eq!(response_item_type(&repaired[1]), Some("reasoning"));
+    assert_eq!(issues.len(), 1);
+}
+
+#[test]
+fn persistent_delta_rejects_reasoning_rs_items() {
+    let items = vec![serde_json::json!({"type":"reasoning","id":"rs_unsafe","summary":[]})];
+
+    let issues = classify_responses_input(&items, ResponsesInputPath::PersistentDelta, None);
+
+    assert!(issues.iter().any(|issue| issue.reason == "server_assigned_delta_item"));
+    assert!(issues.iter().any(|issue| issue.reason == "reasoning_delta_item"));
+}
+
+#[test]
+fn persistent_delta_allows_new_user_message_and_tool_output() {
+    let items = vec![
+        serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"SECRET_TEXT_MARKER"}]}),
+        serde_json::json!({"type":"function_call_output","call_id":"call_1","output":"SECRET_TOOL_OUTPUT_MARKER"}),
+    ];
+
+    let issues = classify_responses_input(&items, ResponsesInputPath::PersistentDelta, None);
+
+    assert!(issues.is_empty());
+}
+
+#[test]
+fn persistent_delta_rejects_server_known_output_ids() {
+    let items = vec![serde_json::json!({"type":"custom","id":"msg_known"})];
+    let known = HashSet::from(["msg_known".to_string()]);
+
+    let issues = classify_responses_input(&items, ResponsesInputPath::PersistentDelta, Some(&known));
+
+    assert!(issues.iter().any(|issue| issue.reason == "server_assigned_delta_item"));
+}
+
+#[test]
+fn prefix_fingerprint_changes_on_reorder_and_allows_same_prefix() {
+    let prefix = vec![
+        serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}),
+        serde_json::json!({"type":"function_call","call_id":"call_1","name":"bash"}),
+    ];
+    let reordered = vec![prefix[1].clone(), prefix[0].clone()];
+
+    assert_eq!(
+        responses_input_prefix_fingerprint(&prefix),
+        responses_input_prefix_fingerprint(&prefix)
+    );
+    assert_ne!(
+        responses_input_prefix_fingerprint(&prefix),
+        responses_input_prefix_fingerprint(&reordered)
+    );
+}
+
+#[test]
+fn issue_log_fields_do_not_include_content_markers() {
+    let items = vec![
+        serde_json::json!({"type":"reasoning","id":"rs_dup","summary":[{"type":"summary_text","text":"SECRET_TEXT_MARKER"}]}),
+        serde_json::json!({"type":"reasoning","id":"rs_dup","summary":[{"type":"summary_text","text":"SECRET_TOOL_ARGS_MARKER"}]}),
+    ];
+    let issues = classify_responses_input(&items, ResponsesInputPath::Full, None);
+    let rendered = issue_log_fields(&issues[0], ResponsesInputPath::Full)
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", key, value))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(!rendered.contains("SECRET_TEXT_MARKER"));
+    assert!(!rendered.contains("SECRET_TOOL_ARGS_MARKER"));
+    assert!(!rendered.contains("SECRET_TOOL_OUTPUT_MARKER"));
+}

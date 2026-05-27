@@ -398,6 +398,51 @@ pub(super) async fn try_persistent_ws_continuation(
         }
     }
 
+    if state.last_response_id.is_empty() {
+        crate::logging::warn(
+            "Persistent WS state missing previous_response_id; resetting before reuse",
+        );
+        *guard = None;
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Warn,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "empty_previous_response_id".to_string()),
+            ],
+        );
+        return PersistentWsResult::NotAvailable;
+    }
+
+    let current_prefix_fingerprint = if input_item_count >= state.last_input_item_count {
+        responses_input_prefix_fingerprint(&input[..state.last_input_item_count])
+    } else {
+        0
+    };
+    if input_item_count < state.last_input_item_count
+        || current_prefix_fingerprint != state.last_input_prefix_fingerprint
+    {
+        let last_input_item_count = state.last_input_item_count;
+        crate::logging::info(&format!(
+            "Input prefix changed for persistent WS reuse ({} vs {}, fingerprint_match={}); reconnecting",
+            input_item_count,
+            last_input_item_count,
+            current_prefix_fingerprint == state.last_input_prefix_fingerprint,
+        ));
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "input_prefix_changed".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                ("last_input_item_count", last_input_item_count.to_string()),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
     // The input array must be strictly growing for continuation to make sense.
     // If the input_item_count is less than or equal to last time, the conversation
     // was reset (e.g., after compaction) - we need a fresh connection.
@@ -449,6 +494,20 @@ pub(super) async fn try_persistent_ws_continuation(
                 ("reason", "empty_incremental_items".to_string()),
             ],
         );
+        return PersistentWsResult::NotAvailable;
+    }
+    let delta_issues = classify_responses_input(
+        &incremental_items,
+        ResponsesInputPath::PersistentDelta,
+        Some(&state.server_known_item_ids),
+    );
+    if let Some(issue) = delta_issues.first() {
+        log_responses_input_issue(
+            "persistent_reuse_rejected",
+            issue,
+            ResponsesInputPath::PersistentDelta,
+        );
+        *guard = None;
         return PersistentWsResult::NotAvailable;
     }
 
@@ -846,6 +905,8 @@ pub(super) async fn try_persistent_ws_continuation(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
+        state.last_input_prefix_fingerprint = responses_input_prefix_fingerprint(input);
+        state.server_known_item_ids = collect_top_level_item_ids(input);
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         crate::logging::info(&format!(
@@ -1315,6 +1376,16 @@ pub(super) async fn stream_response_websocket_persistent(
             last_activity_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
+            last_input_prefix_fingerprint: request_event
+                .get("input")
+                .and_then(|value| value.as_array())
+                .map(|items| responses_input_prefix_fingerprint(items))
+                .unwrap_or(0),
+            server_known_item_ids: request_event
+                .get("input")
+                .and_then(|value| value.as_array())
+                .map(|items| collect_top_level_item_ids(items))
+                .unwrap_or_default(),
         });
     } else {
         crate::logging::info(

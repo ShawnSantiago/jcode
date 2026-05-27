@@ -12,7 +12,15 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let input = build_responses_input(messages);
+        let raw_input = build_responses_input(messages);
+        let (input, full_input_issues) = repair_duplicate_response_input_ids(&raw_input);
+        for issue in &full_input_issues {
+            log_responses_input_issue(
+                "responses_full_input_repaired",
+                issue,
+                ResponsesInputPath::Full,
+            );
+        }
         let input_item_count = input.len();
         let api_tools = build_tools(tools);
         let model_id = self.model_id().await;
