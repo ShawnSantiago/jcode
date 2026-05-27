@@ -761,6 +761,28 @@ pub struct LiveProviderModelCoveragePair {
     pub non_passing_checkpoints: BTreeMap<String, LiveVerificationStageStatus>,
 }
 
+impl LiveProviderModelCoveragePair {
+    fn checkpoint_status(&self, checkpoint: &str) -> Option<LiveVerificationStageStatus> {
+        if self
+            .passed_checkpoints
+            .iter()
+            .any(|passed| passed == checkpoint)
+        {
+            Some(LiveVerificationStageStatus::Passed)
+        } else if let Some(status) = self.non_passing_checkpoints.get(checkpoint) {
+            Some(status.clone())
+        } else if self
+            .missing_checkpoints
+            .iter()
+            .any(|missing| missing == checkpoint)
+        {
+            None
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LiveProviderCoverageSummary {
     pub provider_id: String,
@@ -920,6 +942,7 @@ pub fn format_provider_test_coverage_report(
     };
 
     let provider_norm = normalize_provider_test_coverage_key(provider_query);
+    let provider_aliases = provider_test_coverage_lookup_aliases(&provider_norm);
     let model_norm = normalize_provider_test_coverage_key(model_query);
     let mut matches = coverage
         .latest
@@ -932,10 +955,25 @@ pub fn format_provider_test_coverage_report(
                 .as_deref()
                 .map(normalize_provider_test_coverage_key)
                 .unwrap_or_else(|| "*".to_string());
-            (entry_provider == provider_norm || entry_label == provider_norm)
+            (provider_aliases.contains(&entry_provider) || provider_aliases.contains(&entry_label))
                 && (entry_model == model_norm || model_norm == "*")
         })
         .collect::<Vec<_>>();
+    matches.sort_by_key(|entry| entry.recorded_at);
+    let mut latest_by_target = BTreeMap::new();
+    for entry in matches {
+        let key = (
+            normalize_provider_test_coverage_key(&entry.provider_id),
+            entry
+                .model
+                .as_deref()
+                .map(normalize_provider_test_coverage_key)
+                .unwrap_or_else(|| "*".to_string()),
+            entry.test_name.clone(),
+        );
+        latest_by_target.insert(key, entry);
+    }
+    let mut matches = latest_by_target.into_values().collect::<Vec<_>>();
     matches.sort_by_key(|entry| entry.recorded_at);
 
     let Some(entry) = matches.last() else {
@@ -945,18 +983,28 @@ pub fn format_provider_test_coverage_report(
         return out;
     };
 
-    let passed = entry
-        .checkpoint_statuses
+    let mut expected_checkpoints = Vec::new();
+    let mut checkpoint_statuses = BTreeMap::new();
+    for matched in &matches {
+        for checkpoint in &matched.expected_checkpoints {
+            if !expected_checkpoints.contains(checkpoint) {
+                expected_checkpoints.push(checkpoint.clone());
+            }
+        }
+        for (checkpoint, status) in &matched.checkpoint_statuses {
+            let merged = merge_checkpoint_status(checkpoint_statuses.get(checkpoint), status);
+            checkpoint_statuses.insert(checkpoint.clone(), merged);
+        }
+    }
+
+    let passed = checkpoint_statuses
         .values()
         .filter(|status| matches!(status, LiveVerificationStageStatus::Passed))
         .count();
-    let total = entry
-        .checkpoint_statuses
-        .len()
-        .max(entry.expected_checkpoints.len());
-    let all_expected_passed = entry.expected_checkpoints.iter().all(|checkpoint| {
+    let total = checkpoint_statuses.len().max(expected_checkpoints.len());
+    let all_expected_passed = expected_checkpoints.iter().all(|checkpoint| {
         matches!(
-            entry.checkpoint_statuses.get(checkpoint),
+            checkpoint_statuses.get(checkpoint),
             Some(LiveVerificationStageStatus::Passed)
         )
     });
@@ -971,6 +1019,7 @@ pub fn format_provider_test_coverage_report(
     out.push_str(&format!("Status: **{}**\n", status));
     out.push_str(&format!("Last tested: `{}`\n", entry.recorded_at));
     out.push_str(&format!("Evidence source: `{}`\n", path.display()));
+    out.push_str(&format!("Matching evidence entries: `{}`\n", matches.len()));
     out.push_str(&format!("Test name: `{}`\n", entry.test_name));
     out.push_str(&format!(
         "Tested with: `jcode {}` ({}){}\n\n",
@@ -980,9 +1029,8 @@ pub fn format_provider_test_coverage_report(
     ));
 
     out.push_str("## Checkpoints\n\n");
-    for checkpoint in &entry.expected_checkpoints {
-        let status = entry
-            .checkpoint_statuses
+    for checkpoint in &expected_checkpoints {
+        let status = checkpoint_statuses
             .get(checkpoint)
             .cloned()
             .unwrap_or(LiveVerificationStageStatus::NotRun);
@@ -994,9 +1042,19 @@ pub fn format_provider_test_coverage_report(
         ));
     }
 
-    if !entry.readiness_gaps.is_empty() {
+    let readiness_gaps = expected_checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            !matches!(
+                checkpoint_statuses.get(*checkpoint),
+                Some(LiveVerificationStageStatus::Passed)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !readiness_gaps.is_empty() {
         out.push_str("\n## Readiness gaps\n\n");
-        for gap in &entry.readiness_gaps {
+        for gap in &readiness_gaps {
             out.push_str(&format!("- {}\n", gap));
         }
     }
@@ -1007,7 +1065,17 @@ pub fn format_provider_test_coverage_report(
 }
 
 fn normalize_provider_test_coverage_key(value: &str) -> String {
-    value.trim().to_ascii_lowercase().replace('_', "-")
+    value.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+}
+
+fn provider_test_coverage_lookup_aliases(provider_norm: &str) -> Vec<String> {
+    let mut aliases = vec![provider_norm.to_string()];
+    match provider_norm {
+        "opencode" => aliases.push("opencode-zen".to_string()),
+        "opencode-zen" => aliases.push("opencode".to_string()),
+        _ => {}
+    }
+    aliases
 }
 
 fn provider_test_coverage_icon(status: &LiveVerificationStageStatus) -> &'static str {
@@ -1396,6 +1464,39 @@ pub fn format_strict_live_provider_model_coverage_summary(
         summary.total_provider_model_pairs,
         summary.coverage_percent
     ));
+
+    let mut basic_chat_passed = 0usize;
+    let mut tool_smoke_passed = 0usize;
+    let mut tool_smoke_skipped = 0usize;
+    let all_pairs = summary
+        .covered_pairs
+        .iter()
+        .chain(summary.uncovered_pairs.iter())
+        .collect::<Vec<_>>();
+    for pair in &all_pairs {
+        if matches!(
+            pair.checkpoint_status(crate::live_tests::checkpoints::NON_STREAMING_CHAT_COMPLETION),
+            Some(LiveVerificationStageStatus::Passed)
+        ) {
+            basic_chat_passed += 1;
+        }
+        match pair.checkpoint_status(crate::live_tests::checkpoints::REAL_JCODE_TOOL_SMOKE) {
+            Some(LiveVerificationStageStatus::Passed) => tool_smoke_passed += 1,
+            Some(LiveVerificationStageStatus::Skipped) => tool_smoke_skipped += 1,
+            _ => {}
+        }
+    }
+    if !all_pairs.is_empty() {
+        out.push_str(&format!(
+            "Auth-test smoke snapshot: basic chat passed {}/{} observed provider/model pairs; real tool smoke passed {}/{} and skipped {}.\n",
+            basic_chat_passed,
+            all_pairs.len(),
+            tool_smoke_passed,
+            all_pairs.len(),
+            tool_smoke_skipped
+        ));
+        out.push_str("Note: this is separate from strict E2E coverage, which also requires catalog, TUI picker, model-switch, and streaming checkpoints.\n\n");
+    }
 
     out.push_str("Required checkpoints:\n");
     for checkpoint in &summary.required_checkpoints {
