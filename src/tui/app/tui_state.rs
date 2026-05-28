@@ -185,11 +185,29 @@ impl App {
     fn widget_usage_info(
         &self,
         route: WidgetRouteInfo,
+        auth_method: crate::tui::info_widget::AuthMethod,
     ) -> Option<crate::tui::info_widget::UsageInfo> {
         let output_tps = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
         } else {
             None
+        };
+
+        let cost_based_usage = || crate::tui::info_widget::UsageInfo {
+            provider: crate::tui::info_widget::UsageProvider::CostBased,
+            five_hour: 0.0,
+            five_hour_resets_at: None,
+            seven_day: 0.0,
+            seven_day_resets_at: None,
+            spark: None,
+            spark_resets_at: None,
+            total_cost: self.total_cost,
+            input_tokens: self.total_input_tokens,
+            output_tokens: self.total_output_tokens,
+            cache_read_tokens: self.streaming_cache_read_tokens,
+            cache_write_tokens: self.streaming_cache_creation_tokens,
+            output_tps,
+            available: true,
         };
 
         match route.provider {
@@ -210,6 +228,13 @@ impl App {
                 available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
             }),
             WidgetProviderKind::Anthropic => {
+                if matches!(
+                    auth_method,
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                ) {
+                    return Some(cost_based_usage());
+                }
+
                 let usage = crate::usage::get_sync();
                 Some(crate::tui::info_widget::UsageInfo {
                     provider: crate::tui::info_widget::UsageProvider::Anthropic,
@@ -229,6 +254,13 @@ impl App {
                 })
             }
             WidgetProviderKind::OpenAI => {
+                if matches!(
+                    auth_method,
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                ) {
+                    return Some(cost_based_usage());
+                }
+
                 let openai_usage = crate::usage::get_openai_usage_sync();
                 Some(crate::tui::info_widget::UsageInfo {
                     provider: crate::tui::info_widget::UsageProvider::OpenAI,
@@ -266,22 +298,7 @@ impl App {
             }
             WidgetProviderKind::Gemini => None,
             WidgetProviderKind::OpenRouter | WidgetProviderKind::OpenCode => {
-                Some(crate::tui::info_widget::UsageInfo {
-                    provider: crate::tui::info_widget::UsageProvider::CostBased,
-                    five_hour: 0.0,
-                    five_hour_resets_at: None,
-                    seven_day: 0.0,
-                    seven_day_resets_at: None,
-                    spark: None,
-                    spark_resets_at: None,
-                    total_cost: self.total_cost,
-                    input_tokens: self.total_input_tokens,
-                    output_tokens: self.total_output_tokens,
-                    cache_read_tokens: self.streaming_cache_read_tokens,
-                    cache_write_tokens: self.streaming_cache_creation_tokens,
-                    output_tps,
-                    available: true,
-                })
+                Some(cost_based_usage())
             }
             WidgetProviderKind::Unknown => None,
         }
@@ -1062,7 +1079,8 @@ impl crate::tui::TuiState for App {
         };
 
         let route = self.widget_route_info(model.as_deref());
-        let usage_info = self.widget_usage_info(route);
+        let auth_method = self.widget_auth_method(route);
+        let usage_info = self.widget_usage_info(route, auth_method);
 
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
@@ -1092,8 +1110,6 @@ impl crate::tui::TuiState for App {
                     .collect(),
             }
         });
-
-        let auth_method = self.widget_auth_method(route);
 
         // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
         let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
