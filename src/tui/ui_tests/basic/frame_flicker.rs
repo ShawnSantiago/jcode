@@ -137,6 +137,9 @@ fn test_slow_frame_history_retains_recent_samples() {
         draw_ms: 9.0,
         total_ms: 41.0,
         messages_ms: Some(7.0),
+        input_event: None,
+        scroll_delta: None,
+        model_picker_open: false,
         resources: Default::default(),
         perf: FramePerfStats {
             viewport_total_wrapped_lines: 200,
@@ -163,6 +166,9 @@ fn test_slow_frame_history_retains_recent_samples() {
         draw_ms: 15.0,
         total_ms: 55.0,
         messages_ms: Some(14.0),
+        input_event: None,
+        scroll_delta: None,
+        model_picker_open: false,
         resources: Default::default(),
         perf: FramePerfStats {
             viewport_total_wrapped_lines: 240,

@@ -405,6 +405,32 @@ struct CachedCredentials {
     expires_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnthropicCredentialMode {
+    Auto,
+    OAuth,
+    ApiKey,
+}
+
+impl AnthropicCredentialMode {
+    fn from_runtime_env() -> Self {
+        match std::env::var("JCODE_RUNTIME_PROVIDER")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("claude-api" | "anthropic-api") => Self::ApiKey,
+            Some("claude" | "anthropic") => Self::OAuth,
+            _ => Self::Auto,
+        }
+    }
+}
+
+fn load_anthropic_api_key() -> Result<String> {
+    crate::provider_catalog::load_api_key_from_env_or_config("ANTHROPIC_API_KEY", "anthropic.env")
+        .context("No Anthropic API key found")
+}
+
 /// Direct Anthropic API provider
 pub struct AnthropicProvider {
     client: Client,
@@ -412,6 +438,7 @@ pub struct AnthropicProvider {
     reasoning_effort: Arc<std::sync::RwLock<Option<String>>>,
     /// Cached OAuth credentials (None if using API key)
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
     max_tokens: u32,
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
@@ -455,6 +482,7 @@ impl AnthropicProvider {
             model: Arc::new(std::sync::RwLock::new(model)),
             reasoning_effort: Arc::new(std::sync::RwLock::new(reasoning_effort)),
             credentials: Arc::new(RwLock::new(None)),
+            credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env())),
             max_tokens,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
@@ -583,11 +611,22 @@ impl AnthropicProvider {
     /// Supports both OAuth tokens and direct API keys
     /// Automatically refreshes OAuth tokens when expired
     async fn get_access_token(&self) -> Result<(String, bool)> {
-        // First check for direct API key in environment
-        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            return Ok((key, false)); // false = not OAuth
+        let mode = *self.credential_mode.read().await;
+        if matches!(
+            mode,
+            AnthropicCredentialMode::Auto | AnthropicCredentialMode::ApiKey
+        ) {
+            match load_anthropic_api_key() {
+                Ok(key) => return Ok((key, false)), // false = not OAuth
+                Err(error) if matches!(mode, AnthropicCredentialMode::ApiKey) => return Err(error),
+                Err(_) => {}
+            }
         }
 
+        self.get_oauth_access_token().await
+    }
+
+    async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
         // Check cached credentials
         {
             let cached = self.credentials.read().await;
@@ -656,6 +695,41 @@ impl AnthropicProvider {
         });
 
         Ok((fresh_creds.access_token, true))
+    }
+
+    pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
+        match mode {
+            AnthropicCredentialMode::Auto => {}
+            AnthropicCredentialMode::ApiKey => {
+                load_anthropic_api_key()?;
+            }
+            AnthropicCredentialMode::OAuth => {
+                auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+            }
+        }
+        let mut mode_guard = self.credential_mode.try_write().map_err(|_| {
+            anyhow::anyhow!(
+                "Cannot change Anthropic credential mode while a request is in progress"
+            )
+        })?;
+        *mode_guard = mode;
+        drop(mode_guard);
+        if let Ok(mut cached) = self.credentials.try_write() {
+            *cached = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn credential_mode_snapshot(&self) -> AnthropicCredentialMode {
+        self.credential_mode
+            .try_read()
+            .map(|mode| *mode)
+            .unwrap_or(AnthropicCredentialMode::Auto)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_access_token_and_oauth_mode(&self) -> Result<(String, bool)> {
+        self.get_access_token().await
     }
 
     /// Convert our Message type to Anthropic API format
@@ -1282,6 +1356,7 @@ impl Provider for AnthropicProvider {
             )),
             reasoning_effort: Arc::new(std::sync::RwLock::new(self.reasoning_effort())),
             credentials: Arc::new(RwLock::new(None)),
+            credential_mode: Arc::clone(&self.credential_mode),
             max_tokens: self.max_tokens,
             oauth_session_id: self.oauth_session_id.clone(),
             oauth_preflight_done: Arc::new(AtomicBool::new(

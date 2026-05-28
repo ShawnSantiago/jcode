@@ -184,6 +184,7 @@ pub(super) async fn handle_get_model_catalog(
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
     let started = Instant::now();
+    let build_started = Instant::now();
     let (provider_name, provider_model, available_models, available_model_routes, source) = {
         match agent.try_lock() {
             Ok(agent_guard) => (
@@ -212,7 +213,9 @@ pub(super) async fn handle_get_model_catalog(
             }
         }
     };
+    let build_ms = build_started.elapsed().as_millis();
 
+    let encode_started = Instant::now();
     let event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
@@ -248,13 +251,24 @@ pub(super) async fn handle_get_model_catalog(
         side_panel: Default::default(),
     };
     let json = encode_event(&event);
+    let encode_ms = encode_started.elapsed().as_millis();
+    let write_started = Instant::now();
     let mut writer_guard = writer.lock().await;
+    let writer_lock_ms = write_started.elapsed().as_millis();
     writer_guard.write_all(json.as_bytes()).await?;
+    let write_ms = write_started
+        .elapsed()
+        .as_millis()
+        .saturating_sub(writer_lock_ms);
     crate::logging::info(&format!(
-        "[TIMING] handle_get_model_catalog: session={}, source={}, bytes={}, total={}ms",
+        "[TIMING] handle_get_model_catalog: session={}, source={}, bytes={}, build={}ms, encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
         session_id,
         source,
         json.len(),
+        build_ms,
+        encode_ms,
+        writer_lock_ms,
+        write_ms,
         started.elapsed().as_millis()
     ));
     Ok(())

@@ -27,6 +27,8 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
         "OPENAI_COMPAT_API_KEY",
         "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "JCODE_RUNTIME_PROVIDER",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",

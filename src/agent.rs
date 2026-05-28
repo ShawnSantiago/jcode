@@ -354,12 +354,18 @@ impl Agent {
                 crate::session::derive_session_provider_key(agent.provider.name());
         }
         if let Some(model) = agent.session.model.clone() {
-            if let Err(e) =
-                crate::provider::set_model_with_auth_refresh(agent.provider.as_ref(), &model)
-            {
+            let model_request =
+                crate::provider::MultiProvider::model_switch_request_for_session_model(
+                    &model,
+                    agent.session.provider_key.as_deref(),
+                );
+            if let Err(e) = crate::provider::set_model_with_auth_refresh(
+                agent.provider.as_ref(),
+                &model_request,
+            ) {
                 logging::error(&format!(
-                    "Failed to restore session model '{}': {}",
-                    model, e
+                    "Failed to restore session model '{}' via '{}': {}",
+                    model, model_request, e
                 ));
             }
         } else {

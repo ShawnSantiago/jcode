@@ -308,7 +308,26 @@ pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> 
 }
 
 pub fn load_credentials() -> Result<CodexCredentials> {
-    let env_api_key = load_env_api_key();
+    if let Ok(creds) = load_oauth_credentials_internal(false) {
+        return Ok(creds);
+    }
+
+    if let Ok(creds) = load_api_key_credentials() {
+        return Ok(creds);
+    }
+
+    if let Ok(creds) = load_oauth_credentials_internal(true) {
+        return Ok(creds);
+    }
+
+    anyhow::bail!("No OpenAI tokens or API key found")
+}
+
+pub fn load_oauth_credentials() -> Result<CodexCredentials> {
+    load_oauth_credentials_internal(true)
+}
+
+fn load_oauth_credentials_internal(return_expired: bool) -> Result<CodexCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut expired_candidates: Vec<(&str, CodexCredentials)> = Vec::new();
     let legacy_allowed = legacy_auth_allowed();
@@ -335,10 +354,6 @@ pub fn load_credentials() -> Result<CodexCredentials> {
             }
             expired_candidates.push(("legacy", creds));
         }
-
-        if let Ok(creds) = load_legacy_api_key_credentials() {
-            return Ok(creds);
-        }
     }
 
     if let Some(tokens) = crate::auth::external::load_openai_oauth_tokens() {
@@ -359,7 +374,15 @@ pub fn load_credentials() -> Result<CodexCredentials> {
         expired_candidates.push(("external", creds));
     }
 
-    if let Some(api_key) = env_api_key {
+    if return_expired && let Some((_source, creds)) = expired_candidates.into_iter().next() {
+        return Ok(creds);
+    }
+
+    anyhow::bail!("No OpenAI OAuth tokens found")
+}
+
+pub fn load_api_key_credentials() -> Result<CodexCredentials> {
+    if let Some(api_key) = load_env_api_key() {
         return Ok(CodexCredentials {
             access_token: api_key,
             refresh_token: String::new(),
@@ -369,11 +392,13 @@ pub fn load_credentials() -> Result<CodexCredentials> {
         });
     }
 
-    if let Some((_source, creds)) = expired_candidates.into_iter().next() {
+    if legacy_auth_allowed()
+        && let Ok(creds) = load_legacy_api_key_credentials()
+    {
         return Ok(creds);
     }
 
-    anyhow::bail!("No OpenAI tokens or API key found")
+    anyhow::bail!("No OpenAI API key found")
 }
 
 pub fn load_credentials_for_account(label: &str) -> Result<CodexCredentials> {

@@ -282,10 +282,10 @@ fn minimax_profile_exposes_static_models_before_catalog_refresh() {
 }
 
 #[test]
-fn cerebras_profile_exposes_static_models_before_catalog_refresh() {
+fn cerebras_profile_exposes_live_chat_models_before_catalog_refresh() {
     assert_eq!(
         jcode_provider_metadata::CEREBRAS_PROFILE.default_model,
-        Some("qwen-3-235b-a22b-instruct-2507")
+        Some("gpt-oss-120b")
     );
 
     let models = crate::provider_catalog::openai_compatible_profile_static_models(
@@ -296,20 +296,14 @@ fn cerebras_profile_exposes_static_models_before_catalog_refresh() {
         !models.iter().any(|model| model == "qwen-3-coder-480b"),
         "old Cerebras default is no longer returned by the live /models catalog"
     );
+    assert!(models.iter().any(|model| model == "gpt-oss-120b"));
+    assert!(models.iter().any(|model| model == "zai-glm-4.7"));
     assert!(
-        models
+        !models
             .iter()
             .any(|model| model == "qwen-3-235b-a22b-instruct-2507")
     );
-    assert!(models.iter().any(|model| model == "llama3.1-8b"));
-    assert!(
-        !models.iter().any(|model| model == "zai-glm-4.7"),
-        "Cerebras exposes zai-glm-4.7 from /models for some keys, but chat/completions returns model_not_found"
-    );
-    assert!(
-        !models.iter().any(|model| model == "gpt-oss-120b"),
-        "Cerebras exposes gpt-oss-120b from /models for some keys, but chat/completions returns model_not_found"
-    );
+    assert!(!models.iter().any(|model| model == "llama3.1-8b"));
 }
 
 #[test]
@@ -1068,10 +1062,7 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: Some("cerebras".to_string()),
-        static_models: vec![
-            "zai-glm-4.7".to_string(),
-            "qwen-3-235b-a22b-instruct-2507".to_string(),
-        ],
+        static_models: vec!["gpt-oss-120b".to_string(), "zai-glm-4.7".to_string()],
         send_openrouter_headers: false,
         ..make_custom_compatible_provider()
     };
@@ -1084,18 +1075,13 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
         .expect("refresh fake model catalog");
 
     let display = provider.available_models_display();
+    assert!(display.iter().any(|model| model == "gpt-oss-120b"));
+    assert!(display.iter().any(|model| model == "zai-glm-4.7"));
     assert!(
         display
             .iter()
-            .any(|model| model == "qwen-3-235b-a22b-instruct-2507")
-    );
-    assert!(
-        !display.iter().any(|model| model == "zai-glm-4.7"),
-        "Cerebras models that 404 on chat/completions should not be advertised after a live catalog refresh: {display:?}"
-    );
-    assert!(
-        !display.iter().any(|model| model == "gpt-oss-120b"),
-        "Cerebras models that 404 on chat/completions should not be advertised after a live catalog refresh: {display:?}"
+            .any(|model| model == "qwen-3-235b-a22b-instruct-2507"),
+        "live catalog chat-capable models should remain visible: {display:?}"
     );
 }
 
@@ -1125,28 +1111,24 @@ fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_cat
 }
 
 #[test]
-fn cerebras_chat_unavailable_catalog_models_are_rejected_on_explicit_switch() {
+fn cerebras_live_catalog_models_are_selectable_on_explicit_switch() {
     let provider = OpenRouterProvider {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: Some("cerebras".to_string()),
-        static_models: vec!["qwen-3-235b-a22b-instruct-2507".to_string()],
+        static_models: vec!["gpt-oss-120b".to_string()],
         send_openrouter_headers: false,
         ..make_custom_compatible_provider()
     };
 
-    let error = provider
-        .set_model("zai-glm-4.7")
-        .expect_err("known Cerebras chat-unavailable model should be rejected before request time");
-    assert!(
-        error
-            .to_string()
-            .contains("not currently usable for chat completions"),
-        "unexpected error: {error:?}"
-    );
     provider
-        .set_model("qwen-3-235b-a22b-instruct-2507")
-        .expect("chat-supported Cerebras model should remain selectable");
+        .set_model("zai-glm-4.7")
+        .expect("live Cerebras model should be selectable");
+    assert_eq!(provider.model(), "zai-glm-4.7");
+    provider
+        .set_model("gpt-oss-120b")
+        .expect("default Cerebras model should remain selectable");
+    assert_eq!(provider.model(), "gpt-oss-120b");
 }
 
 #[test]

@@ -3,6 +3,8 @@ use crate::provider::cursor;
 
 #[path = "models_catalog.rs"]
 mod catalog;
+#[path = "model_catalog_service.rs"]
+mod catalog_service;
 
 use anyhow::Result;
 #[cfg(test)]
@@ -11,6 +13,7 @@ pub use catalog::{
     AnthropicModelCatalog, OpenAIModelCatalog, fetch_anthropic_model_catalog,
     fetch_anthropic_model_catalog_oauth, fetch_openai_context_limits, fetch_openai_model_catalog,
 };
+use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, ModelCapabilities, ModelRoute,
     context_limit_for_model_with_provider_and_cache, core_provider_for_model_with_hint,
@@ -76,50 +79,33 @@ static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> 
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
-struct RuntimeModelUnavailability {
-    reason: String,
-    recorded_at: Instant,
-    observed_at: SystemTime,
-}
-
-#[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
     reason: String,
     recorded_at: Instant,
     observed_at: SystemTime,
 }
 
-/// Dynamic cache of models actually available for this account (populated from Codex API).
-/// When populated, only models in this set should be offered/accepted for the OpenAI provider.
-static ACCOUNT_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<HashMap<String, HashSet<String>>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ACCOUNT_AVAILABLE_MODELS_FETCHED_AT: std::sync::LazyLock<RwLock<HashMap<String, Instant>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT: std::sync::LazyLock<
-    RwLock<HashMap<String, SystemTime>>,
-> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ACCOUNT_RUNTIME_UNAVAILABLE_MODELS: std::sync::LazyLock<
-    RwLock<HashMap<String, RuntimeModelUnavailability>>,
-> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+/// Dynamic cache of models actually available for this account (populated from provider APIs).
+/// When populated, only models in this set should be offered/accepted for that account/provider.
+static OPENAI_MODEL_CATALOG_SERVICE: std::sync::LazyLock<ModelCatalogService> =
+    std::sync::LazyLock::new(|| {
+        ModelCatalogService::new(
+            ACCOUNT_MODEL_CACHE_TTL,
+            ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL,
+            RUNTIME_UNAVAILABLE_TTL,
+        )
+    });
+static ANTHROPIC_MODEL_CATALOG_SERVICE: std::sync::LazyLock<ModelCatalogService> =
+    std::sync::LazyLock::new(|| {
+        ModelCatalogService::new(
+            ACCOUNT_MODEL_CACHE_TTL,
+            ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL,
+            RUNTIME_UNAVAILABLE_TTL,
+        )
+    });
 static ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS: std::sync::LazyLock<
     RwLock<HashMap<String, RuntimeProviderUnavailability>>,
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT: std::sync::LazyLock<RwLock<HashMap<String, Instant>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ACCOUNT_MODEL_REFRESH_IN_FLIGHT: std::sync::LazyLock<RwLock<HashSet<String>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
-static ANTHROPIC_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<HashMap<String, HashSet<String>>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT: std::sync::LazyLock<
-    RwLock<HashMap<String, Instant>>,
-> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT: std::sync::LazyLock<
-    RwLock<HashMap<String, SystemTime>>,
-> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ANTHROPIC_MODEL_REFRESH_LAST_ATTEMPT: std::sync::LazyLock<RwLock<HashMap<String, Instant>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
-static ANTHROPIC_MODEL_REFRESH_IN_FLIGHT: std::sync::LazyLock<RwLock<HashSet<String>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
 const ACCOUNT_MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(10 * 60);
 const PROVIDER_RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -221,18 +207,6 @@ fn current_anthropic_catalog_scope() -> String {
     }
 }
 
-fn scoped_openai_model_key(scope: &str, model: &str) -> Option<String> {
-    let key = normalize_model_id(model);
-    if key.is_empty() {
-        return None;
-    }
-    Some(format!("{}::{}", scope, key))
-}
-
-fn current_scoped_openai_model_key(model: &str) -> Option<String> {
-    scoped_openai_model_key(&current_openai_account_scope(), model)
-}
-
 fn provider_runtime_scope_key(provider: &str, account_label: Option<&str>) -> String {
     let normalized = normalize_provider_id(provider);
     match normalized.as_str() {
@@ -305,33 +279,15 @@ fn model_ids_with_context_aliases(models: Vec<String>) -> Vec<String> {
     deduped
 }
 
-fn live_catalog_model_ids(
-    cache: &RwLock<HashMap<String, HashSet<String>>>,
-    scope: &str,
-) -> Option<Vec<String>> {
-    let models = cache
-        .read()
-        .ok()?
-        .get(scope)?
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        return None;
-    }
-
-    let mut models = models;
-    models.sort();
-    Some(model_ids_with_context_aliases(models))
+fn live_catalog_model_ids(service: &ModelCatalogService, scope: &str) -> Option<Vec<String>> {
+    service.model_ids(scope).map(model_ids_with_context_aliases)
 }
 
 fn load_openai_catalog_from_disk(scope: &str) -> Option<Vec<String>> {
     hydrate_catalog_cache_from_disk(
         OPENAI_MODEL_CATALOG_CACHE_FILE,
         scope,
-        &ACCOUNT_AVAILABLE_MODELS,
-        &ACCOUNT_AVAILABLE_MODELS_FETCHED_AT,
-        &ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT,
+        &OPENAI_MODEL_CATALOG_SERVICE,
     )
 }
 
@@ -339,9 +295,7 @@ fn load_anthropic_catalog_from_disk(scope: &str) -> Option<Vec<String>> {
     hydrate_catalog_cache_from_disk(
         ANTHROPIC_MODEL_CATALOG_CACHE_FILE,
         scope,
-        &ANTHROPIC_AVAILABLE_MODELS,
-        &ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT,
-        &ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT,
+        &ANTHROPIC_MODEL_CATALOG_SERVICE,
     )
 }
 
@@ -404,9 +358,7 @@ fn persist_scoped_model_catalog(
 fn hydrate_catalog_cache_from_disk(
     file_name: &str,
     scope: &str,
-    available_cache: &RwLock<HashMap<String, HashSet<String>>>,
-    fetched_at_cache: &RwLock<HashMap<String, Instant>>,
-    observed_at_cache: &RwLock<HashMap<String, SystemTime>>,
+    service: &ModelCatalogService,
 ) -> Option<Vec<String>> {
     let store = load_persisted_model_catalog_store(file_name)?;
     let persisted = store.scopes.get(scope)?.clone();
@@ -426,15 +378,7 @@ fn hydrate_catalog_cache_from_disk(
     }
 
     let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
-    if let Ok(mut cache) = available_cache.write() {
-        cache.insert(scope.to_string(), normalized);
-    }
-    if let Ok(mut fetched_at) = fetched_at_cache.write() {
-        fetched_at.insert(scope.to_string(), Instant::now());
-    }
-    if let Ok(mut observed_at_map) = observed_at_cache.write() {
-        observed_at_map.insert(scope.to_string(), observed_at);
-    }
+    service.replace_scope_models(scope, normalized, observed_at);
     if !persisted.context_limits.is_empty() {
         populate_context_limits(persisted.context_limits.clone());
     }
@@ -444,13 +388,13 @@ fn hydrate_catalog_cache_from_disk(
 
 pub fn cached_anthropic_model_ids() -> Option<Vec<String>> {
     let scope = current_anthropic_catalog_scope();
-    live_catalog_model_ids(&ANTHROPIC_AVAILABLE_MODELS, &scope)
+    live_catalog_model_ids(&ANTHROPIC_MODEL_CATALOG_SERVICE, &scope)
         .or_else(|| load_anthropic_catalog_from_disk(&scope))
 }
 
 pub fn cached_openai_model_ids() -> Option<Vec<String>> {
     let scope = current_openai_account_scope();
-    live_catalog_model_ids(&ACCOUNT_AVAILABLE_MODELS, &scope)
+    live_catalog_model_ids(&OPENAI_MODEL_CATALOG_SERVICE, &scope)
         .or_else(|| load_openai_catalog_from_disk(&scope))
 }
 
@@ -517,32 +461,21 @@ fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
             return;
         }
 
-        if let Ok(mut available) = ACCOUNT_AVAILABLE_MODELS.write() {
-            let mut sorted: Vec<String> = normalized.iter().cloned().collect();
-            sorted.sort();
-            crate::logging::info(&format!(
-                "Account available models [{}]: {}",
-                scope,
-                sorted.join(", ")
-            ));
-            available.insert(scope.to_string(), normalized.clone());
-        }
-        if let Ok(mut fetched_at) = ACCOUNT_AVAILABLE_MODELS_FETCHED_AT.write() {
-            fetched_at.insert(scope.to_string(), Instant::now());
-        }
-        if let Ok(mut observed_at) = ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT.write() {
-            observed_at.insert(scope.to_string(), SystemTime::now());
-        }
-        if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
-            last_attempt.insert(scope.to_string(), Instant::now());
-        }
-        if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
-            unavailable.retain(|key, _| {
-                let Some((entry_scope, model)) = key.split_once("::") else {
-                    return true;
-                };
-                entry_scope != scope || !normalized.contains(model)
-            });
+        let mut sorted: Vec<String> = normalized.iter().cloned().collect();
+        sorted.sort();
+        crate::logging::info(&format!(
+            "Account available models [{}]: {}",
+            scope,
+            sorted.join(", ")
+        ));
+        OPENAI_MODEL_CATALOG_SERVICE.replace_scope_models(
+            scope,
+            normalized.clone(),
+            SystemTime::now(),
+        );
+        OPENAI_MODEL_CATALOG_SERVICE.note_attempt(scope);
+        for model in &normalized {
+            OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, model);
         }
         crate::bus::Bus::global().publish_models_updated();
     }
@@ -564,22 +497,14 @@ fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
         return;
     }
 
-    if let Ok(mut available) = ANTHROPIC_AVAILABLE_MODELS.write() {
-        let mut sorted: Vec<String> = normalized.iter().cloned().collect();
-        sorted.sort();
-        crate::logging::info(&format!(
-            "Anthropic available models [{}]: {}",
-            scope,
-            sorted.join(", ")
-        ));
-        available.insert(scope.to_string(), normalized);
-    }
-    if let Ok(mut fetched_at) = ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT.write() {
-        fetched_at.insert(scope.to_string(), Instant::now());
-    }
-    if let Ok(mut observed_at) = ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT.write() {
-        observed_at.insert(scope.to_string(), SystemTime::now());
-    }
+    let mut sorted: Vec<String> = normalized.iter().cloned().collect();
+    sorted.sort();
+    crate::logging::info(&format!(
+        "Anthropic available models [{}]: {}",
+        scope,
+        sorted.join(", ")
+    ));
+    ANTHROPIC_MODEL_CATALOG_SERVICE.replace_scope_models(scope, normalized, SystemTime::now());
     crate::bus::Bus::global().publish_models_updated();
 }
 
@@ -648,44 +573,20 @@ pub fn known_openai_model_ids() -> Vec<String> {
 }
 
 pub fn note_openai_model_catalog_refresh_attempt() {
-    if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
-        last_attempt.insert(current_openai_account_scope(), Instant::now());
-    }
-}
-
-fn note_anthropic_model_catalog_refresh_attempt_for_scope(scope: &str) {
-    if let Ok(mut last_attempt) = ANTHROPIC_MODEL_REFRESH_LAST_ATTEMPT.write() {
-        last_attempt.insert(scope.to_string(), Instant::now());
-    }
+    OPENAI_MODEL_CATALOG_SERVICE.note_attempt(&current_openai_account_scope());
 }
 
 fn note_openai_model_catalog_refresh_attempt_for_scope(scope: &str) {
-    if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
-        last_attempt.insert(scope.to_string(), Instant::now());
-    }
+    OPENAI_MODEL_CATALOG_SERVICE.note_attempt(scope);
 }
 
 fn openai_model_catalog_refresh_throttled() -> bool {
     let scope = current_openai_account_scope();
-    let Ok(last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.read() else {
-        return false;
-    };
-
-    last_attempt
-        .get(&scope)
-        .map(|at| at.elapsed() < ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL)
-        .unwrap_or(false)
+    OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(&scope)
 }
 
 fn anthropic_model_catalog_refresh_throttled(scope: &str) -> bool {
-    let Ok(last_attempt) = ANTHROPIC_MODEL_REFRESH_LAST_ATTEMPT.read() else {
-        return false;
-    };
-
-    last_attempt
-        .get(scope)
-        .map(|at| at.elapsed() < ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL)
-        .unwrap_or(false)
+    ANTHROPIC_MODEL_CATALOG_SERVICE.refresh_throttled(scope)
 }
 
 pub fn should_refresh_openai_model_catalog() -> bool {
@@ -695,10 +596,7 @@ pub fn should_refresh_openai_model_catalog() -> bool {
     if openai_model_catalog_refresh_throttled() {
         return false;
     }
-    ACCOUNT_MODEL_REFRESH_IN_FLIGHT
-        .read()
-        .map(|in_flight| !in_flight.contains(&current_openai_account_scope()))
-        .unwrap_or(true)
+    OPENAI_MODEL_CATALOG_SERVICE.should_refresh(&current_openai_account_scope())
 }
 
 pub fn should_refresh_anthropic_model_catalog() -> bool {
@@ -709,96 +607,49 @@ pub fn should_refresh_anthropic_model_catalog() -> bool {
     if anthropic_model_catalog_refresh_throttled(&scope) {
         return false;
     }
-    ANTHROPIC_MODEL_REFRESH_IN_FLIGHT
-        .read()
-        .map(|in_flight| !in_flight.contains(&scope))
-        .unwrap_or(true)
+    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(&scope)
 }
 
 pub fn begin_openai_model_catalog_refresh() -> bool {
-    if !should_refresh_openai_model_catalog() {
-        return false;
-    }
     let scope = current_openai_account_scope();
-    let Ok(mut in_flight) = ACCOUNT_MODEL_REFRESH_IN_FLIGHT.write() else {
-        return false;
-    };
-    if !in_flight.insert(scope.clone()) {
-        return false;
-    }
-
-    if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
-        last_attempt.insert(scope, Instant::now());
-    }
-    true
+    OPENAI_MODEL_CATALOG_SERVICE.begin_refresh(&scope)
 }
 
 pub fn begin_anthropic_model_catalog_refresh() -> Option<String> {
-    if !should_refresh_anthropic_model_catalog() {
-        return None;
-    }
     let scope = current_anthropic_catalog_scope();
-    let Ok(mut in_flight) = ANTHROPIC_MODEL_REFRESH_IN_FLIGHT.write() else {
-        return None;
-    };
-    if !in_flight.insert(scope.clone()) {
-        return None;
-    }
-
-    note_anthropic_model_catalog_refresh_attempt_for_scope(&scope);
-    Some(scope)
+    ANTHROPIC_MODEL_CATALOG_SERVICE
+        .begin_refresh(&scope)
+        .then_some(scope)
 }
 
 pub fn finish_openai_model_catalog_refresh() {
-    if let Ok(mut in_flight) = ACCOUNT_MODEL_REFRESH_IN_FLIGHT.write() {
-        in_flight.remove(&current_openai_account_scope());
-    }
+    OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(&current_openai_account_scope());
 }
 
 fn finish_openai_model_catalog_refresh_for_scope(scope: &str) {
-    if let Ok(mut in_flight) = ACCOUNT_MODEL_REFRESH_IN_FLIGHT.write() {
-        in_flight.remove(scope);
-    }
+    OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(scope);
 }
 
 pub fn finish_anthropic_model_catalog_refresh_for_scope(scope: &str) {
-    if let Ok(mut in_flight) = ANTHROPIC_MODEL_REFRESH_IN_FLIGHT.write() {
-        in_flight.remove(scope);
-    }
+    ANTHROPIC_MODEL_CATALOG_SERVICE.finish_refresh(scope);
 }
 
 fn account_model_cache_is_fresh() -> bool {
     let scope = current_openai_account_scope();
-    let Ok(guard) = ACCOUNT_AVAILABLE_MODELS_FETCHED_AT.read() else {
-        return false;
-    };
-    guard
-        .get(&scope)
-        .map(|fetched_at| fetched_at.elapsed() <= ACCOUNT_MODEL_CACHE_TTL)
-        .unwrap_or(false)
+    OPENAI_MODEL_CATALOG_SERVICE.is_fresh(&scope)
 }
 
 fn anthropic_model_cache_is_fresh(scope: &str) -> bool {
-    let Ok(guard) = ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT.read() else {
-        return false;
-    };
-    guard
-        .get(scope)
-        .map(|fetched_at| fetched_at.elapsed() <= ACCOUNT_MODEL_CACHE_TTL)
-        .unwrap_or(false)
+    ANTHROPIC_MODEL_CATALOG_SERVICE.is_fresh(scope)
 }
 
 fn runtime_model_unavailability(model: &str) -> Option<RuntimeModelUnavailability> {
-    let key = current_scoped_openai_model_key(model)?;
-
-    let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write().ok()?;
-    if let Some(entry) = unavailable.get(&key) {
-        if entry.recorded_at.elapsed() <= RUNTIME_UNAVAILABLE_TTL {
-            return Some(entry.clone());
-        }
-        unavailable.remove(&key);
+    let scope = current_openai_account_scope();
+    let model = normalize_model_id(model);
+    if model.is_empty() {
+        return None;
     }
-    None
+    OPENAI_MODEL_CATALOG_SERVICE.runtime_model_unavailability(&scope, &model)
 }
 
 fn account_snapshot_model_available(model: &str) -> Option<bool> {
@@ -811,17 +662,12 @@ fn account_snapshot_model_available(model: &str) -> Option<bool> {
     }
 
     let scope = current_openai_account_scope();
-    let cache = ACCOUNT_AVAILABLE_MODELS.read().ok()?;
-    let models = cache.get(&scope)?;
-    Some(models.contains(&key))
+    OPENAI_MODEL_CATALOG_SERVICE.contains_model(&scope, &key)
 }
 
 fn account_models_observed_at() -> Option<SystemTime> {
     let scope = current_openai_account_scope();
-    ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT
-        .read()
-        .ok()
-        .and_then(|map| map.get(&scope).copied())
+    OPENAI_MODEL_CATALOG_SERVICE.observed_at(&scope)
 }
 
 pub fn refresh_openai_model_catalog_in_background(access_token: String, context: &'static str) {
@@ -870,30 +716,21 @@ pub fn refresh_openai_model_catalog_in_background(access_token: String, context:
 }
 
 pub fn record_model_unavailable_for_account(model: &str, reason: &str) {
-    let Some(key) = current_scoped_openai_model_key(model) else {
+    let scope = current_openai_account_scope();
+    let model = normalize_model_id(model);
+    if model.is_empty() {
         return;
-    };
-
-    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
-        unavailable.insert(
-            key,
-            RuntimeModelUnavailability {
-                reason: reason.trim().to_string(),
-                recorded_at: Instant::now(),
-                observed_at: SystemTime::now(),
-            },
-        );
     }
+    OPENAI_MODEL_CATALOG_SERVICE.record_runtime_model_unavailable(&scope, &model, reason);
 }
 
 pub fn clear_model_unavailable_for_account(model: &str) {
-    let Some(key) = current_scoped_openai_model_key(model) else {
+    let scope = current_openai_account_scope();
+    let model = normalize_model_id(model);
+    if model.is_empty() {
         return;
-    };
-
-    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
-        unavailable.remove(&key);
     }
+    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(&scope, &model);
 }
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
@@ -941,9 +778,7 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
 /// Clear all runtime model unavailability markers.
 pub fn clear_all_model_unavailability_for_account() {
     let scope = current_openai_account_scope();
-    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
-        unavailable.retain(|key, _| !key.starts_with(&format!("{}::", scope)));
-    }
+    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable_scope(&scope);
 }
 
 /// Clear all runtime provider unavailability markers.
@@ -1043,18 +878,17 @@ pub fn get_best_available_openai_model() -> Option<String> {
         return None;
     }
     let scope = current_openai_account_scope();
-    let cache = ACCOUNT_AVAILABLE_MODELS.read().ok()?;
-    let models = cache.get(&scope)?;
+    let models = OPENAI_MODEL_CATALOG_SERVICE.model_ids(&scope)?;
 
     for preferred in OPENAI_MODEL_PREFERENCE {
-        if models.contains(*preferred) && runtime_model_unavailability(preferred).is_none() {
+        if models.iter().any(|model| model == *preferred)
+            && runtime_model_unavailability(preferred).is_none()
+        {
             return Some(preferred.to_string());
         }
     }
 
-    let mut sorted_models: Vec<String> = models.iter().cloned().collect();
-    sorted_models.sort();
-    sorted_models
+    models
         .into_iter()
         .find(|model| runtime_model_unavailability(model).is_none())
 }

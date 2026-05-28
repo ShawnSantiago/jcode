@@ -438,9 +438,10 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
     let streaming_ms = streaming_start.elapsed().as_secs_f64() * 1000.0;
 
-    let is_initial_empty = app.display_messages().is_empty()
-        && !app.is_processing()
-        && app.streaming_text().is_empty();
+    let is_initial_empty = app.onboarding_preview_mode()
+        || (app.display_messages().is_empty()
+            && !app.is_processing()
+            && app.streaming_text().is_empty());
 
     if is_initial_empty {
         let compose_start = Instant::now();
@@ -486,11 +487,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
                 wrapped_lines.push(Line::from(""));
                 wrapped_lines.push(
                     Line::from(Span::styled(
-                        if is_centered {
-                            "Press 1-3 or type anything to start"
-                        } else {
-                            "  Press 1-3 or type anything to start"
-                        },
+                        format!(
+                            "{}Press 1-{} or type anything to start",
+                            if is_centered { "" } else { "  " },
+                            suggestions.len()
+                        ),
                         Style::default().fg(dim_color()),
                     ))
                     .alignment(suggestion_align),

@@ -1639,6 +1639,9 @@ fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
 
     app.diff_mode = crate::config::DiffDisplayMode::FullInline;
     app.record_copy_badge_key_press('e');
+    app.copy_badge_ui.expand_feedback_until =
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(1100));
+    app.copy_badge_ui.expand_feedback_line = crate::tui::ui::visible_expand_edit_badge_line();
     app.set_status_notice(format!(
         "Expanded edit diffs · Diffs: {}",
         app.diff_mode.label()
@@ -2195,6 +2198,15 @@ impl App {
         {
             self.copy_badge_ui.copied_feedback = None;
         }
+        if self
+            .copy_badge_ui
+            .expand_feedback_until
+            .map(|expires_at| expires_at <= now)
+            .unwrap_or(false)
+        {
+            self.copy_badge_ui.expand_feedback_until = None;
+            self.copy_badge_ui.expand_feedback_line = None;
+        }
     }
 
     /// Try to paste whatever is in the clipboard.
@@ -2464,6 +2476,9 @@ impl App {
             }
             return;
         }
+
+        // Leaving the preview should happen as soon as the user acts on it.
+        self.onboarding_preview_mode = false;
 
         // Add user message to display (show placeholder to user, not full paste)
         self.push_display_message(DisplayMessage {

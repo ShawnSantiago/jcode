@@ -1956,6 +1956,12 @@ impl App {
                 self.upstream_provider = None;
                 let active_model = self.provider.model();
                 self.update_context_limit_for_model(&active_model);
+                self.session.provider_key =
+                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                        &model_request,
+                        self.provider.name(),
+                        self.session.provider_key.as_deref(),
+                    );
                 self.session.model = Some(active_model.clone());
                 let _ = self.session.save();
                 self.invalidate_model_picker_cache();
@@ -2059,13 +2065,19 @@ impl App {
                             .map(|route| route.model.clone());
 
                         if let Some(model) = selected {
-                            match provider.set_model(&model) {
+                            let model_request = format!("{}:{}", provider_id, model);
+                            match provider.set_model(&model_request) {
                                 Ok(()) => {
+                                    let provider_key = crate::provider::MultiProvider::session_provider_key_for_model_request(
+                                        &model_request,
+                                        provider.name(),
+                                    );
                                     crate::bus::Bus::global().publish_models_updated();
                                     crate::bus::Bus::global().publish(
                                         crate::bus::BusEvent::ProviderModelActivated {
                                             session_id,
                                             model: model.clone(),
+                                            provider_key,
                                             message: format!(
                                                 "**{} is ready.**\n\nFetched model catalog: +{} models, +{} routes, ~{} changed.{}\n\nSwitched to `{}`. Use `/model` if you want to choose a different accessible model.\n\nIf the model list ever looks stale, run `/refresh-model-list`.",
                                                 provider_label,

@@ -156,9 +156,22 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         rendered.contains("[E] expand"),
         "expected visible expand badge for collapsed edit diff:\n{rendered}"
     );
+    assert!(
+        crate::tui::ui::visible_expand_edit_badge_line().is_some(),
+        "rendering a visible expand badge should register its line"
+    );
 
     app.handle_key_event(crossterm::event::KeyEvent::new(key_code, modifiers));
     assert_eq!(app.diff_mode, crate::config::DiffDisplayMode::FullInline);
+    assert!(
+        app.copy_badge_ui().expand_feedback_line.is_some(),
+        "activating a visible expand badge should persist the rendered badge line"
+    );
+    assert!(
+        app.copy_badge_ui()
+            .expand_feedback_is_active(std::time::Instant::now()),
+        "activating a visible expand badge should arm transient visual feedback"
+    );
 
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
@@ -166,8 +179,8 @@ fn assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         "expanded full inline diff should not be collapsed:\n{rendered}"
     );
     assert!(
-        !rendered.contains("[E] expand"),
-        "expanded full inline diff should not keep expand badge:\n{rendered}"
+        rendered.contains("[E] ✓ Expanded"),
+        "expanded full inline diff should briefly show the activated expand badge like copy feedback:\n{rendered}"
     );
     assert!(
         rendered.contains("new line 19"),

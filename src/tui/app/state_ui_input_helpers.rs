@@ -101,6 +101,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/feedback", "Send feedback about jcode"),
     RegisteredCommand::public("/subscription", "Show jcode subscription status"),
     RegisteredCommand::public("/config", "Show or edit configuration"),
+    RegisteredCommand::public(
+        "/onboarding-preview",
+        "Preview the first-run onboarding screen",
+    ),
     RegisteredCommand::public("/reload", "Reload into newest available binary"),
     RegisteredCommand::public("/restart", "Restart with current binary"),
     RegisteredCommand::public("/rebuild", "Background rebuild and auto reload"),
@@ -1098,12 +1102,13 @@ impl App {
     /// Get suggestion prompts for new users on the initial empty screen.
     /// Returns (label, prompt_text) pairs. Empty once user is experienced or not authenticated.
     pub fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        let preview_mode = self.onboarding_preview_mode;
         let is_canary = if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
             self.session.is_canary
         };
-        if is_canary {
+        if is_canary && !preview_mode {
             return Vec::new();
         }
 
@@ -1112,20 +1117,24 @@ impl App {
             return vec![("Log in to get started".to_string(), "/login".to_string())];
         }
 
-        if !self.display_messages.is_empty() || self.is_processing {
+        if (!self.display_messages.is_empty() || self.is_processing) && !preview_mode {
             return Vec::new();
         }
 
-        let is_new_user = crate::storage::jcode_dir()
-            .ok()
-            .and_then(|dir| {
-                let path = dir.join("setup_hints.json");
-                std::fs::read_to_string(&path).ok()
-            })
-            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-            .and_then(|v| v.get("launch_count")?.as_u64())
-            .map(|count| count <= 5)
-            .unwrap_or(true);
+        let is_new_user = if preview_mode {
+            true
+        } else {
+            crate::storage::jcode_dir()
+                .ok()
+                .and_then(|dir| {
+                    let path = dir.join("setup_hints.json");
+                    std::fs::read_to_string(&path).ok()
+                })
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|v| v.get("launch_count")?.as_u64())
+                .map(|count| count <= 5)
+                .unwrap_or(true)
+        };
 
         if !is_new_user {
             return Vec::new();
@@ -1142,16 +1151,17 @@ impl App {
             ),
         ];
 
-        if let Some(prompt) = latest_external_cli_continuation_prompt() {
-            prompts.push(("Continue my last CLI agent session".to_string(), prompt));
-        } else {
-            prompts.push(
-            (
-                "Find my social media and roast me".to_string(),
-                "Find a social media platform I use, look around at my profile and posts, then give me a brutally honest roast based on what you see.".to_string(),
-            ),
-            );
-        }
+        prompts.push((
+            "Continue my last CLI agent session".to_string(),
+            latest_external_cli_continuation_prompt().unwrap_or_else(|| {
+                "Find my recent Codex or Claude Code sessions, identify the latest useful one, summarize what was happening, and continue from there.".to_string()
+            }),
+        ));
+
+        prompts.push((
+            "Find my social media and roast me".to_string(),
+            "Find a social media platform I use, look around at my profile and posts, then give me a brutally honest roast based on what you see.".to_string(),
+        ));
 
         prompts
     }

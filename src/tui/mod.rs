@@ -310,6 +310,10 @@ pub trait TuiState {
     fn copy_selection_range(&self) -> Option<CopySelectionRange>;
     /// Persistent status for in-app copy selection mode.
     fn copy_selection_status(&self) -> Option<CopySelectionStatus>;
+    /// Whether the first-run onboarding empty state is being previewed in this session.
+    fn onboarding_preview_mode(&self) -> bool {
+        false
+    }
     /// Suggestion prompts for new users (shown in initial empty state).
     /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
     fn suggestion_prompts(&self) -> Vec<(String, String)>;

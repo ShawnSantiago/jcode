@@ -4,6 +4,7 @@ pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
+mod catalog_routes;
 pub mod claude;
 pub mod copilot;
 pub mod cursor;
@@ -37,14 +38,21 @@ use async_trait::async_trait;
 use jcode_provider_core::FailoverDecision;
 use std::sync::{Arc, RwLock};
 
+pub use catalog_routes::{
+    append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
+    remote_model_is_server_copilot_only, remote_model_routes_fallback,
+    remote_model_routes_lightweight_fallback, remote_model_should_offer_copilot_route,
+    remote_openai_compatible_route_for_model, simplified_model_routes_for_picker,
+};
 pub use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHEAPNESS_REFERENCE_INPUT_TOKENS,
     CHEAPNESS_REFERENCE_OUTPUT_TOKENS, DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT,
-    ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult,
-    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
-    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, dedupe_model_routes,
-    explicit_model_provider_prefix, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod,
+    NativeCompactionResult, NativeToolResult, NativeToolResultSender, PremiumMode, Provider,
+    RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource,
+    dedupe_model_routes, explicit_model_provider_prefix, model_name_for_provider,
+    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub(crate) use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
 pub use route_builders::{
@@ -239,7 +247,6 @@ pub use self::models::{
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_openai_model_catalog,
 };
-use self::pricing::cheapness_for_route;
 pub use self::selection::DefaultModelSelection;
 use self::selection::{ActiveProvider, ProviderAvailability};
 use self::state::ProviderState;
@@ -508,6 +515,16 @@ impl MultiProvider {
     }
 
     fn set_model_on_provider(&self, provider: ActiveProvider, model: &str) -> Result<()> {
+        self.set_model_on_provider_with_credential_modes(provider, model, None, None)
+    }
+
+    fn set_model_on_provider_with_credential_modes(
+        &self,
+        provider: ActiveProvider,
+        model: &str,
+        openai_credential_mode: Option<openai::OpenAICredentialMode>,
+        anthropic_credential_mode: Option<anthropic::AnthropicCredentialMode>,
+    ) -> Result<()> {
         let model = model.trim();
         if model.is_empty() {
             anyhow::bail!("Model cannot be empty");
@@ -519,6 +536,9 @@ impl MultiProvider {
             ActiveProvider::Claude => {
                 let model = model_name_for_provider(provider, model);
                 if let Some(anthropic) = self.anthropic_provider() {
+                    if let Some(mode) = anthropic_credential_mode {
+                        anthropic.set_credential_mode(mode)?;
+                    }
                     anthropic.set_model(&model)?;
                 } else if let Some(claude) = self.claude_provider() {
                     claude.set_model(&model)?;
@@ -536,6 +556,9 @@ impl MultiProvider {
                         "OpenAI credentials not available. Run `jcode login --provider openai` first."
                     );
                 };
+                if let Some(mode) = openai_credential_mode {
+                    openai.set_credential_mode(mode)?;
+                }
                 openai.set_model(model)?;
                 self.set_active_provider(ActiveProvider::OpenAI);
                 Ok(())
@@ -853,6 +876,57 @@ impl MultiProvider {
 
         self.set_model(model)
     }
+
+    fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
+        let prefix = match active {
+            ActiveProvider::Claude => {
+                if let Some(anthropic) = self.anthropic_provider() {
+                    match anthropic.credential_mode_snapshot() {
+                        anthropic::AnthropicCredentialMode::OAuth => "claude-oauth",
+                        anthropic::AnthropicCredentialMode::ApiKey => "claude-api",
+                        anthropic::AnthropicCredentialMode::Auto => "claude",
+                    }
+                } else {
+                    "claude"
+                }
+            }
+            ActiveProvider::OpenAI => {
+                if let Some(openai) = self.openai_provider() {
+                    match openai.credential_mode_snapshot() {
+                        openai::OpenAICredentialMode::OAuth => "openai-oauth",
+                        openai::OpenAICredentialMode::ApiKey => "openai-api",
+                        openai::OpenAICredentialMode::Auto => "openai",
+                    }
+                } else {
+                    "openai"
+                }
+            }
+            ActiveProvider::Copilot => "copilot",
+            ActiveProvider::Antigravity => "antigravity",
+            ActiveProvider::Gemini => "gemini",
+            ActiveProvider::Cursor => "cursor",
+            ActiveProvider::Bedrock => "bedrock",
+            ActiveProvider::OpenRouter => {
+                if let Some(openrouter) = self.openrouter_provider()
+                    && let Some((_provider, api_method, _detail)) =
+                        openrouter.direct_openai_compatible_route_parts()
+                    && let Some(profile_id) = api_method
+                        .strip_prefix("openai-compatible:")
+                        .map(str::trim)
+                        .filter(|profile_id| !profile_id.is_empty())
+                {
+                    return format!("{profile_id}:{current_model}");
+                }
+                if let Some(openrouter) = self.openrouter_provider()
+                    && let Some(provider_pin) = openrouter.explicit_provider_pin_for_current_model()
+                {
+                    return format!("openrouter:{current_model}@{provider_pin}");
+                }
+                "openrouter"
+            }
+        };
+        format!("{prefix}:{current_model}")
+    }
 }
 
 impl Default for MultiProvider {
@@ -1015,10 +1089,28 @@ impl Provider for MultiProvider {
         // Provider-prefixed model names are explicit routing directives. They
         // must never silently fall through to another provider when the target
         // is unavailable or when --provider locks a different backend.
-        if let Some((target, _prefix, target_model)) =
+        if let Some((target, prefix, target_model)) =
             explicit_model_provider_prefix(requested_model)
         {
             self.ensure_provider_lock_allows_model_target(target, requested_model)?;
+            let openai_credential_mode = match prefix {
+                "openai-api:" => Some(openai::OpenAICredentialMode::ApiKey),
+                "openai-oauth:" => Some(openai::OpenAICredentialMode::OAuth),
+                _ => None,
+            };
+            let anthropic_credential_mode = match prefix {
+                "claude-api:" => Some(anthropic::AnthropicCredentialMode::ApiKey),
+                "claude-oauth:" => Some(anthropic::AnthropicCredentialMode::OAuth),
+                _ => None,
+            };
+            if openai_credential_mode.is_some() || anthropic_credential_mode.is_some() {
+                return self.set_model_on_provider_with_credential_modes(
+                    target,
+                    target_model,
+                    openai_credential_mode,
+                    anthropic_credential_mode,
+                );
+            }
             return self.set_model_on_provider(target, target_model);
         }
 
@@ -1148,380 +1240,7 @@ impl Provider for MultiProvider {
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
-        let routes_started = std::time::Instant::now();
-        self.spawn_anthropic_catalog_refresh_if_needed();
-        self.spawn_openai_catalog_refresh_if_needed();
-
-        let mut routes = Vec::new();
-        let mut openrouter_models = 0usize;
-        let mut openrouter_endpoint_cache_hits = 0usize;
-        let mut openrouter_endpoint_routes = 0usize;
-        let mut openrouter_scheduled_endpoint_refreshes = 0usize;
-        let has_oauth = self.has_claude_runtime();
-        let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
-        let anthropic_models = if let Some(anthropic) = self.anthropic_provider() {
-            anthropic.available_models_for_switching()
-        } else if let Some(claude) = self.claude_provider() {
-            claude.available_models_for_switching()
-        } else {
-            known_anthropic_model_ids()
-        };
-        let openai_models = if let Some(openai) = self.openai_provider() {
-            openai.available_models_for_switching()
-        } else {
-            known_openai_model_ids()
-        };
-
-        // Anthropic models (oauth and/or api-key)
-        for model in anthropic_models {
-            let (available, detail) = if has_oauth && !has_api_key {
-                anthropic_oauth_route_availability(&model)
-            } else {
-                (true, String::new())
-            };
-
-            if has_oauth {
-                routes.push(build_anthropic_oauth_route(
-                    &model,
-                    available,
-                    detail.clone(),
-                ));
-            }
-            if has_api_key {
-                let (ak_available, ak_detail) = anthropic_api_key_route_availability(&model);
-                routes.push(ModelRoute {
-                    model: model.to_string(),
-                    provider: "Anthropic".to_string(),
-                    api_method: "api-key".to_string(),
-                    available: ak_available,
-                    detail: ak_detail,
-                    cheapness: cheapness_for_route(&model, "Anthropic", "api-key"),
-                });
-            }
-            if !has_oauth && !has_api_key {
-                routes.push(ModelRoute {
-                    model: model.to_string(),
-                    provider: "Anthropic".to_string(),
-                    api_method: "claude-oauth".to_string(),
-                    available: false,
-                    detail: "no credentials".to_string(),
-                    cheapness: cheapness_for_route(&model, "Anthropic", "claude-oauth"),
-                });
-            }
-        }
-
-        // OpenAI models
-        let openai_auth = crate::auth::AuthStatus::check_fast();
-        for model in openai_models {
-            let availability = model_availability_for_account(&model);
-            let (available, detail) = if self.openai_provider().is_none() {
-                (false, "no credentials".to_string())
-            } else {
-                match availability.state {
-                    AccountModelAvailabilityState::Available => (true, String::new()),
-                    AccountModelAvailabilityState::Unavailable => (
-                        false,
-                        format_account_model_availability_detail(&availability)
-                            .unwrap_or_else(|| "not available".to_string()),
-                    ),
-                    AccountModelAvailabilityState::Unknown => {
-                        let detail = format_account_model_availability_detail(&availability)
-                            .unwrap_or_else(|| "availability unknown".to_string());
-                        (true, detail)
-                    }
-                }
-            };
-            if openai_auth.openai_has_oauth {
-                routes.push(build_openai_oauth_route(&model, available, detail.clone()));
-            }
-            if openai_auth.openai_has_api_key {
-                routes.push(build_openai_api_key_route(
-                    &model,
-                    self.openai_provider().is_some(),
-                    String::new(),
-                ));
-            }
-            if !openai_auth.openai_has_oauth && !openai_auth.openai_has_api_key {
-                routes.push(build_openai_oauth_route(&model, false, detail));
-            }
-        }
-
-        let active_direct_openai_compatible_api_method = self
-            .openrouter_provider()
-            .and_then(|openrouter| openrouter.direct_openai_compatible_route_parts())
-            .map(|(_, api_method, _)| api_method);
-        let mut added_direct_openai_compatible_routes = false;
-        for profile in crate::provider_catalog::openai_compatible_profiles()
-            .iter()
-            .copied()
-        {
-            if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
-                continue;
-            }
-            let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-            let api_method = format!("openai-compatible:{}", resolved.id);
-
-            // The active OpenRouter/OpenAI-compatible provider contributes its own
-            // live memory/disk catalog below. Do not preempt it with the generic
-            // configured-profile path, because its in-memory catalog may be newer
-            // than the disk snapshot that this non-active profile path can read.
-            if active_direct_openai_compatible_api_method.as_deref() == Some(api_method.as_str()) {
-                continue;
-            }
-
-            let profile_routes = direct_openai_compatible_profile_routes(profile);
-            added_direct_openai_compatible_routes |= !profile_routes.is_empty();
-            routes.extend(profile_routes);
-        }
-
-        // GitHub Copilot models
-        {
-            if let Some(copilot) = self.copilot_provider() {
-                let copilot_models = copilot.available_models_display();
-                let detail = copilot.model_catalog_detail();
-                let copilot_models_empty = copilot_models.is_empty();
-                for model in copilot_models {
-                    routes.push(build_copilot_route(&model, true, detail.clone()));
-                }
-                if copilot_models_empty && copilot::CopilotApiProvider::has_credentials() {
-                    routes.push(build_copilot_route("copilot models", false, detail));
-                }
-            } else if copilot::CopilotApiProvider::has_credentials() {
-                routes.push(build_copilot_route(
-                    "copilot models",
-                    false,
-                    "not initialized yet",
-                ));
-            }
-        }
-
-        // Gemini models
-        {
-            if let Some(gemini) = self.gemini_provider() {
-                for model in gemini.available_models_display() {
-                    routes.push(ModelRoute {
-                        model,
-                        provider: "Gemini".to_string(),
-                        api_method: "code-assist-oauth".to_string(),
-                        available: true,
-                        detail: String::new(),
-                        cheapness: None,
-                    });
-                }
-            }
-        }
-
-        // Antigravity models
-        {
-            if let Some(antigravity) = self.antigravity_provider() {
-                routes.extend(antigravity.model_routes());
-            }
-        }
-
-        // Cursor models
-        {
-            if let Some(cursor) = self.cursor_provider() {
-                for model in cursor.available_models_display() {
-                    routes.push(ModelRoute {
-                        model,
-                        provider: "Cursor".to_string(),
-                        api_method: "cursor".to_string(),
-                        available: true,
-                        detail: String::new(),
-                        cheapness: None,
-                    });
-                }
-            }
-        }
-
-        // AWS Bedrock models and inference profiles
-        {
-            if let Some(bedrock) = self.bedrock_provider() {
-                routes.extend(bedrock.model_routes());
-            } else if bedrock::BedrockProvider::has_credentials() {
-                let bedrock = bedrock::BedrockProvider::new();
-                routes.extend(bedrock.model_routes().into_iter().map(|mut route| {
-                    if route.detail.trim().is_empty() {
-                        route.detail =
-                            "credentials configured; provider will initialize on selection"
-                                .to_string();
-                    }
-                    route
-                }));
-            }
-        }
-
-        // OpenRouter models (with per-provider endpoints)
-        let openrouter_provider = self.openrouter_provider();
-        let has_openrouter = openrouter_provider.is_some();
-        let has_openrouter_provider_features = openrouter_provider
-            .as_ref()
-            .map(|openrouter| openrouter.supports_provider_routing_features())
-            .unwrap_or(false);
-        if let Some(openrouter) = openrouter_provider {
-            let current_openrouter_model = openrouter.model();
-            let supports_openrouter_provider_features =
-                openrouter.supports_provider_routing_features();
-            let mut scheduled_endpoint_refreshes = 0usize;
-            for model in openrouter.available_models_display() {
-                openrouter_models += 1;
-                let cached = if supports_openrouter_provider_features {
-                    openrouter::load_endpoints_disk_cache_public(&model)
-                } else {
-                    None
-                };
-                let cache_age = cached.as_ref().map(|(_, age)| *age);
-                if supports_openrouter_provider_features
-                    && (model == current_openrouter_model || scheduled_endpoint_refreshes < 8)
-                    && openrouter.maybe_schedule_endpoint_refresh_for_display(
-                        &model,
-                        cache_age,
-                        "model picker route hydration",
-                    )
-                {
-                    scheduled_endpoint_refreshes += 1;
-                    openrouter_scheduled_endpoint_refreshes += 1;
-                }
-                let age_str = cached.as_ref().map(|(_, age)| {
-                    if *age < 3600 {
-                        format!("{}m ago", age / 60)
-                    } else if *age < 86400 {
-                        format!("{}h ago", age / 3600)
-                    } else {
-                        format!("{}d ago", age / 86400)
-                    }
-                });
-                // Auto route: hint which provider it would likely pick
-                let auto_detail = cached
-                    .as_ref()
-                    .and_then(|(eps, _)| {
-                        eps.first().map(|ep| {
-                            let endpoint_detail = ep.detail_string();
-                            if endpoint_detail.trim().is_empty() {
-                                format!("→ {}", ep.provider_name)
-                            } else {
-                                format!("→ {} · {}", ep.provider_name, endpoint_detail)
-                            }
-                        })
-                    })
-                    .unwrap_or_default();
-                if supports_openrouter_provider_features {
-                    routes.push(build_openrouter_auto_route(
-                        &model,
-                        has_openrouter,
-                        auto_detail,
-                    ));
-                } else {
-                    let (provider, api_method, detail) = openrouter
-                        .direct_openai_compatible_route_parts()
-                        .unwrap_or_else(|| {
-                            (
-                                "OpenAI-compatible".to_string(),
-                                "openai-compatible".to_string(),
-                                "custom endpoint".to_string(),
-                            )
-                        });
-                    routes.push(ModelRoute {
-                        model: model.clone(),
-                        provider,
-                        api_method,
-                        available: has_openrouter,
-                        detail,
-                        cheapness: None,
-                    });
-                }
-                // Add per-provider routes from endpoints cache
-                if supports_openrouter_provider_features && let Some((ref endpoints, _)) = cached {
-                    openrouter_endpoint_cache_hits += 1;
-                    let stale_suffix = age_str.as_deref().unwrap_or("");
-                    for ep in endpoints {
-                        openrouter_endpoint_routes += 1;
-                        routes.push(build_openrouter_endpoint_route(
-                            &model,
-                            ep,
-                            has_openrouter,
-                            Some(stale_suffix),
-                        ));
-                    }
-                }
-            }
-
-            // A direct OpenAI-compatible runtime (NVIDIA NIM, Groq, etc.) shares the
-            // OpenRouter/OpenAI-compatible transport, but it is a distinct profile
-            // from standard OpenRouter. Keep standard OpenRouter's catalog scoped to
-            // the `openrouter` cache namespace so `/model` can switch back to it
-            // without relabeling OpenRouter models as the active direct profile.
-            if !supports_openrouter_provider_features && standard_openrouter_profile_configured() {
-                routes.extend(configured_standard_openrouter_profile_routes());
-            }
-        }
-
-        if !has_openrouter && !added_direct_openai_compatible_routes {
-            // OpenRouter not configured - show a few popular models as unavailable
-            routes.push(ModelRoute {
-                model: "openrouter models".to_string(),
-                provider: "—".to_string(),
-                api_method: "openrouter".to_string(),
-                available: false,
-                detail: "OPENROUTER_API_KEY not set".to_string(),
-                cheapness: None,
-            });
-        }
-
-        // Also add Claude/OpenAI models via openrouter as alternative routes
-        if has_openrouter_provider_features {
-            for model in known_anthropic_model_ids() {
-                let or_model = format!("anthropic/{}", model);
-                if let Some((endpoints, _)) =
-                    openrouter::load_endpoints_disk_cache_public(&or_model)
-                {
-                    openrouter_endpoint_cache_hits += 1;
-                    for ep in &endpoints {
-                        openrouter_endpoint_routes += 1;
-                        routes.push(build_openrouter_endpoint_route(&model, ep, true, None));
-                    }
-                } else {
-                    routes.push(build_openrouter_fallback_provider_route(
-                        &model,
-                        &or_model,
-                        "Anthropic",
-                    ));
-                }
-            }
-
-            for model in ALL_OPENAI_MODELS {
-                let or_model = format!("openai/{}", model);
-                if let Some((endpoints, _)) =
-                    openrouter::load_endpoints_disk_cache_public(&or_model)
-                {
-                    openrouter_endpoint_cache_hits += 1;
-                    for ep in &endpoints {
-                        openrouter_endpoint_routes += 1;
-                        routes.push(build_openrouter_endpoint_route(model, ep, true, None));
-                    }
-                } else {
-                    routes.push(build_openrouter_fallback_provider_route(
-                        model, &or_model, "OpenAI",
-                    ));
-                }
-            }
-        }
-
-        let total_ms = routes_started.elapsed().as_millis();
-        if total_ms >= 250 || std::env::var("JCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
-            crate::logging::info(&format!(
-                "[TIMING] model_routes: routes={}, openrouter_configured={}, openrouter_models={}, openrouter_endpoint_cache_hits={}, openrouter_endpoint_routes={}, openrouter_scheduled_endpoint_refreshes={}, total={}ms",
-                routes.len(),
-                has_openrouter,
-                openrouter_models,
-                openrouter_endpoint_cache_hits,
-                openrouter_endpoint_routes,
-                openrouter_scheduled_endpoint_refreshes,
-                total_ms,
-            ));
-        }
-
-        dedupe_model_routes(routes)
+        catalog_routes::multiprovider_model_routes(self)
     }
 
     async fn prefetch_models(&self) -> Result<()> {
@@ -2154,17 +1873,8 @@ impl Provider for MultiProvider {
 
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
-        if matches!(active, ActiveProvider::Copilot) {
-            let _ = provider.set_model(&format!("copilot:{}", current_model));
-        } else if matches!(active, ActiveProvider::Antigravity) {
-            let _ = provider.set_model(&format!("antigravity:{}", current_model));
-        } else if matches!(active, ActiveProvider::Cursor) {
-            let _ = provider.set_model(&format!("cursor:{}", current_model));
-        } else if matches!(active, ActiveProvider::Bedrock) {
-            let _ = provider.set_model(&format!("bedrock:{}", current_model));
-        } else {
-            let _ = provider.set_model(&current_model);
-        }
+        let switch_request = self.fork_model_switch_request(active, &current_model);
+        let _ = provider.set_model(&switch_request);
         Arc::new(provider)
     }
 

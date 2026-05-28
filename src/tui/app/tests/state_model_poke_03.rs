@@ -282,7 +282,10 @@ impl Provider for MixedModelRoutesProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        Self::routes().into_iter().map(|route| route.model).collect()
+        Self::routes()
+            .into_iter()
+            .map(|route| route.model)
+            .collect()
     }
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
@@ -606,7 +609,12 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
             .expect("Cerebras login provider"),
     );
 
-    let prompt = app.display_messages.last().expect("login prompt").content.clone();
+    let prompt = app
+        .display_messages
+        .last()
+        .expect("login prompt")
+        .content
+        .clone();
     assert!(prompt.contains("**Cerebras API Key**"), "{prompt}");
     assert!(
         prompt.contains("Stored variable: `CEREBRAS_API_KEY`"),
@@ -617,12 +625,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("Suggested default model: `qwen-3-235b-a22b-instruct-2507`"),
+        prompt.contains("Suggested default model: `gpt-oss-120b`"),
         "{prompt}"
     );
     assert!(prompt.contains("**Paste your API key below**"), "{prompt}");
 
-    let pending = app.pending_login.take().expect("pending Cerebras key login");
+    let pending = app
+        .pending_login
+        .take()
+        .expect("pending Cerebras key login");
     let _runtime_guard = rt.enter();
     app.handle_login_input(pending, "test-cerebras-key".to_string());
 
@@ -679,10 +690,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                 }
                 Ok(Ok(event @ crate::bus::BusEvent::ProviderModelActivated { .. })) => {
                     activation_events += 1;
-                    if let crate::bus::BusEvent::ProviderModelActivated { model, message, .. } =
-                        &event
+                    if let crate::bus::BusEvent::ProviderModelActivated {
+                        model,
+                        provider_key,
+                        message,
+                        ..
+                    } = &event
                     {
                         assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
+                        assert_eq!(provider_key.as_deref(), Some("cerebras"));
                         assert!(message.contains("**Cerebras is ready.**"), "{message}");
                         assert!(!message.contains("wrong-profile-first"), "{message}");
                     }
@@ -706,7 +722,10 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
             }
             crate::bus::BusEvent::UiActivity(activity) => {
                 if activity.message.contains("Auth Model Catalog Warning") {
-                    panic!("late warning activity after successful auth: {}", activity.message);
+                    panic!(
+                        "late warning activity after successful auth: {}",
+                        activity.message
+                    );
                 }
                 assert!(
                     !activity.message.contains("did not switch models"),
@@ -714,9 +733,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     activity.message
                 );
             }
-            crate::bus::BusEvent::ProviderModelActivated { model, message, .. } => {
+            crate::bus::BusEvent::ProviderModelActivated {
+                model,
+                provider_key,
+                message,
+                ..
+            } => {
                 activation_events += 1;
                 assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
+                assert_eq!(provider_key.as_deref(), Some("cerebras"));
                 assert!(message.contains("**Cerebras is ready.**"), "{message}");
             }
             _ => {}
@@ -724,13 +749,31 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
     }
 
     assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-    assert_eq!(login_success_events, 1, "expected exactly one successful login event");
-    assert_eq!(login_failure_events, 0, "happy auth must not publish failed login events");
-    assert_eq!(catalog_warning_events, 0, "happy auth must not publish catalog warnings");
-    assert_eq!(activation_events, 1, "expected exactly one provider activation event");
+    assert_eq!(
+        login_success_events, 1,
+        "expected exactly one successful login event"
+    );
+    assert_eq!(
+        login_failure_events, 0,
+        "happy auth must not publish failed login events"
+    );
+    assert_eq!(
+        catalog_warning_events, 0,
+        "happy auth must not publish catalog warnings"
+    );
+    assert_eq!(
+        activation_events, 1,
+        "expected exactly one provider activation event"
+    );
     assert_eq!(
         app.session.model.as_deref(),
         Some("qwen-3-235b-a22b-instruct-2507")
+    );
+    assert_eq!(app.session.provider_key.as_deref(), Some("cerebras"));
+    assert_eq!(
+        set_model_requests.lock().unwrap().as_slice(),
+        ["cerebras:qwen-3-235b-a22b-instruct-2507"],
+        "post-login activation must preserve the authenticated Cerebras route instead of switching a bare model"
     );
     let transcript = app
         .display_messages
@@ -823,6 +866,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .expect("Cerebras picker selection should switch models");
 
     assert_eq!(app.session.model.as_deref(), Some("llama3.1-8b"));
+    assert_eq!(app.session.provider_key.as_deref(), Some("cerebras"));
     assert_eq!(app.provider.model(), "llama3.1-8b");
     assert_eq!(
         set_model_requests.lock().unwrap().as_slice(),
@@ -947,7 +991,11 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
         "local refresh failure must not try to switch models from an unavailable catalog"
     );
     assert!(activity.message.contains("Saved credentials are active"));
-    assert!(activity.message.contains("server auth-change catalog refresh"));
+    assert!(
+        activity
+            .message
+            .contains("server auth-change catalog refresh")
+    );
     assert!(activity.message.contains("fixture refresh failed"));
     assert!(!activity.message.contains("Login: failed"));
     assert!(!activity.message.contains("Unable to sign in"));
@@ -1040,10 +1088,7 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
     );
     assert_eq!(
         routes_by_model.get("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
-        Some(&(
-            "Chutes".to_string(),
-            "openai-compatible:chutes".to_string()
-        ))
+        Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
     );
     assert_eq!(
         routes_by_model.get("deepseek/deepseek-v4-pro"),
@@ -1558,7 +1603,9 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         .find(|line| line.contains("glm-51-nvfp4"))
         .unwrap_or("");
     assert!(
-        glm_row.contains("Comtegra GPU Cloud") && glm_row.contains("api key") && !glm_row.contains("copilot"),
+        glm_row.contains("Comtegra GPU Cloud")
+            && glm_row.contains("api key")
+            && !glm_row.contains("copilot"),
         "Comtegra GLM row should show its provider and API-key method, got row `{}` in:\n{}",
         glm_row,
         text
@@ -2057,16 +2104,19 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         assert!(!summary.contains("Confidence meets the threshold"));
         assert!(summary.contains("1 completed todo is below the 90% confidence threshold"));
         assert!(summary.contains("\n- Suggested action: validate or test before finalizing."));
-        assert!(app.display_messages().iter().any(|msg| msg
-            .content
-            .contains("queued hidden confidence reminder")));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("queued hidden confidence reminder"))
+        );
     });
 }
 
 #[test]
 fn test_todo_confidence_summary_hidden_queue_is_not_user_prompt() {
-    let summary = "All todos are done. Todo confidence summary:\n- Weighted completion confidence: 94%."
-        .to_string();
+    let summary =
+        "All todos are done. Todo confidence summary:\n- Weighted completion confidence: 94%."
+            .to_string();
 
     let (user_messages, reminder, display_system_messages) =
         super::helpers::partition_queued_messages(Vec::new(), vec![summary.clone()]);
@@ -2101,10 +2151,11 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
 
         assert!(!app.pending_queued_dispatch);
         assert!(app.queued_messages().is_empty());
-        assert!(!app
-            .display_messages()
-            .iter()
-            .any(|msg| msg.content.contains("confidence summary")));
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("confidence summary"))
+        );
     });
 }
 
@@ -2199,10 +2250,23 @@ fn test_overnight_start_runs_as_visible_local_turn() {
             "/overnight 1m hi"
         ));
 
-        assert!(app.pending_turn, "local overnight should start a visible turn");
-        assert!(app.is_processing, "local overnight should enter processing state");
-        assert!(app.queued_messages.is_empty(), "local overnight should not use remote queue");
-        let last_message = app.session.messages.last().expect("overnight prompt message");
+        assert!(
+            app.pending_turn,
+            "local overnight should start a visible turn"
+        );
+        assert!(
+            app.is_processing,
+            "local overnight should enter processing state"
+        );
+        assert!(
+            app.queued_messages.is_empty(),
+            "local overnight should not use remote queue"
+        );
+        let last_message = app
+            .session
+            .messages
+            .last()
+            .expect("overnight prompt message");
         assert!(last_message.content.iter().any(|block| matches!(
             block,
             crate::message::ContentBlock::Text { text, .. }
@@ -2221,8 +2285,14 @@ fn test_overnight_start_queues_remote_turn_without_stuck_sending() {
             "/overnight 1m hi"
         ));
 
-        assert!(!app.pending_turn, "remote overnight should not set local pending_turn");
-        assert!(!app.is_processing, "remote overnight should not get stuck in local Sending");
+        assert!(
+            !app.pending_turn,
+            "remote overnight should not set local pending_turn"
+        );
+        assert!(
+            !app.is_processing,
+            "remote overnight should not get stuck in local Sending"
+        );
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("visible Overnight Coordinator"));
     });

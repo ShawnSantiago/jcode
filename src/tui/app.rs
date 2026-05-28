@@ -368,6 +368,8 @@ pub struct CopyBadgeUiState {
     pub shift_pulse_until: Option<Instant>,
     pub key_active: Option<(char, Instant)>,
     pub copied_feedback: Option<CopyBadgeFeedback>,
+    pub expand_feedback_until: Option<Instant>,
+    pub expand_feedback_line: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -410,6 +412,11 @@ impl CopyBadgeUiState {
                 None
             }
         })
+    }
+
+    pub(crate) fn expand_feedback_is_active(&self, now: Instant) -> bool {
+        self.expand_feedback_until
+            .is_some_and(|expires_at| expires_at > now)
     }
 }
 
@@ -686,6 +693,8 @@ pub struct App {
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
     submit_input_on_startup: bool,
+    /// One-shot/session-local preview of the first-run onboarding empty state.
+    onboarding_preview_mode: bool,
     // Inline UI state for copy badges ([Alt] [⇧] [S])
     copy_badge_ui: CopyBadgeUiState,
     // Modal in-app selection/copy state for the chat viewport.

@@ -51,20 +51,15 @@ fn pad_center_display(text: &str, width: usize) -> String {
     )
 }
 
-fn api_method_display(raw: &str) -> &str {
-    match raw {
-        "claude-oauth" | "openai-oauth" | "code-assist-oauth" => "oauth",
-        "api-key" | "openai-api-key" => "api key",
-        method if method.starts_with("openai-compatible") => "api key",
-        method => method
-            .split_once(':')
-            .map(|(method, _)| method)
-            .unwrap_or(method),
-    }
+fn api_method_display(raw: &str) -> String {
+    crate::provider::ModelRouteApiMethod::parse(raw).display_label()
 }
 
 fn route_provider_display(provider: &str, api_method: &str) -> String {
-    if api_method == "openrouter" && provider != "auto" && !provider.contains("OpenRouter") {
+    if crate::provider::ModelRouteApiMethod::parse(api_method).is_openrouter()
+        && provider != "auto"
+        && !provider.contains("OpenRouter")
+    {
         format!("OpenRouter/{}", provider)
     } else {
         provider.to_string()
@@ -250,7 +245,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
                 provider_label
             };
             max_provider_len = max_provider_len.max(display_width(provider_label.as_str()));
-            max_via_len = max_via_len.max(display_width(api_method_display(&route.api_method)));
+            max_via_len = max_via_len.max(display_width(&api_method_display(&route.api_method)));
         }
     }
 
@@ -364,7 +359,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         let route = entry.active_option();
         if let Some(r) = route {
             max_provider_len = max_provider_len.max(display_width(r.provider.as_str()));
-            max_via_len = max_via_len.max(display_width(api_method_display(&r.api_method)));
+            max_via_len = max_via_len.max(display_width(&api_method_display(&r.api_method)));
         }
         if is_account_picker {
             let (title, _) = account_picker_entry_title(entry, show_account_provider_badge);
@@ -757,9 +752,9 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 
         let via_raw = route
             .map(|r| api_method_display(&r.api_method))
-            .unwrap_or("—");
+            .unwrap_or_else(|| "—".to_string());
         let vw = via_width.saturating_sub(1);
-        let via_display = format!(" {}", pad_left_display(via_raw, vw));
+        let via_display = format!(" {}", pad_left_display(via_raw.as_str(), vw));
         let via_style = if unavailable {
             Style::default().fg(rgb(80, 80, 80))
         } else if is_row_selected && col == 2 {

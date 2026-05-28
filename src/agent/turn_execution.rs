@@ -445,12 +445,17 @@ impl Agent {
 
         let model_start = Instant::now();
         if let Some(model) = self.session.model.clone() {
+            let model_request =
+                crate::provider::MultiProvider::model_switch_request_for_session_model(
+                    &model,
+                    self.session.provider_key.as_deref(),
+                );
             if let Err(e) =
-                crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model)
+                crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model_request)
             {
                 logging::error(&format!(
-                    "Failed to restore session model '{}': {}",
-                    model, e
+                    "Failed to restore session model '{}' via '{}': {}",
+                    model, model_request, e
                 ));
             }
         } else {

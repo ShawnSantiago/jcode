@@ -1413,6 +1413,20 @@ impl OpenRouterProvider {
         }
     }
 
+    pub(crate) fn explicit_provider_pin_for_current_model(&self) -> Option<String> {
+        if !self.supports_provider_features {
+            return None;
+        }
+
+        let model = self.model.try_read().ok()?.clone();
+        self.provider_pin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|pin| pin.model == model && pin.source == PinSource::Explicit)
+            .map(|pin| pin.provider.clone())
+    }
+
     fn rank_providers_from_endpoints(endpoints: &[EndpointInfo]) -> Vec<String> {
         jcode_provider_openrouter::rank_providers_from_endpoints(endpoints)
     }

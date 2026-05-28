@@ -107,13 +107,43 @@ impl StatusSpinnerRenderer {
         app: &mut App,
         terminal: &mut DefaultTerminal,
     ) -> Result<()> {
+        let force_full_redraw = app.force_full_redraw;
         if app.force_full_redraw {
             terminal.clear()?;
             app.force_full_redraw = false;
             self.invalidate();
         }
 
-        let completed = terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+        let previous_frame = self.last_frame.as_ref();
+        let draw_start = Instant::now();
+        let mut render_elapsed = Duration::ZERO;
+        let completed = terminal.draw(|frame| {
+            let render_start = Instant::now();
+            crate::tui::ui::draw(frame, app);
+            render_elapsed = render_start.elapsed();
+        })?;
+        let total_elapsed = draw_start.elapsed();
+        let changed_cells = previous_frame
+            .filter(|previous| previous.area == completed.buffer.area)
+            .map(|previous| {
+                previous
+                    .content
+                    .iter()
+                    .zip(completed.buffer.content.iter())
+                    .filter(|(left, right)| left != right)
+                    .count()
+            });
+        let total_cells = Some(completed.buffer.content.len());
+        crate::tui::ui::record_draw_call_attribution(crate::tui::ui::DrawCallAttribution {
+            timestamp_ms: crate::tui::ui::wall_clock_ms(),
+            total_ms: total_elapsed.as_secs_f64() * 1000.0,
+            render_ms: render_elapsed.as_secs_f64() * 1000.0,
+            backend_flush_ms: total_elapsed.saturating_sub(render_elapsed).as_secs_f64() * 1000.0,
+            changed_cells,
+            total_cells,
+            force_full_redraw,
+            input: crate::tui::ui::frame_input_attribution_snapshot(),
+        });
         self.last_frame = Some(completed.buffer.clone());
         Ok(())
     }

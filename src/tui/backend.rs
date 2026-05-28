@@ -328,15 +328,20 @@ impl RemoteConnection {
         } else {
             bootstrap_request = "subscribe_resume";
         }
-        // The initial History payload intentionally omits expanded model-route
-        // metadata to keep attach/resume fast. Request it immediately as a
-        // follow-up so `/model` does not have to render the lightweight
-        // `remote-catalog` fallback indefinitely.
-        conn.send_request(Request::GetModelCatalog {
-            id: conn.next_request_id,
-        })
-        .await?;
-        conn.next_request_id += 1;
+        // Avoid a reconnect/reload thundering herd: every headed client used to
+        // request the full expanded model catalog immediately after attach. On
+        // large OpenRouter catalogs this is ~800KB per client and can make many
+        // TUI processes parse/render at once, which showed up as multi-second
+        // draw stalls during scrolling. The TUI hydrates the persisted remote
+        // catalog cache for normal `/model` use; explicit refresh paths still
+        // request fresh catalog data when needed.
+        if std::env::var_os("JCODE_REMOTE_BOOTSTRAP_MODEL_CATALOG").is_some() {
+            conn.send_request(Request::GetModelCatalog {
+                id: conn.next_request_id,
+            })
+            .await?;
+            conn.next_request_id += 1;
+        }
 
         let bootstrap_request_ms = bootstrap_request_start.elapsed().as_millis();
 

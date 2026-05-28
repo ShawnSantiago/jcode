@@ -292,13 +292,16 @@ pub(super) fn draw_messages(
         height: render_area.height.saturating_sub(prompt_preview_lines),
     };
     let visible_height = content_area.height as usize;
+    let copy_badge_ui = app.copy_badge_ui();
+    let copy_badge_now = std::time::Instant::now();
+    let expand_feedback_active = copy_badge_ui.expand_feedback_is_active(copy_badge_now);
 
     let active_file_context = if app.diff_mode().is_file() {
         active_file_diff_context(prepared.as_ref(), scroll, visible_height)
     } else {
         None
     };
-    let active_inline_edit_context = if app.diff_mode().is_inline() {
+    let active_inline_edit_context = if app.diff_mode().is_inline() || expand_feedback_active {
         active_file_diff_context(prepared.as_ref(), scroll, visible_height)
     } else {
         None
@@ -359,9 +362,6 @@ pub(super) fn draw_messages(
     while margins.left_widths.len() < viewport_height {
         margins.left_widths.push(0);
     }
-
-    let copy_badge_ui = app.copy_badge_ui();
-    let copy_badge_now = std::time::Instant::now();
 
     record_copy_viewport_frame_snapshot(
         prepared.clone(),
@@ -507,21 +507,44 @@ pub(super) fn draw_messages(
 
     let expand_edit_badge_visible = active_inline_edit_context.as_ref().is_some_and(|active| {
         active.expandable
-            && !app.diff_mode().is_full_inline()
+            && (!app.diff_mode().is_full_inline() || expand_feedback_active)
             && active.start_line >= scroll
             && active.start_line < visible_end
     });
-    super::set_visible_expand_edit_badge(expand_edit_badge_visible);
+    let visible_expand_badge_line = expand_edit_badge_visible
+        .then(|| {
+            active_inline_edit_context
+                .as_ref()
+                .map(|active| active.start_line)
+        })
+        .flatten();
+    super::set_visible_expand_edit_badge(expand_edit_badge_visible, visible_expand_badge_line);
 
-    if let Some(active) = &active_inline_edit_context
-        && active.expandable
-        && !app.diff_mode().is_full_inline()
-    {
-        let badge_line = active.start_line;
+    let expand_badge_line = if expand_feedback_active {
+        copy_badge_ui.expand_feedback_line.or_else(|| {
+            active_inline_edit_context
+                .as_ref()
+                .map(|active| active.start_line)
+        })
+    } else {
+        active_inline_edit_context
+            .as_ref()
+            .filter(|active| active.expandable && !app.diff_mode().is_full_inline())
+            .map(|active| active.start_line)
+    };
+
+    if let Some(mut badge_line) = expand_badge_line {
+        if expand_feedback_active && visible_end > scroll {
+            badge_line = badge_line.clamp(scroll, visible_end.saturating_sub(1));
+        }
         if badge_line >= scroll && badge_line < visible_end {
             let rel_idx = badge_line - scroll;
             if let Some(line) = visible_lines.get_mut(rel_idx) {
-                let badge_text = " expand";
+                let badge_text = if expand_feedback_active {
+                    " ✓ Expanded"
+                } else {
+                    " expand"
+                };
                 let reserved = UnicodeWidthStr::width(
                     format!(" {} [⇧] [E] expand", copy_badge_alt_badge()).as_str(),
                 );
@@ -551,8 +574,12 @@ pub(super) fn draw_messages(
                 line.spans.push(Span::styled("[⇧]", shift_style));
                 line.spans.push(Span::raw(" "));
                 line.spans.push(Span::styled("[E]", key_style));
-                line.spans
-                    .push(Span::styled(badge_text, Style::default().fg(dim_color())));
+                let badge_text_style = if expand_feedback_active {
+                    Style::default().fg(ai_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+                line.spans.push(Span::styled(badge_text, badge_text_style));
             }
         }
     }

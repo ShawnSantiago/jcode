@@ -3,7 +3,8 @@
 use crate::agent::Agent;
 use crate::auth::lifecycle::{AuthActivationRequest, AuthActivationResult};
 use crate::protocol::{AuthChanged, NotificationType, ServerEvent};
-use crate::provider::{ModelCatalogRefreshSummary, ModelRoute, Provider};
+use crate::provider::{ModelCatalogRefreshSummary, Provider};
+use jcode_provider_core::ModelCatalogSnapshot;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,52 +18,26 @@ struct AuthRefreshTargets {
     deferred_agents: Vec<Arc<Mutex<Agent>>>,
 }
 
-#[derive(Clone)]
-struct AvailableModelsSnapshot {
-    provider_name: Option<String>,
-    provider_model: Option<String>,
-    available_models: Vec<String>,
-    available_model_routes: Vec<ModelRoute>,
-}
-
-impl AvailableModelsSnapshot {
-    fn from_agent(agent: &Agent) -> Self {
-        Self {
-            provider_name: Some(agent.provider_name()),
-            provider_model: Some(agent.provider_model()),
-            available_models: agent.available_models_display(),
-            available_model_routes: agent.model_routes(),
-        }
-    }
-
-    fn into_event(self) -> ServerEvent {
-        ServerEvent::AvailableModelsUpdated {
-            provider_name: self.provider_name,
-            provider_model: self.provider_model,
-            available_models: self.available_models,
-            available_model_routes: self.available_model_routes,
-        }
+fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> ServerEvent {
+    ServerEvent::AvailableModelsUpdated {
+        provider_name: snapshot.provider_name,
+        provider_model: snapshot.provider_model,
+        available_models: snapshot.available_models,
+        available_model_routes: snapshot.model_routes,
     }
 }
 
 fn available_models_updated_event_from_agent(agent: &Agent) -> ServerEvent {
-    AvailableModelsSnapshot::from_agent(agent).into_event()
+    available_models_snapshot_into_event(agent.model_catalog_snapshot())
 }
 
-async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> AvailableModelsSnapshot {
+async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> ModelCatalogSnapshot {
     let agent_guard = agent.lock().await;
-    AvailableModelsSnapshot::from_agent(&agent_guard)
+    agent_guard.model_catalog_snapshot()
 }
 
-fn available_models_snapshot_from_provider(
-    provider: &Arc<dyn Provider>,
-) -> AvailableModelsSnapshot {
-    AvailableModelsSnapshot {
-        provider_name: Some(provider.name().to_string()),
-        provider_model: Some(provider.model()),
-        available_models: provider.available_models_display(),
-        available_model_routes: provider.model_routes(),
-    }
+fn available_models_snapshot_from_provider(provider: &Arc<dyn Provider>) -> ModelCatalogSnapshot {
+    ModelCatalogSnapshot::from_provider(provider.as_ref())
 }
 
 pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> ServerEvent {
@@ -820,7 +795,7 @@ pub(super) async fn handle_notify_auth_changed(
     let (session_id, before_snapshot) = if let Ok(agent_guard) = agent.try_lock() {
         (
             agent_guard.session_id().to_string(),
-            AvailableModelsSnapshot::from_agent(&agent_guard),
+            agent_guard.model_catalog_snapshot(),
         )
     } else {
         crate::logging::event_warn(
@@ -890,7 +865,9 @@ pub(super) async fn handle_notify_auth_changed(
         // the model picker/header stop looking stale right after login, then
         // push another snapshot when the background refresh announces itself.
         let mut latest_snapshot = available_models_snapshot(&agent_clone).await;
-        let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
+        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+            latest_snapshot.clone(),
+        ));
 
         let max_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let quiet_period = auth_model_refresh_quiet_period();
@@ -908,7 +885,7 @@ pub(super) async fn handle_notify_auth_changed(
                 event = bus_rx.recv() => {
                     if matches!(event, Ok(crate::bus::BusEvent::ModelsUpdated)) {
                         latest_snapshot = available_models_snapshot(&agent_clone).await;
-                        let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
+                        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
                         quiet_deadline = Some(tokio::time::Instant::now() + quiet_period);
                     }
                 }
@@ -927,30 +904,34 @@ pub(super) async fn handle_notify_auth_changed(
                 &[("reason", "user_selected_provider_model_during_refresh")],
             );
             latest_snapshot = available_models_snapshot(&agent_clone).await;
-            let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
+            let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+                latest_snapshot.clone(),
+            ));
         } else if let Some(model_to_select) =
             crate::auth::lifecycle::provider_model_to_select_after_auth(
                 &activation,
                 latest_snapshot.provider_model.as_deref(),
-                &latest_snapshot.available_model_routes,
+                &latest_snapshot.model_routes,
             )
         {
             apply_auth_runtime_model_to_agent(&activation, Some(&model_to_select), &agent_clone)
                 .await;
             latest_snapshot = available_models_snapshot(&agent_clone).await;
-            let _ = client_event_tx_clone.send(latest_snapshot.clone().into_event());
+            let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+                latest_snapshot.clone(),
+            ));
         }
 
         let summary = crate::provider::summarize_model_catalog_refresh(
             before_snapshot.available_models,
             latest_snapshot.available_models.clone(),
-            before_snapshot.available_model_routes,
-            latest_snapshot.available_model_routes.clone(),
+            before_snapshot.model_routes,
+            latest_snapshot.model_routes.clone(),
         );
         let catalog_invariants = crate::auth::lifecycle::validate_catalog_invariants(
             &activation,
             latest_snapshot.provider_model.as_deref(),
-            &latest_snapshot.available_model_routes,
+            &latest_snapshot.model_routes,
         );
         let mut catalog_message = format_auth_catalog_refresh_complete(
             activation

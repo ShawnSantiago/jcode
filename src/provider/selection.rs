@@ -104,20 +104,21 @@ impl MultiProvider {
         api_method: &'a str,
         provider_display: &str,
     ) -> Option<&'a str> {
-        if let Some(("openai-compatible", profile_id)) = api_method.split_once(':') {
-            let profile_id = profile_id.trim();
-            if !profile_id.is_empty() {
-                return Some(profile_id);
+        let parsed = ModelRouteApiMethod::parse(api_method);
+        match parsed {
+            ModelRouteApiMethod::OpenAiCompatible {
+                profile_id: Some(_),
+            } => api_method
+                .split_once(':')
+                .map(|(_, profile_id)| profile_id.trim())
+                .filter(|profile_id| !profile_id.is_empty()),
+            ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+                crate::provider_catalog::openai_compatible_profile_id_for_display_name(
+                    provider_display,
+                )
             }
+            _ => None,
         }
-
-        if api_method == "openai-compatible" {
-            return crate::provider_catalog::openai_compatible_profile_id_for_display_name(
-                provider_display,
-            );
-        }
-
-        None
     }
 
     pub fn default_model_selection_from_route(
@@ -125,45 +126,243 @@ impl MultiProvider {
         api_method: &str,
         provider_display: &str,
     ) -> DefaultModelSelection {
-        let profile_id =
-            Self::openai_compatible_profile_id_from_route(api_method, provider_display);
-        let model_spec = if api_method == "copilot" {
-            format!("copilot:{}", bare_name)
-        } else if api_method == "cursor" {
-            format!("cursor:{}", bare_name)
-        } else if api_method == "bedrock" {
-            format!("bedrock:{}", bare_name)
-        } else if provider_display == "Antigravity" {
-            format!("antigravity:{}", bare_name)
-        } else if profile_id.is_some() {
-            bare_name.to_string()
-        } else if api_method == "openrouter" && provider_display != "auto" {
-            let model_id = crate::provider::openrouter_catalog_model_id(bare_name)
-                .unwrap_or_else(|| bare_name.to_string());
-            format!("{}@{}", model_id, provider_display)
-        } else {
-            bare_name.to_string()
+        let api_method_kind = ModelRouteApiMethod::parse(api_method);
+        let profile_id = match &api_method_kind {
+            ModelRouteApiMethod::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => Some(profile_id.clone()),
+            ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+                crate::provider_catalog::openai_compatible_profile_id_for_display_name(
+                    provider_display,
+                )
+                .map(ToOwned::to_owned)
+            }
+            _ => None,
+        };
+        let model_spec = match &api_method_kind {
+            ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+            ModelRouteApiMethod::ClaudeOAuth => format!("claude-oauth:{}", bare_name),
+            ModelRouteApiMethod::AnthropicApiKey if provider_display == "Anthropic" => {
+                format!("claude-api:{}", bare_name)
+            }
+            ModelRouteApiMethod::Cursor => format!("cursor:{}", bare_name),
+            ModelRouteApiMethod::Bedrock => format!("bedrock:{}", bare_name),
+            ModelRouteApiMethod::OpenAIApiKey => format!("openai-api:{}", bare_name),
+            ModelRouteApiMethod::OpenAIOAuth => format!("openai-oauth:{}", bare_name),
+            _ if provider_display == "Antigravity" => format!("antigravity:{}", bare_name),
+            ModelRouteApiMethod::OpenAiCompatible { .. } => bare_name.to_string(),
+            ModelRouteApiMethod::OpenRouter if provider_display != "auto" => {
+                let model_id = crate::provider::openrouter_catalog_model_id(bare_name)
+                    .unwrap_or_else(|| bare_name.to_string());
+                format!("{}@{}", model_id, provider_display)
+            }
+            _ => bare_name.to_string(),
         };
 
-        let provider_key = match api_method {
-            "claude-oauth" | "api-key"
+        let provider_key = match &api_method_kind {
+            ModelRouteApiMethod::AnthropicApiKey
+                if provider_display == "Anthropic"
+                    && crate::provider::provider_for_model(bare_name) == Some("claude") =>
+            {
+                Some("claude-api".to_string())
+            }
+            ModelRouteApiMethod::ClaudeOAuth
                 if crate::provider::provider_for_model(bare_name) == Some("claude") =>
             {
                 Some("claude".to_string())
             }
-            "openai-oauth" | "openai-api-key" => Some("openai".to_string()),
-            "copilot" => Some("copilot".to_string()),
-            "cursor" => Some("cursor".to_string()),
-            "bedrock" => Some("bedrock".to_string()),
-            "cli" if provider_display == "Antigravity" => Some("antigravity".to_string()),
-            "openrouter" => Some("openrouter".to_string()),
-            method if method.starts_with("openai-compatible") => profile_id.map(ToOwned::to_owned),
-            _ => profile_id.map(ToOwned::to_owned),
+            ModelRouteApiMethod::OpenAIApiKey => Some("openai-api".to_string()),
+            ModelRouteApiMethod::OpenAIOAuth => Some("openai".to_string()),
+            ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
+            ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
+            ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
+            ModelRouteApiMethod::Other(method)
+                if method == "cli" && provider_display == "Antigravity" =>
+            {
+                Some("antigravity".to_string())
+            }
+            ModelRouteApiMethod::OpenRouter => Some("openrouter".to_string()),
+            ModelRouteApiMethod::OpenAiCompatible { .. } => profile_id.clone(),
+            _ => profile_id.clone(),
         };
 
         DefaultModelSelection {
             model_spec,
             provider_key,
+        }
+    }
+
+    fn explicit_session_provider_key_for_model_request(model_request: &str) -> Option<String> {
+        let model_request = model_request.trim();
+        if let Some((prefix, rest)) = model_request.split_once(':') {
+            let prefix = prefix.trim();
+            if !prefix.is_empty() && !rest.trim().is_empty() {
+                match prefix {
+                    "claude-api" => return Some("claude-api".to_string()),
+                    "claude-oauth" | "claude" | "anthropic" => {
+                        return Some("claude".to_string());
+                    }
+                    "openai-api" => return Some("openai-api".to_string()),
+                    "openai-oauth" | "openai" => return Some("openai".to_string()),
+                    "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter" => {
+                        return Some(prefix.to_string());
+                    }
+                    _ => {
+                        if crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                            prefix,
+                        )
+                        .is_some()
+                            || crate::config::config().providers.contains_key(prefix)
+                        {
+                            return Some(prefix.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if model_request.contains('@') {
+            return Some("openrouter".to_string());
+        }
+
+        None
+    }
+
+    pub(crate) fn session_provider_key_for_model_request(
+        model_request: &str,
+        provider_name: &str,
+    ) -> Option<String> {
+        if let Some(provider_key) =
+            Self::explicit_session_provider_key_for_model_request(model_request)
+        {
+            return Some(provider_key);
+        }
+
+        Self::session_provider_key_from_provider_name(provider_name)
+            .or_else(|| crate::session::derive_session_provider_key(provider_name))
+    }
+
+    pub(crate) fn session_provider_key_after_model_switch(
+        model_request: &str,
+        provider_name: &str,
+        previous_provider_key: Option<&str>,
+    ) -> Option<String> {
+        if let Some(provider_key) =
+            Self::explicit_session_provider_key_for_model_request(model_request)
+        {
+            return Some(provider_key);
+        }
+
+        if let Some(previous_provider_key) = previous_provider_key
+            .map(str::trim)
+            .filter(|provider_key| !provider_key.is_empty())
+            && Self::session_provider_key_matches_provider_name(
+                previous_provider_key,
+                provider_name,
+            )
+        {
+            return Some(previous_provider_key.to_string());
+        }
+
+        Self::session_provider_key_from_provider_name(provider_name)
+            .or_else(|| crate::session::derive_session_provider_key(provider_name))
+    }
+
+    fn session_provider_key_from_provider_name(provider_name: &str) -> Option<String> {
+        let normalized = provider_name.trim().to_ascii_lowercase();
+        let key = match normalized.as_str() {
+            "jcode" => "jcode",
+            "anthropic" | "claude" | "claude cli" => "claude",
+            "openai" => "openai",
+            "github copilot" | "copilot" => "copilot",
+            "openrouter" => "openrouter",
+            "cursor" => "cursor",
+            "gemini" | "google" => "gemini",
+            "antigravity" => "antigravity",
+            "bedrock" | "aws bedrock" => "bedrock",
+            "" => return None,
+            _ => return None,
+        };
+        Some(key.to_string())
+    }
+
+    fn session_provider_key_matches_provider_name(provider_key: &str, provider_name: &str) -> bool {
+        let provider_key = provider_key.trim();
+        let Some(derived) = Self::session_provider_key_from_provider_name(provider_name)
+            .or_else(|| crate::session::derive_session_provider_key(provider_name))
+        else {
+            return false;
+        };
+        match derived.as_str() {
+            "claude" => matches!(
+                provider_key,
+                "claude" | "claude-oauth" | "claude-api" | "anthropic"
+            ),
+            "openai" => matches!(provider_key, "openai" | "openai-oauth" | "openai-api"),
+            "openrouter" => {
+                provider_key == "openrouter"
+                    || crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        provider_key,
+                    )
+                    .is_some()
+                    || crate::config::config().providers.contains_key(provider_key)
+            }
+            other => provider_key == other,
+        }
+    }
+
+    pub(crate) fn model_switch_request_for_session_model(
+        model: &str,
+        provider_key: Option<&str>,
+    ) -> String {
+        let model = model.trim();
+        if model.is_empty() {
+            return String::new();
+        }
+
+        if crate::provider::explicit_model_provider_prefix(model).is_some() {
+            return model.to_string();
+        }
+
+        if let Some((prefix, rest)) = model.split_once(':') {
+            let prefix = prefix.trim();
+            if !prefix.is_empty()
+                && !rest.trim().is_empty()
+                && (crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                    .is_some()
+                    || crate::config::config().providers.contains_key(prefix))
+            {
+                return model.to_string();
+            }
+        }
+
+        let Some(provider_key) = provider_key
+            .map(str::trim)
+            .filter(|provider_key| !provider_key.is_empty())
+        else {
+            return model.to_string();
+        };
+
+        match provider_key {
+            "claude-api" => format!("claude-api:{model}"),
+            "claude-oauth" | "claude" | "anthropic" => format!("claude-oauth:{model}"),
+            "openai-api" => format!("openai-api:{model}"),
+            "openai-oauth" | "openai" => format!("openai-oauth:{model}"),
+            "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter" => {
+                format!("{provider_key}:{model}")
+            }
+            _ => {
+                if crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                    provider_key,
+                )
+                .is_some()
+                    || crate::config::config().providers.contains_key(provider_key)
+                {
+                    format!("{provider_key}:{model}")
+                } else {
+                    model.to_string()
+                }
+            }
         }
     }
 
@@ -226,6 +425,140 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn default_model_selection_preserves_route_identity_state_space() {
+        for (bare, api_method, provider, expected_spec, expected_provider_key) in [
+            (
+                "gpt-5.5",
+                "openai-oauth",
+                "OpenAI",
+                "openai-oauth:gpt-5.5",
+                Some("openai"),
+            ),
+            (
+                "gpt-5.5",
+                "openai-api-key",
+                "OpenAI",
+                "openai-api:gpt-5.5",
+                Some("openai-api"),
+            ),
+            (
+                "claude-opus-4-6",
+                "claude-oauth",
+                "Anthropic",
+                "claude-oauth:claude-opus-4-6",
+                Some("claude"),
+            ),
+            (
+                "claude-opus-4-6",
+                "api-key",
+                "Anthropic",
+                "claude-api:claude-opus-4-6",
+                Some("claude-api"),
+            ),
+            (
+                "glm-51-nvfp4",
+                "openai-compatible:comtegra",
+                "Comtegra GPU Cloud",
+                "glm-51-nvfp4",
+                Some("comtegra"),
+            ),
+            (
+                "claude-sonnet-4-6",
+                "copilot",
+                "Copilot",
+                "copilot:claude-sonnet-4-6",
+                Some("copilot"),
+            ),
+        ] {
+            let selection =
+                MultiProvider::default_model_selection_from_route(bare, api_method, provider);
+            assert_eq!(selection.model_spec, expected_spec, "{api_method}");
+            assert_eq!(
+                selection.provider_key.as_deref(),
+                expected_provider_key,
+                "{api_method}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_model_route_identity_helpers_preserve_auth_mode_and_profiles() {
+        for (request, provider_name, previous_key, expected_key) in [
+            ("openai-api:gpt-5.5", "OpenAI", None, Some("openai-api")),
+            ("openai-oauth:gpt-5.5", "OpenAI", None, Some("openai")),
+            (
+                "claude-api:claude-opus-4-6",
+                "Anthropic",
+                None,
+                Some("claude-api"),
+            ),
+            (
+                "claude-oauth:claude-opus-4-6",
+                "Anthropic",
+                None,
+                Some("claude"),
+            ),
+            (
+                "cerebras:qwen-3-235b-a22b-instruct-2507",
+                "OpenRouter",
+                None,
+                Some("cerebras"),
+            ),
+            ("gpt-5.5", "OpenAI", Some("openai-api"), Some("openai-api")),
+            (
+                "claude-opus-4-6",
+                "Anthropic",
+                Some("claude-api"),
+                Some("claude-api"),
+            ),
+            (
+                "qwen-3-235b-a22b-instruct-2507",
+                "OpenRouter",
+                Some("cerebras"),
+                Some("cerebras"),
+            ),
+        ] {
+            assert_eq!(
+                MultiProvider::session_provider_key_after_model_switch(
+                    request,
+                    provider_name,
+                    previous_key,
+                )
+                .as_deref(),
+                expected_key,
+                "{request} via {provider_name:?}"
+            );
+        }
+
+        for (model, provider_key, expected_request) in [
+            ("gpt-5.5", Some("openai-api"), "openai-api:gpt-5.5"),
+            ("gpt-5.5", Some("openai"), "openai-oauth:gpt-5.5"),
+            (
+                "claude-opus-4-6",
+                Some("claude-api"),
+                "claude-api:claude-opus-4-6",
+            ),
+            (
+                "claude-opus-4-6",
+                Some("claude"),
+                "claude-oauth:claude-opus-4-6",
+            ),
+            (
+                "qwen-3-235b-a22b-instruct-2507",
+                Some("cerebras"),
+                "cerebras:qwen-3-235b-a22b-instruct-2507",
+            ),
+            ("openai-api:gpt-5.5", Some("openai"), "openai-api:gpt-5.5"),
+        ] {
+            assert_eq!(
+                MultiProvider::model_switch_request_for_session_model(model, provider_key),
+                expected_request,
+                "restore {model:?} with {provider_key:?}"
+            );
+        }
     }
 
     #[test]

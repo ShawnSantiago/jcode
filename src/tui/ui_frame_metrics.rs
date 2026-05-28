@@ -5,6 +5,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+const SLOW_DRAW_ATTRIBUTION_THRESHOLD_MS: f64 = 40.0;
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct FramePerfStats {
     pub full_prep_requests: usize,
@@ -94,14 +96,64 @@ pub(crate) struct SlowFrameSample {
     pub draw_ms: f64,
     pub total_ms: f64,
     pub messages_ms: Option<f64>,
+    pub input_event: Option<String>,
+    pub scroll_delta: Option<i32>,
+    pub model_picker_open: bool,
     pub resources: FrameResourceAttribution,
     pub perf: FramePerfStats,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct FrameInputAttribution {
+    pub event: Option<String>,
+    pub scroll_delta: Option<i32>,
+    pub model_picker_open: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DrawCallAttribution {
+    pub timestamp_ms: u64,
+    pub total_ms: f64,
+    pub render_ms: f64,
+    pub backend_flush_ms: f64,
+    pub changed_cells: Option<usize>,
+    pub total_cells: Option<usize>,
+    pub force_full_redraw: bool,
+    pub input: FrameInputAttribution,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct FrameResourceStart {
     process_cpu_ticks: Option<u64>,
     ticks_per_second: Option<f64>,
+}
+
+fn frame_input_attribution_slot() -> &'static Mutex<FrameInputAttribution> {
+    static SLOT: OnceLock<Mutex<FrameInputAttribution>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(FrameInputAttribution::default()))
+}
+
+pub(crate) fn set_frame_input_attribution(attribution: FrameInputAttribution) {
+    let mut guard = frame_input_attribution_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = attribution;
+}
+
+pub(crate) fn frame_input_attribution_snapshot() -> FrameInputAttribution {
+    frame_input_attribution_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+pub(crate) fn record_draw_call_attribution(sample: DrawCallAttribution) {
+    if sample.total_ms < SLOW_DRAW_ATTRIBUTION_THRESHOLD_MS {
+        return;
+    }
+    if let Ok(payload) = serde_json::to_string(&sample) {
+        crate::logging::warn(&format!("TUI_DRAW_CALL {}", payload));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -201,7 +253,7 @@ fn frame_resource_start() -> &'static Mutex<Option<FrameResourceStart>> {
     FRAME_RESOURCE_START.get_or_init(|| Mutex::new(None))
 }
 
-fn wall_clock_ms() -> u64 {
+pub(crate) fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -867,6 +919,7 @@ pub(super) fn finalize_frame_metrics(
 
     let threshold_ms = slow_frame_threshold_ms();
     if total_ms >= threshold_ms {
+        let input = frame_input_attribution_snapshot();
         record_slow_frame_sample(SlowFrameSample {
             timestamp_ms: wall_clock_ms(),
             threshold_ms,
@@ -886,6 +939,9 @@ pub(super) fn finalize_frame_metrics(
             draw_ms: draw_elapsed.as_secs_f64() * 1000.0,
             total_ms,
             messages_ms,
+            input_event: input.event,
+            scroll_delta: input.scroll_delta,
+            model_picker_open: input.model_picker_open,
             resources: frame_resource_attribution(total_elapsed),
             perf,
         });

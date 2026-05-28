@@ -10,6 +10,7 @@ use jcode_provider_core::{ActiveProvider, provider_key};
 pub enum RuntimeProviderId {
     Jcode,
     Claude,
+    ClaudeApiKey,
     OpenAi,
     OpenAiApiKey,
     OpenRouter,
@@ -28,6 +29,7 @@ impl RuntimeProviderId {
         match self {
             Self::Jcode => "jcode",
             Self::Claude => "claude",
+            Self::ClaudeApiKey => "claude-api",
             Self::OpenAi => "openai",
             Self::OpenAiApiKey => "openai-api",
             Self::OpenRouter => "openrouter",
@@ -46,6 +48,7 @@ impl RuntimeProviderId {
         match self {
             Self::Jcode => "Jcode Subscription",
             Self::Claude => "Anthropic/Claude",
+            Self::ClaudeApiKey => "Anthropic API",
             Self::OpenAi => "OpenAI",
             Self::OpenAiApiKey => "OpenAI API",
             Self::OpenRouter => "OpenRouter",

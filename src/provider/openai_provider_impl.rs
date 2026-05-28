@@ -865,6 +865,7 @@ impl Provider for OpenAIProvider {
         Arc::new(OpenAIProvider {
             client: self.client.clone(),
             credentials: Arc::clone(&self.credentials),
+            credential_mode: Arc::clone(&self.credential_mode),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
@@ -881,7 +882,8 @@ impl Provider for OpenAIProvider {
     }
 
     async fn invalidate_credentials(&self) {
-        if let Ok(credentials) = crate::auth::codex::load_credentials() {
+        let mode = *self.credential_mode.read().await;
+        if let Ok(credentials) = mode.load_credentials() {
             let mut guard = self.credentials.write().await;
             *guard = credentials;
         }

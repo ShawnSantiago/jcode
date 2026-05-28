@@ -1161,7 +1161,7 @@ impl ModelPickerState {
         visible
             .get(self.selected)
             .and_then(|index| self.choices.get(*index))
-            .map(|choice| choice.model.clone())
+            .map(desktop_model_choice_switch_spec)
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -7116,6 +7116,59 @@ fn inferred_desktop_reasoning_efforts(
     // runtime setting. Keep the shortcut responsive by falling back to the
     // common OpenAI/Anthropic order instead of doing a blocking history lookup.
     DESKTOP_REASONING_EFFORTS_OPENAI
+}
+
+pub(crate) fn desktop_model_choice_switch_spec(choice: &DesktopModelChoice) -> String {
+    let model = choice.model.as_str();
+    let provider = choice.provider.as_deref().unwrap_or_default();
+    let api_method = choice.api_method.as_deref().unwrap_or_default();
+
+    if api_method == "copilot" {
+        format!("copilot:{model}")
+    } else if api_method == "claude-oauth"
+        || (api_method == "oauth" && desktop_model_choice_is_anthropic(provider, model))
+    {
+        format!("claude-oauth:{model}")
+    } else if (api_method == "api-key" || api_method == "claude-api")
+        && desktop_model_choice_is_anthropic(provider, model)
+    {
+        format!("claude-api:{model}")
+    } else if api_method == "cursor" {
+        format!("cursor:{model}")
+    } else if api_method == "bedrock" {
+        format!("bedrock:{model}")
+    } else if api_method == "openai-api-key" || api_method == "openai-api" {
+        format!("openai-api:{model}")
+    } else if api_method == "openai-oauth" {
+        format!("openai-oauth:{model}")
+    } else if provider == "Antigravity" {
+        format!("antigravity:{model}")
+    } else if let Some(profile_id) = desktop_openai_compatible_profile_id_for_route(api_method) {
+        format!("{profile_id}:{model}")
+    } else if api_method == "openrouter" && !provider.is_empty() && provider != "auto" {
+        format!("{model}@{provider}")
+    } else {
+        model.to_string()
+    }
+}
+
+fn desktop_model_choice_is_anthropic(provider: &str, model: &str) -> bool {
+    let provider = provider.to_ascii_lowercase();
+    provider.contains("anthropic")
+        || provider.contains("claude")
+        || model.starts_with("claude-")
+        || model.contains("/claude-")
+}
+
+fn desktop_openai_compatible_profile_id_for_route(api_method: &str) -> Option<&str> {
+    let (kind, profile_id) = api_method.split_once(':')?;
+    if kind == "openai-compatible" {
+        let profile_id = profile_id.trim();
+        if !profile_id.is_empty() {
+            return Some(profile_id);
+        }
+    }
+    None
 }
 
 fn model_choice_search_text(choice: &DesktopModelChoice) -> String {

@@ -178,6 +178,12 @@ impl App {
                 self.upstream_provider = None;
                 self.status_detail = None;
                 self.update_context_limit_for_model(&next_model);
+                self.session.provider_key =
+                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                        &next_model,
+                        self.provider.name(),
+                        self.session.provider_key.as_deref(),
+                    );
                 self.session.model = Some(self.provider.model());
                 let _ = self.session.save();
                 self.push_display_message(DisplayMessage::system(format!(
@@ -1057,6 +1063,12 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 app.invalidate_model_picker_cache();
                 let active_model = app.provider.model();
                 app.update_context_limit_for_model(&active_model);
+                app.session.provider_key =
+                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                        model_name,
+                        app.provider.name(),
+                        app.session.provider_key.as_deref(),
+                    );
                 app.session.model = Some(active_model.clone());
                 let _ = app.session.save();
                 app.push_display_message(DisplayMessage {

@@ -121,42 +121,49 @@ pub(super) fn openrouter_route_model_id(model: &str) -> String {
 
 pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption) -> String {
     let bare_name = model_entry_base_name(entry);
-    if route.api_method == "copilot" {
-        format!("copilot:{}", bare_name)
-    } else if route.api_method == "cursor" {
-        format!("cursor:{}", bare_name)
-    } else if route.api_method == "bedrock" {
-        format!("bedrock:{}", bare_name)
-    } else if route.provider == "Antigravity" {
-        format!("antigravity:{}", bare_name)
-    } else if let Some(profile_id) = openai_compatible_profile_id_for_route(route) {
-        format!("{}:{}", profile_id, bare_name)
-    } else if route.api_method == "openrouter" && route.provider != "auto" {
-        format!(
+    let api_method = crate::provider::ModelRouteApiMethod::parse(&route.api_method);
+    match api_method {
+        crate::provider::ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
+            format!("claude-oauth:{}", bare_name)
+        }
+        crate::provider::ModelRouteApiMethod::AnthropicApiKey if route.provider == "Anthropic" => {
+            format!("claude-api:{}", bare_name)
+        }
+        crate::provider::ModelRouteApiMethod::Cursor => format!("cursor:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::Bedrock => format!("bedrock:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::OpenAIApiKey => format!("openai-api:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::OpenAIOAuth => {
+            format!("openai-oauth:{}", bare_name)
+        }
+        _ if route.provider == "Antigravity" => format!("antigravity:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::OpenAiCompatible { .. } => {
+            if let Some(profile_id) = openai_compatible_profile_id_for_route(route) {
+                format!("{}:{}", profile_id, bare_name)
+            } else {
+                bare_name
+            }
+        }
+        crate::provider::ModelRouteApiMethod::OpenRouter if route.provider != "auto" => format!(
             "{}@{}",
             openrouter_route_model_id(&bare_name),
             route.provider
-        )
-    } else {
-        bare_name
+        ),
+        _ => bare_name,
     }
 }
 
-pub(super) fn openai_compatible_profile_id_for_route(route: &PickerOption) -> Option<&str> {
-    if let Some(("openai-compatible", profile_id)) = route.api_method.split_once(':') {
-        let profile_id = profile_id.trim();
-        if !profile_id.is_empty() {
-            return Some(profile_id);
+pub(super) fn openai_compatible_profile_id_for_route(route: &PickerOption) -> Option<String> {
+    match crate::provider::ModelRouteApiMethod::parse(&route.api_method) {
+        crate::provider::ModelRouteApiMethod::OpenAiCompatible {
+            profile_id: Some(profile_id),
+        } => Some(profile_id),
+        crate::provider::ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+            crate::provider_catalog::openai_compatible_profile_id_for_display_name(&route.provider)
+                .map(ToOwned::to_owned)
         }
+        _ => None,
     }
-
-    if route.api_method == "openai-compatible" {
-        return crate::provider_catalog::openai_compatible_profile_id_for_display_name(
-            &route.provider,
-        );
-    }
-
-    None
 }
 
 pub(super) fn model_entry_saved_spec(entry: &PickerEntry) -> String {
@@ -217,4 +224,75 @@ pub(super) fn agent_model_default_summary(target: AgentModelTarget, app: &App) -
     };
 
     normalize_agent_model_summary(target, summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::{PickerAction, PickerEntry, PickerOption};
+
+    fn entry(model: &str, route: PickerOption) -> PickerEntry {
+        PickerEntry {
+            name: model.to_string(),
+            options: vec![route],
+            action: PickerAction::Model,
+            selected_option: 0,
+            is_current: false,
+            is_default: false,
+            recommended: false,
+            recommendation_rank: 0,
+            old: false,
+            created_date: None,
+            effort: None,
+        }
+    }
+
+    fn route(provider: &str, api_method: &str) -> PickerOption {
+        PickerOption {
+            provider: provider.to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            estimated_reference_cost_micros: None,
+        }
+    }
+
+    #[test]
+    fn model_picker_specs_preserve_provider_and_openai_auth_state_space() {
+        for (model, route, expected) in [
+            (
+                "gpt-5.5",
+                route("OpenAI", "openai-oauth"),
+                "openai-oauth:gpt-5.5",
+            ),
+            (
+                "gpt-5.5",
+                route("OpenAI", "openai-api-key"),
+                "openai-api:gpt-5.5",
+            ),
+            (
+                "claude-opus-4-6",
+                route("Anthropic", "claude-oauth"),
+                "claude-oauth:claude-opus-4-6",
+            ),
+            (
+                "claude-opus-4-6",
+                route("Anthropic", "api-key"),
+                "claude-api:claude-opus-4-6",
+            ),
+            (
+                "glm-51-nvfp4",
+                route("Comtegra GPU Cloud", "openai-compatible:comtegra"),
+                "comtegra:glm-51-nvfp4",
+            ),
+            (
+                "claude-sonnet-4-6",
+                route("Copilot", "copilot"),
+                "copilot:claude-sonnet-4-6",
+            ),
+        ] {
+            let entry = entry(model, route.clone());
+            assert_eq!(picker_route_model_spec(&entry, &route), expected);
+        }
+    }
 }
