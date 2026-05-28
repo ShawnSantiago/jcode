@@ -162,6 +162,40 @@ fn direct_openai_compatible_profile_routes(
     routes
 }
 
+fn standard_openrouter_profile_configured() -> bool {
+    crate::provider_catalog::load_env_value_from_env_or_config(
+        "OPENROUTER_API_KEY",
+        "openrouter.env",
+    )
+    .is_some()
+}
+
+fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
+    let Some(cache) = jcode_provider_openrouter::load_disk_cache_entry_for_namespace("openrouter")
+    else {
+        return Vec::new();
+    };
+
+    let source_matches_openrouter = cache
+        .source_api_base
+        .as_deref()
+        .and_then(crate::provider_catalog::normalize_api_base)
+        .map(|base| base.contains("openrouter.ai"))
+        .unwrap_or(false);
+    if !source_matches_openrouter {
+        return Vec::new();
+    }
+
+    let available = standard_openrouter_profile_configured();
+    cache
+        .models
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|model| is_listable_model_name(model))
+        .map(|model| build_openrouter_auto_route(&model, available, String::new()))
+        .collect()
+}
+
 pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Result<()> {
     match provider.set_model(model) {
         Ok(()) => Ok(()),
@@ -1410,6 +1444,15 @@ impl Provider for MultiProvider {
                         ));
                     }
                 }
+            }
+
+            // A direct OpenAI-compatible runtime (NVIDIA NIM, Groq, etc.) shares the
+            // OpenRouter/OpenAI-compatible transport, but it is a distinct profile
+            // from standard OpenRouter. Keep standard OpenRouter's catalog scoped to
+            // the `openrouter` cache namespace so `/model` can switch back to it
+            // without relabeling OpenRouter models as the active direct profile.
+            if !supports_openrouter_provider_features && standard_openrouter_profile_configured() {
+                routes.extend(configured_standard_openrouter_profile_routes());
             }
         }
 

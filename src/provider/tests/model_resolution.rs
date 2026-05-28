@@ -145,8 +145,7 @@ fn test_cerebras_model_routes_are_profile_scoped_and_unique() {
             let qwen_routes = routes
                 .iter()
                 .filter(|route| {
-                    route.provider == "Cerebras"
-                        && route.model == "qwen-3-235b-a22b-instruct-2507"
+                    route.provider == "Cerebras" && route.model == "qwen-3-235b-a22b-instruct-2507"
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
@@ -354,6 +353,85 @@ fn test_auth_changed_replaces_template_direct_profile_for_new_logins() {
             .expect("template direct provider remains direct");
         assert_eq!(active_direct_route.0, "Groq");
         assert_eq!(active_direct_route.1, "openai-compatible:groq");
+    });
+}
+
+#[test]
+fn test_state_space_openrouter_default_survives_switch_to_nvidia_nim() {
+    with_clean_provider_test_env(|| {
+        let nvidia = crate::provider_catalog::openai_compatible_profile_by_id("nvidia-nim")
+            .expect("NVIDIA NIM profile exists");
+
+        save_test_openrouter_model_cache(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            &["openrouter/owl-alpha"],
+        );
+
+        crate::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(None);
+        let openrouter = Arc::new(
+            openrouter::OpenRouterProvider::new().expect("OpenRouter provider should initialize"),
+        );
+        openrouter
+            .set_model("openrouter/owl-alpha")
+            .expect("OpenRouter default model should be selectable");
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(openrouter)),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: None,
+        };
+
+        crate::env::set_var(nvidia.api_key_env, "test-nvidia-key");
+        provider
+            .set_model("nvidia-nim:nvidia/llama-3.1-nemotron-ultra-253b-v1")
+            .expect("NVIDIA NIM model should be selectable after OpenRouter default");
+
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        assert_eq!(provider.model(), "nvidia/llama-3.1-nemotron-ultra-253b-v1");
+        let active_direct_route = provider
+            .openrouter_provider()
+            .expect("NVIDIA direct provider remains installed")
+            .direct_openai_compatible_route_parts()
+            .expect("NVIDIA NIM is hosted through OpenAI-compatible runtime");
+        assert_eq!(active_direct_route.0, "NVIDIA NIM");
+        assert_eq!(active_direct_route.1, "openai-compatible:nvidia-nim");
+
+        let routes = provider.model_routes();
+        assert!(
+            routes.iter().any(|route| {
+                route.model == "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+                    && route.provider == "NVIDIA NIM"
+                    && route.api_method == "openai-compatible:nvidia-nim"
+                    && route.available
+            }),
+            "NVIDIA route should remain selectable: {routes:?}"
+        );
+        assert!(
+            routes.iter().any(|route| {
+                route.model == "openrouter/owl-alpha"
+                    && route.api_method == "openrouter"
+                    && route.available
+            }),
+            "OpenRouter route should remain selectable after switching to NVIDIA NIM: {routes:?}"
+        );
+        assert!(
+            routes.iter().all(|route| {
+                !(route.model == "openrouter/owl-alpha" && route.provider == "NVIDIA NIM")
+            }),
+            "OpenRouter model must not be relabeled as NVIDIA NIM: {routes:?}"
+        );
     });
 }
 

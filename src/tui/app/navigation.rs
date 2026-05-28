@@ -640,6 +640,17 @@ impl App {
                 });
                 true
             }
+            MouseScrollTarget::ModelStatusOverlay => {
+                let Some(current) = self.model_status_scroll else {
+                    return false;
+                };
+                self.model_status_scroll = Some(if direction < 0 {
+                    current.saturating_sub(1)
+                } else {
+                    current.saturating_add(1)
+                });
+                true
+            }
         }
     }
 
@@ -1028,6 +1039,20 @@ impl App {
                     finish_mouse_event!(true, "help_overlay_scroll_down");
                 }
                 _ => finish_mouse_event!(false, "help_overlay_non_scroll"),
+            }
+        }
+
+        if self.model_status_scroll.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::ModelStatusOverlay, -1);
+                    finish_mouse_event!(true, "model_status_overlay_scroll_up");
+                }
+                MouseEventKind::ScrollDown => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::ModelStatusOverlay, 1);
+                    finish_mouse_event!(true, "model_status_overlay_scroll_down");
+                }
+                _ => finish_mouse_event!(false, "model_status_overlay_non_scroll"),
             }
         }
 

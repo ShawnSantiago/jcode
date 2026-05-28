@@ -833,6 +833,12 @@ pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool 
         return false;
     };
 
+    if rest.trim().is_empty() {
+        app.model_status_content = build_provider_test_coverage_summary();
+        app.model_status_scroll = Some(0);
+        return true;
+    }
+
     let mut parts = rest.split_whitespace();
     let provider = parts
         .next()
@@ -852,6 +858,25 @@ pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool 
 
 fn build_model_status_report(provider_query: &str, model_query: &str) -> String {
     crate::live_tests::format_provider_test_coverage_report(provider_query, model_query, None)
+}
+
+fn build_provider_test_coverage_summary() -> String {
+    match crate::live_tests::load_coverage(None) {
+        Ok((coverage, path)) => {
+            let summary = crate::live_tests::strict_live_provider_model_coverage_summary(
+                &coverage,
+                path.display().to_string(),
+            );
+            crate::live_tests::format_strict_live_provider_model_coverage_summary(&summary, 50)
+        }
+        Err(err) => {
+            let mut out = String::new();
+            out.push_str("Live provider/model E2E coverage\n");
+            out.push_str("Status: no verification ledger found on this install\n");
+            out.push_str(&format!("Ledger error: {err}\n"));
+            out
+        }
+    }
 }
 
 pub(super) fn handle_ssh_command(app: &mut App, trimmed: &str) -> bool {

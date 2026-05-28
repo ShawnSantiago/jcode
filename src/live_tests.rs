@@ -790,6 +790,12 @@ pub struct LiveProviderCoverageSummary {
     pub total_model_pairs: usize,
     pub covered_model_pairs: usize,
     pub coverage_percent: f64,
+    #[serde(default)]
+    pub basic_chat_passed_model_pairs: usize,
+    #[serde(default)]
+    pub tool_smoke_passed_model_pairs: usize,
+    #[serde(default)]
+    pub tool_smoke_skipped_model_pairs: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models_without_strict_coverage: Vec<String>,
 }
@@ -1201,8 +1207,9 @@ pub fn strict_live_provider_model_coverage_summary(
 ) -> LiveProviderModelCoverageSummary {
     let mut builders: BTreeMap<(String, String), ProviderModelCoverageBuilder> = BTreeMap::new();
     let mut provider_only_entries = BTreeSet::new();
+    let latest_entries = latest_coverage_entries_by_provider_model_test(coverage);
 
-    for (key, entry) in &coverage.latest {
+    for (key, entry) in latest_entries {
         let model = entry.model.as_deref().map(str::trim).unwrap_or("*");
         if model.is_empty() || model == "*" {
             provider_only_entries.insert(key.clone());
@@ -1224,7 +1231,8 @@ pub fn strict_live_provider_model_coverage_summary(
     let mut covered_pairs = Vec::new();
     let mut uncovered_pairs = Vec::new();
     let mut provider_labels = BTreeMap::new();
-    let mut provider_totals: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
+    let mut provider_totals: BTreeMap<String, (usize, usize, Vec<String>, usize, usize, usize)> =
+        BTreeMap::new();
 
     for pair in builders
         .into_values()
@@ -1233,8 +1241,19 @@ pub fn strict_live_provider_model_coverage_summary(
         provider_labels.insert(pair.provider_id.clone(), pair.provider_label.clone());
         let totals = provider_totals
             .entry(pair.provider_id.clone())
-            .or_insert_with(|| (0, 0, Vec::new()));
+            .or_insert_with(|| (0, 0, Vec::new(), 0, 0, 0));
         totals.0 += 1;
+        if matches!(
+            pair.checkpoint_status(checkpoints::NON_STREAMING_CHAT_COMPLETION),
+            Some(LiveVerificationStageStatus::Passed)
+        ) {
+            totals.3 += 1;
+        }
+        match pair.checkpoint_status(checkpoints::REAL_JCODE_TOOL_SMOKE) {
+            Some(LiveVerificationStageStatus::Passed) => totals.4 += 1,
+            Some(LiveVerificationStageStatus::Skipped) => totals.5 += 1,
+            _ => {}
+        }
         if pair.covered {
             totals.1 += 1;
             covered_pairs.push(pair);
@@ -1258,7 +1277,17 @@ pub fn strict_live_provider_model_coverage_summary(
     let providers = provider_totals
         .into_iter()
         .map(
-            |(provider_id, (total, covered, mut models_without_strict_coverage))| {
+            |(
+                provider_id,
+                (
+                    total,
+                    covered,
+                    mut models_without_strict_coverage,
+                    basic_chat_passed,
+                    tool_smoke_passed,
+                    tool_smoke_skipped,
+                ),
+            )| {
                 models_without_strict_coverage.sort();
                 LiveProviderCoverageSummary {
                     provider_label: provider_labels
@@ -1269,6 +1298,9 @@ pub fn strict_live_provider_model_coverage_summary(
                     total_model_pairs: total,
                     covered_model_pairs: covered,
                     coverage_percent: percent(covered, total),
+                    basic_chat_passed_model_pairs: basic_chat_passed,
+                    tool_smoke_passed_model_pairs: tool_smoke_passed,
+                    tool_smoke_skipped_model_pairs: tool_smoke_skipped,
                     models_without_strict_coverage,
                 }
             },
@@ -1305,6 +1337,48 @@ pub fn strict_live_provider_model_coverage_summary(
         known_provider_ids_without_live_model_coverage,
         issue_driven_targets,
     }
+}
+
+fn latest_coverage_entries_by_provider_model_test(
+    coverage: &LiveVerificationCoverage,
+) -> BTreeMap<String, &LiveVerificationCoverageEntry> {
+    let mut latest_by_target_and_checkpoints: BTreeMap<
+        (String, String, String, Vec<String>),
+        (&String, &LiveVerificationCoverageEntry),
+    > = BTreeMap::new();
+    for (key, entry) in &coverage.latest {
+        let provider_identity =
+            canonical_live_provider_identity(&entry.provider_id, &entry.provider_label);
+        let model = entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or("*")
+            .to_string();
+        let checkpoint_ids = entry
+            .checkpoint_statuses
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let target_key = (
+            provider_identity.0,
+            model,
+            entry.test_name.clone(),
+            checkpoint_ids,
+        );
+        let replace = latest_by_target_and_checkpoints
+            .get(&target_key)
+            .map(|(_, current)| entry.recorded_at > current.recorded_at)
+            .unwrap_or(true);
+        if replace {
+            latest_by_target_and_checkpoints.insert(target_key, (key, entry));
+        }
+    }
+    latest_by_target_and_checkpoints
+        .into_values()
+        .map(|(key, entry)| (key.clone(), entry))
+        .collect()
 }
 
 fn percent(numerator: usize, denominator: usize) -> f64 {
@@ -1504,16 +1578,29 @@ pub fn format_strict_live_provider_model_coverage_summary(
     }
 
     out.push_str("\nProviders:\n");
+    out.push_str("  Strict = full E2E readiness. Smoke = auth-test chat/tool readiness.\n");
+    out.push_str("  Provider              Strict        Smoke chat    Smoke tool\n");
+    out.push_str("  -----------------------------------------------------------\n");
     if summary.providers.is_empty() {
         out.push_str("  none with model-specific live evidence\n");
     } else {
         for provider in &summary.providers {
+            let skipped = if provider.tool_smoke_skipped_model_pairs > 0 {
+                format!(" (+{} skipped)", provider.tool_smoke_skipped_model_pairs)
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  - {}: {}/{} ({:.2}%)\n",
+                "  {:<20} {:>2}/{:<2} {:>6.2}%     {:>2}/{:<2}         {:>2}/{:<2}{}\n",
                 provider.provider_id,
                 provider.covered_model_pairs,
                 provider.total_model_pairs,
-                provider.coverage_percent
+                provider.coverage_percent,
+                provider.basic_chat_passed_model_pairs,
+                provider.total_model_pairs,
+                provider.tool_smoke_passed_model_pairs,
+                provider.total_model_pairs,
+                skipped
             ));
         }
     }
@@ -1581,6 +1668,48 @@ pub fn format_strict_live_provider_model_coverage_summary(
     }
 
     out
+}
+
+pub fn colorize_provider_test_coverage_output(output: &str) -> String {
+    output
+        .lines()
+        .map(colorize_provider_test_coverage_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if output.ends_with('\n') { "\n" } else { "" }
+}
+
+fn colorize_provider_test_coverage_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let color = if trimmed.starts_with('✓')
+        || trimmed.contains("**Fully tested**")
+        || trimmed.contains("strict_covered")
+        || trimmed.contains("Passed")
+    {
+        Some("32")
+    } else if trimmed.starts_with('✗')
+        || trimmed.contains("Failed")
+        || trimmed.contains(" 0.00%")
+        || trimmed.contains("no_model_specific_live_evidence")
+    {
+        Some("31")
+    } else if trimmed.starts_with('!')
+        || trimmed.starts_with('-')
+        || trimmed.contains("Skipped")
+        || trimmed.contains("Blocked")
+        || trimmed.contains("Partially tested")
+        || trimmed.contains("observed_missing_strict_checkpoints")
+    {
+        Some("33")
+    } else if trimmed.starts_with('#') || trimmed.ends_with(':') || trimmed.contains("Coverage:") {
+        Some("1;36")
+    } else {
+        None
+    };
+    match color {
+        Some(color) => format!("\x1b[{color}m{line}\x1b[0m"),
+        None => line.to_string(),
+    }
 }
 
 pub fn fingerprint_secret(secret: &str) -> Option<String> {
