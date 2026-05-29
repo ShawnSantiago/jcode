@@ -318,7 +318,7 @@ async fn manual_login(
     );
     eprint!("Callback URL: ");
     io::stdout().flush()?;
-    let input = crate::cli::login::read_secret_line()?;
+    let input = crate::secret_input::read_secret_line()?;
     if input.trim().is_empty() {
         anyhow::bail!("No callback URL provided.");
     }

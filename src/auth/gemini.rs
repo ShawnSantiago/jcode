@@ -375,7 +375,7 @@ async fn manual_login(
     eprintln!("After approving access, Google will show an authorization code. Paste it below.\n");
     eprint!("Authorization code: ");
     io::stdout().flush()?;
-    let code = crate::cli::login::read_secret_line()?;
+    let code = crate::secret_input::read_secret_line()?;
     if code.trim().is_empty() {
         anyhow::bail!("No authorization code provided.");
     }
