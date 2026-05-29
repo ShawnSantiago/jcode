@@ -1,7 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use crate::ambient::{
-    AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem,
-};
+use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -363,9 +361,9 @@ fn maybe_schedule_next(
     let task = scheduled_poll_prompt(state);
     let mut manager = AmbientManager::new()?;
     if let Some(existing) =
-        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(|| {
-            find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline")
-        })
+        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(
+            || find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline"),
+        )
     {
         if existing.scheduled_for > Utc::now() {
             return Ok(Some(format!(
@@ -432,7 +430,9 @@ fn maybe_schedule_next_monitor(
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
     let mut manager = AmbientManager::new()?;
-    if let Some(existing) = find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor") {
+    if let Some(existing) =
+        find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
+    {
         if existing.scheduled_for > Utc::now() {
             return Ok(Some(format!(
                 "{} at {} (already scheduled)",
@@ -1414,6 +1414,11 @@ fn update_state_from_collection(
     let mut pending_check_count = 0;
     let mut failed_check_count = 0;
     let mut any_surface_success = false;
+    let review_threads_cover_comments = collection
+        .review_threads
+        .as_ref()
+        .map(|threads| !threads.is_empty())
+        .unwrap_or(false);
 
     match collection.metadata {
         Ok(metadata) => {
@@ -1503,7 +1508,8 @@ fn update_state_from_collection(
                         url: comment.url.clone(),
                     },
                 );
-                if (is_new || is_edited)
+                if !review_threads_cover_comments
+                    && (is_new || is_edited)
                     && !is_automation_chatter(comment.author.as_deref(), comment.body.as_deref())
                 {
                     pending_actionable.push(ActionableItem {
@@ -1779,9 +1785,12 @@ fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
     let author = author.unwrap_or_default().to_ascii_lowercase();
     let body = body.unwrap_or_default().to_ascii_lowercase();
     body.starts_with("fix-summary:")
+        || body.starts_with("[vc]:")
+        || body.contains("addressed review feedback in ")
         || body.contains("triggered the review bot")
         || body.contains("automation progress")
         || body.contains("<!-- jcode-pr-watch-ignore -->")
+        || author == "vercel[bot]"
         || (author == "shopify"
             && body.contains("oxygen deployed a preview")
             && body.contains("deployment details"))
@@ -2206,11 +2215,7 @@ mod tests {
             &scheduled_monitor_prompt(&state, 60),
             vec![],
         );
-        let other_poll_item = scheduled_item(
-            "sched_other",
-            &scheduled_poll_prompt(&other),
-            vec![],
-        );
+        let other_poll_item = scheduled_item("sched_other", &scheduled_poll_prompt(&other), vec![]);
         let items = vec![monitor_item, other_poll_item];
 
         assert!(find_existing_scheduled_watch_item(&items, &state, "poll_now").is_none());
@@ -2779,6 +2784,71 @@ mod tests {
                 .contains_key("THREAD_RESOLVED")
         );
     }
+
+    #[test]
+    fn review_comments_are_not_duplicated_when_threads_are_available() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 16,
+        });
+        let collection = GhCollection {
+            metadata: Ok(jcode_pr_watch_core::PrMetadata {
+                identity: jcode_pr_watch_core::PrIdentity {
+                    repo: "owner/repo".into(),
+                    number: 16,
+                    url: Some("https://github.com/owner/repo/pull/16".into()),
+                    state: Some("OPEN".into()),
+                    base_ref: Some("main".into()),
+                    head_ref: Some("feature".into()),
+                    head_sha: Some("abc".into()),
+                    merge_state: Some("CLEAN".into()),
+                    review_decision: None,
+                },
+                is_draft: Some(false),
+            }),
+            checks: Ok(Vec::new()),
+            review_comments: Ok(vec![jcode_pr_watch_core::ReviewComment {
+                id: "RC_RESOLVED_CHILD".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(4),
+                url: Some("https://comment".into()),
+                updated_at: Some("2026-05-29T18:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Previously requested fix".into()),
+            }]),
+            issue_comments: Ok(Vec::new()),
+            reviews: Ok(Vec::new()),
+            review_threads: Ok(vec![jcode_pr_watch_core::ReviewThread {
+                id: "THREAD_RESOLVED".into(),
+                is_resolved: true,
+                is_outdated: false,
+                path: Some("src/lib.rs".into()),
+                line: Some(4),
+                url: Some("https://comment".into()),
+                updated_at: Some("2026-05-29T18:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Previously requested fix".into()),
+            }]),
+        };
+
+        let outcome = update_state_from_collection(&mut state, collection, "2026-05-29T18:01:00Z");
+
+        assert!(!outcome.partial_failure);
+        assert!(state.pending_actionable.is_empty());
+        assert!(
+            state
+                .last_seen
+                .review_comments
+                .contains_key("RC_RESOLVED_CHILD")
+        );
+        assert!(
+            state
+                .last_seen
+                .review_threads
+                .contains_key("THREAD_RESOLVED")
+        );
+    }
+
     #[test]
     fn automation_chatter_is_not_actionable() {
         assert!(!is_automation_chatter(
@@ -2790,8 +2860,18 @@ mod tests {
             Some("fix-summary: addressed feedback")
         ));
         assert!(is_automation_chatter(
+            Some("vercel[bot]"),
+            Some("[vc]: #payload\n| Project | Deployment | Actions | Updated (UTC) |")
+        ));
+        assert!(is_automation_chatter(
+            Some("ShawnSantiago"),
+            Some("Addressed review feedback in c84d324: validation passed")
+        ));
+        assert!(is_automation_chatter(
             Some("shopify"),
-            Some("Oxygen deployed a preview of your `feature` branch. Details:\n| Storefront | Status | Preview link | Deployment details |")
+            Some(
+                "Oxygen deployed a preview of your `feature` branch. Details:\n| Storefront | Status | Preview link | Deployment details |"
+            )
         ));
         assert!(!is_automation_chatter(
             Some("reviewer"),
