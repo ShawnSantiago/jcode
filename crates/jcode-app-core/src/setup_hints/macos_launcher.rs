@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 const MACOS_APP_ICON_FILE_NAME: &str = "Jcode.icns";
-const MACOS_APP_ICON_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/app-icons/Jcode.icns"));
+const MACOS_APP_ICON_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/app-icons/Jcode.icns"
+));
 
 pub(super) fn should_refresh_macos_app_launcher(state: &SetupHintsState) -> bool {
     match (macos_app_launcher_dir(), legacy_macos_app_launcher_dir()) {

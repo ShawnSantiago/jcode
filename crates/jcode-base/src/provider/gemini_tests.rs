@@ -3,8 +3,8 @@ use crate::message::{ContentBlock, Message, Role};
 use crate::provider::{EventStream, Provider};
 // `tool::Registry` lives in the upper jcode-app-core layer; reached here via the
 // dev-dependency on jcode-app-core (legal Cargo dev-dep cycle, lib build unaffected).
-use jcode_app_core::tool::Registry;
 use async_trait::async_trait;
+use jcode_app_core::tool::Registry;
 use std::sync::Arc;
 
 struct EnvVarGuard {

@@ -196,3 +196,59 @@ fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
 
     assert_eq!(provider.service_tier(), Some("priority".to_string()));
 }
+
+/// The OpenAI catalog endpoint and the chat endpoint must be selected by the
+/// same authoritative discriminator: the loaded credential's *shape*
+/// (`is_chatgpt_mode`), not the requested credential mode or a token-string
+/// sniff. A platform API key (`sk-*`, no refresh/id token) must route to the
+/// platform endpoints; a ChatGPT/Codex OAuth session must route to the Codex
+/// endpoints. If these ever diverge, OpenAI returns 401.
+#[test]
+fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
+    // API-key-shaped credential: no refresh token, no id token.
+    let api_key_creds = CodexCredentials {
+        access_token: "sk-platform-key".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+    assert!(
+        !OpenAIProvider::is_chatgpt_mode(&api_key_creds),
+        "platform API key must not be treated as ChatGPT/Codex mode"
+    );
+    assert!(
+        OpenAIProvider::responses_url(&api_key_creds).starts_with(OPENAI_API_BASE),
+        "platform API key chat requests must use the platform API base"
+    );
+
+    // OAuth-shaped credential: has a refresh token (Codex/ChatGPT session).
+    let oauth_creds = CodexCredentials {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+    assert!(
+        OpenAIProvider::is_chatgpt_mode(&oauth_creds),
+        "OAuth session with a refresh token must be treated as ChatGPT/Codex mode"
+    );
+    assert!(
+        OpenAIProvider::responses_url(&oauth_creds).starts_with(CHATGPT_API_BASE),
+        "OAuth chat requests must use the ChatGPT/Codex API base"
+    );
+
+    // An id-token-only credential is also a ChatGPT/Codex session.
+    let id_token_creds = CodexCredentials {
+        access_token: "oauth-access".to_string(),
+        refresh_token: String::new(),
+        id_token: Some("id-token".to_string()),
+        account_id: None,
+        expires_at: None,
+    };
+    assert!(
+        OpenAIProvider::is_chatgpt_mode(&id_token_creds),
+        "credential with an id token must be treated as ChatGPT/Codex mode"
+    );
+}

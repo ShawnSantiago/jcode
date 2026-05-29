@@ -11,7 +11,8 @@ use anyhow::Result;
 pub(crate) use catalog::parse_anthropic_model_catalog;
 pub use catalog::{
     AnthropicModelCatalog, OpenAIModelCatalog, fetch_anthropic_model_catalog,
-    fetch_anthropic_model_catalog_oauth, fetch_openai_context_limits, fetch_openai_model_catalog,
+    fetch_anthropic_model_catalog_oauth, fetch_openai_api_key_model_catalog,
+    fetch_openai_context_limits, fetch_openai_model_catalog,
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
@@ -670,22 +671,46 @@ fn account_models_observed_at() -> Option<SystemTime> {
     OPENAI_MODEL_CATALOG_SERVICE.observed_at(&scope)
 }
 
-pub fn refresh_openai_model_catalog_in_background(access_token: String, context: &'static str) {
+/// Refresh the OpenAI model catalog in the background.
+///
+/// `is_chatgpt_mode` is the authoritative discriminator for which endpoint to
+/// hit and must come from the loaded credential's shape
+/// (`OpenAIProvider::is_chatgpt_mode`), never from sniffing the token string or
+/// the requested credential *intent*. ChatGPT/Codex OAuth sessions use the
+/// `backend-api/codex/models` endpoint; platform API keys (`sk-*`) use
+/// `api.openai.com/v1/models`, which rejects Codex tokens (and vice versa) with
+/// a 401.
+pub fn refresh_openai_model_catalog_in_background(
+    access_token: String,
+    is_chatgpt_mode: bool,
+    context: &'static str,
+) {
     let scope = current_openai_account_scope();
     if access_token.trim().is_empty() {
         finish_openai_model_catalog_refresh_for_scope(&scope);
         return;
     }
 
+    let use_platform_api = !is_chatgpt_mode;
+
     tokio::spawn(async move {
-        let refresh_result = fetch_openai_model_catalog(&access_token).await;
+        let refresh_result = if use_platform_api {
+            fetch_openai_api_key_model_catalog(&access_token).await
+        } else {
+            fetch_openai_model_catalog(&access_token).await
+        };
         match refresh_result {
             Ok(catalog)
                 if !catalog.available_models.is_empty() || !catalog.context_limits.is_empty() =>
             {
                 crate::logging::info(&format!(
-                    "Refreshed OpenAI model catalog ({}): {} available, {} with context limits",
+                    "Refreshed OpenAI model catalog ({}{}): {} available, {} with context limits",
                     context,
+                    if use_platform_api {
+                        ", platform-api"
+                    } else {
+                        ", codex-api"
+                    },
                     catalog.available_models.len(),
                     catalog.context_limits.len()
                 ));
@@ -705,8 +730,14 @@ pub fn refresh_openai_model_catalog_in_background(access_token: String, context:
             }
             Err(e) => {
                 crate::logging::info(&format!(
-                    "Failed to refresh OpenAI model catalog from Codex API ({}): {}",
-                    context, e
+                    "Failed to refresh OpenAI model catalog from {} ({}): {}",
+                    if use_platform_api {
+                        "platform API"
+                    } else {
+                        "Codex API"
+                    },
+                    context,
+                    e
                 ));
             }
         }
