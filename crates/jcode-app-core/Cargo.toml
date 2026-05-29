@@ -125,6 +125,7 @@ jcode-memory-types = { path = "../jcode-memory-types" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-overnight-core = { path = "../jcode-overnight-core" }
 jcode-plan = { path = "../jcode-plan" }
+jcode-pr-watch-core = { path = "../jcode-pr-watch-core" }
 jcode-swarm-core = { path = "../jcode-swarm-core" }
 jcode-protocol = { path = "../jcode-protocol" }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
