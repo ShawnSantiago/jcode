@@ -652,6 +652,48 @@ once the binding peak is the shared base floor. The remaining levers (lower the 
 level (codegen-units/debuginfo) or dependency-level (trim/feature-gate heavy external deps), not further
 crate carving.
 
+## Results: incremental-rebuild fixes (2026-05-29)
+
+After the structural split, the inner-loop wall time was attributed with `cargo --timings` and
+`CARGO_LOG=...fingerprint`. Two non-structural defects dominated real self-dev iteration far more than any
+remaining crate-size effect:
+
+1. **Right-sized the parallel-job memory budget** (`scripts/dev_cargo.sh`, commit `83857b13`). The adaptive
+   limiter budgeted 2048 MiB/rustc, calibrated for the old 2.5-3 GiB monolith. With the largest unit now
+   ~1.28 GiB, that stale figure capped an idle 15 GiB/8-core box at 6 jobs. Lowered to 1536 MiB/job so an
+   idle machine uses all cores (and a pressured one gains a job: 4 -> 5 at ~9 GiB available) while staying
+   OOM-safe (pessimistic 8-job concurrent RSS ~6.7 GiB).
+
+2. **Stopped git activity from forcing full-tree recompiles** (`crates/jcode-build-meta/build.rs`, commit
+   `8d87b2c0`). This was the dominant inner-loop tax. `jcode-build-meta` embeds version/git metadata that
+   every crate consumes via `env!("JCODE_*")`. It (a) declared `.git/HEAD` + `.git/index` as
+   `rerun-if-changed` inputs and (b) auto-incremented a persistent patch counter on every rerun. Cargo
+   marks a build script dirty whenever a declared input is newer than its output, reruns it, and then
+   force-recompiles all dependents via `StaleDepFingerprint`; the counter guaranteed the output actually
+   changed each time. Net effect: any `git add`/`git status`/commit/concurrent-agent git op invalidated the
+   entire graph (base -> app-core -> tui -> cli).
+
+   Fix: derive the dev patch number deterministically from committed git state
+   (`base.patch + commits-since-base-tag`, a pure function of HEAD) and drop the `.git/*` rerun triggers,
+   keeping `Cargo.toml` + `JCODE_RELEASE_BUILD`/`JCODE_BUILD_SEMVER`/`JCODE_BUILD_GIT_*` env triggers so
+   release/dist builds still embed exact metadata.
+
+   Measured (selfdev, warm, this machine):
+
+   | scenario | before | after |
+   | --- | --- | --- |
+   | build after `git/index` touch (commit, `git add`, parallel agent) | ~18-25s | **0.65s** |
+   | build after `git/HEAD` touch | ~18s | **0.87s** |
+   | build after a real code edit (`jcode-base/src/lib.rs`) | ~20s | ~20s (correctly unchanged) |
+
+   The dev `--version` git hash may lag the latest in-session commit until the next real rebuild; that is
+   cosmetic and refreshed automatically by release builds (which clean/override).
+
+Diagnostic recipe for "why did everything just recompile?":
+`CARGO_LOG=cargo::core::compiler::fingerprint=info <cargo build> 2>&1 | grep -iE 'stale|dirty'`.
+Look for `StaleItem(ChangedFile { reference: <build-script output>, stale: <some input> })` -- it names the
+exact `rerun-if-changed` input whose mtime outran the build-script output.
+
 ## Developer Workflow Guidance
 
 ### Fast local cargo wrapper

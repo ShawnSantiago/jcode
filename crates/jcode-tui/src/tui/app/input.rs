@@ -1029,15 +1029,22 @@ impl App {
             if todos.is_empty() {
                 return false;
             }
-            self.push_display_message(DisplayMessage::system(
-                "✅ Todos complete. Auto-poke finished; queued hidden confidence reminder."
-                    .to_string(),
-            ));
-            self.hidden_queued_system_messages.push(
-                super::commands::build_todo_confidence_summary_message(&todos),
-            );
-            self.pending_queued_dispatch = true;
-            return true;
+            let confidence_summary = super::commands::todo_confidence_summary(&todos);
+            let confidence_label =
+                super::commands::format_todo_completion_confidence(confidence_summary);
+            self.push_display_message(DisplayMessage::system(format!(
+                "✅ Todos complete. Auto-poke finished. Cumulative confidence: {}.",
+                confidence_label
+            )));
+            if confidence_summary.needs_more_work {
+                self.hidden_queued_system_messages.push(
+                    super::commands::build_todo_confidence_summary_message(&todos),
+                );
+                self.pending_queued_dispatch = true;
+                return true;
+            }
+            self.pending_queued_dispatch = false;
+            return false;
         }
 
         self.push_display_message(DisplayMessage::system(format!(
@@ -1512,7 +1519,6 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
     if cfg!(target_os = "macos")
-        && app.input.is_empty()
         && !matches!(app.status, ProcessingStatus::RunningTool(_))
         && let Some(direction) = app
             .effort_switch_keys
@@ -2383,6 +2389,7 @@ impl App {
             || commands::handle_session_command(self, trimmed)
             || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)
+            || commands::handle_log_command(self, trimmed)
             || commands::handle_model_status_command(self, trimmed)
             || super::debug::handle_debug_command(self, trimmed)
             || super::model_context::handle_model_command(self, trimmed)

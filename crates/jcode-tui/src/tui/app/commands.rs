@@ -34,6 +34,12 @@ const TODO_CONFIDENCE_THRESHOLD: u8 = 90;
 const TODO_CONFIDENCE_SUMMARY_PREFIX: &str = "All todos are done. Todo confidence summary:";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct TodoConfidenceSummary {
+    pub completion_average: Option<u8>,
+    pub needs_more_work: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PokeCommand {
     Trigger,
     On,
@@ -853,6 +859,53 @@ pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool 
 
     app.model_status_content = build_model_status_report(&provider, &model);
     app.model_status_scroll = Some(0);
+    true
+}
+
+pub(super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/log") else {
+        return false;
+    };
+
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let subcommand = parts.next().unwrap_or_default();
+    let note = parts.next().unwrap_or_default().trim();
+
+    if subcommand != "mark" {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: `/log mark [note]`".to_string(),
+        ));
+        return true;
+    }
+
+    let marker_id = format!(
+        "logmark-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S%.3f")
+    );
+    let working_dir = active_working_dir(app)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let note_for_log = if note.is_empty() { "(none)" } else { note };
+
+    crate::logging::info(&format!(
+        "JCODE_LOG_MARK id={} session={} provider={} model={} cwd={} note={}",
+        marker_id,
+        app.session.id,
+        app.provider_name(),
+        app.provider_model(),
+        working_dir,
+        note_for_log
+    ));
+
+    let mut message = format!(
+        "Log mark written: `{}`\n\nAgents can search `~/.jcode/logs/` for `JCODE_LOG_MARK` or this marker id.",
+        marker_id
+    );
+    if !note.is_empty() {
+        message.push_str(&format!("\n\nNote: {}", note));
+    }
+    app.push_display_message(DisplayMessage::system(message));
+    app.set_status_notice(format!("Log mark {}", marker_id));
     true
 }
 
@@ -2279,6 +2332,7 @@ fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> O
 }
 
 pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
+    let summary = todo_confidence_summary(todos);
     let completed: Vec<&crate::todo::TodoItem> = todos
         .iter()
         .filter(|todo| todo.status == "completed")
@@ -2299,11 +2353,7 @@ pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoIt
                 .map(|score| (*todo, score, todo_confidence_weight(&todo.priority)))
         })
         .collect();
-    let completion_average = weighted_confidence_average(
-        completion_scores
-            .iter()
-            .map(|(_, score, weight)| (*score, *weight)),
-    );
+    let completion_average = summary.completion_average;
     let missing_completion_confidence = completed
         .iter()
         .filter(|todo| todo.completion_confidence.is_none())
@@ -2380,14 +2430,9 @@ pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoIt
         ));
     }
 
-    let needs_validation = completion_average
-        .map(|avg| avg < TODO_CONFIDENCE_THRESHOLD)
-        .unwrap_or(true)
-        || missing_completion_confidence > 0
-        || below_threshold_count > 0;
-    if needs_validation {
+    if summary.needs_more_work {
         lines.push(
-            "- Suggested action: validate or test before finalizing. Inspect the result and update completion_confidence when the evidence changes."
+            "- Auto-poke instruction: confidence is below the threshold or incomplete. Keep working: validate, test, fix gaps, and update completion_confidence when the evidence changes."
                 .to_string(),
         );
     } else {
@@ -2398,6 +2443,50 @@ pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoIt
     }
 
     lines.join("\n")
+}
+
+pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoConfidenceSummary {
+    let completed: Vec<&crate::todo::TodoItem> = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .collect();
+    let completion_scores: Vec<(&crate::todo::TodoItem, u8, u32)> = completed
+        .iter()
+        .filter_map(|todo| {
+            todo.completion_confidence
+                .map(|score| (*todo, score, todo_confidence_weight(&todo.priority)))
+        })
+        .collect();
+    let completion_average = weighted_confidence_average(
+        completion_scores
+            .iter()
+            .map(|(_, score, weight)| (*score, *weight)),
+    );
+    let missing_completion_confidence = completed
+        .iter()
+        .filter(|todo| todo.completion_confidence.is_none())
+        .count();
+    let below_threshold_count = completion_scores
+        .iter()
+        .filter(|(_, score, _)| *score < TODO_CONFIDENCE_THRESHOLD)
+        .count();
+    let needs_more_work = completion_average
+        .map(|avg| avg < TODO_CONFIDENCE_THRESHOLD)
+        .unwrap_or(true)
+        || missing_completion_confidence > 0
+        || below_threshold_count > 0;
+
+    TodoConfidenceSummary {
+        completion_average,
+        needs_more_work,
+    }
+}
+
+pub(super) fn format_todo_completion_confidence(summary: TodoConfidenceSummary) -> String {
+    match summary.completion_average {
+        Some(avg) => format!("{}%", avg),
+        None => "unknown".to_string(),
+    }
 }
 
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {

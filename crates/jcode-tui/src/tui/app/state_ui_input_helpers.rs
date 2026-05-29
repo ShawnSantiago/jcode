@@ -97,6 +97,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/feedback", "Send feedback about jcode"),
     RegisteredCommand::public("/subscription", "Show jcode subscription status"),
     RegisteredCommand::public("/config", "Show or edit configuration"),
+    RegisteredCommand::public("/log", "Mark the current location in the jcode logs"),
     RegisteredCommand::public(
         "/onboarding-preview",
         "Preview the first-run onboarding screen",
@@ -1093,6 +1094,22 @@ impl App {
         self.tab_completion_state = None;
         self.command_suggestion_selected = 0;
         true
+    }
+
+    /// Whether to show the dedicated first-run onboarding welcome screen
+    /// (gray telemetry header, prominent donut, welcome text, login prompt).
+    ///
+    /// This is true exactly when the empty screen is showing onboarding
+    /// suggestion prompts (brand-new install / unauthenticated / new user) so
+    /// the welcome layout and the suggestions stay in sync.
+    pub fn onboarding_welcome_active(&self) -> bool {
+        if self.onboarding_preview_mode {
+            return true;
+        }
+        if !self.display_messages.is_empty() || self.is_processing {
+            return false;
+        }
+        !self.suggestion_prompts().is_empty()
     }
 
     /// Get suggestion prompts for new users on the initial empty screen.

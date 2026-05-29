@@ -6,7 +6,10 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
     let mut status = String::new();
 
     status.push_str("## Current Version\n\n");
-    status.push_str(&format!("**Running:** jcode {}\n", jcode_build_meta::VERSION));
+    status.push_str(&format!(
+        "**Running:** jcode {}\n",
+        jcode_build_meta::VERSION
+    ));
 
     if let Some(repo_dir) = build::get_repo_dir() {
         let output = std::process::Command::new("git")

@@ -628,8 +628,21 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let access_token = openai_access_token(&self.credentials).await?;
-        let catalog = crate::provider::fetch_openai_model_catalog(&access_token).await?;
+        // The loaded credential's *shape* is authoritative for which catalog
+        // endpoint to hit, not the requested credential mode. In Auto mode a
+        // user with only an OPENAI_API_KEY loads an API-key-shaped credential
+        // while the mode stays Auto; routing by mode would send that platform
+        // key to the ChatGPT/Codex endpoint and get a 401.
+        let (access_token, is_chatgpt_mode) = {
+            let creds = self.credentials.read().await;
+            (creds.access_token.clone(), Self::is_chatgpt_mode(&creds))
+        };
+        let catalog = if is_chatgpt_mode {
+            let access_token = openai_access_token(&self.credentials).await?;
+            crate::provider::fetch_openai_model_catalog(&access_token).await?
+        } else {
+            crate::provider::fetch_openai_api_key_model_catalog(&access_token).await?
+        };
         crate::provider::persist_openai_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
             crate::provider::populate_context_limits(catalog.context_limits);
