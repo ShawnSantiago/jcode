@@ -120,13 +120,13 @@ configure_rust_min_stack() {
   # invoked with the platform default worker-thread stack. rustc itself
   # recommends increasing RUST_MIN_STACK for this class of crash. Keep an
   # existing caller-provided value, but make dev/selfdev builds resilient by
-  # defaulting to 16 MiB.
+  # defaulting to 64 MiB.
   if [[ -n "${RUST_MIN_STACK:-}" ]]; then
     rust_min_stack_status="external:${RUST_MIN_STACK}"
     return
   fi
 
-  export RUST_MIN_STACK=16777216
+  export RUST_MIN_STACK=67108864
   rust_min_stack_status="default:${RUST_MIN_STACK}"
   log "using RUST_MIN_STACK=${RUST_MIN_STACK}"
 }
