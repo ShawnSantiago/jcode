@@ -81,7 +81,7 @@ fn mac_terminal_pref_path() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("preferred_terminal.json"))
 }
 
-fn load_preferred_macos_terminal() -> Option<MacTerminalKind> {
+pub(super) fn load_preferred_macos_terminal() -> Option<MacTerminalKind> {
     let path = mac_terminal_pref_path().ok()?;
     let pref: MacTerminalPreference = storage::read_json(&path).ok()?;
     MacTerminalKind::from_cli_value(&pref.terminal)

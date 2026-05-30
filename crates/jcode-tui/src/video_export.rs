@@ -569,7 +569,7 @@ fn find_mermaid_regions(buf: &Buffer) -> Vec<MermaidRegion> {
                         break;
                     }
                 }
-                rx // right boundary (exclusive) — the border column
+                rx // right boundary (exclusive) - the border column
             };
 
             // Count consecutive empty rows below for image height
@@ -838,12 +838,12 @@ text.emoji {{ font-family: "Noto Color Emoji", "Symbols Nerd Font", "{}", sans-s
             // Scale image to fit within the region while preserving aspect ratio
             let aspect = region.img_width as f64 / region.img_height as f64;
             let (draw_w, draw_h) = if region_w as f64 / region_h as f64 > aspect {
-                // Region is wider than image aspect — fit by height
+                // Region is wider than image aspect - fit by height
                 let h = region_h;
                 let w = (h as f64 * aspect) as u32;
                 (w, h)
             } else {
-                // Region is taller than image aspect — fit by width
+                // Region is taller than image aspect - fit by width
                 let w = region_w;
                 let h = (w as f64 / aspect) as u32;
                 (w, h)
@@ -961,7 +961,7 @@ fn box_drawing_to_svg(
         '┬' => (true, true, false, true, false),
         '┴' => (true, true, true, false, false),
         '┼' => (true, true, true, true, false),
-        // Rounded corners — quarter-circle arcs connecting to adjacent ─ and │ cells
+        // Rounded corners - quarter-circle arcs connecting to adjacent ─ and │ cells
         // Uses SVG arc (A) for perfect quarter circles
         // Each corner draws: straight segment → arc → straight segment
         '╭' => {

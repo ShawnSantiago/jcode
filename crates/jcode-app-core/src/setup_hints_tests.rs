@@ -66,6 +66,8 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     let (_, message) = hints.display_message.expect("expected display message");
     assert!(message.contains("Alt+C"));
     assert!(message.contains("Cmd+;"));
+    // The notice should make clear the hotkey works globally, not just inside jcode.
+    assert!(message.contains("system-wide"));
 }
 
 #[test]
@@ -90,4 +92,33 @@ fn paused_jcode_shell_command_keeps_failures_visible() {
     assert!(command.contains("Press Enter to close"));
     assert!(command.contains("Jcode exited with status"));
     assert!(command.contains("jcode executable not found"));
+}
+
+#[test]
+fn fresh_user_gets_hotkey_install() {
+    let state = SetupHintsState::default();
+    assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::Install);
+}
+
+#[test]
+fn legacy_configured_user_gets_migrated_on_update() {
+    // Configured before the version field existed -> version defaults to 0.
+    let state = SetupHintsState {
+        hotkey_configured: true,
+        hotkey_dismissed: true,
+        hotkey_listener_version: 0,
+        ..SetupHintsState::default()
+    };
+    assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::Migrate);
+}
+
+#[test]
+fn current_version_user_is_left_alone() {
+    let state = SetupHintsState {
+        hotkey_configured: true,
+        hotkey_dismissed: true,
+        hotkey_listener_version: HOTKEY_LISTENER_VERSION,
+        ..SetupHintsState::default()
+    };
+    assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::None);
 }

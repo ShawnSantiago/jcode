@@ -162,9 +162,7 @@ fn selected_route_notice_text(
 
 fn model_picker_keybind_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
     if picker.kind == crate::tui::PickerKind::Model && !picker.preview {
-        Some(
-            " keys: Enter select · Ctrl+D default · Ctrl+F favorite · Alt+F next favorite · type filter · Esc close",
-        )
+        Some(" keys: Ctrl+D default · Ctrl+F favorite")
     } else {
         None
     }
@@ -210,7 +208,7 @@ fn account_picker_entry_title(
 }
 
 fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'static str {
-    entry.account_state_label().unwrap_or("—")
+    entry.account_state_label().unwrap_or("-")
 }
 
 fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: usize) -> usize {
@@ -776,7 +774,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         let route_count = entry.option_count();
         let provider_raw = route
             .map(|r| route_provider_display(&r.provider, &r.api_method))
-            .unwrap_or_else(|| "—".to_string());
+            .unwrap_or_else(|| "-".to_string());
         let provider_label = if col == 0 && route_count > 1 {
             format!("{} ({})", provider_raw, route_count)
         } else {
@@ -794,7 +792,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 
         let via_raw = route
             .map(|r| api_method_display(&r.api_method))
-            .unwrap_or_else(|| "—".to_string());
+            .unwrap_or_else(|| "-".to_string());
         let vw = via_width.saturating_sub(1);
         let via_display = format!(" {}", pad_left_display(via_raw.as_str(), vw));
         let via_style = if unavailable {
@@ -1142,7 +1140,6 @@ mod tests {
 
         assert!(hint.contains("Ctrl+D default"));
         assert!(hint.contains("Ctrl+F favorite"));
-        assert!(hint.contains("Alt+F next favorite"));
     }
 
     #[test]

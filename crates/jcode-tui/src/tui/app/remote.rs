@@ -75,6 +75,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     app.maybe_capture_runtime_memory_heartbeat();
     app.progress_mouse_scroll_animation();
+    needs_redraw |= app.update_pinned_images_auto_hide();
     needs_redraw |= dispatch_compacted_history_load(app, remote).await;
     if let Some(chunk) = app.stream_buffer.flush() {
         app.append_streaming_text(&chunk);
@@ -831,13 +832,13 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                     "Failed to auto-reload server: {}. Use `/reload` to retry.",
                     err
                 )));
-                app.set_status_notice("Server update available — auto reload failed");
+                app.set_status_notice("Server update available - auto reload failed");
             }
         } else {
             app.push_display_message(DisplayMessage::system(
                 "ℹ Newer server binary detected. Auto-reload is disabled by `display.auto_server_reload = false`. Use `/reload` manually when you're ready.".to_string(),
             ));
-            app.set_status_notice("Server update available — manual /reload recommended");
+            app.set_status_notice("Server update available - manual /reload recommended");
         }
     }
 

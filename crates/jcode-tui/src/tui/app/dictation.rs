@@ -137,7 +137,7 @@ impl App {
         self.dictation_in_flight = true;
         self.dictation_request_id = Some(dictation_id.clone());
         self.dictation_target_session_id = target_session_id.clone();
-        self.set_status_notice("🎙 Dictation running — press again to stop");
+        self.set_status_notice("🎙 Dictation running - press again to stop");
 
         let stdout_buf = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf = Arc::new(Mutex::new(Vec::new()));
