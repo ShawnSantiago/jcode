@@ -68,8 +68,13 @@ pub struct SetupHintsState {
 /// users on update. History:
 /// - 1: pump the Core Foundation run loop on the main thread so Cmd+; fires
 ///   (previously the listener blocked and never delivered events).
+/// - 2: promote the launchd process to a UIElement app (`TransformProcessType`)
+///   and run the Carbon application event loop, so a faceless background
+///   process is actually eligible to receive `RegisterEventHotKey` events.
+///   Version 1 still never fired because the process had no window-server
+///   connection.
 #[cfg(any(test, target_os = "macos"))]
-pub const HOTKEY_LISTENER_VERSION: u32 = 1;
+pub const HOTKEY_LISTENER_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupHints {
@@ -177,6 +182,8 @@ fn mac_hotkey_launch_agent_plist(
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
     <key>StandardOutPath</key>
     <string>{stdout_path}</string>
     <key>StandardErrorPath</key>
@@ -397,7 +404,9 @@ pub fn run_setup_hotkey(_listen_macos_hotkey: bool) -> Result<()> {
         eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
         eprintln!();
         eprintln!("  Preferred terminal: {}", terminal.label());
-        eprintln!("  Installing a LaunchAgent so Cmd+; launches a new jcode from anywhere, system-wide.");
+        eprintln!(
+            "  Installing a LaunchAgent so Cmd+; launches a new jcode from anywhere, system-wide."
+        );
         eprintln!();
 
         match install_macos_hotkey_listener(Some(terminal)) {
@@ -460,23 +469,67 @@ pub fn run_macos_hotkey_listener_main_thread() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 mod macos_run_loop {
-    // Minimal Core Foundation binding to run the current thread's run loop.
-    // Avoids pulling in a heavier core-foundation dependency just for one call.
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFRunLoopRun();
+    // Minimal Carbon/ApplicationServices bindings to (a) make this faceless
+    // launchd process eligible to receive global hotkeys and (b) run the Carbon
+    // application event loop that dispatches `RegisterEventHotKey` events.
+    //
+    // We deliberately avoid pulling in a heavier `core-foundation`/`cocoa`
+    // dependency just for these few calls.
+
+    #[repr(C)]
+    struct ProcessSerialNumber {
+        high: u32,
+        low: u32,
     }
 
-    /// Block on the current thread's Core Foundation run loop forever, dispatching
-    /// run-loop sources (including Carbon hotkey events) as they arrive.
+    // `kCurrentProcess` from MacTypes / Process Manager.
+    const K_CURRENT_PROCESS: u32 = 2;
+    // `kProcessTransformToUIElementApplication` from ApplicationServices.
+    // Promotes a background (faceless) process to a UIElement app so it has a
+    // connection to the window server and can receive Carbon hotkey events,
+    // without showing a Dock icon or menu bar.
+    const K_PROCESS_TRANSFORM_TO_UI_ELEMENT_APPLICATION: u32 = 4;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn TransformProcessType(psn: *const ProcessSerialNumber, transform_state: u32) -> i32;
+    }
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn RunApplicationEventLoop();
+    }
+
+    /// Promote this process to a UIElement application.
     ///
-    /// This must be called on the thread that created the hotkey manager (the main
-    /// thread). It only returns if every source is removed and the loop stops,
-    /// which does not happen for our long-lived listener.
+    /// A LaunchAgent started without an app bundle runs as a faceless background
+    /// process with no window-server connection, so Carbon `RegisterEventHotKey`
+    /// events are never delivered to it. Transforming the process type gives it
+    /// the connection it needs while keeping it out of the Dock and menu bar.
+    ///
+    /// Returns the raw OSStatus (0 == `noErr`).
+    pub fn promote_to_ui_element() -> i32 {
+        let psn = ProcessSerialNumber {
+            high: 0,
+            low: K_CURRENT_PROCESS,
+        };
+        // SAFETY: `psn` points at a valid ProcessSerialNumber for the lifetime of
+        // the call; the transform constant is a documented Process Manager value.
+        unsafe { TransformProcessType(&psn, K_PROCESS_TRANSFORM_TO_UI_ELEMENT_APPLICATION) }
+    }
+
+    /// Block forever on the Carbon application event loop, dispatching hotkey
+    /// (and other Carbon) events as they arrive.
+    ///
+    /// This must run on the real main thread that created the hotkey manager.
+    /// `RunApplicationEventLoop` installs the standard application event handlers
+    /// and pumps the main run loop; unlike a bare `CFRunLoopRun()` it guarantees
+    /// the Carbon event target that `RegisterEventHotKey` dispatches through is
+    /// actually serviced, and it does not return spuriously when no Core
+    /// Foundation input source happens to be installed yet.
     pub fn run_forever() {
-        // SAFETY: CFRunLoopRun takes no arguments and runs the calling thread's
-        // run loop. We are on the main thread with hotkey sources installed.
-        unsafe { CFRunLoopRun() };
+        // SAFETY: takes no arguments; runs the calling (main) thread's event loop.
+        unsafe { RunApplicationEventLoop() };
     }
 }
 
@@ -487,16 +540,37 @@ fn run_macos_hotkey_listener() -> Result<()> {
     use std::process::Command;
 
     // `global-hotkey` on macOS registers a Carbon hotkey (`RegisterEventHotKey`)
-    // whose events are dispatched through the **main thread's** Core Foundation
-    // run loop. The previous implementation blocked on `recv()` without ever
-    // running a run loop, so the Carbon callback never fired and Cmd+; was dead.
+    // whose events are dispatched through the application's Carbon event target,
+    // serviced by the **main thread's** event loop. Two things are required for a
+    // LaunchAgent (started without an app bundle) to actually receive them:
+    //
+    //   1. The process must be promoted from a faceless background process to a
+    //      UIElement application (`TransformProcessType`). Without a window-server
+    //      connection, Carbon never delivers hotkey events at all. This was the
+    //      reason Cmd+; stayed dead even after the run-loop fix.
+    //   2. The main thread must run the Carbon application event loop
+    //      (`RunApplicationEventLoop`), not a bare `CFRunLoopRun()`.
     //
     // This function is invoked directly from `main()` before the tokio runtime is
     // built, so it runs on the real main thread. We install an event handler that
-    // launches jcode on key-down, then hand the thread to `CFRunLoopRun()` so the
-    // handler is invoked synchronously whenever the hotkey fires. Using the event
-    // handler (rather than polling the channel) avoids both busy-spinning and
-    // wakeup latency.
+    // launches jcode on key-down, then hand the thread to the event loop so the
+    // handler is invoked whenever the hotkey fires. Using the event handler
+    // (rather than polling the channel) avoids both busy-spinning and latency.
+
+    // The listener runs as its own launchd process and never goes through the
+    // normal startup path, so initialize logging here. Diagnostics land in the
+    // standard jcode log plus the plist's StandardOut/ErrorPath.
+    crate::logging::init();
+    macos_hotkey_log("starting macOS Cmd+; hotkey listener");
+
+    let status = macos_run_loop::promote_to_ui_element();
+    if status != 0 {
+        macos_hotkey_log(&format!(
+            "warning: TransformProcessType returned status {status}; \
+             Cmd+; may not be delivered to this process"
+        ));
+    }
+
     let launch_script = mac_hotkey_support_dir()?.join("launch_jcode.sh");
     let manager =
         GlobalHotKeyManager::new().context("failed to initialize global hotkey manager")?;
@@ -508,15 +582,34 @@ fn run_macos_hotkey_listener() -> Result<()> {
     let hotkey_id = hotkey.id();
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
         if event.id == hotkey_id && event.state == HotKeyState::Pressed {
-            let _ = Command::new("sh").arg(&launch_script).spawn();
+            macos_hotkey_log("Cmd+; pressed; launching new jcode");
+            match Command::new("sh").arg(&launch_script).spawn() {
+                Ok(_) => {}
+                Err(err) => macos_hotkey_log(&format!("failed to launch jcode: {err}")),
+            }
         }
     }));
 
-    crate::logging::info("macOS Cmd+; hotkey listener started");
-    // Hand the main thread to the run loop so Carbon hotkey events are delivered.
+    macos_hotkey_log("macOS Cmd+; hotkey listener registered; entering event loop");
+    // Keep the manager alive for the lifetime of the event loop so the hotkey
+    // registration and event handler stay installed.
+    let _manager = manager;
+    // Hand the main thread to the Carbon event loop so hotkey events are
+    // delivered. This normally never returns for our long-lived listener.
     macos_run_loop::run_forever();
-    // CFRunLoopRun only returns if all sources are removed; treat that as exit.
+    macos_hotkey_log("macOS Cmd+; hotkey event loop exited");
     Ok(())
+}
+
+/// Log a hotkey-listener diagnostic to both the jcode log and stderr.
+///
+/// The LaunchAgent redirects stdout/stderr to log files in the hotkey support
+/// dir, so emitting to stderr here makes the listener's lifecycle observable
+/// even before/without the structured logger.
+#[cfg(target_os = "macos")]
+fn macos_hotkey_log(message: &str) {
+    crate::logging::info(message);
+    eprintln!("[jcode hotkey] {message}");
 }
 
 /// Decide what macOS hotkey listener action a launch should take, given the
@@ -537,9 +630,7 @@ pub enum MacHotkeyAction {
 fn mac_hotkey_action_for_state(state: &SetupHintsState) -> MacHotkeyAction {
     if !state.hotkey_configured && !state.hotkey_dismissed {
         MacHotkeyAction::Install
-    } else if state.hotkey_configured
-        && state.hotkey_listener_version < HOTKEY_LISTENER_VERSION
-    {
+    } else if state.hotkey_configured && state.hotkey_listener_version < HOTKEY_LISTENER_VERSION {
         MacHotkeyAction::Migrate
     } else {
         MacHotkeyAction::None

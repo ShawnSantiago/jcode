@@ -1063,3 +1063,33 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         }
     }
 }
+
+/// The runtime-provider identity that `set_credential_mode` writes must decode
+/// back to the exact same credential mode. This guards the model picker / header
+/// widget from reporting OAuth when an API key is in use (or vice versa): the
+/// env key is the single source of truth those surfaces read, so an asymmetric
+/// mapping here would surface an inaccurate auth method to the user.
+#[test]
+fn credential_mode_runtime_provider_identity_round_trips() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+    assert_eq!(
+        AnthropicCredentialMode::from_runtime_env(),
+        AnthropicCredentialMode::OAuth,
+        "OAuth selection must surface as the OAuth runtime identity"
+    );
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+    assert_eq!(
+        AnthropicCredentialMode::from_runtime_env(),
+        AnthropicCredentialMode::ApiKey,
+        "API-key selection must surface as the API-key runtime identity"
+    );
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
+        None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
+    }
+}

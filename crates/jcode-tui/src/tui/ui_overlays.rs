@@ -363,9 +363,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("[ / ]", "Zoom diagram (when focused)"));
     lines.push(key_entry("+ / -", "Resize diagram pane"));
     lines.push(key_entry(
-        "Shift+Tab",
-        "Cycle diff mode (Off/Inline/Pinned)",
+        "Alt+G / /diff",
+        "Cycle diff mode (Off/Inline/Pinned/File)",
     ));
+    lines.push(key_entry("Shift+Tab", "Cycle favorited models"));
 
     lines.push(Line::from(""));
     lines.push(separator());
@@ -526,7 +527,7 @@ pub(super) fn draw_model_status_overlay(
 fn model_status_line_style(raw: &str, default: Style) -> Style {
     let trimmed = raw.trim_start();
     if trimmed.starts_with('✓')
-        || trimmed.contains("**Fully tested**")
+        || trimmed.contains("Fully tested")
         || trimmed.contains("strict_covered")
         || trimmed.contains("Passed")
     {

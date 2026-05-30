@@ -169,3 +169,32 @@ include!("openai_tests/responses_input.rs");
 include!("openai_tests/transport_runtime.rs");
 include!("openai_tests/payloads.rs");
 include!("openai_tests/parsing_tools.rs");
+
+/// Mirror of the Anthropic round-trip guard: the runtime-provider identity that
+/// `set_credential_mode` writes for OpenAI must decode back to the same mode so
+/// the model picker / header widget report the auth method that requests will
+/// actually use.
+#[test]
+fn openai_credential_mode_runtime_provider_identity_round_trips() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai");
+    assert_eq!(
+        OpenAICredentialMode::from_runtime_env(),
+        OpenAICredentialMode::OAuth,
+        "OAuth selection must surface as the OAuth runtime identity"
+    );
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-api");
+    assert_eq!(
+        OpenAICredentialMode::from_runtime_env(),
+        OpenAICredentialMode::ApiKey,
+        "API-key selection must surface as the API-key runtime identity"
+    );
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
+        None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
+    }
+}

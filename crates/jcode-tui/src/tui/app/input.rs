@@ -689,7 +689,14 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
-    if app.input.is_empty() && !app.is_processing && app.display_messages.is_empty() {
+    let onboarding_suggestions = matches!(
+        app.onboarding_phase(),
+        Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
+    );
+    if app.input.is_empty()
+        && !app.is_processing
+        && (app.display_messages.is_empty() || onboarding_suggestions)
+    {
         let mut chars = text.chars();
         if let (Some(c), None) = (chars.next(), chars.next())
             && let Some(digit) = c.to_digit(10)
@@ -1365,7 +1372,9 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
-    if code == KeyCode::BackTab {
+    if modifiers.contains(KeyModifiers::ALT)
+        && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g'))
+    {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
@@ -1388,7 +1397,8 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
-        || code == KeyCode::BackTab
+        || (modifiers.contains(KeyModifiers::ALT)
+            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g')))
     {
         return true;
     }
@@ -1979,9 +1989,11 @@ impl App {
             return Ok(());
         }
 
-        if modifiers.contains(KeyModifiers::ALT)
-            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'f'))
-        {
+        if self.handle_onboarding_continue_prompt_key(code) {
+            return Ok(());
+        }
+
+        if code == KeyCode::BackTab {
             self.cycle_model_favorite_hotkey();
             return Ok(());
         }
@@ -2077,6 +2089,17 @@ impl App {
         }
 
         if code == KeyCode::Enter {
+            // During the onboarding model-selection phase, Enter on an empty
+            // prompt opens the model picker instead of submitting nothing.
+            if self.input.trim().is_empty()
+                && matches!(
+                    self.onboarding_phase(),
+                    Some(crate::tui::app::onboarding_flow::OnboardingPhase::ModelSelect)
+                )
+            {
+                self.open_model_picker();
+                return Ok(());
+            }
             handle_enter(self);
             return Ok(());
         }
@@ -2397,6 +2420,7 @@ impl App {
             || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)
             || commands::handle_log_command(self, trimmed)
+            || commands::handle_diff_command(self, trimmed)
             || commands::handle_model_status_command(self, trimmed)
             || super::debug::handle_debug_command(self, trimmed)
             || super::model_context::handle_model_command(self, trimmed)

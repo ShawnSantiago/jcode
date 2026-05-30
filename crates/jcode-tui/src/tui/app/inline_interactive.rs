@@ -1915,7 +1915,38 @@ impl App {
             OverlayAction::Continue => {}
             OverlayAction::Close => {
                 self.session_picker_overlay = None;
+                if let SessionPickerMode::Onboarding { cli } = self.session_picker_mode {
+                    // Escaping the onboarding picker = "skip continue"; show the
+                    // suggestion cards rather than dropping the user nowhere.
+                    let _ = cli;
+                    self.session_picker_mode = SessionPickerMode::Resume;
+                    self.onboarding_show_suggestions();
+                } else {
+                    self.session_picker_mode = SessionPickerMode::Resume;
+                }
+            }
+            OverlayAction::Selected(result)
+                if matches!(self.session_picker_mode, SessionPickerMode::Onboarding { .. }) =>
+            {
+                let cli = match self.session_picker_mode {
+                    SessionPickerMode::Onboarding { cli } => cli,
+                    _ => unreachable!(),
+                };
+                let ids = match result {
+                    PickerResult::Selected(ids)
+                    | PickerResult::SelectedInNewTerminal(ids)
+                    | PickerResult::SelectedInCurrentTerminal(ids) => ids,
+                    PickerResult::RestoreCrashedGroup(_) => Vec::new(),
+                };
+                self.session_picker_overlay = None;
                 self.session_picker_mode = SessionPickerMode::Resume;
+                if ids.is_empty() {
+                    self.onboarding_fallback_to_session_search(cli);
+                } else {
+                    // Single-select: resume only the first chosen transcript.
+                    self.handle_session_picker_current_terminal_selection(&ids[..1]);
+                    self.onboarding_finish();
+                }
             }
             OverlayAction::Selected(PickerResult::Selected(ids))
             | OverlayAction::Selected(PickerResult::SelectedInNewTerminal(ids)) => {
@@ -2118,7 +2149,26 @@ impl App {
                     }
                 }
             }
-            KeyCode::Left | KeyCode::BackTab => {
+            KeyCode::BackTab => {
+                if self
+                    .inline_interactive_state
+                    .as_ref()
+                    .map(picker_is_runtime_model_picker)
+                    .unwrap_or(false)
+                {
+                    self.cycle_selected_model_favorite();
+                    return Ok(());
+                }
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    if picker.uses_compact_navigation() {
+                        return Ok(());
+                    }
+                    if picker.column > 0 {
+                        picker.column -= 1;
+                    }
+                }
+            }
+            KeyCode::Left => {
                 if let Some(ref mut picker) = self.inline_interactive_state {
                     if picker.uses_compact_navigation() {
                         return Ok(());
@@ -2345,9 +2395,12 @@ impl App {
 
                         let effort = entry.effort.clone();
                         record_model_picker_selection(&bare_name, route, effort.as_deref());
+                        let method_label =
+                            crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                                .display_label();
                         let notice = format!(
                             "Model → {} via {} ({})",
-                            entry.name, route.provider, route.api_method
+                            entry.name, route.provider, method_label
                         );
                         let route_detail = route.detail.trim().to_string();
 
@@ -2401,6 +2454,8 @@ impl App {
                         } else {
                             format!("{} · {}", notice, route_detail)
                         });
+                        // First-run onboarding: a model choice advances the flow.
+                        self.onboarding_after_model_select();
                     }
                 }
             }

@@ -71,6 +71,8 @@ mod misc_ui;
 mod model_context;
 mod navigation;
 mod observe;
+mod onboarding_flow;
+mod onboarding_flow_control;
 mod remote;
 mod remote_notifications;
 mod replay;
@@ -284,6 +286,10 @@ pub(super) enum SessionPickerMode {
     #[default]
     Resume,
     CatchUp,
+    /// First-run onboarding "continue where you left off" single-select picker.
+    Onboarding {
+        cli: onboarding_flow::ExternalCli,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -708,6 +714,14 @@ pub struct App {
     submit_input_on_startup: bool,
     /// One-shot/session-local preview of the first-run onboarding empty state.
     onboarding_preview_mode: bool,
+    /// Active guided first-run onboarding flow (model select -> continue ->
+    /// transcript pick -> suggestions). `None` when not onboarding.
+    onboarding_flow: Option<onboarding_flow::OnboardingFlow>,
+    /// One-shot guard: have we evaluated whether to auto-start the onboarding
+    /// flow on startup yet? The fresh-install path logs in at the CLI before the
+    /// TUI launches, so no in-TUI login event fires; this lets us still begin the
+    /// flow once the TUI is ready and already authenticated.
+    onboarding_startup_checked: bool,
     // Inline UI state for copy badges ([Alt] [⇧] [S])
     copy_badge_ui: CopyBadgeUiState,
     // Modal in-app selection/copy state for the chat viewport.
@@ -747,6 +761,12 @@ pub struct App {
     remote_server_has_update: Option<bool>,
     // Auto-reload server when stale (set on first connect if server_has_update)
     pending_server_reload: bool,
+    // Defense-in-depth circuit breaker for issue #277: count how many times this
+    // client has auto-reloaded the server. A healthy reload happens at most once
+    // (afterwards the server is up to date), so repeated auto-reloads indicate a
+    // false-positive "update available" loop. Past a small threshold we stop
+    // auto-reloading and surface a message instead of flickering forever.
+    server_auto_reload_attempts: u32,
     // Remote server short name (e.g., "running", "blazing")
     remote_server_short_name: Option<String>,
     // Remote server icon (e.g., "🔥", "🌫️")
@@ -811,7 +831,7 @@ pub struct App {
     last_injected_memory_signature: Option<(String, Instant)>,
     // Swarm feature toggle for this session
     swarm_enabled: bool,
-    // Diff display mode (toggle with Shift+Tab)
+    // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
