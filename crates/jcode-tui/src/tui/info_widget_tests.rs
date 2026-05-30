@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn truncate_smart_handles_unicode() {
-    let s = "eagle running — keep going";
+    let s = "eagle running - keep going";
     let out = truncate_smart(s, 15);
     assert_eq!(out, "eagle runnin...");
 }
@@ -728,6 +728,35 @@ fn render_context_compact_prefers_observed_token_usage_for_label() {
 }
 
 #[test]
+fn render_context_compact_reports_updating_when_snapshot_is_stale() {
+    let data = InfoWidgetData {
+        context_info_stale: true,
+        context_info: Some(crate::prompt::ContextInfo {
+            total_chars: 400_000,
+            ..Default::default()
+        }),
+        context_limit: Some(200_000),
+        ..Default::default()
+    };
+
+    let lines = super::render_context_compact(&data, Rect::new(0, 0, 40, 1));
+    let text: String = lines[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    assert!(
+        text.contains("updating"),
+        "expected updating marker: {text}"
+    );
+    assert!(
+        !text.contains("100k/200k"),
+        "stale snapshots must not render old usage as current: {text}"
+    );
+}
+
+#[test]
 fn swarm_widget_renders_member_roles_and_details() {
     let data = InfoWidgetData {
         swarm_info: Some(SwarmInfo {
@@ -767,11 +796,11 @@ fn swarm_widget_renders_member_roles_and_details() {
     assert!(text.contains("★"), "got: {text}");
     assert!(text.contains("◆"), "got: {text}");
     assert!(
-        text.contains("coord running — orchestrating patch"),
+        text.contains("coord running - orchestrating patch"),
         "got: {text}"
     );
     assert!(
-        text.contains("trees ready — worktree synced"),
+        text.contains("trees ready - worktree synced"),
         "got: {text}"
     );
 }

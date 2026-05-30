@@ -494,6 +494,9 @@ pub(super) struct CompactedHistoryLazyState {
     pub total_messages: usize,
     pub visible_messages: usize,
     pub remaining_messages: usize,
+    /// Number of user prompts hidden before the first visible message. Used to
+    /// keep prompt numbers absolute when older history is truncated.
+    pub hidden_user_prompts: usize,
     pub pending_request_visible: Option<usize>,
 }
 
@@ -597,6 +600,9 @@ pub struct App {
     context_warning_shown: bool,
     // Context info (what's loaded in system prompt)
     context_info: crate::prompt::ContextInfo,
+    // Monotonic revision for prompt/context-affecting state. Info widgets use this to avoid stale
+    // cached context after compaction, prompt rebuilds, tool-definition refreshes, or message edits.
+    context_revision: u64,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
     // Provider has emitted MessageEnd, but the turn is still finalizing bookkeeping.
@@ -865,6 +871,9 @@ pub struct App {
     side_panel_user_hidden: bool,
     // Pin read images to side pane
     pin_images: bool,
+    // Auto-hide deadline for the pinned image side pane only.
+    pinned_images_auto_hide_deadline: Option<Instant>,
+    pinned_images_seen_count: usize,
     // Show a native terminal scrollbar in the chat viewport.
     chat_native_scrollbar: bool,
     // Show a native terminal scrollbar in the side panel.

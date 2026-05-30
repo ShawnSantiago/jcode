@@ -544,9 +544,9 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     assert_eq!(app.session.model.as_deref(), Some("state-space-alpha"));
     let last = app.display_messages.last().expect("activation message");
     assert!(last.content.contains("Added models:"));
-    assert!(last.content.contains("`state-space-alpha`"));
-    assert!(last.content.contains("`state-space-beta`"));
-    assert!(last.content.contains("Use `/model`"));
+    assert!(last.content.contains("state-space-alpha"));
+    assert!(last.content.contains("state-space-beta"));
+    assert!(last.content.contains("Use /model"));
     assert!(!last.content.contains("model picker is open"));
 
     assert!(super::model_context::handle_model_command(
@@ -617,15 +617,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .clone();
     assert!(prompt.contains("**Cerebras API Key**"), "{prompt}");
     assert!(
-        prompt.contains("Stored variable: `CEREBRAS_API_KEY`"),
+        prompt.contains("Stored variable: CEREBRAS_API_KEY"),
         "{prompt}"
     );
     assert!(
-        prompt.contains("Endpoint: `https://api.cerebras.ai/v1`"),
+        prompt.contains("Endpoint: https://api.cerebras.ai/v1"),
         "{prompt}"
     );
     assert!(
-        prompt.contains("Suggested default model: `gpt-oss-120b`"),
+        prompt.contains("Suggested default model: gpt-oss-120b"),
         "{prompt}"
     );
     assert!(prompt.contains("**Paste your API key below**"), "{prompt}");
@@ -659,7 +659,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     assert!(
                         login
                             .message
-                            .contains("Stored at `~/.config/jcode/cerebras.env`.")
+                            .contains("Stored at ~/.config/jcode/cerebras.env.")
                     );
                     assert!(login.message.contains("Fetching models now."));
                     assert!(!login.message.contains("did not switch models"));
@@ -1537,7 +1537,7 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
     let last = app.display_messages.last().expect("display message");
     assert_eq!(last.role, "system");
     assert!(
-        last.content.contains("`openai/gpt-5.4@OpenAI`"),
+        last.content.contains("openai/gpt-5.4@OpenAI"),
         "message should show normalized saved spec, got: {}",
         last.content
     );
@@ -2026,6 +2026,31 @@ fn test_poke_queues_when_turn_is_in_progress() {
 }
 
 #[test]
+fn test_btw_does_not_present_as_queued_when_turn_is_in_progress() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_processing = true;
+
+        assert!(super::commands::handle_session_command(
+            &mut app,
+            "/btw should this fork context?"
+        ));
+
+        assert!(app.is_processing);
+        assert_eq!(app.status_notice(), Some("/btw noted".to_string()));
+        assert!(app.queued_messages().is_empty());
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("/btw noted - answer will appear in the side panel.")
+        }));
+        assert!(!app.display_messages().iter().any(|msg| {
+            msg.content.to_ascii_lowercase().contains("queued /btw")
+        }));
+    });
+}
+
+#[test]
 fn test_finish_turn_auto_pokes_again_when_todos_remain() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -2203,9 +2228,9 @@ fn test_help_topic_shows_overnight_command_details() {
         .last()
         .expect("missing help response");
     assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("`/overnight <hours>[h|m] [mission]`"));
+    assert!(msg.content.contains("/overnight <hours>[h|m] [mission]"));
     assert!(msg.content.contains("review HTML page"));
-    assert!(msg.content.contains("`/overnight status`"));
+    assert!(msg.content.contains("/overnight status"));
 }
 
 #[test]
@@ -2239,8 +2264,8 @@ fn test_overnight_help_command_is_handled() {
         .last()
         .expect("missing overnight help response");
     assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("`/overnight <hours>[h|m] [mission]`"));
-    assert!(msg.content.contains("`/overnight review`"));
+    assert!(msg.content.contains("/overnight <hours>[h|m] [mission]"));
+    assert!(msg.content.contains("/overnight review"));
 }
 
 #[test]
