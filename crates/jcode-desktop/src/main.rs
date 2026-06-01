@@ -8782,6 +8782,7 @@ struct Canvas {
     primitive_vertices_cache_key: Option<u64>,
     primitive_vertices_cache: Vec<Vertex>,
     primitive_frame_vertices: Vec<Vertex>,
+    primitive_caret_vertices: Vec<Vertex>,
     primitive_workspace_vertices: Vec<Vertex>,
     primitive_workspace_vertices_cache_key: Option<u64>,
     app_mode_transition: AppModeTransitionState,
@@ -8926,6 +8927,7 @@ impl Canvas {
             primitive_vertices_cache_key: None,
             primitive_vertices_cache: Vec::new(),
             primitive_frame_vertices: Vec::new(),
+            primitive_caret_vertices: Vec::new(),
             primitive_workspace_vertices: Vec::new(),
             primitive_workspace_vertices_cache_key: None,
             app_mode_transition: AppModeTransitionState::default(),
@@ -8995,6 +8997,7 @@ impl Canvas {
         self.primitive_vertices_cache_key = None;
         self.primitive_vertices_cache.clear();
         self.primitive_frame_vertices.clear();
+        self.primitive_caret_vertices.clear();
         self.workspace_text_pane_cache.clear();
         self.app_mode_transition.clear();
         self.app_mode_transition_vertices.clear();
@@ -10457,16 +10460,16 @@ impl Canvas {
             && single_session_caret_visible_for_frame(single_session, spinner_tick)
         {
             if single_session_issue_layout_for_frame.visible() {
-                let mut caret_vertices = Vec::new();
+                self.primitive_caret_vertices.clear();
                 push_single_session_caret(
-                    &mut caret_vertices,
+                    &mut self.primitive_caret_vertices,
                     single_session,
                     single_session_render_size,
                     text_buffers.get(2),
                 );
                 append_child_vertices_to_parent_with_opacity(
                     vertices.to_mut(),
-                    &caret_vertices,
+                    &self.primitive_caret_vertices,
                     single_session_render_size,
                     single_session_issue_layout_for_frame.chat,
                     self.size,
@@ -10483,12 +10486,10 @@ impl Canvas {
         }
         frame_profile.checkpoint("caret");
         if let Some(mode_transition_frame) = self.app_mode_transition.frame(app.mode(), now) {
-            let previous_vertices = self.app_mode_transition.previous_vertices().to_vec();
-            let current_vertices = vertices.as_ref().to_vec();
             compose_app_mode_transition_vertices(
                 &mut self.app_mode_transition_vertices,
-                &previous_vertices,
-                &current_vertices,
+                self.app_mode_transition.previous_vertices(),
+                vertices.as_ref(),
                 mode_transition_frame,
             );
             vertices = Cow::Borrowed(self.app_mode_transition_vertices.as_slice());
