@@ -31,6 +31,33 @@ pub(in crate::tui::app) async fn send_interleave_now(
     }
 }
 
+pub(in crate::tui::app) async fn handle_remote_update_command(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> Result<()> {
+    reload_stale_remote_server_before_update(app, remote).await?;
+
+    let session_id = app
+        .remote_session_id
+        .clone()
+        .unwrap_or_else(|| crate::id::new_id("ses"));
+    app.start_background_client_update(session_id);
+    Ok(())
+}
+
+pub(in crate::tui::app) async fn reload_stale_remote_server_before_update(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> Result<bool> {
+    if app.remote_server_has_update != Some(true) {
+        return Ok(false);
+    }
+
+    app.append_reload_message("Reloading stale server before checking for client updates...");
+    remote.reload().await?;
+    Ok(true)
+}
+
 async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -242,6 +269,10 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.handle_onboarding_continue_prompt_key(code) {
+        return Ok(());
+    }
+
     if app.changelog_scroll.is_some() {
         return app.handle_changelog_key(code);
     }
@@ -294,15 +325,13 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if crate::tui::keybind::matches_side_panel_toggle_key(code, modifiers) {
+    if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
         return Ok(());
     }
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
-    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')))
-        || macos_option_shortcut == Some('t')
-    {
+    if app.toggle_keys.diagram_pane.matches(code, modifiers) {
         app.toggle_diagram_pane_position();
         return Ok(());
     }
@@ -323,9 +352,7 @@ async fn handle_remote_key_internal(
         apply_remote_effort_direction(app, remote, direction).await?;
         return Ok(());
     }
-    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')))
-        || macos_option_shortcut == Some('s')
-    {
+    if app.toggle_keys.typing_scroll_lock.matches(code, modifiers) {
         app.toggle_typing_scroll_lock();
         return Ok(());
     }
@@ -381,7 +408,7 @@ async fn handle_remote_key_internal(
     if modifiers.contains(KeyModifiers::SUPER) {
         match code {
             KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
-                input::delete_input_to_start(app);
+                input::delete_input_word_back(app);
                 return Ok(());
             }
             KeyCode::Left | KeyCode::Home | KeyCode::Char('a') => {
@@ -445,11 +472,6 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')) {
-        app.toggle_typing_scroll_lock();
-        return Ok(());
-    }
-
     if app.scroll_keys.is_bookmark(code, modifiers) {
         app.toggle_scroll_bookmark();
         return Ok(());
@@ -460,9 +482,7 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if modifiers.contains(KeyModifiers::ALT)
-        && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g'))
-    {
+    if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
@@ -841,11 +861,7 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/update" {
-                    let session_id = app
-                        .remote_session_id
-                        .clone()
-                        .unwrap_or_else(|| crate::id::new_id("ses"));
-                    app.start_background_client_update(session_id);
+                    handle_remote_update_command(app, remote).await?;
                     return Ok(());
                 }
 
@@ -1916,6 +1932,25 @@ async fn handle_remote_key_internal(
                                 }
                             }
                         }
+                    }
+                    return Ok(());
+                }
+
+                if let Some(command) = app_mod::commands::parse_plan_command(trimmed) {
+                    let prompt = app_mod::commands::build_plan_prompt(command.goal.as_deref());
+                    if app.is_processing {
+                        remote.cancel_with_reason("slash_plan").await?;
+                        app.set_status_notice("Interrupting for /plan...");
+                        app.push_display_message(DisplayMessage::system(
+                            app_mod::commands::plan_launch_notice(command.goal.as_deref(), true),
+                        ));
+                        app.queued_messages.push(prompt);
+                    } else {
+                        app.push_display_message(DisplayMessage::system(
+                            app_mod::commands::plan_launch_notice(command.goal.as_deref(), false),
+                        ));
+                        let _ = begin_remote_send(app, remote, prompt, vec![], true, None, true, 0)
+                            .await;
                     }
                     return Ok(());
                 }

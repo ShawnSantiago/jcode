@@ -173,11 +173,12 @@ impl App {
                     crate::tui::info_widget::AuthMethod::AnthropicApiKey
                 } else if matches!(runtime_provider.as_deref(), Some("claude" | "anthropic")) {
                     crate::tui::info_widget::AuthMethod::AnthropicOAuth
-                } else if auth_status.anthropic.has_api_key {
-                    // AnthropicProvider::Auto tries direct API keys before OAuth.
-                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
                 } else if auth_status.anthropic.has_oauth {
+                    // Anthropic Auto prefers OAuth (Claude subscription) before
+                    // falling back to a direct API key.
                     crate::tui::info_widget::AuthMethod::AnthropicOAuth
+                } else if auth_status.anthropic.has_api_key {
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
                 } else {
                     crate::tui::info_widget::AuthMethod::Unknown
                 }
@@ -424,6 +425,10 @@ impl crate::tui::TuiState for App {
 
     fn auto_scroll_paused(&self) -> bool {
         self.auto_scroll_paused
+    }
+
+    fn chat_overscroll_active(&self) -> bool {
+        self.chat_overscroll_active()
     }
 
     fn provider_name(&self) -> String {
@@ -1244,6 +1249,7 @@ impl crate::tui::TuiState for App {
             native_compaction_threshold_tokens,
             session_count,
             session_name,
+            working_dir: self.session.working_dir.clone(),
             client_count,
             memory_info,
             swarm_info,
@@ -1478,6 +1484,10 @@ impl crate::tui::TuiState for App {
 
     fn onboarding_welcome_active(&self) -> bool {
         App::onboarding_welcome_active(self)
+    }
+
+    fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
+        App::onboarding_welcome_kind(self)
     }
 
     fn suggestion_prompts(&self) -> Vec<(String, String)> {

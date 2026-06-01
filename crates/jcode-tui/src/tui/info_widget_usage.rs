@@ -196,8 +196,8 @@ fn render_labeled_bar(
     let filled = ((used_pct as f32 / 100.0) * bar_width as f32).round() as usize;
     let empty = bar_width.saturating_sub(filled);
 
-    let bar_filled = "█".repeat(filled);
-    let bar_empty = "░".repeat(empty);
+    let bar_filled = "▰".repeat(filled);
+    let bar_empty = "▱".repeat(empty);
 
     let suffix = if left_pct == 0 {
         if let Some(reset) = reset_time {
@@ -219,13 +219,13 @@ fn render_labeled_bar(
     ])
 }
 
-pub(super) fn render_usage_bar(
+pub(super) fn render_usage_pill(
     used_tokens: usize,
     limit_tokens: usize,
     width: u16,
 ) -> Line<'static> {
     let safe_limit = limit_tokens.max(1);
-    let bar_width = width.saturating_sub(2).min(24) as usize;
+    let bar_width = (width as usize).min(24);
     if bar_width == 0 {
         return Line::default();
     }
@@ -249,52 +249,18 @@ pub(super) fn render_usage_bar(
         rgb(100, 200, 100)
     };
 
-    let label = format!(
-        "{}/{}",
-        format_token_k(used_tokens),
-        format_token_k(limit_tokens)
-    );
-    let show_label = UnicodeWidthStr::width(label.as_str()) <= bar_width;
+    let empty_cells = bar_width.saturating_sub(used_cells);
     let mut spans = Vec::new();
-    spans.push(Span::styled("[", Style::default().fg(rgb(90, 90, 100))));
-    if show_label {
-        let label_start = (bar_width - label.len()) / 2;
-        let label_end = label_start + label.len();
-        for idx in 0..bar_width {
-            let in_used = idx < used_cells;
-            let base_char = if in_used { '█' } else { '░' };
-            let ch = if idx >= label_start && idx < label_end {
-                label.as_bytes()[idx - label_start] as char
-            } else {
-                base_char
-            };
-            let style = if idx >= label_start && idx < label_end {
-                if in_used {
-                    Style::default().fg(rgb(20, 30, 35)).bold()
-                } else {
-                    Style::default().fg(rgb(170, 170, 180)).bold()
-                }
-            } else if in_used {
-                Style::default().fg(used_color)
-            } else {
-                Style::default().fg(rgb(50, 50, 60))
-            };
-            spans.push(Span::styled(ch.to_string(), style));
-        }
-    } else {
-        let empty_cells = bar_width.saturating_sub(used_cells);
+    spans.push(Span::styled(
+        "▰".repeat(used_cells),
+        Style::default().fg(used_color),
+    ));
+    if empty_cells > 0 {
         spans.push(Span::styled(
-            "█".repeat(used_cells),
-            Style::default().fg(used_color),
+            "▱".repeat(empty_cells),
+            Style::default().fg(rgb(50, 50, 60)),
         ));
-        if empty_cells > 0 {
-            spans.push(Span::styled(
-                "░".repeat(empty_cells),
-                Style::default().fg(rgb(50, 50, 60)),
-            ));
-        }
     }
-    spans.push(Span::styled("]", Style::default().fg(rgb(90, 90, 100))));
     Line::from(spans)
 }
 
@@ -304,29 +270,39 @@ pub(super) fn render_context_usage_line(
     limit_tokens: usize,
     width: u16,
 ) -> Line<'static> {
+    let tokens = format!(
+        "{}/{}",
+        format_token_k(used_tokens),
+        format_token_k(limit_tokens)
+    );
+    let used_pct = ((used_tokens as f64 / limit_tokens.max(1) as f64) * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u8;
+    let left_pct = 100u8.saturating_sub(used_pct);
+    let token_color = if left_pct <= 20 {
+        rgb(255, 100, 100)
+    } else if left_pct <= 50 {
+        rgb(255, 200, 100)
+    } else {
+        rgb(100, 200, 100)
+    };
+
     let label_width = UnicodeWidthStr::width(label);
-    let bar_width = width.saturating_sub(label_width as u16 + 1);
+    let tokens_width = UnicodeWidthStr::width(tokens.as_str());
+    // label + space + tokens + space + bar
+    let bar_width = width.saturating_sub((label_width + 1 + tokens_width + 1) as u16);
 
-    if bar_width < 3 {
-        return Line::from(vec![
-            Span::styled(label.to_string(), Style::default().fg(rgb(140, 140, 150))),
-            Span::raw(" "),
-            Span::styled(
-                format!(
-                    "{}/{}",
-                    format_token_k(used_tokens),
-                    format_token_k(limit_tokens)
-                ),
-                Style::default().fg(rgb(100, 200, 100)).bold(),
-            ),
-        ]);
+    let mut spans = vec![
+        Span::styled(format!("{label} "), Style::default().fg(rgb(140, 140, 150))),
+        Span::styled(
+            format!("{tokens} "),
+            Style::default().fg(token_color).bold(),
+        ),
+    ];
+
+    if bar_width >= 3 {
+        spans.extend(render_usage_pill(used_tokens, limit_tokens, bar_width).spans);
     }
-
-    let mut spans = vec![Span::styled(
-        format!("{label} "),
-        Style::default().fg(rgb(140, 140, 150)),
-    )];
-    spans.extend(render_usage_bar(used_tokens, limit_tokens, bar_width).spans);
     Line::from(spans)
 }
 

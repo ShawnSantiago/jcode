@@ -76,9 +76,8 @@ pub struct ExternalAuthReviewCandidate {
     action: ExternalAuthReviewAction,
 }
 
-// Read-only accessors exposed to downstream crates' test targets via the
-// `test-support` feature, so the production field surface stays `pub(crate)`.
-#[cfg(any(test, feature = "test-support"))]
+// Read-only accessors. Kept available outside tests so onboarding/UI can
+// summarize detected import candidates (e.g. for the first-run welcome card).
 impl ExternalAuthReviewCandidate {
     pub fn provider_summary(&self) -> &str {
         &self.provider_summary
@@ -86,6 +85,19 @@ impl ExternalAuthReviewCandidate {
 
     pub fn source_name(&self) -> &str {
         &self.source_name
+    }
+
+    /// Build a synthetic candidate for tests / UI fixtures. The resulting
+    /// candidate points at the legacy Codex action so it can be summarized and
+    /// rendered, but is not expected to actually import successfully.
+    #[doc(hidden)]
+    pub fn fixture(provider_summary: impl Into<String>, source_name: impl Into<String>) -> Self {
+        Self {
+            provider_summary: provider_summary.into(),
+            source_name: source_name.into(),
+            path: std::path::PathBuf::from("/dev/null"),
+            action: ExternalAuthReviewAction::CodexLegacy,
+        }
     }
 }
 
@@ -98,13 +110,49 @@ pub struct ExternalAuthAutoImportOutcome {
 impl ExternalAuthAutoImportOutcome {
     pub fn render_markdown(&self) -> String {
         if self.messages.is_empty() {
-            return "No external auth sources were imported.".to_string();
+            return "No external logins were imported.".to_string();
         }
-        let mut out = format!("**Auto Import**\n\nImported {} source(s).", self.imported);
-        for line in &self.messages {
+
+        // Messages are tagged with a leading "✓"/"✕" marker by the importer.
+        let imported: Vec<&String> = self
+            .messages
+            .iter()
+            .filter(|m| m.starts_with('✓'))
+            .collect();
+        let skipped: Vec<&String> = self
+            .messages
+            .iter()
+            .filter(|m| m.starts_with('✕'))
+            .collect();
+
+        let mut out = String::from("**Logins imported**\n");
+        out.push('\n');
+        if imported.is_empty() {
+            out.push_str("No logins could be imported.");
+        } else {
+            out.push_str(&format!(
+                "Reusing {} existing login{}:",
+                imported.len(),
+                if imported.len() == 1 { "" } else { "s" }
+            ));
+        }
+        for line in &imported {
             out.push_str("\n- ");
-            out.push_str(line);
+            out.push_str(line.trim_start_matches('✓').trim());
         }
+
+        if !skipped.is_empty() {
+            out.push_str(&format!(
+                "\n\nSkipped {} source{}:",
+                skipped.len(),
+                if skipped.len() == 1 { "" } else { "s" }
+            ));
+            for line in &skipped {
+                out.push_str("\n- ");
+                out.push_str(line.trim_start_matches('✕').trim());
+            }
+        }
+
         out
     }
 }
@@ -313,52 +361,75 @@ fn revoke_external_auth_review_candidate(candidate: &ExternalAuthReviewCandidate
     Ok(())
 }
 
+/// Render a human-friendly note about how soon a token-based credential
+/// expires, used to tell the user when a re-login is likely needed without
+/// failing the import.
+fn token_freshness_note(expires_at_ms: i64) -> String {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if expires_at_ms <= now_ms {
+        " The access token is expired; jcode will refresh it on first use, or run /login if that fails.".to_string()
+    } else {
+        String::new()
+    }
+}
+
+// Import validation is intentionally *non-destructive*: it only checks that
+// reusable credentials are present after trusting the source. It must NOT
+// perform a live OAuth refresh, because OAuth refresh tokens are single-use --
+// refreshing here would rotate (and thus burn) the source's refresh token and
+// then discard the rotated result, breaking both jcode and the original tool.
+// Expired tokens are still imported: they get refreshed lazily (and persisted)
+// at request time, or the user is prompted to /login.
+
 async fn validate_claude_import() -> Result<String> {
     let creds = auth::claude::load_credentials()?;
-    let refreshed = crate::auth::oauth::refresh_claude_tokens(&creds.refresh_token).await?;
+    if creds.access_token.trim().is_empty() && creds.refresh_token.trim().is_empty() {
+        anyhow::bail!("Claude source did not expose a usable access or refresh token.");
+    }
     Ok(format!(
-        "Claude refresh probe succeeded (expires_at={}).",
-        refreshed.expires_at
+        "Loaded Claude credentials.{}",
+        token_freshness_note(creds.expires_at)
     ))
 }
 
 async fn validate_openai_import() -> Result<String> {
     let creds = auth::codex::load_credentials()?;
     if creds.refresh_token.trim().is_empty() {
-        Ok("Loaded OpenAI API key credentials.".to_string())
-    } else {
-        let refreshed = crate::auth::oauth::refresh_openai_tokens(&creds.refresh_token).await?;
-        Ok(format!(
-            "OpenAI refresh probe succeeded (expires_at={}).",
-            refreshed.expires_at
-        ))
+        if creds.access_token.trim().is_empty() {
+            anyhow::bail!("OpenAI source did not expose a usable token or API key.");
+        }
+        return Ok("Loaded OpenAI API key credentials.".to_string());
     }
+    Ok(format!(
+        "Loaded OpenAI OAuth credentials.{}",
+        creds
+            .expires_at
+            .map(token_freshness_note)
+            .unwrap_or_default()
+    ))
 }
 
 async fn validate_gemini_import() -> Result<String> {
-    let tokens = auth::gemini::load_or_refresh_tokens().await?;
+    let tokens = auth::gemini::load_tokens()?;
     Ok(format!(
-        "Gemini load/refresh probe succeeded (expires_at={}).",
-        tokens.expires_at
+        "Loaded Gemini credentials.{}",
+        token_freshness_note(tokens.expires_at)
     ))
 }
 
 async fn validate_antigravity_import() -> Result<String> {
-    let tokens = auth::antigravity::load_or_refresh_tokens().await?;
+    let tokens = auth::antigravity::load_tokens()?;
     Ok(format!(
-        "Antigravity load/refresh probe succeeded (expires_at={}).",
-        tokens.expires_at
+        "Loaded Antigravity credentials.{}",
+        token_freshness_note(tokens.expires_at)
     ))
 }
 
 async fn validate_copilot_import() -> Result<String> {
-    let github_token = auth::copilot::load_github_token()?;
-    let client = crate::provider::shared_http_client();
-    let api_token = auth::copilot::exchange_github_token(&client, &github_token).await?;
-    Ok(format!(
-        "Copilot exchange probe succeeded (expires_at={}).",
-        api_token.expires_at
-    ))
+    // Presence check only: confirm a GitHub token is readable. The
+    // GitHub->Copilot exchange happens lazily at request time.
+    let _github_token = auth::copilot::load_github_token()?;
+    Ok("Loaded GitHub Copilot credentials.".to_string())
 }
 
 async fn validate_cursor_import() -> Result<String> {
@@ -475,14 +546,14 @@ pub async fn run_external_auth_auto_import_candidates(
             Ok(detail) => {
                 outcome.imported += 1;
                 outcome.messages.push(format!(
-                    "✓ Imported {} from {}. {}",
+                    "✓ {} (from {}): {}",
                     candidate.provider_summary, candidate.source_name, detail
                 ));
             }
             Err(err) => {
                 let _ = revoke_external_auth_review_candidate(candidate);
                 outcome.messages.push(format!(
-                    "✕ Skipped {} from {}: {}",
+                    "✕ {} (from {}): {}",
                     candidate.provider_summary, candidate.source_name, err
                 ));
             }
@@ -491,4 +562,59 @@ pub async fn run_external_auth_auto_import_candidates(
 
     auth::AuthStatus::invalidate_cache();
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod render_markdown_tests {
+    use super::ExternalAuthAutoImportOutcome;
+
+    #[test]
+    fn empty_outcome_reports_nothing_imported() {
+        let outcome = ExternalAuthAutoImportOutcome {
+            imported: 0,
+            messages: Vec::new(),
+        };
+        assert_eq!(
+            outcome.render_markdown(),
+            "No external logins were imported."
+        );
+    }
+
+    #[test]
+    fn groups_imported_and_skipped_with_counts() {
+        let outcome = ExternalAuthAutoImportOutcome {
+            imported: 2,
+            messages: vec![
+                "✓ OpenAI/Codex (from Codex auth.json): Loaded OpenAI OAuth credentials."
+                    .to_string(),
+                "✓ Claude (from Claude Code): Loaded Claude credentials.".to_string(),
+                "✕ Cursor (from Cursor native): no usable auth token.".to_string(),
+            ],
+        };
+        let md = outcome.render_markdown();
+        assert!(md.starts_with("**Logins imported**"), "got: {md}");
+        assert!(md.contains("Reusing 2 existing logins:"), "got: {md}");
+        assert!(
+            md.contains("- OpenAI/Codex (from Codex auth.json): Loaded OpenAI OAuth credentials."),
+            "got: {md}"
+        );
+        assert!(md.contains("Skipped 1 source:"), "got: {md}");
+        assert!(
+            md.contains("- Cursor (from Cursor native): no usable auth token."),
+            "got: {md}"
+        );
+        // Markers themselves should be stripped from the rendered list.
+        assert!(!md.contains('✓'), "got: {md}");
+        assert!(!md.contains('✕'), "got: {md}");
+    }
+
+    #[test]
+    fn singular_wording_for_one_login() {
+        let outcome = ExternalAuthAutoImportOutcome {
+            imported: 1,
+            messages: vec!["✓ Gemini (from Gemini CLI): Loaded Gemini credentials.".to_string()],
+        };
+        let md = outcome.render_markdown();
+        assert!(md.contains("Reusing 1 existing login:"), "got: {md}");
+    }
 }

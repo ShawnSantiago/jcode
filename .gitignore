@@ -14,3 +14,4 @@ ios_simulator_screenshot.png
 
 # Local/generated OMX artifacts
 .omx/artifacts/
+/telemetry-worker/backups/

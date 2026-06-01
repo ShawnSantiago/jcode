@@ -25,6 +25,7 @@ mod patch;
 mod pr_watch;
 mod read;
 pub mod selfdev;
+pub(crate) mod serde_coerce;
 mod session_search;
 mod side_panel;
 mod skill;
@@ -374,6 +375,46 @@ impl Registry {
         jcode_tool_types::resolve_tool_name(name)
     }
 
+    /// Suggest up to 3 available tool names that look similar to `name`.
+    /// Uses cheap, dependency-free heuristics: case-insensitive equality,
+    /// prefix/substring containment, then bounded edit distance. Helps the
+    /// model recover from hallucinated tool names (#104).
+    fn closest_tool_names(name: &str, available: &[&str]) -> Vec<String> {
+        let needle = name.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(usize, &str)> = available
+            .iter()
+            .filter_map(|candidate| {
+                let hay = candidate.to_ascii_lowercase();
+                let score = if hay == needle {
+                    0
+                } else if hay.starts_with(&needle) || needle.starts_with(&hay) {
+                    1
+                } else if hay.contains(&needle) || needle.contains(&hay) {
+                    2
+                } else {
+                    let dist = levenshtein(&needle, &hay);
+                    // Only suggest near-misses, scaled to the longer name.
+                    let threshold = (hay.len().max(needle.len()) / 3).max(2);
+                    if dist <= threshold {
+                        3 + dist
+                    } else {
+                        return None;
+                    }
+                };
+                Some((score, *candidate))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+        scored
+            .into_iter()
+            .take(3)
+            .map(|(_, name)| name.to_string())
+            .collect()
+    }
+
     /// Estimate token count for a string (chars / 4, matching compaction heuristic)
     fn estimate_tokens(s: &str) -> usize {
         crate::util::estimate_tokens(s)
@@ -481,10 +522,22 @@ impl Registry {
                 return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
             }
         }
-        let tool = tools
-            .get(resolved_name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?
-            .clone();
+        let tool = match tools.get(resolved_name) {
+            Some(tool) => tool.clone(),
+            None => {
+                // List available tools so the model can recover instead of
+                // spiraling through hallucinated names like "ToolSearch" (#104).
+                let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
+                available.sort_unstable();
+                let suggestions = Self::closest_tool_names(name, &available);
+                let mut msg = format!("Unknown tool: {name}.");
+                if !suggestions.is_empty() {
+                    msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                }
+                msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
 
         // Drop the lock before executing
         drop(tools);
@@ -676,6 +729,68 @@ impl Registry {
                 });
             }
 
+            // Advertise-early: register proxy tools for each configured server
+            // from the on-disk schema cache *before* connections settle, so the
+            // first locked tool snapshot already contains MCP tools and we avoid
+            // the intentional prompt-cache miss entirely (#206 Phase 2). The
+            // proxies connect-on-first-call. Servers with no cached schemas yet
+            // (cold start, or reconfigured) fall back to the post-connect
+            // registration + one-shot late-register rebuild below.
+            let schema_cache = crate::mcp::McpSchemaCache::load();
+            let mut advertised_servers: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            {
+                let config_servers: Vec<(String, crate::mcp::McpServerConfig)> = {
+                    let manager = mcp_manager.read().await;
+                    manager
+                        .config()
+                        .servers
+                        .iter()
+                        .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                        .collect()
+                };
+                let mut advertised_tool_count = 0usize;
+                for (server, cfg) in &config_servers {
+                    if let Some(cached) = schema_cache.tools_for(server, cfg) {
+                        let tools = crate::mcp::create_mcp_tools_from_cached(
+                            server,
+                            cached,
+                            Arc::clone(&mcp_manager),
+                        );
+                        advertised_tool_count += tools.len();
+                        for (name, tool) in tools {
+                            self.register(name, tool).await;
+                        }
+                        advertised_servers.insert(server.clone());
+                    }
+                }
+                if advertised_tool_count > 0 {
+                    crate::logging::info(&format!(
+                        "MCP: advertised {} cached tool(s) from {} server(s) at spawn \
+                         (connect-on-first-call); zero prompt-cache miss expected (#206)",
+                        advertised_tool_count,
+                        advertised_servers.len()
+                    ));
+                    // Reflect the advertised tools in the status indicator
+                    // immediately so the UI shows them before connections settle.
+                    if let Some(ref tx) = event_tx {
+                        let mut counts: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
+                        for (server, cfg) in &config_servers {
+                            if let Some(cached) = schema_cache.tools_for(server, cfg) {
+                                counts.insert(server.clone(), cached.len());
+                            }
+                        }
+                        let servers: Vec<String> = counts
+                            .into_iter()
+                            .map(|(name, count)| format!("{}:{}", name, count))
+                            .collect();
+                        let _ =
+                            tx.send(crate::protocol::ServerEvent::McpStatus { servers });
+                    }
+                }
+            }
+
             // Spawn connection and tool registration in background
             let registry = self.clone();
             tokio::spawn(async move {
@@ -709,7 +824,60 @@ impl Registry {
                     {
                         *server_counts.entry(server.to_string()).or_default() += 1;
                     }
+                    // Idempotent: advertise-early may have already registered an
+                    // identical proxy. Re-registering refreshes it with the live
+                    // schema, which is correct (handles schema drift).
                     registry.register(name.clone(), tool.clone()).await;
+                }
+
+                // Reconcile the on-disk schema cache with the live schemas so the
+                // next spawn can advertise the up-to-date tools with zero cache
+                // miss. Group live tool defs by server and update each entry
+                // under the current config fingerprint; prune servers that are
+                // no longer configured. (#206 Phase 2)
+                {
+                    let (live_by_server, config_snapshot): (
+                        std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>,
+                        Vec<(String, crate::mcp::McpServerConfig)>,
+                    ) = {
+                        let manager = mcp_manager.read().await;
+                        let mut grouped: std::collections::BTreeMap<
+                            String,
+                            Vec<crate::mcp::McpToolDef>,
+                        > = std::collections::BTreeMap::new();
+                        for (server, def) in manager.all_tools().await {
+                            grouped.entry(server).or_default().push(def);
+                        }
+                        let configs = manager
+                            .config()
+                            .servers
+                            .iter()
+                            .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                            .collect();
+                        (grouped, configs)
+                    };
+
+                    let mut cache = crate::mcp::McpSchemaCache::load();
+                    let mut dirty = false;
+                    for (server, cfg) in &config_snapshot {
+                        if let Some(defs) = live_by_server.get(server) {
+                            // Only cache servers that actually exposed tools.
+                            if cache.update(server, cfg, defs.clone()) {
+                                dirty = true;
+                            }
+                        }
+                    }
+                    let configured_names: Vec<String> =
+                        config_snapshot.iter().map(|(n, _)| n.clone()).collect();
+                    if cache.retain_servers(&configured_names) {
+                        dirty = true;
+                    }
+                    if dirty {
+                        cache.save();
+                        crate::logging::info(
+                            "MCP: updated on-disk tool-schema cache from live connection (#206)",
+                        );
+                    }
                 }
 
                 // Notify client of MCP status
@@ -799,6 +967,31 @@ impl Registry {
     pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
         self.compaction.clone()
     }
+}
+
+/// Classic Levenshtein edit distance over Unicode scalar values.
+/// Used only for tool-name "did you mean" suggestions, so the simple
+/// O(n*m) two-row implementation is more than sufficient.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 #[cfg(test)]

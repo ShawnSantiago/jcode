@@ -720,26 +720,29 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
             }
             ProcessingStatus::RunningTool(ref name) => {
                 let half_width = 3;
-                let (left_bar, right_bar) =
-                    if crate::perf::tui_policy().enable_decorative_animations {
-                        let progress = elapsed * 2.0 % 1.0;
-                        let filled_pos = ((progress * half_width as f32) as usize) % half_width;
-                        let left_bar: String = (0..half_width)
-                            .map(|i| if i == filled_pos { '●' } else { '·' })
-                            .collect();
-                        let right_bar: String = (0..half_width)
-                            .map(|i| {
-                                if i == (half_width - 1 - filled_pos) {
-                                    '●'
-                                } else {
-                                    '·'
-                                }
-                            })
-                            .collect();
-                        (left_bar, right_bar)
-                    } else {
-                        ("···".to_string(), "···".to_string())
-                    };
+                let decorative = crate::perf::tui_policy().enable_decorative_animations;
+                // When decorative animations are disabled we still nudge the bar
+                // forward at a slow "liveness" rate so a long-running tool (e.g.
+                // bash) reads as alive instead of frozen.
+                let bar_speed = if decorative {
+                    2.0
+                } else {
+                    jcode_tui_style::theme::LIVENESS_INDICATOR_FPS / half_width as f32
+                };
+                let progress = elapsed * bar_speed % 1.0;
+                let filled_pos = ((progress * half_width as f32) as usize) % half_width;
+                let left_bar: String = (0..half_width)
+                    .map(|i| if i == filled_pos { '●' } else { '·' })
+                    .collect();
+                let right_bar: String = (0..half_width)
+                    .map(|i| {
+                        if i == (half_width - 1 - filled_pos) {
+                            '●'
+                        } else {
+                            '·'
+                        }
+                    })
+                    .collect();
 
                 let anim_color = animated_tool_color(elapsed);
                 let batch_prog = app.batch_progress();
@@ -1448,6 +1451,270 @@ pub(super) fn draw_notification(frame: &mut Frame, app: &dyn TuiState, area: Rec
         line
     };
     frame.render_widget(Paragraph::new(aligned_line), area);
+}
+
+/// Draw the elastic overscroll status line, revealed below the input when the
+/// user scrolls past the bottom of the transcript. Shows model, provider,
+/// access method, reasoning level, and context usage percentage.
+pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let data = app.info_widget_data();
+
+    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Model
+    let model = data
+        .model
+        .clone()
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| app.provider_model());
+    if !model.is_empty() && !overscroll_is_placeholder(&model) {
+        spans.push(Span::styled(
+            model,
+            Style::default().fg(rgb(180, 180, 190)).bold(),
+        ));
+        // Reasoning level shown inline next to the model, e.g. " high".
+        if let Some(effort) = data
+            .reasoning_effort
+            .as_deref()
+            .and_then(overscroll_short_reasoning)
+        {
+            spans.push(Span::styled(
+                format!(" {}", effort),
+                Style::default().fg(rgb(140, 140, 150)),
+            ));
+        }
+    }
+
+    // Provider
+    let provider = data
+        .provider_name
+        .clone()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| app.provider_name());
+    if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
+        spans.push(Span::styled(
+            overscroll_provider_display(&provider),
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+
+    // Access method (auth)
+    if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
+        spans.push(Span::styled(label.to_string(), Style::default().fg(color)));
+    }
+
+
+    // Context usage as a rounded bar
+    if let Some((used, limit)) = overscroll_context_usage(&data) {
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
+        spans.push(Span::styled(
+            format!(
+                "{}/{} ",
+                overscroll_format_tokens(used),
+                overscroll_format_tokens(limit)
+            ),
+            Style::default().fg(rgb(140, 140, 150)),
+        ));
+        spans.extend(overscroll_context_bar(used, limit, 10));
+    }
+
+    // Working directory last (right side), shown as a home-relative path.
+    if let Some(dir) = app.working_dir().and_then(|d| overscroll_dir_label(&d)) {
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
+        spans.push(Span::styled(" ", Style::default().fg(rgb(140, 180, 255))));
+        spans.push(Span::styled(dir, Style::default().fg(rgb(140, 140, 150))));
+    }
+
+    if spans.is_empty() {
+        return;
+    }
+
+    let line = Line::from(spans);
+    let aligned_line = if app.centered_mode() {
+        line.alignment(Alignment::Center)
+    } else {
+        line
+    };
+    frame.render_widget(Paragraph::new(aligned_line), area);
+}
+
+/// Format a working dir path home-relative (~/foo/bar), keeping the last 2 segments.
+fn overscroll_dir_label(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let display = if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if !home.is_empty() && (trimmed == home || trimmed.starts_with(&format!("{home}/"))) {
+            format!("~{}", &trimmed[home.len()..])
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+    // Keep it short: show at most the last two path segments.
+    let segs: Vec<&str> = display.split('/').filter(|s| !s.is_empty()).collect();
+    let short = if display.starts_with('~') {
+        if segs.len() <= 2 {
+            display.clone()
+        } else {
+            format!("~/…/{}", segs[segs.len() - 1])
+        }
+    } else if segs.len() <= 2 {
+        format!("/{}", segs.join("/"))
+    } else {
+        format!("…/{}/{}", segs[segs.len() - 2], segs[segs.len() - 1])
+    };
+    Some(short)
+}
+
+/// Placeholder header strings used during remote startup; not real model names.
+fn overscroll_is_placeholder(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    m.starts_with("connecting")
+        || m.starts_with("loading")
+        || m == "connected"
+        || m.contains("connecting to server")
+}
+
+/// Inert runtime provider labels (remote/replay/test-harness) shown before the
+/// real provider name is known; not real provider names.
+fn overscroll_is_runtime_placeholder(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "remote" | "replay" | "test-harness"
+    )
+}
+
+fn overscroll_provider_display(provider: &str) -> String {
+    match provider.to_ascii_lowercase().as_str() {
+        "claude" => "Claude OAuth".to_string(),
+        "anthropic" => "Anthropic API".to_string(),
+        "openai" => "OpenAI".to_string(),
+        "openrouter" => "OpenRouter".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        "gemini" => "Gemini".to_string(),
+        "copilot" => "GitHub Copilot".to_string(),
+        "cursor" => "Cursor".to_string(),
+        "bedrock" => "AWS Bedrock".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        _ => provider.to_string(),
+    }
+}
+
+fn overscroll_auth_label(method: crate::tui::info_widget::AuthMethod) -> Option<(&'static str, Color)> {
+    use crate::tui::info_widget::AuthMethod;
+    match method {
+        AuthMethod::Unknown => None,
+        AuthMethod::ApiKey
+        | AuthMethod::AnthropicApiKey
+        | AuthMethod::OpenAIApiKey => Some(("API key", rgb(180, 180, 190))),
+        AuthMethod::OpenRouterApiKey
+        | AuthMethod::OpenCodeApiKey => Some(("API key", rgb(140, 180, 255))),
+        AuthMethod::AnthropicOAuth => Some(("OAuth", rgb(255, 160, 100))),
+        AuthMethod::OpenAIOAuth => Some(("OAuth", rgb(100, 200, 180))),
+        AuthMethod::CopilotOAuth => Some(("OAuth", rgb(110, 200, 140))),
+        AuthMethod::GeminiOAuth => Some(("OAuth", rgb(120, 190, 255))),
+    }
+}
+
+fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
+    let effort = effort.trim();
+    if effort.is_empty() {
+        return None;
+    }
+    Some(match effort {
+        "xhigh" => "xhigh",
+        "high" => "high",
+        "medium" => "medium",
+        "low" => "low",
+        "none" => "none",
+        other => other,
+    })
+}
+
+fn overscroll_context_usage(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<(usize, usize)> {
+    let used_tokens = if let Some(observed) = data.observed_context_tokens {
+        observed as usize
+    } else {
+        let info = data.context_info.as_ref()?;
+        if info.total_chars == 0 {
+            return None;
+        }
+        info.estimated_tokens()
+    };
+    let limit = data
+        .context_limit
+        .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
+        .max(1);
+    Some((used_tokens, limit))
+}
+
+/// Format a token count compactly: 1234 -> "1.2k", 200000 -> "200k", 1_500_000 -> "1.5M".
+fn overscroll_format_tokens(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 10_000 {
+        format!("{}k", tokens / 1000)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Render a compact rounded progress bar (◖████░░◗) plus a percentage label.
+fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'static>> {
+    let limit = limit.max(1);
+    let ratio = (used as f64 / limit as f64).clamp(0.0, 1.0);
+    let pct = (ratio * 100.0).round() as u16;
+    let filled = (ratio * cells as f64).round() as usize;
+    let filled = filled.min(cells);
+
+    // Match the info widget usage bar palette (based on remaining context).
+    let left_pct = 100u16.saturating_sub(pct);
+    let fill_color = if left_pct <= 20 {
+        rgb(255, 100, 100)
+    } else if left_pct <= 50 {
+        rgb(255, 200, 100)
+    } else {
+        rgb(100, 200, 100)
+    };
+    let track_color = rgb(50, 50, 60);
+
+    let mut spans = Vec::with_capacity(cells + 2);
+    // Slim segmented pill (▰ filled / ▱ empty) reads thinner than full blocks.
+    spans.push(Span::styled(
+        "▰".repeat(filled),
+        Style::default().fg(fill_color),
+    ));
+    spans.push(Span::styled(
+        "▱".repeat(cells.saturating_sub(filled)),
+        Style::default().fg(track_color),
+    ));
+    spans.push(Span::styled(
+        format!(" {}%", pct),
+        Style::default().fg(fill_color).bold(),
+    ));
+    spans
 }
 
 pub(super) fn draw_input(

@@ -195,6 +195,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Poke model to resume with incomplete todos (on/off/status)",
     ));
     lines.push(help_entry(
+        "/plan [goal]",
+        "Draft a plan-only proposal in the side panel (no edits)",
+    ));
+    lines.push(help_entry(
         "/improve",
         "Autonomously improve the repo until returns diminish",
     ));
@@ -334,6 +338,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("PageUp / PageDown", "Scroll history"));
     lines.push(key_entry("Up / Down", "Scroll history (when input empty)"));
     lines.push(key_entry("Ctrl+[ / Ctrl+]", "Jump between user prompts"));
+    lines.push(key_entry(
+        "Cmd/Super+K / J",
+        "Jump to previous / next user prompt (macOS)",
+    ));
     lines.push(key_entry("Ctrl+1..4", "Resize side panel to 25/50/75/100%"));
     lines.push(key_entry(
         "Ctrl+5..9",
@@ -392,7 +400,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry(
         "Cmd/Super+Backspace / Delete",
-        "Delete to start of input",
+        "Delete previous word in input",
     ));
     lines.push(key_entry(
         "Cmd/Super+Left / Right",

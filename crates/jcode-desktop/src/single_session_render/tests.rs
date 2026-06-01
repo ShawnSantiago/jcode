@@ -254,7 +254,14 @@ fn small_window_inline_activity_and_composer_lanes_do_not_overlap() {
         &typography,
         app.render_inline_widget_visible_line_count(),
         inline_width,
-        inline_widget_target_top(size, app.text_scale(), layout.body_bottom(), false, 0.0),
+        inline_widget_target_top(
+            size,
+            inline_kind,
+            app.text_scale(),
+            layout.body_bottom(),
+            false,
+            0.0,
+        ),
         app.render_inline_widget_reveal_progress(),
         activity.y,
     )

@@ -31,6 +31,7 @@ mod debug_swarm_write;
 mod debug_testers;
 mod durable_state;
 mod headless;
+mod jade_relay;
 mod lifecycle;
 mod provider_control;
 mod reload;
@@ -346,14 +347,14 @@ pub use self::socket::spawn_server_notify;
 use self::socket::{acquire_daemon_lock, mark_close_on_exec};
 pub use self::socket::{
     cleanup_socket_pair, connect_socket, debug_socket_path, has_live_listener, is_server_ready,
-    set_socket_path, socket_path, wait_for_server_ready,
+    reap_stale_socket_if_dead, set_socket_path, socket_path, wait_for_server_ready,
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
 pub use self::util::ServerIdentity;
 use self::util::{
-    debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, server_has_newer_binary,
-    server_update_candidate, startup_headless_recovery_test_delay, swarm_id_for_dir,
+    debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
+    server_has_newer_binary, startup_headless_recovery_test_delay, swarm_id_for_dir,
 };
 
 mod file_activity;
@@ -1069,6 +1070,16 @@ impl Server {
                 ambient_handle.run_loop(ambient_provider).await;
             });
         }
+
+        // Spawn the Jade cloud relay listener independently of ambient mode. The
+        // worker is strictly opt-in and requires an explicit API base, token,
+        // session id, and reply-enabled flag before it makes any outbound calls.
+        jade_relay::spawn_if_configured(
+            &crate::config::config().safety,
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.soft_interrupt_queues),
+            Arc::clone(&self.swarm_state.members),
+        );
 
         // Spawn embedding idle monitor so the model can be unloaded when this
         // server has been quiet for a while.

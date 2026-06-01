@@ -124,6 +124,12 @@ pub(crate) enum Command {
     /// Run as an Agent Client Protocol (ACP) adapter backed by the Jcode daemon
     Acp,
 
+    /// Manage the background server daemon (e.g. `jcode server stop`).
+    Server {
+        #[command(subcommand)]
+        action: ServerCommand,
+    },
+
     /// Connect to a running server
     Connect,
 
@@ -398,6 +404,24 @@ pub(crate) enum Command {
         coverage_limit: usize,
     },
 
+    /// Diagnose why a provider/model or the model picker is broken by walking the
+    /// strict end-to-end checkpoints (catalog, picker, model-switch, chat, streaming, tools).
+    #[command(name = "provider-doctor", alias = "provider-strict-e2e")]
+    ProviderDoctor {
+        /// OpenAI-compatible provider id to diagnose (e.g. cerebras, fpt, nvidia-nim)
+        #[arg(id = "doctor_provider", value_name = "PROVIDER")]
+        provider: String,
+
+        /// How much to exercise: offline (no key/no spend), catalog (key, ~no spend),
+        /// or full (key, spends balance: chat + streaming + tools).
+        #[arg(long, value_name = "TIER", default_value = "catalog")]
+        tier: String,
+
+        /// Emit the report as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Test authentication end-to-end: login (optional), credential probe, refresh, and provider smoke
     AuthTest {
         /// Run the provider login flow before validation (interactive/browser-based)
@@ -449,6 +473,42 @@ pub(crate) enum Command {
     Restart {
         #[command(subcommand)]
         action: RestartCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ServerCommand {
+    /// Gracefully reload the running background server onto the newest binary.
+    ///
+    /// This is the preferred way to pick up an upgrade: the daemon hands its
+    /// live sessions off to a freshly exec'd server (the same path `/reload`
+    /// uses), so headless/swarm work is preserved instead of being killed. If
+    /// no server is running, this is a no-op. Use `server stop --force` only
+    /// when you need to hard-retire a wedged daemon.
+    Reload {
+        /// Reload even if the running server is already on the newest binary.
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop the running background server and clear its socket.
+    ///
+    /// Prefer `server reload` after an upgrade; it preserves live sessions.
+    /// `stop` terminates the daemon (SIGTERM, escalating to SIGKILL), which
+    /// drops any in-flight headless/swarm sessions, so it requires `--force`
+    /// as a deliberate acknowledgement.
+    Stop {
+        /// Confirm that terminating the daemon (and dropping live sessions) is intended.
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -878,10 +878,7 @@ fn push_cache_signature(
             "- {}.message_count: {}",
             label, signature.message_count
         ));
-        lines.push(format!(
-            "- {}.tool_count: {}",
-            label, signature.tool_count
-        ));
+        lines.push(format!("- {}.tool_count: {}", label, signature.tool_count));
         lines.push(format!(
             "- {}.system_static_chars: {}",
             label,
@@ -1224,10 +1221,7 @@ fn format_cache_stats(app: &App) -> String {
         "- total_cache_optimal_input_tokens: {}",
         bold_count(optimal)
     ));
-    lines.push(format!(
-        "- cache_read_pct_of_reported_input: {}%",
-        read_pct
-    ));
+    lines.push(format!("- cache_read_pct_of_reported_input: {}%", read_pct));
     lines.push(format!(
         "- cache_write_pct_of_reported_input: {}%",
         write_pct
@@ -1349,10 +1343,7 @@ fn format_cache_stats(app: &App) -> String {
             "- pending_request.call_index: {}",
             request.call_index
         ));
-        lines.push(format!(
-            "- pending_request.provider: {}",
-            request.provider
-        ));
+        lines.push(format!("- pending_request.provider: {}", request.provider));
         lines.push(format!("- pending_request.model: {}", request.model));
         lines.push(format!(
             "- pending_request.upstream_provider: {}",
@@ -1444,9 +1435,36 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         } else {
             ""
         };
+        let mut content = format!("jcode client: {}{}", version, is_canary);
+        if app.is_remote {
+            content.push_str("\nmode: remote/shared-server");
+            let server_label = match (&app.remote_server_icon, &app.remote_server_short_name) {
+                (Some(icon), Some(name)) => format!("{} {}", icon, name),
+                (None, Some(name)) => name.clone(),
+                _ => "connected server".to_string(),
+            };
+            content.push_str(&format!("\nserver: {}", server_label));
+            content.push_str(&format!(
+                "\nserver version: {}",
+                app.remote_server_version
+                    .as_deref()
+                    .unwrap_or("unknown until history sync")
+            ));
+            if app.remote_server_has_update.unwrap_or(false) {
+                content.push_str(
+                    "\nstatus: server is older or differs from installed stable/current; reload recommended",
+                );
+            } else {
+                content.push_str(
+                    "\nstatus: server matches installed channel or no newer binary is known",
+                );
+            }
+        } else {
+            content.push_str("\nmode: local/in-process");
+        }
         app.push_display_message(DisplayMessage {
             role: "system".to_string(),
-            content: format!("jcode {}{}", version, is_canary),
+            content,
             tool_calls: vec![],
             duration_secs: None,
             title: None,

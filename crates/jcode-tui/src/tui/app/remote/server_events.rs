@@ -4,6 +4,52 @@ use crate::tui::TuiState;
 use crate::tui::app as app_mod;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 
+fn allow_runtime_identity_mismatch() -> bool {
+    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
+}
+
+fn should_defer_history_for_runtime_identity_with_allow(
+    server_has_update: Option<bool>,
+    allow_mismatch: bool,
+) -> bool {
+    server_has_update == Some(true) && !allow_mismatch
+}
+
+fn should_defer_history_for_runtime_identity(server_has_update: Option<bool>) -> bool {
+    should_defer_history_for_runtime_identity_with_allow(
+        server_has_update,
+        allow_runtime_identity_mismatch(),
+    )
+}
+
+#[cfg(test)]
+mod runtime_identity_tests {
+    use super::should_defer_history_for_runtime_identity_with_allow;
+
+    #[test]
+    fn runtime_identity_gate_defers_stale_server_history_by_default() {
+        assert!(should_defer_history_for_runtime_identity_with_allow(
+            Some(true),
+            false
+        ));
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            Some(false),
+            false
+        ));
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            None, false
+        ));
+    }
+
+    #[test]
+    fn runtime_identity_gate_allows_explicit_mismatch_escape_hatch() {
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            Some(true),
+            true
+        ));
+    }
+}
+
 pub(in crate::tui::app) fn handle_server_event(
     app: &mut App,
     event: ServerEvent,
@@ -673,6 +719,25 @@ pub(in crate::tui::app) fn handle_server_event(
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();
+
+            if should_defer_history_for_runtime_identity(server_has_update) {
+                app.remote_server_version = server_version;
+                app.remote_server_short_name = server_name.clone();
+                app.remote_server_icon = server_icon.clone();
+                app.remote_server_has_update = server_has_update;
+                app.pending_server_reload = true;
+                app.clear_remote_startup_phase();
+                app.set_status_notice(
+                    "Server/runtime mismatch detected; reloading server before attach",
+                );
+                app.push_display_message(DisplayMessage::system(
+                    "ℹ Connected server binary differs from the installed client channel. Reloading the server before applying remote session state. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing."
+                        .to_string(),
+                ));
+                app.update_terminal_title();
+                return false;
+            }
+
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -769,6 +834,8 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_client_count = client_count;
             app.remote_is_canary = is_canary;
             app.remote_server_version = server_version;
+            app.remote_server_short_name = server_name.clone();
+            app.remote_server_icon = server_icon.clone();
             app.remote_server_has_update = server_has_update;
             let history_total_tokens = total_tokens.or_else(|| {
                 token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
@@ -1090,6 +1157,8 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::McpStatus { servers } => {
+            let previous_tool_total: usize =
+                app.mcp_server_names.iter().map(|(_, count)| count).sum();
             app.mcp_server_names = servers
                 .iter()
                 .filter_map(|s| {
@@ -1098,6 +1167,26 @@ pub(in crate::tui::app) fn handle_server_event(
                     Some((name.to_string(), count))
                 })
                 .collect();
+            let new_tool_total: usize = app.mcp_server_names.iter().map(|(_, count)| count).sum();
+            // When MCP tools first become available (servers finished
+            // connecting), the next turn rebuilds the tool snapshot once to
+            // expose them — a single intentional prompt-cache miss we accept so
+            // the agent is reachable immediately at spawn instead of blocking on
+            // MCP connection (#206). Surface this so it isn't mistaken for a bug.
+            if previous_tool_total == 0 && new_tool_total > 0 {
+                let server_count = app
+                    .mcp_server_names
+                    .iter()
+                    .filter(|(_, count)| *count > 0)
+                    .count();
+                app.set_status_notice(format!(
+                    "MCP ready: {} tool{} from {} server{} (one-time tool refresh)",
+                    new_tool_total,
+                    if new_tool_total == 1 { "" } else { "s" },
+                    server_count,
+                    if server_count == 1 { "" } else { "s" },
+                ));
+            }
             false
         }
         ServerEvent::ModelChanged {
@@ -1380,6 +1469,12 @@ pub(in crate::tui::app) fn handle_server_event(
             }
 
             if let Some(scope) = runtime_activity_scope {
+                if app.onboarding_flow_active()
+                    && matches!(scope, "auth_activity" | "catalog_activity")
+                {
+                    app.set_status_notice(runtime_activity_status_notice(&message));
+                    return false;
+                }
                 if scope == "catalog_activity"
                     && let Some(progress) =
                         crate::message::parse_background_task_progress_notification_markdown(

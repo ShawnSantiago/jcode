@@ -73,8 +73,9 @@ const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 const MODEL_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
 /// Minimum delay between background refresh attempts.
 const MODEL_CATALOG_REFRESH_RETRY_SECS: u64 = 60;
-/// Pin provider to preserve cache for this long after a cache hit
-const CACHE_PIN_TTL_SECS: u64 = 60 * 60;
+/// Standard OpenRouter catalog freshness window for the inactive-slot refresh
+/// path. Matches the shared on-disk model-catalog TTL (24h).
+const STANDARD_OPENROUTER_CATALOG_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// Endpoints cache TTL (1 hour) - per-model provider endpoint data
 const ENDPOINTS_CACHE_TTL_SECS: u64 = 60 * 60;
@@ -815,6 +816,111 @@ pub(crate) fn maybe_schedule_openai_compatible_profile_catalog_refresh(
     true
 }
 
+/// Schedule a background refresh of the *standard* OpenRouter model catalog
+/// (the `openrouter` cache namespace), even when standard OpenRouter is not the
+/// active provider occupying the shared OpenRouter/OpenAI-compatible runtime
+/// slot.
+///
+/// This matters when a direct OpenAI-compatible profile (e.g. NVIDIA NIM, Groq)
+/// is the startup default: that profile owns the single shared slot, so the
+/// standard OpenRouter catalog would otherwise never be fetched and its models
+/// (e.g. `openrouter/owl-alpha`) would never appear in `/model`. The model
+/// picker reads the standard catalog from the `openrouter` disk-cache namespace
+/// via `configured_standard_openrouter_profile_routes`; this populates it.
+pub(crate) fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str) -> bool {
+    // This always targets canonical openrouter.ai with OPENROUTER_API_KEY and
+    // writes to the dedicated `openrouter` cache namespace. It must run even
+    // when JCODE_OPENROUTER_* env vars are set by an active named profile
+    // (e.g. NVIDIA NIM via `[providers.mynvidia]`, which sets
+    // JCODE_OPENROUTER_API_BASE to the NVIDIA endpoint): that profile owns the
+    // shared slot and points the live runtime elsewhere, but standard
+    // OpenRouter's catalog still needs its own refresh so `/model` can list it
+    // (issue #292). Hence we deliberately ignore the shared-slot runtime env.
+    let Some(api_key) = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)
+    else {
+        return false;
+    };
+
+    let namespace = "openrouter";
+
+    // Only refresh when the cached standard catalog is missing or stale. A
+    // present-but-stale cache is the common upgrade case: a user who first ran
+    // an older build (before a model like `openrouter/owl-alpha` existed) has a
+    // non-empty `openrouter` namespace cache that would otherwise never update
+    // while a direct profile owns the shared slot. Reuse the shared 24h catalog
+    // TTL so we self-heal on the next picker render after an upgrade.
+    let cache_is_fresh = current_unix_secs()
+        .zip(jcode_provider_openrouter::load_disk_cache_entry_for_namespace(namespace))
+        .map(|(now, cache)| {
+            !cache.models.is_empty()
+                && now.saturating_sub(cache.cached_at) < STANDARD_OPENROUTER_CATALOG_TTL_SECS
+        })
+        .unwrap_or(false);
+    if cache_is_fresh {
+        return false;
+    }
+
+    if !begin_profile_catalog_refresh(namespace) {
+        return false;
+    }
+
+    let Some(api_base) = normalize_api_base(DEFAULT_API_BASE) else {
+        finish_profile_catalog_refresh(namespace);
+        return false;
+    };
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        finish_profile_catalog_refresh(namespace);
+        return false;
+    };
+
+    let auth = ProviderAuth::AuthorizationBearer {
+        token: api_key,
+        label: DEFAULT_API_KEY_NAME.to_string(),
+    };
+    let previous_fingerprint =
+        jcode_provider_openrouter::load_disk_cache_entry_for_namespace(namespace)
+            .map(|cache| models_fingerprint(&cache.models))
+            .unwrap_or_default();
+    handle.spawn(async move {
+        let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
+        match fetch_models_from_api(
+            crate::provider::shared_http_client(),
+            api_base,
+            auth,
+            models_cache,
+            Some(namespace.to_string()),
+        )
+        .await
+        {
+            Ok(models) => {
+                let updated = models_fingerprint(&models) != previous_fingerprint;
+                if updated {
+                    crate::logging::info(&format!(
+                        "Refreshed standard OpenRouter model catalog in background ({}): {} models",
+                        context,
+                        models.len()
+                    ));
+                    crate::bus::Bus::global().publish_models_updated();
+                } else {
+                    crate::logging::info(&format!(
+                        "Standard OpenRouter model catalog refresh produced no material change ({}): {} models",
+                        context,
+                        models.len()
+                    ));
+                }
+            }
+            Err(error) => crate::logging::info(&format!(
+                "Failed to refresh standard OpenRouter model catalog in background ({}): {}",
+                context, error
+            )),
+        }
+        finish_profile_catalog_refresh(namespace);
+    });
+
+    true
+}
+
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
@@ -1077,6 +1183,20 @@ impl OpenRouterProvider {
         }
     }
 
+    /// Detect providers that strictly enforce the OpenAI-compatible schema and
+    /// reject the non-standard `reasoning_content` message field and top-level
+    /// `thinking` request field. Mistral's API returns 422 "Extra inputs are
+    /// not permitted" when either is present (issue #261).
+    fn strict_openai_schema_endpoint(profile_id: Option<&str>, api_base: &str) -> bool {
+        if profile_id
+            .map(|id| id.eq_ignore_ascii_case("mistral"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        api_base.to_ascii_lowercase().contains("mistral.ai")
+    }
+
     pub fn new() -> Result<Self> {
         let autodetected_profile = autodetected_openai_compatible_profile();
         let api_base = configured_api_base();
@@ -1160,6 +1280,107 @@ impl OpenRouterProvider {
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        })
+    }
+
+    pub(crate) fn new_openrouter_api_key_runtime() -> Result<Self> {
+        let api_key = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)
+            .ok_or_else(|| {
+                let path = crate::storage::app_config_dir()
+                    .map(|dir| dir.join(DEFAULT_ENV_FILE).display().to_string())
+                    .unwrap_or_else(|_| DEFAULT_ENV_FILE.to_string());
+                anyhow::anyhow!(
+                    "{} not found in environment or {}",
+                    DEFAULT_API_KEY_NAME,
+                    path
+                )
+            })?;
+
+        Ok(Self {
+            client: crate::provider::shared_http_client(),
+            model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+            reasoning_effort: Arc::new(RwLock::new(None)),
+            api_base: DEFAULT_API_BASE.to_string(),
+            auth: ProviderAuth::AuthorizationBearer {
+                token: api_key,
+                label: DEFAULT_API_KEY_NAME.to_string(),
+            },
+            supports_provider_features: true,
+            supports_model_catalog: true,
+            profile_id: None,
+            max_tokens: Self::configured_max_tokens(None),
+            static_models: Vec::new(),
+            static_context_limits: HashMap::new(),
+            send_openrouter_headers: true,
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        })
+    }
+
+    pub(crate) fn new_openai_compatible_profile_runtime(
+        profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    ) -> Result<Self> {
+        let resolved = resolve_openai_compatible_profile(profile);
+        let api_base = normalize_api_base(&resolved.api_base).ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenAI-compatible profile '{}' has invalid API base '{}'",
+                resolved.id,
+                resolved.api_base
+            )
+        })?;
+        let auth = match load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file)
+        {
+            Some(token) => ProviderAuth::AuthorizationBearer {
+                token,
+                label: resolved.api_key_env.clone(),
+            },
+            None if !resolved.requires_api_key => ProviderAuth::None {
+                label: "local endpoint (no auth)".to_string(),
+            },
+            None => {
+                let path = crate::storage::app_config_dir()
+                    .map(|dir| dir.join(&resolved.env_file).display().to_string())
+                    .unwrap_or_else(|_| resolved.env_file.clone());
+                anyhow::bail!(
+                    "{} credentials not available. {} not found in environment or {}. Run `jcode login --provider {}` first.",
+                    resolved.display_name,
+                    resolved.api_key_env,
+                    path,
+                    resolved.id,
+                );
+            }
+        };
+
+        let static_context_limits = openai_compatible_profile_static_context_limits(profile);
+        let static_models = openai_compatible_profile_static_models(profile);
+        let model = resolved
+            .default_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+        Ok(Self {
+            client: crate::provider::shared_http_client(),
+            model: Arc::new(RwLock::new(model)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
+            api_base,
+            auth,
+            supports_provider_features: false,
+            supports_model_catalog: true,
+            profile_id: Some(resolved.id.clone()),
+            max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
+            static_models,
+            static_context_limits,
+            send_openrouter_headers: false,
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -1536,20 +1757,28 @@ impl OpenRouterProvider {
         if let Some(pin) = pin
             && pin.model == model
         {
-            let cache_recent = pin
-                .last_cache_read
-                .map(|t| t.elapsed().as_secs() <= CACHE_PIN_TTL_SECS)
-                .unwrap_or(false);
+            // Once OpenRouter has actually served a request for this model from a
+            // concrete provider, stick to that provider for the rest of the
+            // session. Re-selecting a provider per request would route to a
+            // backend with a cold KV cache, so we pin the observed provider and
+            // disable fallbacks to keep prompt-prefix caching warm.
             let use_pin = match pin.source {
                 PinSource::Explicit => true,
-                PinSource::Observed => cache_recent || base.order.is_none(),
+                // Honor an explicit user-configured order only when the user
+                // actively narrowed routing themselves; otherwise the observed
+                // session provider wins so the cache stays warm.
+                PinSource::Observed => base.order.is_none(),
             };
 
             if use_pin {
                 let mut routing = base.clone();
                 routing.order = Some(vec![pin.provider.clone()]);
-                if !pin.allow_fallbacks {
-                    routing.allow_fallbacks = false;
+                // Pin hard: an explicit pin honors its own fallback preference,
+                // an observed (session) pin always disables fallbacks so every
+                // turn reuses the same upstream provider and its KV cache.
+                match pin.source {
+                    PinSource::Explicit if pin.allow_fallbacks => {}
+                    _ => routing.allow_fallbacks = false,
                 }
                 return routing;
             }

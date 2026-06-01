@@ -136,7 +136,6 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) activity_active: bool,
     pub(crate) welcome_handoff_visible: bool,
     pub(crate) text_scale_bits: u32,
-    pub(crate) body_top_offset_pixels_bits: u32,
     pub(crate) user_font_family: &'static str,
     pub(crate) assistant_font_family: &'static str,
     pub(crate) body: Vec<SingleSessionStyledLine>,
@@ -315,7 +314,7 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
     if app.has_activity_indicator() {
         push_streaming_activity_cue(&mut vertices, app, size, spinner_tick, None, None);
     }
-    push_single_session_selection(&mut vertices, app, size);
+    push_single_session_selection(&mut vertices, app, size, None);
     push_single_session_scrollbar(
         &mut vertices,
         app,
@@ -570,7 +569,7 @@ fn build_single_session_vertices_with_cached_body_internal(
             activity_cue_motion,
         );
     }
-    push_single_session_selection(&mut vertices, app, size);
+    push_single_session_selection(&mut vertices, app, size, Some(&viewport.lines));
     push_single_session_scrollbar_for_total_lines(
         &mut vertices,
         app,
@@ -1603,6 +1602,7 @@ fn push_single_session_inline_widget_card(
         inline_widget_bottom_limit_for_layout(app, session_layout, welcome_chrome_visible);
     let target_top = inline_widget_target_top(
         size,
+        app.render_inline_widget_kind(),
         app.text_scale(),
         body_bottom,
         welcome_chrome_visible,
@@ -7909,6 +7909,7 @@ fn push_single_session_selection(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
+    visible_body_lines: Option<&[SingleSessionStyledLine]>,
 ) {
     if !app.has_body_selection() && !app.has_draft_selection() {
         return;
@@ -7917,7 +7918,12 @@ fn push_single_session_selection(
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let char_width = single_session_body_char_width();
-    let visible_lines = single_session_visible_body(app, size);
+    let visible_lines_storage = if let Some(lines) = visible_body_lines {
+        lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>()
+    } else {
+        single_session_visible_body(app, size)
+    };
+    let visible_lines = &visible_lines_storage;
     let body_top = single_session_body_top_for_app(app, size);
     for segment in app.selection_segments(&visible_lines) {
         let selected_columns = segment
@@ -8368,7 +8374,7 @@ fn single_session_text_key_for_body_lines(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     _tick: u64,
-    body_top_offset_pixels: f32,
+    _body_top_offset_pixels: f32,
     body: Vec<SingleSessionStyledLine>,
     welcome_chrome_visible: bool,
 ) -> SingleSessionTextKey {
@@ -8433,7 +8439,6 @@ fn single_session_text_key_for_body_lines(
         activity_active: app.has_activity_indicator(),
         welcome_handoff_visible,
         text_scale_bits: app.text_scale().to_bits(),
-        body_top_offset_pixels_bits: body_top_offset_pixels.to_bits(),
         user_font_family: single_session_user_font_family(),
         assistant_font_family: single_session_assistant_font_family(),
         body,
@@ -8515,6 +8520,11 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
             && previous.text_scale_bits == key.text_scale_bits
             && user_font_compatible
     });
+    let width_layout_compatible = previous_key.is_some_and(|previous| {
+        previous.size.0 == key.size.0
+            && previous.text_scale_bits == key.text_scale_bits
+            && user_font_compatible
+    });
     let body_layout_compatible = previous_key.is_some_and(|previous| {
         previous.text_scale_bits == key.text_scale_bits
             && single_session_body_text_buffer_layout_bucket(previous.size, text_scale)
@@ -8529,12 +8539,13 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
             old_buffers.get_mut(index).and_then(Option::take)
         };
     let exact_previous = previous_key.filter(|_| exact_layout_compatible);
+    let width_previous = previous_key.filter(|_| width_layout_compatible);
     let body_previous = previous_key.filter(|_| body_layout_compatible);
 
     let title_buffer = take_reusable(
         &mut old_buffers,
         0,
-        exact_previous.is_some_and(|previous| previous.title == key.title),
+        width_previous.is_some_and(|previous| previous.title == key.title),
     )
     .unwrap_or_else(|| {
         single_session_text_buffer(
@@ -8672,7 +8683,7 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
     let version_buffer = take_reusable(
         &mut old_buffers,
         3,
-        exact_previous.is_some_and(|previous| previous.version == key.version),
+        width_previous.is_some_and(|previous| previous.version == key.version),
     )
     .unwrap_or_else(|| {
         single_session_text_buffer(
@@ -8709,7 +8720,7 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
     let welcome_hint_buffer = take_reusable(
         &mut old_buffers,
         6,
-        exact_previous.is_some_and(|previous| previous.welcome_hint == key.welcome_hint),
+        width_previous.is_some_and(|previous| previous.welcome_hint == key.welcome_hint),
     )
     .unwrap_or_else(|| {
         single_session_styled_text_buffer(
@@ -9204,6 +9215,7 @@ fn inline_widget_reserved_height(app: &SingleSessionApp) -> f32 {
 
 fn inline_widget_target_top(
     size: PhysicalSize<u32>,
+    kind: Option<InlineWidgetKind>,
     ui_scale: f32,
     body_bottom: f32,
     welcome_chrome_visible: bool,
@@ -9214,8 +9226,42 @@ fn inline_widget_target_top(
             + welcome_chrome_offset_pixels
             + fresh_welcome_inline_widget_gap_for_scale(ui_scale)
     } else {
-        body_bottom + INLINE_WIDGET_BODY_GAP
+        body_bottom + INLINE_WIDGET_BODY_GAP + inline_widget_card_padding_y(kind)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn inline_widget_body_and_card_vertical_geometry_for_test(
+    size: PhysicalSize<u32>,
+    kind: Option<InlineWidgetKind>,
+    ui_scale: f32,
+    body_base_bottom: f32,
+    line_count: usize,
+    text_width: f32,
+    reveal_progress: f32,
+    activity_reserved_height: f32,
+) -> Option<(f32, f32)> {
+    let typography = single_session_typography_for_scale(ui_scale);
+    let padding_y = inline_widget_card_padding_y(kind);
+    let visible_text_height = line_count as f32 * inline_widget_line_height(kind, &typography);
+    let reserved_height =
+        (visible_text_height + padding_y * 2.0 + INLINE_WIDGET_BODY_GAP) * reveal_progress;
+    let body_bottom =
+        (body_base_bottom - reserved_height - activity_reserved_height).max(PANEL_BODY_TOP_PADDING);
+    let target_top = inline_widget_target_top(size, kind, ui_scale, body_bottom, false, 0.0);
+    let bottom_limit =
+        (body_base_bottom - activity_reserved_height).min(single_session_draft_top(size));
+    inline_widget_card_layout_with_bottom_limit(
+        size,
+        kind,
+        &typography,
+        line_count,
+        text_width,
+        target_top,
+        reveal_progress,
+        bottom_limit,
+    )
+    .map(|layout| (body_bottom, layout.card.y))
 }
 
 pub(crate) fn single_session_body_bottom(size: PhysicalSize<u32>) -> f32 {
@@ -9528,6 +9574,7 @@ pub(crate) fn single_session_text_areas_for_state(
     let inline_widget_layout = if inline_widget_line_count > 0 {
         let target_top = inline_widget_target_top(
             size,
+            inline_widget_kind,
             ui_scale,
             body_bottom as f32,
             welcome_chrome_visible,

@@ -1182,6 +1182,19 @@ pub(crate) fn clear_test_render_state_for_tests() {
     });
 }
 
+/// Test-only: render just the onboarding welcome screen into `area`, using the
+/// exact same code path the live UI uses. Lets onboarding golden/snapshot tests
+/// capture the rendered copy without reaching into the private `onboarding`
+/// submodule.
+#[cfg(test)]
+pub(crate) fn draw_onboarding_welcome_for_tests(
+    frame: &mut ratatui::Frame,
+    app: &dyn crate::tui::TuiState,
+    area: ratatui::layout::Rect,
+) {
+    onboarding::draw_onboarding_welcome(frame, app, area);
+}
+
 #[derive(Clone)]
 enum CopyViewportData {
     Dense {
@@ -1563,6 +1576,28 @@ pub(crate) fn copy_point_from_screen(
                     .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
             })
     }
+}
+
+pub(crate) fn copy_pane_vertical_edge_point(
+    pane: crate::tui::CopySelectionPane,
+    column: u16,
+    row: u16,
+) -> Option<(crate::tui::CopySelectionPoint, bool)> {
+    let snapshot = copy_snapshot_for_pane(pane)?;
+    let area = snapshot.content_area;
+    if column < area.x || column >= area.x.saturating_add(area.width) || area.height == 0 {
+        return None;
+    }
+
+    let (edge_row, upward) = if row < area.y {
+        (area.y, true)
+    } else if row >= area.y.saturating_add(area.height) {
+        (area.y.saturating_add(area.height).saturating_sub(1), false)
+    } else {
+        return None;
+    };
+
+    copy_point_from_snapshot(&snapshot, column, edge_row).map(|point| (point, upward))
 }
 
 #[cfg(test)]
@@ -2028,13 +2063,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
     let donut_height: u16 = if show_donut { 14 } else { 0 };
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
+    // Elastic overscroll status line revealed when the user scrolls past the
+    // bottom of the transcript. Rendered directly below the input line.
+    let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
     let fixed_height = 1
         + queued_height
         + notification_height
         + inline_block_height
         + inline_ui_gap_height
         + input_height
-        + donut_height; // status + queued + notification + inline UI + gap + input + donut
+        + overscroll_height
+        + donut_height; // status + queued + notification + inline UI + gap + input + overscroll + donut
     let available_height = chat_area.height;
     let overflows = |prepared: &PreparedChatFrame| {
         (prepared.total_wrapped_lines().max(1) as u16) + fixed_height > available_height
@@ -2117,6 +2156,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(inline_block_height),   // Inline UI
                 Constraint::Length(inline_ui_gap_height),  // Inline UI/input spacing
                 Constraint::Length(input_height),          // Input
+                Constraint::Length(overscroll_height),     // Overscroll status line
                 Constraint::Length(donut_height),          // Donut animation
             ]
         } else {
@@ -2128,6 +2168,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(inline_block_height),  // Inline UI
                 Constraint::Length(inline_ui_gap_height), // Inline UI/input spacing
                 Constraint::Length(input_height),         // Input
+                Constraint::Length(overscroll_height),    // Overscroll status line
                 Constraint::Length(donut_height),         // Donut animation
             ]
         })
@@ -2341,8 +2382,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         &mut debug_capture,
     );
 
+    if overscroll_height > 0 {
+        input_ui::draw_overscroll_status(frame, app, chunks[7]);
+    }
+
     if donut_height > 0 {
-        animations::draw_idle_animation(frame, app, chunks[7]);
+        animations::draw_idle_animation(frame, app, chunks[8]);
     }
 
     // Draw info widget overlays (skip during idle animation - they look out of place)

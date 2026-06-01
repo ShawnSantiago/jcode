@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::{build, logging, session, startup_profile};
 
@@ -10,6 +11,8 @@ use super::provider_init::ProviderChoice;
 
 pub use jcode_selfdev_types::CLIENT_SELFDEV_ENV;
 pub use jcode_selfdev_types::client_selfdev_requested;
+
+const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
 
 fn repo_from_session_working_dir(session_id: &str) -> Option<PathBuf> {
     let session = session::Session::load(session_id).ok()?;
@@ -40,11 +43,72 @@ fn selfdev_repo_discovery_error(resume_session: Option<&str>) -> anyhow::Error {
 
     anyhow::anyhow!(
         "Could not find jcode repository for self-dev. Tried resumed session working_dir={}, current_dir={}, and build/executable fallbacks. Run from the jcode repo or use `selfdev enter` to create a self-dev session with a valid repo working directory.",
-        session_working_dir
-            .as_deref()
-            .unwrap_or("<none>"),
+        session_working_dir.as_deref().unwrap_or("<none>"),
         cwd
     )
+}
+
+fn selfdev_clone_dir() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("source").join("jcode"))
+}
+
+fn resolve_or_clone_repo_dir(resume_session: Option<&str>) -> Result<PathBuf> {
+    if let Some(repo_dir) = resolve_selfdev_cli_repo_dir(resume_session) {
+        return Ok(repo_dir);
+    }
+
+    let repo_dir = selfdev_clone_dir()?;
+    if repo_dir.exists() {
+        if build::is_jcode_repo(&repo_dir) {
+            return Ok(repo_dir);
+        }
+
+        anyhow::bail!(
+            "{}\nSelf-dev source directory exists but is not a jcode repository: {}\n\
+             Move it aside or clone {} there, then retry.",
+            selfdev_repo_discovery_error(resume_session),
+            repo_dir.display(),
+            JCODE_REPO_URL
+        );
+    }
+
+    let parent = repo_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid self-dev clone path: {}", repo_dir.display()))?;
+    std::fs::create_dir_all(parent)?;
+
+    output::stderr_info(format!(
+        "No local jcode checkout found; cloning self-dev source into {}...",
+        repo_dir.display()
+    ));
+
+    let status = Command::new("git")
+        .arg("clone")
+        .arg(JCODE_REPO_URL)
+        .arg(&repo_dir)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run git clone for self-dev source: {e}"))?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "Failed to clone self-dev source from {} into {} (git exited with {}).\n\
+             Clone it manually with: git clone {} {}",
+            JCODE_REPO_URL,
+            repo_dir.display(),
+            status,
+            JCODE_REPO_URL,
+            repo_dir.display()
+        );
+    }
+
+    if !build::is_jcode_repo(&repo_dir) {
+        anyhow::bail!(
+            "Cloned self-dev source is not a valid jcode repository: {}",
+            repo_dir.display()
+        );
+    }
+
+    Ok(repo_dir)
 }
 
 async fn wait_for_reloading_server() -> bool {
@@ -73,8 +137,8 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
     startup_profile::mark("run_self_dev_enter");
     crate::env::set_var(CLIENT_SELFDEV_ENV, "1");
 
-    let repo_dir = resolve_selfdev_cli_repo_dir(resume_session.as_deref())
-        .ok_or_else(|| selfdev_repo_discovery_error(resume_session.as_deref()))?;
+    let repo_dir = resolve_or_clone_repo_dir(resume_session.as_deref())?;
+    crate::env::set_var("JCODE_REPO_DIR", &repo_dir);
 
     startup_profile::mark("selfdev_session_create");
     let is_resume = resume_session.is_some();

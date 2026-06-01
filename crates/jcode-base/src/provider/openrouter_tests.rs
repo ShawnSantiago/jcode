@@ -1352,6 +1352,75 @@ fn test_kimi_routing_uses_endpoints_or_fallback() {
 }
 
 #[test]
+fn observed_session_provider_pin_sticks_without_fallbacks() {
+    // Simulates the KV-cache stickiness contract: after OpenRouter serves a
+    // request for this model from a concrete provider (recorded as an
+    // observed pin), every subsequent request must route to that exact same
+    // provider with fallbacks disabled so the upstream prompt cache stays warm.
+    let model = "anthropic/claude-sonnet-4.6";
+    let provider = OpenRouterProvider {
+        model: Arc::new(RwLock::new(model.to_string())),
+        provider_pin: Arc::new(Mutex::new(Some(ProviderPin {
+            model: model.to_string(),
+            provider: "anthropic".to_string(),
+            source: PinSource::Observed,
+            allow_fallbacks: true,
+            last_cache_read: None,
+        }))),
+        ..make_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let routing = rt.block_on(provider.effective_routing(model));
+
+    assert_eq!(
+        routing.order.as_deref(),
+        Some(["anthropic".to_string()].as_slice()),
+        "observed session provider should be pinned exactly"
+    );
+    assert!(
+        !routing.allow_fallbacks,
+        "observed session pin must disable fallbacks to preserve the KV cache"
+    );
+}
+
+#[test]
+fn observed_pin_yields_to_explicit_user_routing_order() {
+    // If the user explicitly narrowed routing themselves (base order set),
+    // their configured order wins over the auto-observed session pin.
+    let model = "anthropic/claude-sonnet-4.6";
+    let mut base = ProviderRouting::default();
+    base.order = Some(vec!["fireworks".to_string()]);
+    let provider = OpenRouterProvider {
+        model: Arc::new(RwLock::new(model.to_string())),
+        provider_routing: Arc::new(RwLock::new(base)),
+        provider_pin: Arc::new(Mutex::new(Some(ProviderPin {
+            model: model.to_string(),
+            provider: "anthropic".to_string(),
+            source: PinSource::Observed,
+            allow_fallbacks: true,
+            last_cache_read: None,
+        }))),
+        ..make_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let routing = rt.block_on(provider.effective_routing(model));
+
+    assert_eq!(
+        routing.order.as_deref(),
+        Some(["fireworks".to_string()].as_slice()),
+        "explicit user routing order should win over an observed session pin"
+    );
+}
+
+#[test]
 fn test_kimi_coding_header_detection_matches_endpoint_and_model() {
     assert!(should_send_kimi_coding_agent_headers(
         "https://api.kimi.com/coding/v1",
@@ -1504,4 +1573,46 @@ fn test_endpoint_detail_string() {
         "should contain quantization: {}",
         detail
     );
+}
+
+#[test]
+fn strict_openai_schema_endpoint_detects_mistral_profile() {
+    // Mistral direct profile rejects non-standard reasoning_content/thinking
+    // fields with a 422 (issue #261), so it must be flagged strict.
+    assert!(OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("mistral"),
+        "https://api.mistral.ai/v1"
+    ));
+    assert!(OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("MISTRAL"),
+        "https://example.com/v1"
+    ));
+}
+
+#[test]
+fn strict_openai_schema_endpoint_detects_mistral_api_base() {
+    assert!(OpenRouterProvider::strict_openai_schema_endpoint(
+        None,
+        "https://api.mistral.ai/v1"
+    ));
+    assert!(OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("custom"),
+        "https://API.MISTRAL.AI/v1"
+    ));
+}
+
+#[test]
+fn strict_openai_schema_endpoint_allows_other_providers() {
+    assert!(!OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("deepseek"),
+        "https://api.deepseek.com"
+    ));
+    assert!(!OpenRouterProvider::strict_openai_schema_endpoint(
+        None,
+        "https://openrouter.ai/api/v1"
+    ));
+    assert!(!OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("openai"),
+        "https://api.openai.com/v1"
+    ));
 }

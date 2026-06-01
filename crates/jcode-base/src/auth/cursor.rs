@@ -337,6 +337,16 @@ pub fn save_api_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove the saved Cursor API key from `~/.config/jcode/cursor.env` and the
+/// current process environment.
+pub fn clear_api_key() -> Result<()> {
+    let file_path = config_file_path()?;
+    crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
+
+    crate::env::remove_var("CURSOR_API_KEY");
+    Ok(())
+}
+
 fn config_file_path() -> Result<PathBuf> {
     let config_dir = crate::storage::app_config_dir()?;
     Ok(config_dir.join("cursor.env"))
@@ -361,6 +371,17 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
+        // Honor JCODE_HOME isolation (used by the onboarding sandbox and tests)
+        // the same way every other external-CLI auth detector does. Without this,
+        // Cursor would leak the real `~/.config/cursor/auth.json` into a sandbox
+        // while Codex/Claude/Gemini/Copilot correctly look under
+        // `$JCODE_HOME/external/...`, so a fresh-install sandbox would show only
+        // Cursor as importable.
+        if std::env::var_os("JCODE_HOME").is_some() {
+            return crate::storage::user_home_path(".config/cursor/auth.json")
+                .context("No home directory found for Cursor auth.json");
+        }
+
         let config_dir =
             dirs::config_dir().ok_or_else(|| anyhow::anyhow!("No config directory found"))?;
         Ok(config_dir.join("cursor").join("auth.json"))

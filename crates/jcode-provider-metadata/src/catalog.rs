@@ -9,7 +9,7 @@ pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://opencode.ai/zen/v1",
     api_key_env: "OPENCODE_API_KEY",
     env_file: "opencode.env",
-    setup_url: "https://opencode.ai/docs/providers#opencode-zen",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("minimax-m2.7"),
     requires_api_key: true,
 };
@@ -20,7 +20,7 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     api_base: "https://opencode.ai/zen/go/v1",
     api_key_env: "OPENCODE_GO_API_KEY",
     env_file: "opencode-go.env",
-    setup_url: "https://opencode.ai/docs/providers#opencode-go",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -53,7 +53,7 @@ pub const AI302_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.302.ai/v1",
     api_key_env: "302AI_API_KEY",
     env_file: "302ai.env",
-    setup_url: "https://opencode.ai/docs/providers#302ai",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("qwen3-235b-a22b-instruct-2507"),
     requires_api_key: true,
 };
@@ -64,7 +64,7 @@ pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://inference.baseten.co/v1",
     api_key_env: "BASETEN_API_KEY",
     env_file: "baseten.env",
-    setup_url: "https://opencode.ai/docs/providers#baseten",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
 };
@@ -75,8 +75,54 @@ pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.cortecs.ai/v1",
     api_key_env: "CORTECS_API_KEY",
     env_file: "cortecs.env",
-    setup_url: "https://opencode.ai/docs/providers#cortecs",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
+    requires_api_key: true,
+};
+
+// OpenRouter also has a dedicated provider implementation elsewhere, but it
+// speaks the standard OpenAI-compatible /api/v1 endpoint, so it can be driven
+// by `provider-doctor` / `provider-test-coverage` like any other
+// OpenAI-compatible provider. `default_model` is None so the doctor selects the
+// live catalog's first model unless `--model` is passed.
+pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "openrouter",
+    display_name: "OpenRouter",
+    api_base: "https://openrouter.ai/api/v1",
+    api_key_env: "OPENROUTER_API_KEY",
+    env_file: "openrouter.env",
+    setup_url: "https://openrouter.ai/keys",
+    default_model: None,
+    requires_api_key: true,
+};
+
+// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
+// endpoints, so they can be driven by `provider-doctor` /
+// `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
+// alias the native login-provider ids (`anthropic-api`, `openai-api`); auth
+// activation deliberately routes them through the native runtime, while the
+// live HTTP probes hit these hosts (Anthropic needs `x-api-key` +
+// `anthropic-version`, handled in the probe layer). `default_model` is None so
+// the doctor selects from the live catalog unless `--model` is passed.
+pub const ANTHROPIC_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "anthropic-api",
+    display_name: "Anthropic API",
+    api_base: "https://api.anthropic.com/v1",
+    api_key_env: "ANTHROPIC_API_KEY",
+    env_file: "anthropic.env",
+    setup_url: "https://docs.anthropic.com/en/api/openai-sdk",
+    default_model: None,
+    requires_api_key: true,
+};
+
+pub const OPENAI_NATIVE_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "openai-api",
+    display_name: "OpenAI API",
+    api_base: "https://api.openai.com/v1",
+    api_key_env: "OPENAI_API_KEY",
+    env_file: "openai.env",
+    setup_url: "https://platform.openai.com/api-keys",
+    default_model: None,
     requires_api_key: true,
 };
 
@@ -119,7 +165,7 @@ pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://app.frogbot.ai/api/v1",
     api_key_env: "FIRMWARE_API_KEY",
     env_file: "firmware.env",
-    setup_url: "https://opencode.ai/docs/providers#firmware",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -130,7 +176,7 @@ pub const HUGGING_FACE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfil
     api_base: "https://router.huggingface.co/v1",
     api_key_env: "HF_TOKEN",
     env_file: "huggingface.env",
-    setup_url: "https://opencode.ai/docs/providers#hugging-face",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
 };
@@ -141,7 +187,7 @@ pub const MOONSHOT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.moonshot.ai/v1",
     api_key_env: "MOONSHOT_API_KEY",
     env_file: "moonshotai.env",
-    setup_url: "https://opencode.ai/docs/providers#moonshot-ai",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -152,7 +198,7 @@ pub const NEBIUS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.tokenfactory.nebius.com/v1",
     api_key_env: "NEBIUS_API_KEY",
     env_file: "nebius.env",
-    setup_url: "https://opencode.ai/docs/providers#nebius-token-factory",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
 };
@@ -163,7 +209,7 @@ pub const SCALEWAY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.scaleway.ai/v1",
     api_key_env: "SCALEWAY_API_KEY",
     env_file: "scaleway.env",
-    setup_url: "https://opencode.ai/docs/providers#scaleway",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("qwen3-coder-30b-a3b-instruct"),
     requires_api_key: true,
 };
@@ -174,7 +220,7 @@ pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1",
     api_key_env: "STACKIT_API_KEY",
     env_file: "stackit.env",
-    setup_url: "https://opencode.ai/docs/providers#stackit",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
 };
@@ -359,7 +405,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 32] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 35] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -370,6 +416,9 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 32] = [
     AI302_PROFILE,
     BASETEN_PROFILE,
     CORTECS_PROFILE,
+    OPENROUTER_OPENAI_COMPAT_PROFILE,
+    ANTHROPIC_OPENAI_COMPAT_PROFILE,
+    OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
     DEEPSEEK_PROFILE,
     COMTEGRA_PROFILE,
     FPT_PROFILE,

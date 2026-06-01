@@ -49,6 +49,10 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if let Some(provider) = trimmed.strip_prefix("/logout ") {
+        if matches!(provider.trim(), "all" | "*") {
+            app.start_logout_all();
+            return true;
+        }
         let providers = crate::provider_catalog::tui_login_providers();
         if let Some(provider) =
             crate::provider_catalog::resolve_login_selection(provider, &providers)
@@ -286,8 +290,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "default-model" if provider.id == "openai-compatible" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai-compatible default-model <model|clear>"
-                            .to_string(),
+                        "Usage: /account openai-compatible default-model <model|clear>".to_string(),
                     ));
                 }
                 AccountCommand::SetOpenAiCompatDefaultModel(normalize_clearish_value(value))
@@ -1036,7 +1039,10 @@ fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
             assessment.credential_source.label(),
             assessment.credential_source_detail
         ));
-        lines.push(format!("  - Refresh: {}", assessment.refresh_support.label()));
+        lines.push(format!(
+            "  - Refresh: {}",
+            assessment.refresh_support.label()
+        ));
         lines.push(format!(
             "  - Validation method: {}",
             assessment.validation_method.label()

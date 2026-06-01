@@ -6,13 +6,19 @@ fn parse_diff_mode_name_maps_known_aliases() {
     use crate::config::DiffDisplayMode;
     assert_eq!(parse_diff_mode_name("off"), Some(DiffDisplayMode::Off));
     assert_eq!(parse_diff_mode_name("none"), Some(DiffDisplayMode::Off));
-    assert_eq!(parse_diff_mode_name("inline"), Some(DiffDisplayMode::Inline));
+    assert_eq!(
+        parse_diff_mode_name("inline"),
+        Some(DiffDisplayMode::Inline)
+    );
     assert_eq!(parse_diff_mode_name("on"), Some(DiffDisplayMode::Inline));
     assert_eq!(
         parse_diff_mode_name("full"),
         Some(DiffDisplayMode::FullInline)
     );
-    assert_eq!(parse_diff_mode_name("pinned"), Some(DiffDisplayMode::Pinned));
+    assert_eq!(
+        parse_diff_mode_name("pinned"),
+        Some(DiffDisplayMode::Pinned)
+    );
     assert_eq!(parse_diff_mode_name("file"), Some(DiffDisplayMode::File));
 }
 
@@ -49,4 +55,23 @@ fn parse_manual_subagent_spec_rejects_missing_prompt() {
     let err = parse_manual_subagent_spec("--model gpt-5.4")
         .expect_err("missing prompt should be rejected");
     assert!(err.contains("Missing prompt"));
+}
+
+#[test]
+fn openrouter_402_payment_required_is_non_retryable() {
+    use super::is_non_retryable_auto_poke_error;
+    let err = "OpenAI-compatible chat request failed\n  endpoint: \
+        https://openrouter.ai/api/v1/chat/completions\n  model: openai/gpt-5.4\n  \
+        auth: OPENROUTER_API_KEY\n  status: 402 Payment Required\n  response: \
+        {\"error\":{\"message\":\"This request requires more credits, or fewer max_tokens. \
+        You requested up to 65536 tokens, but can only afford 34424. To increase, visit \
+        https://openrouter.ai/settings/credits and add more credits\",\"code\":402}}";
+    assert!(is_non_retryable_auto_poke_error(err));
+}
+
+#[test]
+fn transient_server_error_remains_retryable_for_auto_poke() {
+    use super::is_non_retryable_auto_poke_error;
+    let err = "OpenAI-compatible chat request failed\n  status: 503 Service Unavailable";
+    assert!(!is_non_retryable_auto_poke_error(err));
 }

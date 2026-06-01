@@ -33,6 +33,7 @@ mod render;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
+pub(crate) use loading::latest_external_cli_session_secs;
 use loading::{build_messages_preview, build_search_index, crashed_sessions_from_all_sessions};
 pub use loading::{
     invalidate_session_list_cache, load_cached_sessions_grouped, load_servers, load_sessions,
@@ -350,11 +351,7 @@ impl SessionPicker {
         self.visible_sessions
             .iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
-            .max_by_key(|session| {
-                session
-                    .last_active_at
-                    .unwrap_or(session.last_message_time)
-            })
+            .max_by_key(|session| session.last_active_at.unwrap_or(session.last_message_time))
             .map(|session| session.resume_target.clone())
     }
 

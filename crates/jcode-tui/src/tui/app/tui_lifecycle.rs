@@ -9,6 +9,15 @@ impl App {
         self.pending_images = restored.pending_images;
         self.submit_input_on_startup = restored.submit_on_restore
             && (!self.input.is_empty() || !self.pending_images.is_empty());
+        crate::logging::info(&format!(
+            "Startup input restored: submit_on_restore={} input_chars={} pending_images={} queued_messages={} hidden_system={} => submit_input_on_startup={}",
+            restored.submit_on_restore,
+            self.input.chars().count(),
+            self.pending_images.len(),
+            restored.queued_messages.len(),
+            restored.hidden_queued_system_messages.len(),
+            self.submit_input_on_startup,
+        ));
         self.hidden_queued_system_messages = restored.hidden_queued_system_messages;
         if let Some(status_notice) = restored.startup_status_notice {
             self.set_status_notice(status_notice);
@@ -366,6 +375,7 @@ impl App {
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
+            startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_flow: None,
             onboarding_startup_checked: false,
@@ -484,12 +494,14 @@ impl App {
             pending_model_picker_load: None,
             model_picker_load_request_id: 0,
             pending_model_switch: None,
+            pending_route_selection: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
+            toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
             dictation_key: keybind::load_dictation_key(),
             scroll_keys: keybind::load_scroll_keys(),
@@ -544,6 +556,7 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
+            chat_overscroll_last: None,
             changelog_scroll: None,
             help_scroll: None,
             model_status_scroll: None,
@@ -746,6 +759,7 @@ impl App {
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
+            startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_flow: None,
             onboarding_startup_checked: false,
@@ -864,12 +878,14 @@ impl App {
             pending_model_picker_load: None,
             model_picker_load_request_id: 0,
             pending_model_switch: None,
+            pending_route_selection: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
+            toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
             dictation_key: keybind::load_dictation_key(),
             scroll_keys: keybind::load_scroll_keys(),
@@ -924,6 +940,7 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
+            chat_overscroll_last: None,
             changelog_scroll: None,
             help_scroll: None,
             model_status_scroll: None,

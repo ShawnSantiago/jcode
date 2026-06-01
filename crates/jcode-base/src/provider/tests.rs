@@ -188,6 +188,8 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         cursor: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
         use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
@@ -519,6 +521,85 @@ fn configured_openai_compatible_profile_routes_use_live_cache_when_not_active_pr
     });
 }
 
+#[test]
+fn standard_openrouter_catalog_refresh_is_noop_when_cache_fresh() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        runtime.block_on(async {
+            crate::provider_catalog::save_env_value_to_env_file(
+                "OPENROUTER_API_KEY",
+                "openrouter.env",
+                Some("sk-test-openrouter"),
+            )
+            .expect("save openrouter key");
+            // A fresh, non-empty standard OpenRouter cache should suppress the
+            // background refresh entirely so we never fire a needless network
+            // request on every picker render.
+            save_test_openrouter_model_cache(
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                &["openrouter/owl-alpha"],
+            );
+
+            assert!(
+                !openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
+                    "unit test fresh cache"
+                ),
+                "a fresh non-empty standard OpenRouter cache must not trigger a refresh"
+            );
+        });
+    });
+}
+
+#[test]
+fn standard_openrouter_catalog_refresh_skips_without_key() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        runtime.block_on(async {
+            // No OPENROUTER_API_KEY configured: the refresh must not be
+            // scheduled regardless of cache state.
+            assert!(
+                !openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
+                    "unit test missing key"
+                ),
+                "standard OpenRouter refresh must be skipped when no key is configured"
+            );
+        });
+    });
+}
+
+#[test]
+fn standard_openrouter_catalog_refresh_fires_when_named_profile_owns_slot() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        runtime.block_on(async {
+            crate::provider_catalog::save_env_value_to_env_file(
+                "OPENROUTER_API_KEY",
+                "openrouter.env",
+                Some("sk-test-openrouter"),
+            )
+            .expect("save openrouter key");
+            // Simulate an active named profile (e.g. NVIDIA NIM) occupying the
+            // shared OpenRouter/OpenAI-compatible slot: it sets the runtime env
+            // vars to point at a non-openrouter.ai endpoint. The standard
+            // OpenRouter catalog refresh must STILL fire so `/model` can list
+            // openrouter.ai models (issue #292). Cache is missing -> not fresh.
+            crate::env::set_var(
+                "JCODE_OPENROUTER_API_BASE",
+                "https://integrate.api.nvidia.com/v1",
+            );
+            crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "mynvidia");
+
+            assert!(
+                openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
+                    "unit test named profile owns slot"
+                ),
+                "standard OpenRouter refresh must fire even when a named profile sets JCODE_OPENROUTER_* env"
+            );
+        });
+    });
+}
+
 fn test_multi_provider_with_cursor() -> MultiProvider {
     MultiProvider {
         claude: RwLock::new(None),
@@ -530,6 +611,8 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         cursor: RwLock::new(Some(Arc::new(cursor::CursorCliProvider::new()))),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
         use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),

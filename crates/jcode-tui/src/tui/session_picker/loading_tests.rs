@@ -121,6 +121,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
         status: SessionStatus::Closed,
         needs_catchup: false,
         estimated_tokens: 0,
+        first_user_prompt: None,
         messages_preview: Vec::new(),
         search_index: "cache test".to_string(),
         server_name: None,
@@ -409,6 +410,56 @@ fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
             .iter()
             .any(|session| session.id == "session_saved_beyond_scan_limit"),
         "saved sessions should remain visible even when the recency scan limit is full"
+    );
+}
+
+#[test]
+fn load_sessions_preserves_snapshot_saved_when_journal_meta_omits_saved() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut session = Session::create_with_id(
+        "session_saved_legacy_journal".to_string(),
+        Some("/tmp/saved-legacy-journal".to_string()),
+        Some("Saved Legacy Journal".to_string()),
+    );
+    session.mark_saved(Some("Legacy Saved".to_string()));
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "saved-legacy-msg".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "saved session with old journal metadata".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save saved session");
+
+    let snapshot = crate::session::session_path(&session.id).expect("session path");
+    let journal = crate::session::session_journal_path_from_snapshot(&snapshot);
+    std::fs::write(
+        journal,
+        format!(
+            r#"{{"meta":{{"updated_at":{}}}}}
+"#,
+            serde_json::to_string(&chrono::Utc::now()).expect("updated_at json")
+        ),
+    )
+    .expect("write legacy journal");
+    invalidate_session_list_cache();
+
+    let sessions = load_sessions().expect("load sessions");
+    let loaded = sessions
+        .iter()
+        .find(|session| session.id == "session_saved_legacy_journal")
+        .expect("legacy saved session visible");
+    assert!(
+        loaded.saved,
+        "missing journal saved field must not clear snapshot saved state"
     );
 }
 

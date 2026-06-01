@@ -75,6 +75,9 @@ fn is_mouse_scroll_kind(kind: MouseEventKind) -> bool {
 impl App {
     const MOUSE_SCROLL_INTENT_LINES: i16 = 3;
     const MOUSE_SCROLL_MAX_QUEUE: i16 = 24;
+    /// How long the overscroll status line stays revealed after the last
+    /// downward overscroll tick before it rebounds away.
+    const OVERSCROLL_DWELL: std::time::Duration = std::time::Duration::from_millis(600);
 
     fn log_mouse_scroll_trace(
         &self,
@@ -669,11 +672,10 @@ impl App {
         match target {
             MouseScrollTarget::Chat => {
                 if direction < 0 {
-                    self.scroll_up(1);
+                    self.scroll_up(1)
                 } else {
-                    self.scroll_down(1);
+                    self.scroll_down(1)
                 }
-                true
             }
             MouseScrollTarget::SidePane => {
                 let current = if self.diff_pane_scroll == usize::MAX {
@@ -1369,7 +1371,15 @@ impl App {
         }
     }
 
-    pub(super) fn scroll_up(&mut self, amount: usize) {
+    /// Scroll the chat transcript up by `amount` lines.
+    ///
+    /// Returns `true` if the stored scroll position actually changed. Callers
+    /// (e.g. the mouse-wheel queue) rely on this to avoid accumulating
+    /// "phantom" scroll once the viewport is already pinned to the top.
+    pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
+        // Scrolling up cancels any pending overscroll rebound line immediately.
+        self.chat_overscroll_last = None;
+        let before = (self.scroll_offset, self.auto_scroll_paused);
         let max = self.scroll_max_estimate();
         if !self.auto_scroll_paused {
             let rendered_max = super::super::ui::last_max_scroll();
@@ -1383,6 +1393,7 @@ impl App {
         }
         self.auto_scroll_paused = true;
         self.maybe_queue_compacted_history_load();
+        before != (self.scroll_offset, self.auto_scroll_paused)
     }
 
     pub(super) fn pause_chat_auto_scroll(&mut self) {
@@ -1396,28 +1407,76 @@ impl App {
         self.auto_scroll_paused = true;
     }
 
-    pub(super) fn scroll_down(&mut self, amount: usize) {
+    /// Scroll the chat transcript down by `amount` lines.
+    ///
+    /// Returns `true` if the stored scroll position actually changed. When the
+    /// view is already following the bottom this is a no-op and returns
+    /// `false`, so the mouse-wheel queue does not accumulate phantom scroll
+    /// that would later have to be undone before scrolling up moves the view.
+    pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
         if !self.auto_scroll_paused {
-            return;
+            // Already pinned to the bottom: a further downward scroll is an
+            // "overscroll". Reveal the elastic status line and keep it dwelling.
+            self.register_chat_overscroll();
+            return false;
         }
+        let before = self.scroll_offset;
         let max = self.scroll_max_estimate();
         let rendered_max = super::super::ui::last_max_scroll();
+        // The renderer's exact extent is the authoritative ceiling. Only fall
+        // back to the (possibly inflated) estimate while streaming can leave
+        // `rendered_max` stale at 0 even though there is content to scroll.
         let bottom_threshold = if rendered_max > 0 {
             rendered_max.min(max)
-        } else {
+        } else if self.is_processing || !self.streaming_text.is_empty() {
             max
+        } else {
+            // Not streaming and nothing to scroll: we are already at the bottom.
+            0
         };
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
         if self.scroll_offset >= bottom_threshold {
             self.follow_chat_bottom();
+            true
         } else {
-            self.scroll_offset = self.scroll_offset.min(max);
+            // Never let the stored offset grow past the largest offset that
+            // still moves the rendered viewport. Otherwise scrolling down at
+            // (or near) the bottom silently accumulates "phantom" offset that
+            // later has to be undone before scrolling up moves the view again.
+            self.scroll_offset = self.scroll_offset.min(bottom_threshold);
+            self.scroll_offset != before
         }
     }
 
     pub(super) fn follow_chat_bottom(&mut self) {
         self.scroll_offset = 0;
         self.auto_scroll_paused = false;
+    }
+
+    /// Record an overscroll tick (downward scroll while already pinned to the
+    /// bottom). Reveals the elastic status line below the input and (re)starts
+    /// the dwell window after which it rebounds away.
+    pub(super) fn register_chat_overscroll(&mut self) {
+        self.chat_overscroll_last = Some(Instant::now());
+    }
+
+    /// Whether the overscroll status line is currently revealed.
+    pub(super) fn chat_overscroll_active(&self) -> bool {
+        self.chat_overscroll_last
+            .map(|t| t.elapsed() < Self::OVERSCROLL_DWELL)
+            .unwrap_or(false)
+    }
+
+    /// Drive the overscroll dwell timer. Returns `true` when the revealed state
+    /// changed (so the caller can request a redraw). Called every tick.
+    pub(super) fn update_chat_overscroll(&mut self) -> bool {
+        if let Some(t) = self.chat_overscroll_last
+            && t.elapsed() >= Self::OVERSCROLL_DWELL
+        {
+            self.chat_overscroll_last = None;
+            return true;
+        }
+        false
     }
 
     pub(super) fn debug_scroll_up(&mut self, amount: usize) {

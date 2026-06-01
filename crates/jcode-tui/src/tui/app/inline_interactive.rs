@@ -19,7 +19,8 @@ mod preview_request;
 use helpers::{
     agent_model_default_summary, agent_model_target_label, catchup_candidates,
     catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openrouter_route_model_id, picker_route_model_spec, save_agent_model_override,
+    openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
+    save_agent_model_override,
 };
 
 const REMOTE_MODEL_CATALOG_CACHE_FILE: &str = "remote_model_catalog_cache.json";
@@ -484,6 +485,7 @@ impl App {
         &mut self,
         signature: &ModelPickerCacheSignature,
         picker_started: std::time::Instant,
+        preserve_input: bool,
     ) -> bool {
         let Some(cache) = self.model_picker_cache.as_ref() else {
             return false;
@@ -506,8 +508,10 @@ impl App {
             filter: String::new(),
             preview: false,
         });
-        self.input.clear();
-        self.cursor_pos = 0;
+        if !preserve_input {
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
 
         if std::env::var("JCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
             crate::logging::info(&format!(
@@ -542,6 +546,14 @@ impl App {
     }
 
     pub(super) fn open_model_picker(&mut self) {
+        self.open_model_picker_inner(false);
+    }
+
+    fn open_model_picker_preserving_input(&mut self) {
+        self.open_model_picker_inner(true);
+    }
+
+    fn open_model_picker_inner(&mut self, preserve_input: bool) {
         let picker_started = std::time::Instant::now();
         const RECENT_AUTH_BOOST_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
         if self
@@ -591,7 +603,8 @@ impl App {
             current_effort.clone(),
             &available_efforts,
         );
-        if self.open_cached_model_picker_if_fresh(&cache_signature, picker_started) {
+        if self.open_cached_model_picker_if_fresh(&cache_signature, picker_started, preserve_input)
+        {
             return;
         }
 
@@ -604,7 +617,7 @@ impl App {
                 picker_started,
                 routes,
                 routes_ms,
-                false,
+                preserve_input,
                 false,
             );
             if self.inline_interactive_state.is_some() {
@@ -626,7 +639,7 @@ impl App {
                     picker_started,
                     routes,
                     routes_ms,
-                    false,
+                    preserve_input,
                     true,
                 );
                 return;
@@ -642,7 +655,7 @@ impl App {
             picker_started,
             routes,
             routes_ms,
-            false,
+            preserve_input,
             true,
         );
     }
@@ -1376,6 +1389,34 @@ impl App {
         )
     }
 
+    /// When a runtime model-picker preview is visible, route its favorite/default
+    /// hotkeys to the focused picker handler. Returns true if the key was consumed.
+    pub(super) fn model_picker_preview_hotkey(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<bool> {
+        let active = self
+            .inline_interactive_state
+            .as_ref()
+            .map(|picker| picker.preview && picker_is_runtime_model_picker(picker))
+            .unwrap_or(false);
+        if !active {
+            return Ok(false);
+        }
+        let is_default = modifiers.contains(KeyModifiers::CONTROL)
+            && key_char_eq_ignore_ascii_case(code, 'd');
+        let is_favorite = modifiers.contains(KeyModifiers::CONTROL)
+            && key_char_eq_ignore_ascii_case(code, 'f');
+        let is_cycle_favorite = modifiers.contains(KeyModifiers::ALT)
+            && key_char_eq_ignore_ascii_case(code, 'f');
+        if is_default || is_favorite || is_cycle_favorite {
+            self.handle_inline_interactive_key(code, modifiers)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(super) fn handle_inline_interactive_preview_key(
         &mut self,
         code: &KeyCode,
@@ -1718,10 +1759,24 @@ impl App {
                     spawned += 1;
                     names.push(name);
                 }
-                Ok(false) | Err(_) => failed.push(resume_target_manual_command(
-                    &resolved_target,
-                    socket.as_deref(),
-                )),
+                Ok(false) | Err(_) => {
+                    // No terminal emulator could be spawned. For a single jcode
+                    // session, fall back to resuming in the current terminal
+                    // instead of dead-ending with a manual command (issue #203).
+                    if targets.len() == 1
+                        && spawned == 0
+                        && matches!(resolved_target, ResumeTarget::JcodeSession { .. })
+                    {
+                        self.handle_session_picker_current_terminal_selection(std::slice::from_ref(
+                            target,
+                        ));
+                        return;
+                    }
+                    failed.push(resume_target_manual_command(
+                        &resolved_target,
+                        socket.as_deref(),
+                    ));
+                }
             }
         }
 
@@ -1870,6 +1925,14 @@ impl App {
             }
         }
 
+        // Single recovered session that could not get a new terminal: resume it
+        // in the current terminal instead of forcing a manual command (#203).
+        if spawned == 0 && recovered.len() == 1 && failed.len() == 1 {
+            self.handle_session_picker_current_terminal_selection(&[ResumeTarget::JcodeSession {
+                session_id: recovered[0].clone(),
+            }]);
+            return;
+        }
         if spawned > 0 && failed.is_empty() {
             self.push_display_message(DisplayMessage::system(format!(
                 "Restored {} crashed session(s) in new windows.",
@@ -1926,7 +1989,10 @@ impl App {
                 }
             }
             OverlayAction::Selected(result)
-                if matches!(self.session_picker_mode, SessionPickerMode::Onboarding { .. }) =>
+                if matches!(
+                    self.session_picker_mode,
+                    SessionPickerMode::Onboarding { .. }
+                ) =>
             {
                 let cli = match self.session_picker_mode {
                     SessionPickerMode::Onboarding { cli } => cli,
@@ -2054,7 +2120,7 @@ impl App {
             return;
         }
 
-        self.open_model_picker();
+        self.open_model_picker_preserving_input();
         if !self
             .inline_interactive_state
             .as_ref()
@@ -2312,6 +2378,10 @@ impl App {
                         self.inline_interactive_state = None;
                         self.start_logout_provider(provider);
                     }
+                    PickerAction::LogoutAll => {
+                        self.inline_interactive_state = None;
+                        self.start_logout_all();
+                    }
                     PickerAction::Usage {
                         title,
                         subtitle,
@@ -2392,6 +2462,7 @@ impl App {
                         } else {
                             picker_route_model_spec(&entry, route)
                         };
+                        let route_selection = picker_route_selection(&entry, route);
 
                         let effort = entry.effort.clone();
                         record_model_picker_selection(&bare_name, route, effort.as_deref());
@@ -2408,9 +2479,10 @@ impl App {
                             self.inline_interactive_state = None;
                             self.upstream_provider = None;
                             self.status_detail = None;
+                            self.pending_route_selection = Some(route_selection);
                             self.pending_model_switch = Some(spec);
                         } else {
-                            match self.provider.set_model(&spec) {
+                            match self.provider.set_route_selection(&route_selection) {
                                 Ok(()) => {
                                     self.inline_interactive_state = None;
                                     self.provider_session_id = None;
@@ -2426,6 +2498,8 @@ impl App {
                                         self.session.provider_key.as_deref(),
                                     );
                                     self.session.model = Some(active_model);
+                                    self.session.route_api_method =
+                                        Some(route_selection.api_method.clone());
                                     let _ = self.session.save();
                                 }
                                 Err(error) => {

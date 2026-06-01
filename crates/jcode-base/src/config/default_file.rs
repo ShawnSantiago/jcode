@@ -46,8 +46,9 @@ scroll_prompt_down = "ctrl+]"
 scroll_bookmark = "ctrl+g"
 
 # Optional fallback scroll bindings (useful on macOS terminals that forward Command)
-scroll_up_fallback = "cmd+k"
-scroll_down_fallback = "cmd+j"
+# Leave unset by default; on macOS Cmd+K / Cmd+J move up / down by prompt instead.
+scroll_up_fallback = ""
+scroll_down_fallback = ""
 
 # Workspace navigation (Niri-style)
 # Comma-separate multiple bindings to add aliases.
@@ -55,6 +56,14 @@ workspace_left = "alt+h"
 workspace_down = "alt+j"
 workspace_up = "alt+k"
 workspace_right = "alt+l"
+
+# Pane / mode toggles
+side_panel_toggle = "alt+m"
+copy_selection_toggle = "alt+y"
+diagram_pane_toggle = "alt+t"
+typing_scroll_lock_toggle = "alt+s"
+diff_mode_cycle = "alt+g"
+info_widget_toggle = "alt+i"
 
 # /resume picker Enter behavior. Options: "current-terminal" or "new-terminal".
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
@@ -155,7 +164,7 @@ persist_memory_injections = false
 update_channel = "stable"
 
 [websearch]
-# Preferred websearch engine: "duckduckgo" or "bing".
+# Preferred websearch engine: "duckduckgo", "bing", or "searxng".
 engine = "duckduckgo"
 # Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
 fallback_engines = ["bing"]
@@ -165,6 +174,13 @@ fallback_engines = ["bing"]
 # bing_api_key = ""
 # Bing market/region, for example "en-US" or "zh-CN".
 bing_market = "en-US"
+# SearXNG instance for the "searxng" engine. On some hosts (commonly Linux),
+# DuckDuckGo and Bing block scraped requests via TLS fingerprinting / IP
+# reputation and return an anti-bot page with no results. Pointing at a SearXNG
+# instance (self-hosted or trusted public) with the JSON format enabled avoids
+# this. Configure here or via the JCODE_SEARXNG_URL environment variable, then
+# set engine = "searxng" or add it to fallback_engines.
+# searxng_url = "https://searx.example.org"
 
 [tools]
 # Controls which built-in tools are sent to the model.
@@ -221,6 +237,11 @@ cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
 # copilot_premium = "zero"
+# Max seconds to wait for streaming data before timing out a request with no
+# data received. Raise this for slow reasoning models (e.g. DeepSeek) that think
+# silently for minutes before emitting tokens. Default: 180.
+# Also overridable per-launch via JCODE_STREAM_IDLE_TIMEOUT_SECS.
+# stream_idle_timeout_secs = 600
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
@@ -291,7 +312,16 @@ desktop_notifications = true
 # discord_channel_id = ""    # Channel ID to post in
 # discord_bot_user_id = ""   # Bot's user ID (for filtering own messages)
 # discord_reply_enabled = false  # Messages in channel become agent directives
-"#;
+
+# Jade cloud relay (outbound-only long polling, disabled by default).
+# Prefer environment variables for secrets:
+# JCODE_JADE_RELAY_API_BASE, JCODE_JADE_RELAY_TOKEN, JCODE_JADE_RELAY_TOKEN_ID,
+# JCODE_JADE_RELAY_USER_ID, JCODE_JADE_RELAY_SESSION_ID.
+# jade_relay_enabled = false
+# jade_relay_reply_enabled = false   # Deliver cloud prompts to one configured live session.
+# jade_relay_launch_enabled = false  # Allow cloud device commands to open headed local sessions.
+# jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
+	"#;
 
         std::fs::write(&path, default_content)?;
         Ok(path)

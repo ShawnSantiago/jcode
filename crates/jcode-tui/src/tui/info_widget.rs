@@ -63,7 +63,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::{render_tips_widget, tips_widget_height};
 use todos_render::{render_todos_compact, render_todos_expanded, render_todos_widget};
 #[cfg(test)]
-use usage_render::render_usage_bar;
+use usage_render::render_usage_pill;
 use usage_render::{render_context_usage_line, render_usage_compact, render_usage_widget};
 
 /// Types of info widgets that can be displayed
@@ -524,6 +524,8 @@ pub struct InfoWidgetData {
     pub native_compaction_threshold_tokens: Option<usize>,
     pub session_count: Option<usize>,
     pub session_name: Option<String>,
+    /// Current working directory for this session.
+    pub working_dir: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,

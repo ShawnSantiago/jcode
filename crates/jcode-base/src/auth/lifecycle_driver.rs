@@ -520,347 +520,31 @@ fn route_matches_spec(route: &ModelRoute, spec: &AuthLifecycleSpec) -> bool {
         || route.api_method.eq_ignore_ascii_case(spec.provider_id)
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAiCompatibleModelsResponse {
-    #[serde(default)]
-    data: Vec<OpenAiCompatibleModelInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiCompatibleModelInfo {
-    id: String,
-}
-
-pub(crate) async fn fetch_live_openai_compatible_models(
-    profile: OpenAiCompatibleProfile,
-    api_key: &str,
-) -> anyhow::Result<Vec<String>> {
-    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    let url = format!("{}/models", resolved.api_base.trim_end_matches('/'));
-    let request = crate::provider::shared_http_client()
-        .get(&url)
-        .bearer_auth(api_key);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(20), request.send())
-        .await
-        .context("timed out fetching live model catalog")?
-        .with_context(|| {
-            format!(
-                "fetch live {} model catalog from {url}",
-                resolved.display_name
-            )
-        })?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    ensure!(
-        status.is_success(),
-        "{} live model catalog failed (HTTP {}): {}",
-        resolved.display_name,
-        status,
-        body.trim()
-    );
-
-    let parsed: OpenAiCompatibleModelsResponse = serde_json::from_str(&body)
-        .with_context(|| format!("parse live {} model catalog", resolved.display_name))?;
-    let models = parsed
-        .data
-        .into_iter()
-        .map(|model| model.id.trim().to_string())
-        .filter(|model| {
-            !model.is_empty()
-                && crate::provider_catalog::openai_compatible_profile_model_supports_chat(
-                    resolved.id.as_str(),
-                    model,
-                )
-        })
-        .collect::<Vec<_>>();
-    ensure!(
-        !models.is_empty(),
-        "{} live model catalog returned no models",
-        resolved.display_name
-    );
-    Ok(models)
-}
-
-pub(crate) async fn run_live_openai_compatible_smoke(
-    profile: OpenAiCompatibleProfile,
-    api_key: &str,
-    model: &str,
-) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
-    let started = std::time::Instant::now();
-    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    let url = format!(
-        "{}/chat/completions",
-        resolved.api_base.trim_end_matches('/')
-    );
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "user", "content": "Reply with exactly AUTH_TEST_OK and nothing else."}
-        ],
-        "stream": false
-    });
-    let request = crate::provider::shared_http_client()
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(&body);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
-        .await
-        .context("timed out running live smoke completion")?
-        .with_context(|| format!("run live {} smoke completion", resolved.display_name))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    ensure!(
-        status.is_success(),
-        "{} live smoke failed (HTTP {}): {}",
-        resolved.display_name,
-        status,
-        text.trim()
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("parse live {} smoke response", resolved.display_name))?;
-    let content = parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .unwrap_or_default()
-        .trim();
-    ensure!(
-        content.contains("AUTH_TEST_OK"),
-        "{} live smoke returned unexpected content: {:?}",
-        resolved.display_name,
-        content
-    );
-    let mut stage = crate::live_tests::LiveVerificationStage::passed(
-        crate::live_tests::checkpoints::NON_STREAMING_CHAT_COMPLETION,
-    )
-    .with_duration_ms(started.elapsed().as_millis() as u64)
-    .with_evidence("http_status", serde_json::json!(status.as_u16()))
-    .with_evidence("matched_expected_content", serde_json::json!(true));
-    for key in ["id", "model", "usage", "cost"] {
-        if let Some(value) = parsed.get(key) {
-            stage = stage.with_evidence(key, value.clone());
-        }
-    }
-    Ok(stage)
-}
-
-pub(crate) async fn run_live_openai_compatible_stream_smoke(
-    profile: OpenAiCompatibleProfile,
-    api_key: &str,
-    model: &str,
-) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
-    let started = std::time::Instant::now();
-    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    let url = format!(
-        "{}/chat/completions",
-        resolved.api_base.trim_end_matches('/')
-    );
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "user", "content": "Reply with exactly STREAM_TEST_OK and nothing else."}
-        ],
-        "stream": true
-    });
-    let request = crate::provider::shared_http_client()
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(&body);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(45), request.send())
-        .await
-        .context("timed out running live stream smoke completion")?
-        .with_context(|| format!("run live {} stream smoke completion", resolved.display_name))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    ensure!(
-        status.is_success(),
-        "{} live stream smoke failed (HTTP {}): {}",
-        resolved.display_name,
-        status,
-        text.trim()
-    );
-
-    let mut content = String::new();
-    let mut chunk_count = 0usize;
-    let mut finish_reason = serde_json::Value::Null;
-    for line in text.lines() {
-        let Some(data) = line.trim().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data == "[DONE]" {
-            break;
-        }
-        if data.is_empty() {
-            continue;
-        }
-        let parsed: serde_json::Value = serde_json::from_str(data)
-            .with_context(|| format!("parse live {} stream chunk", resolved.display_name))?;
-        chunk_count += 1;
-        if let Some(delta) = parsed
-            .get("choices")
-            .and_then(|choices| choices.get(0))
-            .and_then(|choice| choice.get("delta"))
-            && let Some(part) = delta.get("content").and_then(|content| content.as_str())
-        {
-            content.push_str(part);
-        }
-        if let Some(reason) = parsed
-            .get("choices")
-            .and_then(|choices| choices.get(0))
-            .and_then(|choice| choice.get("finish_reason"))
-            .filter(|reason| !reason.is_null())
-        {
-            finish_reason = reason.clone();
-        }
-    }
-    ensure!(
-        content.contains("STREAM_TEST_OK"),
-        "{} live stream smoke returned unexpected content: {:?}",
-        resolved.display_name,
-        content
-    );
-    Ok(crate::live_tests::LiveVerificationStage::passed(
-        crate::live_tests::checkpoints::STREAMING_CHAT_COMPLETION,
-    )
-    .with_duration_ms(started.elapsed().as_millis() as u64)
-    .with_evidence("http_status", serde_json::json!(status.as_u16()))
-    .with_evidence("chunk_count", serde_json::json!(chunk_count))
-    .with_evidence("finish_reason", finish_reason)
-    .with_evidence("matched_expected_content", serde_json::json!(true)))
-}
-
-pub(crate) async fn run_live_openai_compatible_tool_smoke(
-    profile: OpenAiCompatibleProfile,
-    api_key: &str,
-    model: &str,
-) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
-    let started = std::time::Instant::now();
-    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    let url = format!(
-        "{}/chat/completions",
-        resolved.api_base.trim_end_matches('/')
-    );
-    let tool_name = "auth_tool_probe";
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "user", "content": "Call the auth_tool_probe tool now. Do not answer in text."}
-        ],
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": "A no-op live auth/tool-call smoke-test tool.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": false
-                    }
-                }
-            }
-        ],
-        "stream": false,
-        "max_tokens": 256
-    });
-    if !resolved.api_base.contains("fptcloud.com") {
-        body["tool_choice"] = serde_json::json!("auto");
-    }
-    let request = crate::provider::shared_http_client()
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(&body);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(45), request.send())
-        .await
-        .context("timed out running live tool-call smoke completion")?
-        .with_context(|| format!("run live {} tool-call smoke", resolved.display_name))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    ensure!(
-        status.is_success(),
-        "{} live tool-call smoke failed (HTTP {}): {}",
-        resolved.display_name,
-        status,
-        text.trim()
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&text).with_context(|| {
-        format!(
-            "parse live {} tool-call smoke response",
-            resolved.display_name
-        )
-    })?;
-    let tool_calls = parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("tool_calls"))
-        .and_then(|tool_calls| tool_calls.as_array())
-        .cloned()
-        .unwrap_or_default();
-    ensure!(
-        !tool_calls.is_empty(),
-        "{} live tool-call smoke returned no tool calls: {}",
-        resolved.display_name,
-        crate::util::truncate_str(text.trim(), 1200)
-    );
-    let function = tool_calls[0]
-        .get("function")
-        .and_then(|function| function.as_object())
-        .context("live tool-call smoke response missing function object")?;
-    let returned_name = function
-        .get("name")
-        .and_then(|name| name.as_str())
-        .unwrap_or_default();
-    ensure!(
-        returned_name == tool_name,
-        "{} live tool-call smoke returned unexpected tool name {:?}",
-        resolved.display_name,
-        returned_name
-    );
-    let arguments = function
-        .get("arguments")
-        .and_then(|arguments| arguments.as_str())
-        .context("live tool-call smoke response missing string arguments")?;
-    let parsed_arguments = crate::message::ToolCall::parse_streamed_input_to_object(arguments);
-    ensure!(
-        parsed_arguments.is_object(),
-        "{} live tool-call smoke returned non-object tool arguments: {:?}",
-        resolved.display_name,
-        arguments
-    );
-    let choice = parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let mut stage = crate::live_tests::LiveVerificationStage::passed(
-        crate::live_tests::checkpoints::TOOL_CALL_PARSE,
-    )
-    .with_duration_ms(started.elapsed().as_millis() as u64)
-    .with_evidence("http_status", serde_json::json!(status.as_u16()))
-    .with_evidence("tool_name", serde_json::json!(returned_name))
-    .with_evidence("tool_arguments", parsed_arguments)
-    .with_evidence(
-        "finish_reason",
-        choice
-            .get("finish_reason")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    );
-    for key in ["id", "model", "usage", "cost"] {
-        if let Some(value) = parsed.get(key) {
-            stage = stage.with_evidence(key, value.clone());
-        }
-    }
-    Ok(stage)
-}
+// The live provider probes were moved to `live_provider_probes` so they compile
+// into the shipping binary (used by `provider_e2e`). Re-export for the tests
+// below that reference them via `super::*`.
+#[cfg(test)]
+pub(crate) use crate::auth::live_provider_probes::{
+    fetch_live_openai_compatible_models, run_live_openai_compatible_smoke,
+    run_live_openai_compatible_stream_smoke, run_live_openai_compatible_tool_smoke,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// True when an OpenAI-compatible profile id is intentionally remapped onto a
+    /// native runtime (e.g. `anthropic-api` -> `claude-api`, `openai-api`) instead
+    /// of the generic `openai-compatible:<id>` route. Such profiles exist so
+    /// `provider-doctor` can drive the native Anthropic/OpenAI API-key surfaces,
+    /// but they fail the generic openai-compatible lifecycle contracts by design,
+    /// so the generic matrices skip them.
+    fn is_native_routed_compat_profile(
+        profile: &crate::provider_catalog::OpenAiCompatibleProfile,
+    ) -> bool {
+        crate::auth::lifecycle::normalized_auth_provider_id(Some(profile.id))
+            .is_some_and(|canonical| canonical != profile.id)
+    }
 
     fn env_truthy(key: &str) -> bool {
         std::env::var(key)
@@ -1223,7 +907,11 @@ mod tests {
             AuthLifecycleAuthPath::ProcessEnvPreseeded,
         ];
 
-        for profile in crate::provider_catalog::openai_compatible_profiles() {
+        for profile in crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+            .filter(|profile| !is_native_routed_compat_profile(profile))
+        {
             for auth_path in auth_paths {
                 let driver = AuthLifecycleDriver::new().unwrap_or_else(|error| {
                     panic!(
@@ -1231,7 +919,7 @@ mod tests {
                         profile.id, auth_path
                     )
                 });
-                let spec = AuthLifecycleSpec::openai_compatible_fixture(*profile, auth_path);
+                let spec = AuthLifecycleSpec::openai_compatible_fixture(profile, auth_path);
 
                 let result = driver
                     .run_openai_compatible_fixture(&spec)
@@ -1258,7 +946,14 @@ mod tests {
 
     #[test]
     fn provider_switch_reauth_matrix_recovers_from_stale_previous_provider_state() {
-        let profiles = crate::provider_catalog::openai_compatible_profiles();
+        // Native-routed profiles (Anthropic/OpenAI API-key) deliberately use a
+        // native runtime route, not the generic `openai-compatible:<id>` one, so
+        // exclude them from this generic switch/reauth contract.
+        let profiles: Vec<_> = crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+            .filter(|profile| !is_native_routed_compat_profile(profile))
+            .collect();
         assert!(
             profiles.len() >= 2,
             "switch/reauth matrix needs at least two OpenAI-compatible providers"

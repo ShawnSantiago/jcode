@@ -651,25 +651,21 @@ fn model_widget_renders_connection_type() {
 }
 
 #[test]
-fn usage_bar_shows_centered_numeric_label_when_space_allows() {
-    let line = super::render_usage_bar(200_000, 1_000_000, 26);
+fn usage_pill_renders_filled_and_empty_segments() {
+    let line = super::render_usage_pill(200_000, 1_000_000, 26);
     let text: String = line
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
 
-    assert!(text.starts_with('['), "expected opening bracket: {text}");
-    assert!(text.ends_with(']'), "expected closing bracket: {text}");
-    assert!(
-        text.contains("200k/1000k"),
-        "expected inline usage label: {text}"
-    );
+    assert!(text.contains('▰'), "expected filled pill segments: {text}");
+    assert!(text.contains('▱'), "expected empty pill segments: {text}");
 }
 
 #[test]
-fn usage_bar_omits_numeric_label_when_bar_too_narrow() {
-    let line = super::render_usage_bar(200_000, 1_000_000, 10);
+fn usage_pill_renders_when_narrow() {
+    let line = super::render_usage_pill(200_000, 1_000_000, 10);
     let text: String = line
         .spans
         .iter()
@@ -677,8 +673,8 @@ fn usage_bar_omits_numeric_label_when_bar_too_narrow() {
         .collect();
 
     assert!(
-        !text.contains("200k/1000k"),
-        "narrow bar should fall back to plain fill: {text}"
+        text.contains('▰') || text.contains('▱'),
+        "narrow bar should still render pill segments: {text}"
     );
 }
 
