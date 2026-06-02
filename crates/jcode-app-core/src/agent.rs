@@ -21,7 +21,7 @@ use self::streaming::{
 };
 use self::tools::{
     cap_sdk_tool_content_for_history, cap_tool_output_for_history, print_tool_summary,
-    tool_output_to_content_blocks,
+    tool_output_side_pane_images, tool_output_to_content_blocks,
 };
 use self::utils::trace_enabled;
 use crate::build;
@@ -217,6 +217,17 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    /// One-shot guard for the async MCP-registration race (#206).
+    ///
+    /// MCP servers connect on a background task and register `mcp__*` tools
+    /// seconds after the session starts (we deliberately do NOT block the first
+    /// turn on MCP connection, so the user can talk to the agent immediately).
+    /// The first turn therefore locks a snapshot without MCP tools. We allow
+    /// exactly one rebuild to pick them up — an intentional, one-time provider
+    /// prompt-cache miss. Once that rebuild happens (or we confirm there are no
+    /// MCP tools to wait for), this is set so the per-turn registry scan stops.
+    /// Reset whenever the tool list is intentionally unlocked.
+    mcp_late_register_resolved: bool,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
@@ -272,6 +283,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            mcp_late_register_resolved: false,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
@@ -355,9 +367,10 @@ impl Agent {
         }
         if let Some(model) = agent.session.model.clone() {
             let model_request =
-                crate::provider::MultiProvider::model_switch_request_for_session_model(
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
                     &model,
                     agent.session.provider_key.as_deref(),
+                    agent.session.route_api_method.as_deref(),
                 );
             if let Err(e) = crate::provider::set_model_with_auth_refresh(
                 agent.provider.as_ref(),
@@ -511,6 +524,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
+        self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
     }
 
@@ -570,6 +584,7 @@ impl Agent {
 
         self.cache_tracker.reset();
         self.locked_tools = None;
+        self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.session.save()?;
@@ -790,6 +805,7 @@ impl Agent {
             self.persist_session_best_effort("missing tool-output repair");
             self.cache_tracker.reset();
             self.locked_tools = None;
+            self.mcp_late_register_resolved = false;
         }
 
         repaired

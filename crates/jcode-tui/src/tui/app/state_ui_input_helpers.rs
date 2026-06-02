@@ -74,6 +74,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/clear", "Clear conversation history"),
     RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
     RegisteredCommand::public("/poke", "Poke model to resume with incomplete todos"),
+    RegisteredCommand::public("/plan", "Create a plan-only response in the side panel"),
     RegisteredCommand::public("/improve", "Autonomously improve the repository"),
     RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
     RegisteredCommand::public("/compact", "Compact context"),
@@ -98,6 +99,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/subscription", "Show jcode subscription status"),
     RegisteredCommand::public("/config", "Show or edit configuration"),
     RegisteredCommand::public("/log", "Mark the current location in the jcode logs"),
+    RegisteredCommand::public(
+        "/diff",
+        "Cycle or set diff display mode (off/inline/full/pinned/file)",
+    ),
     RegisteredCommand::public(
         "/onboarding-preview",
         "Preview the first-run onboarding screen",
@@ -1106,10 +1111,81 @@ impl App {
         if self.onboarding_preview_mode {
             return true;
         }
+        // While the guided onboarding flow is driving the pre-suggestion phases
+        // (model select / continue prompt), keep the welcome screen up even
+        // though the server may have pushed scaffolding messages. The flow
+        // renders its own body via `onboarding_welcome_kind()`.
+        if self.onboarding_flow_drives_welcome() {
+            return true;
+        }
         if !self.display_messages.is_empty() || self.is_processing {
             return false;
         }
         !self.suggestion_prompts().is_empty()
+    }
+
+    /// What the onboarding welcome screen should render in its body, driven by
+    /// the active guided flow phase. Defaults to the starter suggestion cards.
+    pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
+        use crate::tui::OnboardingWelcomeKind;
+        use crate::tui::app::onboarding_flow::OnboardingPhase;
+        match self.onboarding_phase() {
+            Some(OnboardingPhase::Login { import }) => {
+                let prompt = import.as_ref().and_then(|review| {
+                    review
+                        .current()
+                        .map(|candidate| crate::tui::LoginImportPrompt {
+                            provider_summary: candidate.provider_summary().to_string(),
+                            source_name: candidate.source_name().to_string(),
+                            position: review.position(),
+                            total: review.total(),
+                            yes_highlighted: review.yes_highlighted,
+                            seconds_left: review.seconds_remaining(),
+                        })
+                });
+                OnboardingWelcomeKind::Login { import: prompt }
+            }
+            Some(OnboardingPhase::TelemetryConsent {
+                yes_highlighted,
+                shown_at,
+            }) => {
+                let total = crate::tui::app::onboarding_flow::DECISION_TIMEOUT.as_secs();
+                let seconds_left = total.saturating_sub(shown_at.elapsed().as_secs());
+                OnboardingWelcomeKind::TelemetryConsent {
+                    yes_highlighted: *yes_highlighted,
+                    seconds_left,
+                }
+            }
+            Some(OnboardingPhase::ModelSelect) => OnboardingWelcomeKind::Suggestions,
+            Some(OnboardingPhase::ContinuePrompt {
+                cli,
+                yes_highlighted,
+                shown_at,
+            }) => {
+                let total = crate::tui::app::onboarding_flow::DECISION_TIMEOUT.as_secs();
+                let seconds_left = total.saturating_sub(shown_at.elapsed().as_secs());
+                OnboardingWelcomeKind::ContinuePrompt {
+                    cli_label: cli.label().to_string(),
+                    yes_highlighted: *yes_highlighted,
+                    seconds_left,
+                }
+            }
+            _ => OnboardingWelcomeKind::Suggestions,
+        }
+    }
+
+    /// Whether the guided onboarding flow is in a phase that should take over
+    /// the welcome screen body (login, telemetry, or continue prompt). The
+    /// transcript-pick phase uses the session-picker overlay instead, and the
+    /// suggestions phase is the default welcome body.
+    fn onboarding_flow_drives_welcome(&self) -> bool {
+        use crate::tui::app::onboarding_flow::OnboardingPhase;
+        matches!(
+            self.onboarding_phase(),
+            Some(OnboardingPhase::Login { .. })
+                | Some(OnboardingPhase::TelemetryConsent { .. })
+                | Some(OnboardingPhase::ContinuePrompt { .. })
+        )
     }
 
     /// Get suggestion prompts for new users on the initial empty screen.
@@ -1165,7 +1241,7 @@ impl App {
         ];
 
         prompts.push((
-            "Continue my last CLI agent session".to_string(),
+            "Continue my last Codex CLI / Claude Code session".to_string(),
             latest_external_cli_continuation_prompt().unwrap_or_else(|| {
                 "Find my recent Codex or Claude Code sessions, identify the latest useful one, summarize what was happening, and continue from there.".to_string()
             }),
@@ -1313,6 +1389,7 @@ impl App {
                 | "/goals"
                 | "/goals show"
                 | "/swarm"
+                | "/plan"
                 | "/improve"
                 | "/refactor"
                 | "/rewind"

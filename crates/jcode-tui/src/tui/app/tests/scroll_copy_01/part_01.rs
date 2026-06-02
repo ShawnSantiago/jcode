@@ -727,6 +727,53 @@ fn test_local_alt_m_toggles_image_side_panel_visibility() {
 }
 
 #[test]
+fn test_explicitly_hidden_image_side_panel_stays_hidden_after_server_reload() {
+    // Reproduces an Alt+M hide being undone by a server reload/reconnect: the
+    // history snapshot repopulates remote_side_pane_images while
+    // pinned_images_seen_count resets to 0, which previously looked like new
+    // images and re-revealed the panel.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot::default();
+    app.remote_side_pane_images.push(crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: "image-data".to_string(),
+        label: Some("preview.png".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+    });
+
+    // User explicitly hides the image side panel.
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert!(app.side_panel_user_hidden);
+    assert!(app.side_panel_explicit_hidden);
+
+    // Simulate a server reload/reconnect: the seen count is reset while the
+    // image snapshot is re-applied with the same images.
+    app.pinned_images_seen_count = 0;
+    app.remote_side_pane_images = vec![crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: "image-data".to_string(),
+        label: Some("preview.png".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+    }];
+
+    app.update_pinned_images_auto_hide();
+
+    // The panel must remain hidden because the user explicitly closed it.
+    assert!(app.side_panel_user_hidden);
+    assert!(app.side_panel_explicit_hidden);
+    assert!(app.pinned_images_auto_hide_deadline.is_none());
+
+    // Alt+M still toggles it back on.
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert!(!app.side_panel_user_hidden);
+    assert!(!app.side_panel_explicit_hidden);
+    assert_eq!(app.status_notice(), Some("Image side panel: ON".to_string()));
+}
+
+#[test]
 fn test_pinned_image_side_panel_auto_hides_and_mentions_alt_m() {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -960,4 +1007,55 @@ fn test_ctrl_digit_side_panel_preset_in_app() {
     app.handle_key(KeyCode::Char('4'), KeyModifiers::CONTROL)
         .unwrap();
     assert_eq!(app.diagram_pane_ratio_target, 100);
+}
+
+#[test]
+fn test_chat_overscroll_reveals_status_line_then_rebounds() {
+    let _lock = scroll_render_test_lock();
+
+    let (mut app, mut terminal) = create_scroll_test_app(80, 14, 0, 36);
+
+    // Give the app some context so the overscroll line has a percentage to show.
+    app.context_info = crate::prompt::ContextInfo {
+        total_chars: 40_000,
+        ..Default::default()
+    };
+    app.context_limit = 200_000;
+
+    // Pinned to the bottom: no overscroll line yet.
+    let pinned = render_and_snap(&app, &mut terminal);
+    assert!(!app.chat_overscroll_active(), "should start without overscroll");
+    assert!(
+        !pinned.contains("▰") && !pinned.contains("▱"),
+        "overscroll bar should be hidden while pinned"
+    );
+
+    // Scroll down at the bottom => overscroll registered, line revealed.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(
+        app.chat_overscroll_active(),
+        "overscroll should be active after scrolling down at the bottom"
+    );
+    let revealed = render_and_snap(&app, &mut terminal);
+    assert!(
+        revealed.contains("▰") || revealed.contains("▱"),
+        "overscroll status line should show context bar: {revealed:?}"
+    );
+
+    // Scrolling up cancels the overscroll line immediately.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(
+        !app.chat_overscroll_active(),
+        "scrolling up should cancel the overscroll line"
+    );
 }

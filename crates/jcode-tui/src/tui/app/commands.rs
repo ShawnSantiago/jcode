@@ -6,6 +6,9 @@ pub(super) use super::commands_improve::{
     parse_refactor_command, refactor_launch_notice, refactor_mode_for, refactor_stop_notice,
     refactor_stop_prompt, restore_improve_mode, session_improve_mode_for,
 };
+pub(super) use super::commands_plan::{
+    build_plan_prompt, handle_plan_command_local, parse_plan_command, plan_launch_notice,
+};
 #[cfg(test)]
 pub(super) use super::commands_review::queue_autojudge_remote;
 pub(super) use super::commands_review::{
@@ -62,9 +65,7 @@ pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, St
         "/poke on" => Some(Ok(PokeCommand::On)),
         "/poke off" => Some(Ok(PokeCommand::Off)),
         "/poke status" => Some(Ok(PokeCommand::Status)),
-        _ if trimmed.starts_with("/poke ") => {
-            Some(Err("Usage: /poke [on|off|status]".to_string()))
-        }
+        _ if trimmed.starts_with("/poke ") => Some(Err("Usage: /poke [on|off|status]".to_string())),
         _ => None,
     }
 }
@@ -144,8 +145,14 @@ pub(super) fn is_non_retryable_auto_poke_error(error: &str) -> bool {
         "401 unauthorized",
         "403 forbidden",
         "insufficient_quota",
+        "402 payment required",
+        "payment required",
+        "requires more credits",
+        "add more credits",
+        "more credits",
         "billing",
         "credit balance",
+        "out of credits",
     ];
 
     deterministic_markers
@@ -862,6 +869,59 @@ pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool 
     true
 }
 
+/// Parse an explicit diff-mode name accepted by `/diff <mode>`. Returns `None`
+/// for unrecognized values so the caller can report a usage error.
+fn parse_diff_mode_name(value: &str) -> Option<crate::config::DiffDisplayMode> {
+    use crate::config::DiffDisplayMode;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "hide" | "hidden" => Some(DiffDisplayMode::Off),
+        "inline" | "on" => Some(DiffDisplayMode::Inline),
+        "full" | "full-inline" | "full_inline" | "fullinline" | "inline-full" => {
+            Some(DiffDisplayMode::FullInline)
+        }
+        "pinned" | "pin" | "pane" => Some(DiffDisplayMode::Pinned),
+        "file" | "fullfile" | "full-file" => Some(DiffDisplayMode::File),
+        _ => None,
+    }
+}
+
+fn apply_diff_mode(app: &mut App, mode: crate::config::DiffDisplayMode) {
+    app.diff_mode = mode;
+    if !app.diff_pane_visible() {
+        app.diff_pane_focus = false;
+    }
+    app.set_status_notice(&format!("Diffs: {}", app.diff_mode.label()));
+}
+
+pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/diff") else {
+        return false;
+    };
+    let arg = rest.trim();
+
+    if arg.is_empty() || arg.eq_ignore_ascii_case("cycle") || arg.eq_ignore_ascii_case("next") {
+        let next = app.diff_mode.cycle();
+        apply_diff_mode(app, next);
+        return true;
+    }
+
+    if arg.eq_ignore_ascii_case("status") {
+        app.push_display_message(DisplayMessage::system(format!(
+            "Diff mode: {} (use /diff [off|inline|full|pinned|file] or /diff to cycle)",
+            app.diff_mode.label()
+        )));
+        return true;
+    }
+
+    match parse_diff_mode_name(arg) {
+        Some(mode) => apply_diff_mode(app, mode),
+        None => app.push_display_message(DisplayMessage::error(
+            "Usage: /diff [off|inline|full|pinned|file|cycle|status]".to_string(),
+        )),
+    }
+    true
+}
+
 pub(super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = slash_command_rest(trimmed, "/log") else {
         return false;
@@ -872,9 +932,7 @@ pub(super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool {
     let note = parts.next().unwrap_or_default().trim();
 
     if subcommand != "mark" {
-        app.push_display_message(DisplayMessage::error(
-            "Usage: /log mark [note]".to_string(),
-        ));
+        app.push_display_message(DisplayMessage::error("Usage: /log mark [note]".to_string()));
         return true;
     }
 
@@ -1215,9 +1273,7 @@ fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
 
     let question = trimmed.strip_prefix("/btw").unwrap_or_default().trim();
     if question.is_empty() {
-        app.push_display_message(DisplayMessage::error(
-            "Usage: /btw <question>".to_string(),
-        ));
+        app.push_display_message(DisplayMessage::error("Usage: /btw <question>".to_string()));
         return true;
     }
 
@@ -1371,8 +1427,7 @@ fn git_command_repo_dir(app: &App) -> Result<PathBuf, String> {
 
     if app.is_remote {
         return Err(
-            "Unable to run /git: the remote session does not have a working directory."
-                .to_string(),
+            "Unable to run /git: the remote session does not have a working directory.".to_string(),
         );
     }
 
@@ -1473,10 +1528,7 @@ fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 fn transcript_opened_message(path: &std::path::Path) -> String {
-    format!(
-        "Opened transcript file:\n\n  {}",
-        path.display()
-    )
+    format!("Opened transcript file:\n\n  {}", path.display())
 }
 
 fn transcript_path_message(path: &std::path::Path) -> String {
@@ -1573,6 +1625,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
         app.open_session_picker();
+        return true;
+    }
+
+    if let Some(command) = parse_plan_command(trimmed) {
+        handle_plan_command_local(app, command);
         return true;
     }
 

@@ -76,6 +76,245 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
         .alignment(align),
     );
 
+    use crate::tui::OnboardingWelcomeKind;
+    match app.onboarding_welcome_kind() {
+        OnboardingWelcomeKind::Login { import } => {
+            lines.push(Line::from(""));
+            match import {
+                None => {
+                    lines.push(
+                        Line::from(Span::styled(
+                            "First, log in to get started.",
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .alignment(align),
+                    );
+                    lines.push(
+                        Line::from(Span::styled(
+                            "Press Enter to choose a provider.",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                }
+                Some(prompt) => {
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!(
+                                "We found {} existing login{}.",
+                                prompt.total,
+                                if prompt.total == 1 { "" } else { "s" },
+                            ),
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .alignment(align),
+                    );
+                    lines.push(Line::from(""));
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("Login {} of {}", prompt.position, prompt.total),
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled("Import ", Style::default().fg(rgb(200, 200, 200))),
+                            Span::styled(
+                                prompt.provider_summary.clone(),
+                                Style::default()
+                                    .fg(welcome_accent())
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!(" ({})?", prompt.source_name),
+                                Style::default().fg(dim_color()),
+                            ),
+                        ])
+                        .alignment(align),
+                    );
+                    lines.push(Line::from(""));
+
+                    // Yes / No options; the highlighted one is bold + accented.
+                    let (yes_style, no_style) = if prompt.yes_highlighted {
+                        (
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                            Style::default().fg(dim_color()),
+                        )
+                    } else {
+                        (
+                            Style::default().fg(dim_color()),
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                        )
+                    };
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled("  Yes  ", yes_style),
+                            Span::raw("   "),
+                            Span::styled("  No  ", no_style),
+                        ])
+                        .alignment(align),
+                    );
+                    lines.push(Line::from(""));
+                    lines.push(
+                        Line::from(Span::styled(
+                            "Left/right or h/l to move, Enter or Space to choose (y / n also work).",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("Auto-selects in {}s.", prompt.seconds_left),
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                }
+            }
+            return lines;
+        }
+        OnboardingWelcomeKind::TelemetryConsent {
+            yes_highlighted,
+            seconds_left,
+        } => {
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(Span::styled(
+                    "Help improve jcode?",
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .alignment(align),
+            );
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(Span::styled(
+                    "Share your prompts and transcripts so we can improve the product.",
+                    Style::default().fg(rgb(200, 200, 200)),
+                ))
+                .alignment(align),
+            );
+            lines.push(
+                Line::from(Span::styled(
+                    "This is optional and off by default. You can change it later.",
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            lines.push(Line::from(""));
+
+            // Yes / No options; the highlighted one is bold + accented.
+            let (yes_style, no_style) = if yes_highlighted {
+                (
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                    Style::default().fg(dim_color()),
+                )
+            } else {
+                (
+                    Style::default().fg(dim_color()),
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                )
+            };
+            lines.push(
+                Line::from(vec![
+                    Span::styled("  Yes  ", yes_style),
+                    Span::raw("   "),
+                    Span::styled("  No  ", no_style),
+                ])
+                .alignment(align),
+            );
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(Span::styled(
+                    "Left/right or h/l to move, Enter or Space to choose (y / n also work).",
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            lines.push(
+                Line::from(Span::styled(
+                    format!("Declines automatically in {seconds_left}s."),
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            return lines;
+        }
+        OnboardingWelcomeKind::ContinuePrompt {
+            cli_label,
+            yes_highlighted,
+            seconds_left,
+        } => {
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(Span::styled(
+                    format!("Continue where you left off in {cli_label}?"),
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .alignment(align),
+            );
+            lines.push(Line::from(""));
+
+            // Yes / No options; the highlighted one is bold + accented.
+            let (yes_style, no_style) = if yes_highlighted {
+                (
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                    Style::default().fg(dim_color()),
+                )
+            } else {
+                (
+                    Style::default().fg(dim_color()),
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                )
+            };
+            lines.push(
+                Line::from(vec![
+                    Span::styled("  Yes  ", yes_style),
+                    Span::raw("   "),
+                    Span::styled("  No  ", no_style),
+                ])
+                .alignment(align),
+            );
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(Span::styled(
+                    "Left/right or h/l to move, Enter or Space to choose (y / n also work).",
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            lines.push(
+                Line::from(Span::styled(
+                    format!("Opens the resume menu automatically in {seconds_left}s…"),
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            return lines;
+        }
+        OnboardingWelcomeKind::Suggestions => {}
+    }
+
     let suggestions = app.suggestion_prompts();
     if !suggestions.is_empty() {
         lines.push(Line::from(""));

@@ -1,5 +1,5 @@
 pub mod account_picker;
-mod app;
+pub(crate) mod app;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -135,6 +135,11 @@ pub trait TuiState {
     fn scroll_offset(&self) -> usize;
     /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
     fn auto_scroll_paused(&self) -> bool;
+    /// Whether the elastic overscroll status line (revealed by scrolling past
+    /// the bottom of the transcript) is currently shown.
+    fn chat_overscroll_active(&self) -> bool {
+        false
+    }
     fn provider_name(&self) -> String;
     fn provider_model(&self) -> String;
     /// Upstream provider (e.g., which provider OpenRouter routed to)
@@ -268,6 +273,8 @@ pub trait TuiState {
     fn diagram_scroll(&self) -> (i32, i32);
     /// Diagram pane width ratio percentage
     fn diagram_pane_ratio(&self) -> u8;
+    /// Whether the user has manually resized the diagram/side pane width.
+    fn diagram_pane_ratio_user_adjusted(&self) -> bool;
     /// Whether the diagram pane ratio is currently animating
     fn diagram_pane_animating(&self) -> bool;
     /// Whether the pinned diagram pane is visible
@@ -348,6 +355,12 @@ pub trait TuiState {
     /// previewing onboarding.
     fn onboarding_welcome_active(&self) -> bool {
         self.onboarding_preview_mode()
+    }
+    /// What the onboarding welcome screen should render in its body. Returns
+    /// `Suggestions` by default (the starter cards); the guided flow overrides
+    /// this to drive the model-select and continue-prompt phases.
+    fn onboarding_welcome_kind(&self) -> OnboardingWelcomeKind {
+        OnboardingWelcomeKind::Suggestions
     }
     /// Suggestion prompts for new users (shown in initial empty state).
     /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
@@ -559,6 +572,55 @@ pub enum PickerKind {
     Usage,
 }
 
+/// What the first-run onboarding welcome screen should render in its body,
+/// driven by the active onboarding flow phase. `Suggestions` is the default
+/// resting state (the starter prompt cards).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnboardingWelcomeKind {
+    /// Ask the user to log in first. Shown on a fresh install that booted
+    /// without working credentials.
+    ///
+    /// When `import` is `Some`, we detected importable external logins and are
+    /// walking the user through them one at a time (a yes/no prompt per login).
+    /// When `None`, there was nothing to import and the card points the user at
+    /// the provider picker.
+    Login { import: Option<LoginImportPrompt> },
+    /// Ask whether to share prompt/transcript content with telemetry, with a
+    /// live decision countdown. `yes_highlighted` reflects the current choice.
+    TelemetryConsent {
+        yes_highlighted: bool,
+        seconds_left: u64,
+    },
+    /// "Continue where you left off in <cli>?" with a highlightable Yes/No
+    /// selector and a live decision countdown (seconds remaining).
+    ContinuePrompt {
+        cli_label: String,
+        yes_highlighted: bool,
+        seconds_left: u64,
+    },
+    /// The starter prompt-suggestion cards (default).
+    Suggestions,
+}
+
+/// Render-friendly snapshot of the current step in the per-candidate login
+/// import walkthrough. Describes which detected login is being reviewed and
+/// which Yes/No option is currently highlighted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginImportPrompt {
+    /// Human-readable provider summary (e.g. "OpenAI/Codex").
+    pub provider_summary: String,
+    /// Where the credentials came from (e.g. "Codex auth.json").
+    pub source_name: String,
+    /// 1-based position of this candidate.
+    pub position: usize,
+    /// Total number of detected candidates.
+    pub total: usize,
+    /// Whether the "Yes" option is currently highlighted (vs. "No").
+    pub yes_highlighted: bool,
+    /// Seconds left before this candidate auto-commits its default.
+    pub seconds_left: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineInteractiveLayout {
     Compact,
@@ -738,6 +800,7 @@ pub enum PickerAction {
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
     Logout(crate::provider_catalog::LoginProviderDescriptor),
+    LogoutAll,
     Usage {
         id: String,
         title: String,
@@ -791,7 +854,8 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
         | PickerAction::AgentTarget(_)
-        | PickerAction::AgentModelChoice { .. } => 0,
+        | PickerAction::AgentModelChoice { .. }
+        | PickerAction::LogoutAll => 0,
         PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
             provider_id.capacity() + label.capacity()
         }
@@ -1060,6 +1124,17 @@ fn idle_donut_active_with_policy(
         return false;
     }
 
+    // The onboarding welcome screen draws the same live donut, but it also
+    // shows a welcome/login card so `display_messages()` is not empty.  Keep the
+    // animation loop running smoothly while that screen is up (even past the
+    // deep-idle threshold) so the donut spins as an attention grab instead of
+    // only repainting on input events.
+    if state.onboarding_welcome_active() {
+        return policy.enable_decorative_animations
+            && crate::config::config().display.idle_animation
+            && policy.tier.idle_animation_enabled();
+    }
+
     // The idle donut is decorative.  Leaving many dormant tabs/sessions open
     // should not keep every TUI repainting forever, especially when those tabs
     // are hidden behind a terminal multiplexer or kitty single-instance window.
@@ -1155,6 +1230,7 @@ pub(crate) fn redraw_interval_with_policy(
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
+        && !state.onboarding_welcome_active()
     {
         return REDRAW_DEEP_IDLE;
     }
@@ -1231,6 +1307,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
+        && !state.onboarding_welcome_active()
     {
         return false;
     }
@@ -1247,6 +1324,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         || !state.streaming_text().is_empty()
         || state.status_notice().is_some()
         || state.has_pending_mouse_scroll_animation()
+        || state.chat_overscroll_active()
         || state.has_notification()
         || rate_limit_countdown_redraw_active(state)
         || state.remote_startup_phase_active()

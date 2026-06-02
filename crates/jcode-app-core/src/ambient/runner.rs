@@ -917,7 +917,7 @@ impl AmbientRunnerHandle {
             active_sessions,
         );
 
-        let initial_message = "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the todos tool.".to_string();
+        let initial_message = "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool.".to_string();
 
         Ok((system_prompt, initial_message))
     }

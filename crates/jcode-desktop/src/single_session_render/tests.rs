@@ -254,7 +254,14 @@ fn small_window_inline_activity_and_composer_lanes_do_not_overlap() {
         &typography,
         app.render_inline_widget_visible_line_count(),
         inline_width,
-        inline_widget_target_top(size, app.text_scale(), layout.body_bottom(), false, 0.0),
+        inline_widget_target_top(
+            size,
+            inline_kind,
+            app.text_scale(),
+            layout.body_bottom(),
+            false,
+            0.0,
+        ),
         app.render_inline_widget_reveal_progress(),
         activity.y,
     )
@@ -425,9 +432,35 @@ fn inline_widget_command_palettes_draw_structured_cards_not_text_boxes() {
         1.0,
     )
     .expect("model picker layout");
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::OpenModelPicker);
+    app.apply_session_event(session_launch::DesktopSessionEvent::ModelCatalog {
+        current_model: Some("gpt-5.4".to_string()),
+        provider_name: Some("OpenAI".to_string()),
+        models: vec![
+            session_launch::DesktopModelChoice {
+                model: "gpt-5.4".to_string(),
+                provider: Some("OpenAI".to_string()),
+                api_method: Some("chat".to_string()),
+                detail: Some("available".to_string()),
+                available: true,
+            },
+            session_launch::DesktopModelChoice {
+                model: "claude-sonnet".to_string(),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("chat".to_string()),
+                detail: Some("available".to_string()),
+                available: true,
+            },
+        ],
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: None,
+    });
     let mut model_vertices = Vec::new();
     push_single_session_inline_widget_structured_chrome(
         &mut model_vertices,
+        &app,
         Some(InlineWidgetKind::ModelPicker),
         &model_lines,
         model_lines.len(),
@@ -491,6 +524,7 @@ fn inline_widget_command_palettes_draw_structured_cards_not_text_boxes() {
     let mut session_vertices = Vec::new();
     push_single_session_inline_widget_structured_chrome(
         &mut session_vertices,
+        &app,
         Some(InlineWidgetKind::SessionSwitcher),
         &session_lines,
         session_lines.len(),

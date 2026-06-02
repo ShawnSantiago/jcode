@@ -58,10 +58,17 @@ impl MultiProvider {
     }
 
     pub(super) fn openrouter_provider(&self) -> Option<Arc<openrouter::OpenRouterProvider>> {
-        self.openrouter
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        ProviderRegistry::new(self).real_openrouter()
+    }
+
+    pub(super) fn active_openrouter_execution_provider(
+        &self,
+    ) -> Option<Arc<openrouter::OpenRouterProvider>> {
+        ProviderRegistry::new(self).active_openrouter_execution()
+    }
+
+    pub(super) fn clear_active_openai_compatible_profile(&self) {
+        ProviderRegistry::new(self).clear_active_compatible_profile();
     }
 
     pub(super) fn has_claude_runtime(&self) -> bool {

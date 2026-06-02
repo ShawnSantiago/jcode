@@ -84,6 +84,10 @@ fn mac_hotkey_launch_agent_plist_uses_valid_xml_quotes() {
     assert!(!plist.contains("\\\""));
     assert!(plist.contains("<string>setup-hotkey</string>"));
     assert!(plist.contains("<string>--listen-macos-hotkey</string>"));
+    // The listener must load into the GUI (Aqua) session so it has a
+    // window-server connection and can receive Carbon hotkey events.
+    assert!(plist.contains("<key>LimitLoadToSessionType</key>"));
+    assert!(plist.contains("<string>Aqua</string>"));
 }
 
 #[test]
@@ -97,7 +101,10 @@ fn paused_jcode_shell_command_keeps_failures_visible() {
 #[test]
 fn fresh_user_gets_hotkey_install() {
     let state = SetupHintsState::default();
-    assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::Install);
+    assert_eq!(
+        mac_hotkey_action_for_state(&state),
+        MacHotkeyAction::Install
+    );
 }
 
 #[test]
@@ -109,7 +116,10 @@ fn legacy_configured_user_gets_migrated_on_update() {
         hotkey_listener_version: 0,
         ..SetupHintsState::default()
     };
-    assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::Migrate);
+    assert_eq!(
+        mac_hotkey_action_for_state(&state),
+        MacHotkeyAction::Migrate
+    );
 }
 
 #[test]
@@ -121,4 +131,24 @@ fn current_version_user_is_left_alone() {
         ..SetupHintsState::default()
     };
     assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::None);
+}
+
+#[test]
+fn previous_listener_version_user_gets_migrated_on_update() {
+    // A user who already installed an earlier listener version (e.g. the v1
+    // run-loop-only listener that still never fired) must be re-migrated to the
+    // current listener on update.
+    for old_version in 0..HOTKEY_LISTENER_VERSION {
+        let state = SetupHintsState {
+            hotkey_configured: true,
+            hotkey_dismissed: true,
+            hotkey_listener_version: old_version,
+            ..SetupHintsState::default()
+        };
+        assert_eq!(
+            mac_hotkey_action_for_state(&state),
+            MacHotkeyAction::Migrate,
+            "listener version {old_version} should be migrated"
+        );
+    }
 }

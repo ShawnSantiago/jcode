@@ -187,10 +187,19 @@ async fn stream_response(
 
     let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
 
-    const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    // Idle timeout between streamed chunks. Configurable so slow reasoning
+    // models (e.g. DeepSeek) that think silently for minutes before emitting
+    // tokens don't trip a premature timeout (issue #196). Resolved from
+    // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`,
+    // defaulting to 180s.
+    let idle_timeout_secs = crate::config::config()
+        .provider
+        .stream_idle_timeout_secs
+        .max(1);
+    let sse_chunk_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
     loop {
-        let event = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+        let event = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
             Ok(Some(Ok(event))) => event,
             Ok(Some(Err(e))) => anyhow::bail!(
                 "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",
@@ -201,12 +210,16 @@ async fn stream_response(
             ),
             Ok(None) => break, // stream ended normally
             Err(_) => {
-                crate::logging::warn("OpenRouter SSE stream timed out (no data for 180s)");
+                crate::logging::warn(&format!(
+                    "OpenRouter SSE stream timed out (no data for {}s)",
+                    idle_timeout_secs
+                ));
                 anyhow::bail!(
-                    "OpenAI-compatible stream timeout\n  endpoint: {}\n  model: {}\n  auth: {}\n  timeout: no data received for 180 seconds\n{}",
+                    "OpenAI-compatible stream timeout\n  endpoint: {}\n  model: {}\n  auth: {}\n  timeout: no data received for {} seconds\n{}",
                     url,
                     model,
                     auth.label(),
+                    idle_timeout_secs,
                     local_endpoint_troubleshooting_hint(&api_base, &model)
                 );
             }
@@ -219,7 +232,36 @@ async fn stream_response(
     Ok(())
 }
 
+/// Extract the HTTP status code reported in a formatted provider error string.
+///
+/// Error strings produced in this module embed the status as `status: <code>`
+/// (e.g. `status: 402 Payment Required`). The input may be lowercased before
+/// it reaches here, so matching is case-insensitive.
+fn parsed_http_status(error_str: &str) -> Option<u16> {
+    let lower = error_str.to_ascii_lowercase();
+    let idx = lower.find("status:")?;
+    let rest = lower[idx + "status:".len()..].trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 3 {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
+    // Explicit non-retryable HTTP statuses take precedence over the loose
+    // substring heuristics below. These are deterministic client-side failures
+    // (auth, billing, malformed request) where retrying is futile and just
+    // burns time/credits. 429 (rate limit) is intentionally NOT listed here so
+    // it can still be retried.
+    if let Some(status) = parsed_http_status(error_str) {
+        match status {
+            400 | 401 | 402 | 403 | 404 | 405 | 406 | 422 => return false,
+            _ => {}
+        }
+    }
+
     crate::provider::is_transient_transport_error(error_str)
         || error_str.contains("stream error")
         || error_str.contains("eof")
@@ -800,5 +842,50 @@ mod tests {
         assert!(hint.contains("LM Studio"));
         assert!(hint.contains("Local Server"));
         assert!(hint.contains("/v1/models"));
+    }
+
+    #[test]
+    fn parsed_http_status_extracts_code() {
+        assert_eq!(
+            parsed_http_status("status: 402 payment required"),
+            Some(402)
+        );
+        assert_eq!(parsed_http_status("  status:404 not found"), Some(404));
+        assert_eq!(parsed_http_status("no status here"), None);
+        // Embedded numbers elsewhere must not be misread as a status.
+        assert_eq!(parsed_http_status("you requested 65536 tokens"), None);
+    }
+
+    #[test]
+    fn payment_required_is_not_retryable() {
+        let err = "openai-compatible chat request failed\n  endpoint: \
+            https://openrouter.ai/api/v1/chat/completions\n  model: openai/gpt-5.4\n  \
+            auth: openrouter_api_key\n  status: 402 payment required\n  response: \
+            {\"error\":{\"message\":\"this request requires more credits, or fewer \
+            max_tokens. you requested up to 65536 tokens, but can only afford 34424\"}}";
+        assert!(!is_retryable_error(err));
+    }
+
+    #[test]
+    fn client_errors_are_not_retryable() {
+        for status in [400u16, 401, 402, 403, 404, 405, 406, 422] {
+            let err = format!("chat request failed\n  status: {status} client error");
+            assert!(
+                !is_retryable_error(&err),
+                "status {status} should not be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn server_errors_remain_retryable() {
+        assert!(is_retryable_error(
+            "chat request failed\n  status: 503 service unavailable"
+        ));
+        assert!(is_retryable_error(
+            "chat request failed\n  status: 500 internal server error"
+        ));
+        // Rate limiting should still be retried.
+        assert!(is_retryable_error("overloaded"));
     }
 }

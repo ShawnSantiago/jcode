@@ -350,7 +350,11 @@ where
 {
     match kind {
         ClipboardPasteKind::Smart => {
-            if let Some(text) = read_text() {
+            // Only treat the clipboard as text when it has *non-empty* text.
+            // Image-only clipboards (especially on Wayland/arboard) frequently
+            // expose an empty text target, which previously short-circuited the
+            // image path and produced a silent "0 char" paste.
+            if let Some(text) = read_text().filter(|t| !t.trim().is_empty()) {
                 if let Some(url) = super::extract_image_url(&text)
                     && let Some(content) = download_image_url(&url)
                 {
@@ -442,6 +446,29 @@ mod tests {
             matches!(content, ClipboardPasteContent::Empty),
             "expected empty paste, got {content:?}"
         );
+    }
+
+    #[test]
+    fn smart_paste_uses_image_when_text_target_is_blank() {
+        // Image-only clipboards can advertise an empty text target; the image
+        // must still be pasted instead of producing a silent empty text paste.
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some("   ".to_string()),
+            || Some(("image/png".to_string(), "base64".to_string())),
+            |_| None,
+        );
+
+        match content {
+            ClipboardPasteContent::Image {
+                media_type,
+                base64_data,
+            } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(base64_data, "base64");
+            }
+            other => panic!("expected image paste, got {other:?}"),
+        }
     }
 
     #[test]
@@ -689,7 +716,14 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
-    if app.input.is_empty() && !app.is_processing && app.display_messages.is_empty() {
+    let onboarding_suggestions = matches!(
+        app.onboarding_phase(),
+        Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
+    );
+    if app.input.is_empty()
+        && !app.is_processing
+        && (app.display_messages.is_empty() || onboarding_suggestions)
+    {
         let mut chars = text.chars();
         if let (Some(c), None) = (chars.next(), chars.next())
             && let Some(digit) = c.to_digit(10)
@@ -703,6 +737,7 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
                     app.input = prompt.clone();
                     app.cursor_pos = app.input.len();
                     app.follow_chat_bottom_for_typing();
+                    app.submit_input();
                     return true;
                 }
             }
@@ -1009,6 +1044,18 @@ impl App {
             || !self.hidden_queued_system_messages.is_empty()
     }
 
+    /// True when a startup submission is staged and ready to auto-send.
+    ///
+    /// Headed spawns (and reloads with a resume prompt) stage their initial
+    /// prompt into `self.input` and set `submit_input_on_startup`, rather than
+    /// pushing onto `queued_messages`. The post-connect dispatcher must treat
+    /// this as pending work so the prompt is actually submitted once the remote
+    /// session history loads. See issues #267/#268/#76.
+    pub(super) fn has_pending_startup_submission(&self) -> bool {
+        self.submit_input_on_startup
+            && (!self.input.trim().is_empty() || !self.pending_images.is_empty())
+    }
+
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
@@ -1240,10 +1287,10 @@ pub(super) fn delete_input_to_end(app: &mut App) {
 pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         // macOS terminals that forward Command may report Command+Delete as Super+Backspace,
-        // Super+Delete, or Super+DEL. Treat all of them as delete-to-start, matching native
-        // macOS text fields and avoiding overlap with Option/Alt word-delete shortcuts.
+        // Super+Delete, or Super+DEL. Treat all of them as delete-the-previous-word, matching
+        // the requested Cmd+Backspace = delete-by-word behavior.
         KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
-            delete_input_to_start(app);
+            delete_input_word_back(app);
             true
         }
         KeyCode::Left | KeyCode::Home | KeyCode::Char('a') => {
@@ -1305,16 +1352,6 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             delete_input_word_back(app);
             true
         }
-        KeyCode::Char('i') => {
-            crate::tui::info_widget::toggle_enabled();
-            let status = if crate::tui::info_widget::is_enabled() {
-                "Info widget: ON"
-            } else {
-                "Info widget: OFF"
-            };
-            app.set_status_notice(status);
-            true
-        }
         KeyCode::Char('v') => {
             paste_from_clipboard(app);
             true
@@ -1365,7 +1402,7 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
-    if code == KeyCode::BackTab {
+    if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
@@ -1388,7 +1425,8 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
-        || code == KeyCode::BackTab
+        || (modifiers.contains(KeyModifiers::ALT)
+            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g')))
     {
         return true;
     }
@@ -1479,9 +1517,7 @@ pub(super) fn handle_pre_control_shortcuts(
 
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
-    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('y')))
-        || macos_option_shortcut == Some('y')
-    {
+    if app.toggle_keys.copy_selection.matches(code, modifiers) {
         app.toggle_copy_selection_mode();
         return true;
     }
@@ -1490,20 +1526,26 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
-    if crate::tui::keybind::matches_side_panel_toggle_key(code, modifiers) {
+    if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
         return true;
     }
-    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')))
-        || macos_option_shortcut == Some('t')
-    {
+    if app.toggle_keys.diagram_pane.matches(code, modifiers) {
         app.toggle_diagram_pane_position();
         return true;
     }
-    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')))
-        || macos_option_shortcut == Some('s')
-    {
+    if app.toggle_keys.typing_scroll_lock.matches(code, modifiers) {
         app.toggle_typing_scroll_lock();
+        return true;
+    }
+    if app.toggle_keys.info_widget.matches(code, modifiers) {
+        crate::tui::info_widget::toggle_enabled();
+        let status = if crate::tui::info_widget::is_enabled() {
+            "Info widget: ON"
+        } else {
+            "Info widget: OFF"
+        };
+        app.set_status_notice(status);
         return true;
     }
     if app.dictation_key_matches(code, modifiers) {
@@ -1979,10 +2021,20 @@ impl App {
             return Ok(());
         }
 
-        if modifiers.contains(KeyModifiers::ALT)
-            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'f'))
-        {
+        if self.handle_onboarding_continue_prompt_key(code) {
+            return Ok(());
+        }
+
+        if code == KeyCode::BackTab {
             self.cycle_model_favorite_hotkey();
+            return Ok(());
+        }
+
+        // While the model picker preview is visible, route its favorite/default
+        // hotkeys (Ctrl+D, Ctrl+F, Alt+F) to the focused picker handler before the
+        // global control shortcuts can claim them (e.g. Ctrl+D as quit). This makes
+        // the hotkeys work directly in the preview list the user always sees.
+        if self.model_picker_preview_hotkey(code, modifiers)? {
             return Ok(());
         }
 
@@ -2077,6 +2129,17 @@ impl App {
         }
 
         if code == KeyCode::Enter {
+            // During the onboarding model-selection phase, Enter on an empty
+            // prompt opens the model picker instead of submitting nothing.
+            if self.input.trim().is_empty()
+                && matches!(
+                    self.onboarding_phase(),
+                    Some(crate::tui::app::onboarding_flow::OnboardingPhase::ModelSelect)
+                )
+            {
+                self.open_model_picker();
+                return Ok(());
+            }
             handle_enter(self);
             return Ok(());
         }
@@ -2397,6 +2460,7 @@ impl App {
             || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)
             || commands::handle_log_command(self, trimmed)
+            || commands::handle_diff_command(self, trimmed)
             || commands::handle_model_status_command(self, trimmed)
             || super::debug::handle_debug_command(self, trimmed)
             || super::model_context::handle_model_command(self, trimmed)

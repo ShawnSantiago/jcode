@@ -55,6 +55,7 @@ mod catchup;
 mod commands;
 mod commands_improve;
 mod commands_overnight;
+mod commands_plan;
 mod commands_review;
 mod conversation_state;
 mod copy_selection;
@@ -71,6 +72,8 @@ mod misc_ui;
 mod model_context;
 mod navigation;
 mod observe;
+pub(crate) mod onboarding_flow;
+mod onboarding_flow_control;
 mod remote;
 mod remote_notifications;
 mod replay;
@@ -284,6 +287,10 @@ pub(super) enum SessionPickerMode {
     #[default]
     Resume,
     CatchUp,
+    /// First-run onboarding "continue where you left off" single-select picker.
+    Onboarding {
+        cli: onboarding_flow::ExternalCli,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -595,6 +602,10 @@ pub struct App {
     // Cached pricing (input $/1M tokens, output $/1M tokens)
     cached_prompt_price: Option<f32>,
     cached_completion_price: Option<f32>,
+    // Cached cache-read pricing ($/1M tokens), when known for the active model.
+    cached_cache_read_price: Option<f32>,
+    // Model the cached_*_price values were resolved for, so we re-resolve on switch.
+    cached_price_model: Option<String>,
     // Context limit tracking (for compaction warning)
     context_limit: u64,
     context_warning_shown: bool,
@@ -706,8 +717,27 @@ pub struct App {
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
     submit_input_on_startup: bool,
+    /// Debug guard: tracks the last reason the startup auto-submit was deferred
+    /// so `process_remote_followups` logs each distinct blocker exactly once
+    /// instead of spamming every tick. Used to debug headed-spawn prompts that
+    /// appear "seen but never sent".
+    startup_submit_deferred_reason: Option<&'static str>,
     /// One-shot/session-local preview of the first-run onboarding empty state.
     onboarding_preview_mode: bool,
+    /// Active guided first-run onboarding flow (model select -> continue ->
+    /// transcript pick -> suggestions). `None` when not onboarding.
+    onboarding_flow: Option<onboarding_flow::OnboardingFlow>,
+    /// One-shot guard: have we evaluated whether to auto-start the onboarding
+    /// flow on startup yet? The fresh-install path logs in at the CLI before the
+    /// TUI launches, so no in-TUI login event fires; this lets us still begin the
+    /// flow once the TUI is ready and already authenticated.
+    onboarding_startup_checked: bool,
+    /// Pending first-run model-validation request for the new-session screen.
+    /// In remote/client mode the live default model is reported by the server
+    /// asynchronously, so we record that a validation is wanted and let the
+    /// onboarding tick fire it once a concrete model id (not "unknown") is
+    /// known. `None` means no validation is pending.
+    onboarding_pending_model_validation: Option<onboarding_flow::OnboardingPendingValidation>,
     // Inline UI state for copy badges ([Alt] [⇧] [S])
     copy_badge_ui: CopyBadgeUiState,
     // Modal in-app selection/copy state for the chat viewport.
@@ -747,6 +777,12 @@ pub struct App {
     remote_server_has_update: Option<bool>,
     // Auto-reload server when stale (set on first connect if server_has_update)
     pending_server_reload: bool,
+    // Defense-in-depth circuit breaker for issue #277: count how many times this
+    // client has auto-reloaded the server. A healthy reload happens at most once
+    // (afterwards the server is up to date), so repeated auto-reloads indicate a
+    // false-positive "update available" loop. Past a small threshold we stop
+    // auto-reloading and surface a message instead of flickering forever.
+    server_auto_reload_attempts: u32,
     // Remote server short name (e.g., "running", "blazing")
     remote_server_short_name: Option<String>,
     // Remote server icon (e.g., "🔥", "🌫️")
@@ -811,7 +847,7 @@ pub struct App {
     last_injected_memory_signature: Option<(String, Instant)>,
     // Swarm feature toggle for this session
     swarm_enabled: bool,
-    // Diff display mode (toggle with Shift+Tab)
+    // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
@@ -830,6 +866,9 @@ pub struct App {
     diagram_pane_ratio_from: u8,
     diagram_pane_ratio_target: u8,
     diagram_pane_anim_start: Option<Instant>,
+    // Set once the user manually resizes the pane (drag or +/- keys), so the
+    // adaptive image-width default stops overriding their explicit choice.
+    diagram_pane_ratio_user_adjusted: bool,
     // Whether the pinned diagram pane is visible
     diagram_pane_enabled: bool,
     // Position of pinned diagram pane (side or top)
@@ -869,6 +908,11 @@ pub struct App {
     // User explicitly hid the side panel with the side-panel toggle key. While set, incoming snapshots may update
     // pages but must not reopen the panel by restoring focused_page_id.
     side_panel_user_hidden: bool,
+    // True when the user explicitly hid the side panel (e.g. Alt+M) rather than
+    // it being auto-hidden. This makes the hide "sticky" so transient image
+    // repopulation (such as after a server reload/reconnect) does not re-reveal
+    // a panel the user deliberately closed.
+    side_panel_explicit_hidden: bool,
     // Pin read images to side pane
     pin_images: bool,
     // Auto-hide deadline for the pinned image side pane only.
@@ -891,6 +935,7 @@ pub struct App {
     model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
+    pending_route_selection: Option<crate::provider::RouteSelection>,
     // Remote SetModel has been sent but ModelChanged has not arrived yet. User
     // prompts submitted in this window are held so the first request cannot race
     // the model switch and use stale provider/model state.
@@ -906,6 +951,8 @@ pub struct App {
     scroll_keys: ScrollKeys,
     // Keybinding for centered-mode toggle
     centered_toggle_keys: CenteredToggleKeys,
+    // Configurable pane / mode toggle keybindings
+    toggle_keys: super::keybind::ToggleKeys,
     // Keybindings for Niri-style workspace navigation
     workspace_navigation_keys: WorkspaceNavigationKeys,
     // Optional configured keybinding for external dictation
@@ -1010,6 +1057,11 @@ pub struct App {
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
     mouse_scroll_queue: i16,
+    /// When the user overscrolls past the bottom of the transcript, an extra
+    /// status line is revealed below the input. This records the last time an
+    /// overscroll tick was received; the line dwells for a fixed window after
+    /// the last tick, then rebounds away. `None` means the line is hidden.
+    chat_overscroll_last: Option<Instant>,
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,

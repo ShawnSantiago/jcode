@@ -4,6 +4,9 @@ __pycache__/
 ios_simulator_screenshot.png
 /.wrangler/
 /tmp/
+# Local onboarding sandbox + auth fixtures. May contain REAL OAuth tokens copied
+# from $HOME (see scripts/onboarding_sandbox.sh seed-real-logins). Never commit.
+/.tmp/
 /.jcode/generated-images/
 .jcode/pr-feedback-watch/
 /.omc/
@@ -14,3 +17,5 @@ ios_simulator_screenshot.png
 
 # Local/generated OMX artifacts
 .omx/artifacts/
+
+/telemetry-worker/backups/

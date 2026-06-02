@@ -63,7 +63,7 @@ pub(crate) use tips::occasional_status_tip;
 use tips::{render_tips_widget, tips_widget_height};
 use todos_render::{render_todos_compact, render_todos_expanded, render_todos_widget};
 #[cfg(test)]
-use usage_render::render_usage_bar;
+use usage_render::render_usage_pill;
 use usage_render::{render_context_usage_line, render_usage_compact, render_usage_widget};
 
 /// Types of info widgets that can be displayed
@@ -524,6 +524,8 @@ pub struct InfoWidgetData {
     pub native_compaction_threshold_tokens: Option<usize>,
     pub session_count: Option<usize>,
     pub session_name: Option<String>,
+    /// Current working directory for this session.
+    pub working_dir: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
@@ -874,9 +876,9 @@ pub(crate) fn calculate_widget_height(
             if data.todos.is_empty() {
                 return 0;
             }
-            // Header + progress bar + up to 5 items
+            // Header (with inline pip meter) + up to 5 items
             let items = data.todos.len().min(5) as u16;
-            2 + items + if data.todos.len() > 5 { 1 } else { 0 }
+            1 + items + if data.todos.len() > 5 { 1 } else { 0 }
         }
         WidgetKind::ContextUsage => {
             if data

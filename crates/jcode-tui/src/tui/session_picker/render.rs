@@ -235,7 +235,23 @@ impl SessionPicker {
             Span::styled(dir_part, Style::default().fg(dimmer)),
         ]);
 
-        let mut rows = vec![line1, line2, line3];
+        let mut rows = vec![line1, line2];
+        if let Some(prompt) = session.first_user_prompt.as_deref().map(str::trim)
+            && !prompt.is_empty()
+        {
+            let prompt = prompt.replace('\n', " ");
+            let prompt_display = if prompt.chars().count() > 72 {
+                format!("{}...", safe_truncate(&prompt, 69))
+            } else {
+                prompt
+            };
+            rows.push(Line::from(vec![
+                Span::styled("     ", Style::default()),
+                Span::styled("prompt: ", Style::default().fg(dimmer)),
+                Span::styled(prompt_display, Style::default().fg(rgb(180, 180, 220))),
+            ]));
+        }
+        rows.push(line3);
         if let Some(reason_line) = Self::crash_reason_line(session) {
             rows.push(reason_line);
         }
@@ -442,11 +458,15 @@ impl SessionPicker {
                     )))
                     .border_style(Style::default().fg(border_color)),
             )
-            .highlight_style(
+            .highlight_style(if self.onboarding_start_new_highlighted() {
+                // Focus is on the onboarding "Start a new session" row; dim the
+                // list selection so only one row reads as active.
+                Style::default().fg(rgb(150, 150, 160))
+            } else {
                 Style::default()
                     .bg(rgb(40, 44, 52))
-                    .add_modifier(Modifier::BOLD),
-            );
+                    .add_modifier(Modifier::BOLD)
+            });
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }

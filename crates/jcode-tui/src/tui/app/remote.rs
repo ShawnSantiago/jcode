@@ -26,6 +26,8 @@ mod session_persistence;
 mod swarm_plan_core;
 mod workspace;
 
+#[cfg(test)]
+pub(super) use key_handling::reload_stale_remote_server_before_update;
 use queue_recovery::{recover_local_interleave_to_queue, recover_stranded_soft_interrupts};
 // Re-export for sibling modules and tests that access reconnect state and helpers
 // through `super::remote::*` without reaching into private submodules directly.
@@ -75,6 +77,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     app.maybe_capture_runtime_memory_heartbeat();
     app.progress_mouse_scroll_animation();
+    needs_redraw |= app.update_chat_overscroll();
     needs_redraw |= app.update_pinned_images_auto_hide();
     needs_redraw |= dispatch_compacted_history_load(app, remote).await;
     if let Some(chunk) = app.stream_buffer.flush() {
@@ -86,6 +89,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
+    needs_redraw |= app.onboarding_tick();
 
     let _ = check_debug_command(app, remote).await;
 
@@ -274,7 +278,21 @@ pub(super) async fn handle_terminal_event(
             app.update_copy_badge_key_event(key);
             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 handle_remote_key_event(app, key, remote).await?;
-                if let Some(spec) = app.pending_model_switch.take() {
+                if let Some(selection) = app.pending_route_selection.take() {
+                    app.pending_model_switch = None;
+                    match remote.set_route_selection(selection).await {
+                        Ok(_) => {
+                            app.remote_model_switch_in_flight = true;
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to request model switch: {}",
+                                error
+                            )));
+                            app.set_status_notice("Model switch failed");
+                        }
+                    }
+                } else if let Some(spec) = app.pending_model_switch.take() {
                     match remote.set_model(&spec).await {
                         Ok(_) => {
                             app.remote_model_switch_in_flight = true;
@@ -453,6 +471,9 @@ pub(super) async fn handle_bus_event(
                 remote.notify_auth_changed_detached_event(provider_hint, auth);
             }
             true
+        }
+        Ok(BusEvent::OnboardingModelValidated(result)) => {
+            app.handle_onboarding_model_validated(result)
         }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
@@ -759,14 +780,36 @@ pub(super) fn handle_disconnect(
     state.reconnect_attempts = 1;
 }
 
+/// Record (once per distinct reason) why the restored startup auto-submit is
+/// being deferred. This makes "headed-spawn prompt seen but never sent" cases
+/// debuggable without spamming a log line on every event-loop tick.
+fn note_startup_submit_deferred(app: &mut App, reason: &'static str) {
+    if !app.submit_input_on_startup {
+        // Nothing pending; clear any stale reason so the next deferral logs.
+        app.startup_submit_deferred_reason = None;
+        return;
+    }
+    if app.startup_submit_deferred_reason == Some(reason) {
+        return;
+    }
+    app.startup_submit_deferred_reason = Some(reason);
+    crate::logging::info(&format!(
+        "Startup auto-submit deferred: {reason} (input_chars={}, pending_images={})",
+        app.input.chars().count(),
+        app.pending_images.len(),
+    ));
+}
+
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
     if !remote.has_loaded_history() {
+        note_startup_submit_deferred(app, "remote history not loaded yet");
         return;
     }
 
     let _ = recover_stranded_soft_interrupts(app, remote).await;
 
     if app.pending_queued_dispatch {
+        note_startup_submit_deferred(app, "pending_queued_dispatch in progress");
         return;
     }
 
@@ -805,9 +848,16 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;
+        app.startup_submit_deferred_reason = None;
         if !app.input.is_empty() || !app.pending_images.is_empty() {
+            crate::logging::info(&format!(
+                "Startup auto-submit firing: input_chars={} pending_images={}",
+                app.input.chars().count(),
+                app.pending_images.len(),
+            ));
             let prepared = input::take_prepared_input(app);
             if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
+                crate::logging::warn(&format!("Startup auto-submit failed: {error}"));
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to submit startup prompt: {}",
                     error
@@ -815,7 +865,13 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 app.set_status_notice("Startup prompt failed");
             }
             return;
+        } else {
+            crate::logging::warn(
+                "Startup auto-submit skipped: submit flag was set but input and pending images are both empty",
+            );
         }
+    } else if app.submit_input_on_startup && app.is_processing {
+        note_startup_submit_deferred(app, "session still processing (is_processing=true)");
     }
 
     if app.pending_background_client_reload.is_some() && !app.is_processing {
@@ -826,13 +882,30 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     if app.pending_server_reload && !app.is_processing {
         app.pending_server_reload = false;
         if app.auto_server_reload {
-            app.append_reload_message("Reloading server with newer binary...");
-            if let Err(err) = remote.reload().await {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to auto-reload server: {}. Use `/reload` to retry.",
-                    err
-                )));
-                app.set_status_notice("Server update available - auto reload failed");
+            // Defense-in-depth for issue #277: a correct reload only needs to
+            // happen once. If we keep being told a newer binary is available
+            // after several auto-reloads, treat it as a false-positive loop and
+            // stop hammering the server (which would otherwise flicker the UI).
+            const MAX_AUTO_SERVER_RELOADS: u32 = 3;
+            if app.server_auto_reload_attempts >= MAX_AUTO_SERVER_RELOADS {
+                crate::logging::warn(&format!(
+                    "Suppressing server auto-reload after {} attempts; server keeps reporting an update (possible reload loop, issue #277)",
+                    app.server_auto_reload_attempts
+                ));
+                app.push_display_message(DisplayMessage::system(
+                    "ℹ Server keeps reporting a newer binary after repeated reloads; auto-reload paused to avoid a loop. Use `/reload` manually if needed.".to_string(),
+                ));
+                app.set_status_notice("Server auto-reload paused (possible loop)");
+            } else {
+                app.server_auto_reload_attempts += 1;
+                app.append_reload_message("Reloading server with newer binary...");
+                if let Err(err) = remote.reload().await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to auto-reload server: {}. Use `/reload` to retry.",
+                        err
+                    )));
+                    app.set_status_notice("Server update available - auto reload failed");
+                }
             }
         } else {
             app.push_display_message(DisplayMessage::system(
@@ -1147,6 +1220,7 @@ fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_goals_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
         || super::commands::handle_log_command(app, trimmed)
+        || super::commands::handle_diff_command(app, trimmed)
         || super::commands::handle_debug_command(app, trimmed)
         || super::commands::handle_model_command(app, trimmed)
         || super::commands::handle_usage_command(app, trimmed)

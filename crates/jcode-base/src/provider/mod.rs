@@ -19,6 +19,7 @@ pub mod openai;
 pub mod openai_request;
 pub mod openrouter;
 pub mod pricing;
+mod registry;
 mod route_builders;
 mod routing;
 mod selection;
@@ -36,6 +37,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
 use jcode_provider_core::FailoverDecision;
+use registry::ProviderRegistry;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub use catalog_routes::{
@@ -49,8 +52,8 @@ pub use jcode_provider_core::{
     CHEAPNESS_REFERENCE_OUTPUT_TOKENS, DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT,
     ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod,
     NativeCompactionResult, NativeToolResult, NativeToolResultSender, PremiumMode, Provider,
-    RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource,
-    dedupe_model_routes, explicit_model_provider_prefix, model_name_for_provider,
+    RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection,
+    RuntimeKey, dedupe_model_routes, explicit_model_provider_prefix, model_name_for_provider,
     normalize_copilot_model_name, provider_from_model_key, shared_http_client,
     summarize_model_catalog_refresh,
 };
@@ -272,6 +275,14 @@ pub struct MultiProvider {
     bedrock: RwLock<Option<Arc<bedrock::BedrockProvider>>>,
     /// OpenRouter API provider
     openrouter: RwLock<Option<Arc<openrouter::OpenRouterProvider>>>,
+    /// Direct OpenAI-compatible runtimes keyed by profile id.
+    ///
+    /// These use the same wire protocol implementation as OpenRouter, but must
+    /// not occupy the real OpenRouter slot. Keeping them separate prevents a
+    /// compatible endpoint selection from corrupting later OpenRouter model
+    /// switches, catalog display, or auth refresh handling.
+    openai_compatible_profiles: RwLock<HashMap<String, Arc<openrouter::OpenRouterProvider>>>,
+    active_openai_compatible_profile: RwLock<Option<String>>,
     active: RwLock<ActiveProvider>,
     /// Use Claude CLI instead of direct API (legacy mode)
     use_claude_cli: bool,
@@ -467,6 +478,9 @@ impl MultiProvider {
         model: &str,
     ) -> Option<(crate::provider_catalog::OpenAiCompatibleProfile, &str)> {
         let (prefix, rest) = model.split_once(':')?;
+        if explicit_model_provider_prefix(model).is_some() {
+            return None;
+        }
         let rest = rest.trim();
         if rest.is_empty() {
             return None;
@@ -613,6 +627,21 @@ impl MultiProvider {
                 Ok(())
             }
             ActiveProvider::OpenRouter => {
+                self.clear_active_openai_compatible_profile();
+                if self
+                    .openrouter_provider()
+                    .as_deref()
+                    .map(|provider| !provider.supports_provider_routing_features())
+                    .unwrap_or(true)
+                {
+                    let provider =
+                        Arc::new(openrouter::OpenRouterProvider::new_openrouter_api_key_runtime()?);
+                    *self
+                        .openrouter
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+                }
+
                 let Some(openrouter) = self.openrouter_provider() else {
                     anyhow::bail!(
                         "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."
@@ -643,13 +672,32 @@ impl MultiProvider {
             );
         }
 
-        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
-        let provider = Arc::new(openrouter::OpenRouterProvider::new()?);
+        let profile_id = resolved.id.clone();
+        let registry = ProviderRegistry::new(self);
+        let provider = {
+            let existing = registry.compatible_profile(&profile_id).filter(|provider| {
+                provider
+                    .direct_openai_compatible_route_parts()
+                    .and_then(|(_provider, api_method, _detail)| {
+                        api_method
+                            .strip_prefix("openai-compatible:")
+                            .map(|profile| profile.trim().to_string())
+                    })
+                    .as_deref()
+                    == Some(profile_id.as_str())
+            });
+            if let Some(provider) = existing {
+                provider
+            } else {
+                let provider = Arc::new(
+                    openrouter::OpenRouterProvider::new_openai_compatible_profile_runtime(profile)?,
+                );
+                registry.install_compatible_profile(profile_id.clone(), provider.clone());
+                provider
+            }
+        };
         provider.set_model(model)?;
-        *self
-            .openrouter
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+        registry.set_active_compatible_profile(profile_id);
         self.set_active_provider(ActiveProvider::OpenRouter);
         Ok(())
     }
@@ -911,7 +959,7 @@ impl MultiProvider {
             ActiveProvider::Cursor => "cursor",
             ActiveProvider::Bedrock => "bedrock",
             ActiveProvider::OpenRouter => {
-                if let Some(openrouter) = self.openrouter_provider()
+                if let Some(openrouter) = self.active_openrouter_execution_provider()
                     && let Some((_provider, api_method, _detail)) =
                         openrouter.direct_openai_compatible_route_parts()
                     && let Some(profile_id) = api_method
@@ -1028,9 +1076,46 @@ impl Provider for MultiProvider {
                 .map(|o| o.model())
                 .unwrap_or_else(|| "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string()),
             ActiveProvider::OpenRouter => self
-                .openrouter_provider()
+                .active_openrouter_execution_provider()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
+        }
+    }
+
+    fn active_auth_method_label(&self) -> Option<&'static str> {
+        match self.active_provider() {
+            ActiveProvider::Claude => {
+                let anthropic = self.anthropic_provider()?;
+                Some(match anthropic.credential_mode_snapshot() {
+                    anthropic::AnthropicCredentialMode::OAuth => "OAuth",
+                    anthropic::AnthropicCredentialMode::ApiKey => "API key",
+                    // Auto prefers OAuth (Claude subscription) when available,
+                    // otherwise falls back to the API key. Mirror that exactly.
+                    anthropic::AnthropicCredentialMode::Auto => {
+                        if crate::auth::claude::load_credentials().is_ok() {
+                            "OAuth"
+                        } else {
+                            "API key"
+                        }
+                    }
+                })
+            }
+            ActiveProvider::OpenAI => {
+                let openai = self.openai_provider()?;
+                Some(match openai.credential_mode_snapshot() {
+                    openai::OpenAICredentialMode::OAuth => "OAuth",
+                    openai::OpenAICredentialMode::ApiKey => "API key",
+                    // Auto resolves to OAuth first when available, otherwise API key.
+                    openai::OpenAICredentialMode::Auto => {
+                        if crate::auth::codex::load_oauth_credentials().is_ok() {
+                            "OAuth"
+                        } else {
+                            "API key"
+                        }
+                    }
+                })
+            }
+            _ => None,
         }
     }
 
@@ -1155,6 +1240,50 @@ impl Provider for MultiProvider {
             // Unknown model - try current provider.
             self.set_model_on_provider(self.active_provider(), model)
         }
+    }
+
+    fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
+        let model = selection.model.trim();
+        if model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+
+        let routed_model = match &selection.runtime_key {
+            RuntimeKey::ClaudeOAuth => format!("claude-oauth:{model}"),
+            RuntimeKey::AnthropicApiKey => format!("claude-api:{model}"),
+            RuntimeKey::OpenAIOAuth => format!("openai-oauth:{model}"),
+            RuntimeKey::OpenAIApiKey => format!("openai-api:{model}"),
+            RuntimeKey::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => format!("{}:{model}", profile_id.trim()),
+            RuntimeKey::OpenAiCompatible { profile_id: None } => model.to_string(),
+            RuntimeKey::OpenRouter => {
+                let provider = selection.provider_label.trim();
+                if provider.is_empty()
+                    || provider.eq_ignore_ascii_case("auto")
+                    || model.contains('@')
+                {
+                    openrouter_catalog_model_id(model).unwrap_or_else(|| model.to_string())
+                } else {
+                    format!(
+                        "{}@{}",
+                        openrouter_catalog_model_id(model).unwrap_or_else(|| model.to_string()),
+                        provider
+                    )
+                }
+            }
+            RuntimeKey::Copilot => format!("copilot:{model}"),
+            RuntimeKey::Cursor => format!("cursor:{model}"),
+            RuntimeKey::Bedrock => format!("bedrock:{model}"),
+            RuntimeKey::Antigravity => format!("antigravity:{model}"),
+            RuntimeKey::Gemini
+            | RuntimeKey::CodeAssistOAuth
+            | RuntimeKey::RemoteCatalog
+            | RuntimeKey::Current
+            | RuntimeKey::Other(_) => model.to_string(),
+        };
+
+        self.set_model(&routed_model)
     }
 
     fn available_models(&self) -> Vec<&'static str> {
@@ -1892,6 +2021,8 @@ impl Provider for MultiProvider {
             cursor: RwLock::new(cursor_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
+            openai_compatible_profiles: RwLock::new(HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(active),
             use_claude_cli: self.use_claude_cli,
             startup_notices: RwLock::new(Vec::new()),

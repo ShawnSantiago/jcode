@@ -61,6 +61,40 @@ impl ChannelRegistry {
             )));
         }
 
+        if config.jade_relay_enabled {
+            match (
+                config.jade_relay_api_base.clone(),
+                config.jade_relay_token.clone(),
+                config.jade_relay_session_id.clone(),
+            ) {
+                (Some(api_base), Some(token), Some(session_id)) => {
+                    // user_id defaults to the token id when not explicitly set.
+                    let user_id = config
+                        .jade_relay_user_id
+                        .clone()
+                        .or_else(|| config.jade_relay_token_id.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    logging::info(&format!(
+                        "registering jade relay channel user={} session={} reply_enabled={}",
+                        user_id, session_id, config.jade_relay_reply_enabled
+                    ));
+                    channels.push(Arc::new(JadeRelayChannel::new(
+                        api_base,
+                        token,
+                        config.jade_relay_token_id.clone(),
+                        user_id,
+                        session_id,
+                        config.jade_relay_reply_enabled,
+                    )));
+                }
+                _ => {
+                    logging::warn(
+                        "jade_relay_enabled but api_base/token/session_id incomplete; skipping",
+                    );
+                }
+            }
+        }
+
         logging::debug(&format!(
             "channel registry initialized channel_count={}",
             channels.len()
@@ -455,6 +489,267 @@ impl MessageChannel for DiscordChannel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Jade cloud relay channel
+// ---------------------------------------------------------------------------
+
+/// Remote control via the Jade cloud relay (an append-only per-session event
+/// log in AWS). Unlike the WebSocket gateway, nothing listens on this machine:
+/// the laptop only makes outbound long-poll requests, so there is no inbound
+/// port to attack. A cloud client posts `prompt` events; this channel injects
+/// them into the live session and posts the agent's reply back as a `response`
+/// event for the cloud client to read.
+pub struct JadeRelayChannel {
+    /// API base URL, normalized to end with a single '/'.
+    api_base: String,
+    token: String,
+    token_id: Option<String>,
+    user_id: String,
+    session_id: String,
+    reply_enabled: bool,
+    client: reqwest::Client,
+}
+
+impl JadeRelayChannel {
+    pub fn new(
+        api_base: String,
+        token: String,
+        token_id: Option<String>,
+        user_id: String,
+        session_id: String,
+        reply_enabled: bool,
+    ) -> Self {
+        let api_base = if api_base.ends_with('/') {
+            api_base
+        } else {
+            format!("{}/", api_base)
+        };
+        Self {
+            api_base,
+            token,
+            token_id,
+            user_id,
+            session_id,
+            reply_enabled,
+            client: crate::provider::shared_http_client(),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.api_base, path.trim_start_matches('/'))
+    }
+
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let mut req = req.header("Authorization", format!("Bearer {}", self.token));
+        if let Some(id) = &self.token_id {
+            req = req.header("x-jade-token-id", id);
+        }
+        req
+    }
+
+    /// Register/heartbeat this device so the cloud can show it as online.
+    async fn heartbeat(&self, device_id: &str) {
+        let body = serde_json::json!({
+            "user_id": self.user_id,
+            "device_id": device_id,
+            "label": device_id,
+            "platform": std::env::consts::OS,
+        });
+        let req = self.auth(self.client.post(self.url("v1/devices")).json(&body));
+        if let Err(e) = req.send().await {
+            logging::debug(&format!("jade relay heartbeat failed: {}", e));
+        }
+    }
+
+    /// Long-poll for new prompt events after `after`. Returns (events, next_after).
+    /// `wait` is the server-side long-poll window in seconds (capped at 25 by the relay).
+    async fn poll_prompts(&self, after: i64, wait: u32) -> anyhow::Result<(Vec<RelayEvent>, i64)> {
+        let session = urlencoding_encode(&self.session_id);
+        let url = self.url(&format!(
+            "v1/sessions/{}/events?user_id={}&after={}&types=prompt&wait={}",
+            session,
+            urlencoding_encode(&self.user_id),
+            after,
+            wait
+        ));
+        let resp = self.auth(self.client.get(&url)).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("jade relay poll error ({}): {}", status, body);
+        }
+        let parsed: RelayEventsResponse = resp.json().await?;
+        Ok((parsed.events, parsed.next_after))
+    }
+
+    /// Post a response event back to the relay for the cloud client to read.
+    async fn post_response(&self, text: &str, request_seq: i64) -> anyhow::Result<()> {
+        let session = urlencoding_encode(&self.session_id);
+        let body = serde_json::json!({
+            "user_id": self.user_id,
+            "type": "response",
+            "text": text,
+            "request_seq": request_seq,
+            "origin": "jcode",
+        });
+        let resp = self
+            .auth(
+                self.client
+                    .post(self.url(&format!("v1/sessions/{}/events", session)))
+                    .json(&body),
+            )
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let detail = resp.text().await.unwrap_or_default();
+            anyhow::bail!("jade relay post error ({}): {}", status, detail);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RelayEventsResponse {
+    #[serde(default)]
+    events: Vec<RelayEvent>,
+    #[serde(default)]
+    next_after: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RelayEvent {
+    #[serde(default)]
+    seq: i64,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Minimal percent-encoding for path/query segments (alnum and -_.~ pass through).
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+#[async_trait]
+impl MessageChannel for JadeRelayChannel {
+    fn name(&self) -> &str {
+        "jade_relay"
+    }
+
+    fn is_send_enabled(&self) -> bool {
+        true
+    }
+
+    fn is_reply_enabled(&self) -> bool {
+        // Inbound Jade relay prompts are delivered by server::jade_relay so they
+        // work even when ambient mode is disabled and target the configured live
+        // Jcode session directly. Keep this channel for outbound notifications
+        // only; otherwise ambient mode would start a second poller.
+        let _configured_for_server_listener = self.reply_enabled;
+        false
+    }
+
+    async fn send(&self, text: &str) -> anyhow::Result<()> {
+        // Cloud notifications (e.g. ambient cycle summaries) are posted as a
+        // response event with request_seq=0 (not tied to a specific prompt).
+        self.post_response(text, 0).await
+    }
+
+    async fn reply_loop(&self, runner: AmbientRunnerHandle) {
+        let host = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "laptop".to_string());
+        let device_id = format!("jcode-{}", host);
+        logging::info(&format!(
+            "jade relay reply loop started channel={}/{}",
+            self.user_id, self.session_id
+        ));
+        // Start after the latest existing prompt so we don't replay history.
+        let mut after: i64 = match self.poll_prompts(0, 0).await {
+            Ok((_, next)) => next,
+            Err(e) => {
+                logging::error(&format!("jade relay init poll failed: {}", e));
+                0
+            }
+        };
+        let mut last_heartbeat = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap_or_else(std::time::Instant::now);
+
+        loop {
+            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
+                self.heartbeat(&device_id).await;
+                last_heartbeat = std::time::Instant::now();
+            }
+            match self.poll_prompts(after, 20).await {
+                Ok((events, next_after)) => {
+                    after = next_after;
+                    for ev in events {
+                        let text = ev.text.unwrap_or_default();
+                        let trimmed = text.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                            let (approved, message) =
+                                crate::notifications::parse_permission_reply(trimmed);
+                            if let Err(e) = crate::safety::record_permission_via_file(
+                                &req_id,
+                                approved,
+                                "jade_relay",
+                                message,
+                            ) {
+                                logging::error(&format!(
+                                    "Failed to record permission from jade relay for {}: {}",
+                                    req_id, e
+                                ));
+                            } else {
+                                let _ = self
+                                    .post_response(
+                                        &format!(
+                                            "Permission {} for {}",
+                                            if approved { "approved" } else { "denied" },
+                                            req_id
+                                        ),
+                                        ev.seq,
+                                    )
+                                    .await;
+                            }
+                            continue;
+                        }
+                        let injected = runner.inject_message(trimmed, "jade_relay").await;
+                        logging::info(&format!(
+                            "jade relay prompt injected seq={} injected={}",
+                            ev.seq, injected
+                        ));
+                        let ack = if injected {
+                            "Message delivered to active session."
+                        } else {
+                            "Message queued; waking agent."
+                        };
+                        if let Err(e) = self.post_response(ack, ev.seq).await {
+                            logging::error(&format!("jade relay ack post failed: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    logging::error(&format!("jade relay poll error: {}", e));
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +776,178 @@ mod tests {
         }"#;
         let msg: DiscordMessage = serde_json::from_str(json).unwrap();
         assert!(msg.author.bot.unwrap());
+    }
+
+    #[test]
+    fn test_relay_events_parse() {
+        let json = r#"{
+            "events": [
+                {"seq": 5, "type": "prompt", "text": "run the tests"},
+                {"seq": 6, "type": "prompt", "text": "now lint"}
+            ],
+            "next_after": 6
+        }"#;
+        let parsed: RelayEventsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.events.len(), 2);
+        assert_eq!(parsed.events[0].seq, 5);
+        assert_eq!(parsed.events[0].text.as_deref(), Some("run the tests"));
+        assert_eq!(parsed.next_after, 6);
+    }
+
+    #[test]
+    fn test_relay_events_empty() {
+        let json = r#"{"events": [], "next_after": 0}"#;
+        let parsed: RelayEventsResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.events.is_empty());
+        assert_eq!(parsed.next_after, 0);
+    }
+
+    #[test]
+    fn test_relay_url_encoding() {
+        assert_eq!(urlencoding_encode("sess-relay-test"), "sess-relay-test");
+        assert_eq!(urlencoding_encode("a/b c"), "a%2Fb%20c");
+        assert_eq!(urlencoding_encode("user.name~1_2"), "user.name~1_2");
+    }
+
+    #[test]
+    fn test_relay_url_join() {
+        let ch = JadeRelayChannel::new(
+            "https://example.com/api".to_string(),
+            "tok".to_string(),
+            Some("jeremy".to_string()),
+            "jeremy".to_string(),
+            "sess-1".to_string(),
+            true,
+        );
+        assert_eq!(ch.url("v1/devices"), "https://example.com/api/v1/devices");
+        assert_eq!(ch.url("/v1/devices"), "https://example.com/api/v1/devices");
+    }
+
+    #[test]
+    fn test_relay_registry_wiring() {
+        // Disabled: not registered.
+        let cfg = SafetyConfig::default();
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(!reg.channel_names().iter().any(|n| n == "jade_relay"));
+
+        // Enabled but incomplete: skipped with a warning.
+        let mut cfg = SafetyConfig {
+            jade_relay_enabled: true,
+            ..SafetyConfig::default()
+        };
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(!reg.channel_names().iter().any(|n| n == "jade_relay"));
+
+        // Enabled and complete: registered.
+        cfg.jade_relay_api_base = Some("https://example.com/".to_string());
+        cfg.jade_relay_token = Some("tok".to_string());
+        cfg.jade_relay_session_id = Some("sess-1".to_string());
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(reg.channel_names().iter().any(|n| n == "jade_relay"));
+    }
+
+    /// Live end-to-end test against the real Jade relay. Ignored by default;
+    /// run with the relay env vars set:
+    ///   JADE_RELAY_API_BASE, JADE_RELAY_TOKEN, JADE_RELAY_TOKEN_ID,
+    ///   JADE_RELAY_USER_ID, JADE_RELAY_SESSION_ID
+    ///   cargo test -p jcode-app-core relay_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires live Jade relay credentials"]
+    async fn test_relay_live_roundtrip() {
+        let api_base = match std::env::var("JADE_RELAY_API_BASE") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("skipping: JADE_RELAY_API_BASE not set");
+                return;
+            }
+        };
+        let token = std::env::var("JADE_RELAY_TOKEN").expect("JADE_RELAY_TOKEN");
+        let token_id = std::env::var("JADE_RELAY_TOKEN_ID").ok();
+        let user_id = std::env::var("JADE_RELAY_USER_ID").unwrap_or_else(|_| "jeremy".to_string());
+        let session_id = std::env::var("JADE_RELAY_SESSION_ID")
+            .unwrap_or_else(|_| format!("rust-live-{}", chrono::Utc::now().timestamp()));
+
+        let ch = JadeRelayChannel::new(
+            api_base,
+            token,
+            token_id.clone(),
+            user_id.clone(),
+            session_id.clone(),
+            true,
+        );
+
+        // 1) heartbeat (device register)
+        ch.heartbeat("jcode-test-device").await;
+
+        // 2) baseline cursor: no prompts yet
+        let (events, after) = ch.poll_prompts(0, 0).await.expect("baseline poll");
+        eprintln!("baseline: {} events, next_after={}", events.len(), after);
+
+        // 3) simulate a cloud client posting a prompt by POSTing a prompt event
+        let prompt_text = format!(
+            "hello from rust live test {}",
+            chrono::Utc::now().timestamp()
+        );
+        let prompt_body = serde_json::json!({
+            "user_id": user_id,
+            "type": "prompt",
+            "text": prompt_text,
+            "origin": "rust-test-client",
+        });
+        let resp = ch
+            .auth(
+                ch.client
+                    .post(ch.url(&format!(
+                        "v1/sessions/{}/events",
+                        urlencoding_encode(&session_id)
+                    )))
+                    .json(&prompt_body),
+            )
+            .send()
+            .await
+            .expect("post prompt");
+        assert!(
+            resp.status().is_success(),
+            "post prompt status {}",
+            resp.status()
+        );
+
+        // 4) the channel polls and sees the prompt
+        let (events, after2) = ch.poll_prompts(after, 5).await.expect("poll after prompt");
+        assert!(!events.is_empty(), "expected at least one prompt event");
+        let prompt_ev = events
+            .iter()
+            .find(|e| e.text.as_deref() == Some(prompt_text.as_str()))
+            .expect("our prompt event present");
+        eprintln!("received prompt seq={} after2={}", prompt_ev.seq, after2);
+
+        // 5) the channel posts a response tied to that prompt's seq
+        let reply = format!("rust live reply to seq {}", prompt_ev.seq);
+        ch.post_response(&reply, prompt_ev.seq)
+            .await
+            .expect("post response");
+
+        // 6) verify the response is visible (poll all event types via raw GET)
+        let verify_url = ch.url(&format!(
+            "v1/sessions/{}/events?user_id={}&after=0&types=response&wait=5",
+            urlencoding_encode(&session_id),
+            urlencoding_encode(&user_id)
+        ));
+        let verify: RelayEventsResponse = ch
+            .auth(ch.client.get(&verify_url))
+            .send()
+            .await
+            .expect("verify get")
+            .json()
+            .await
+            .expect("verify json");
+        assert!(
+            verify
+                .events
+                .iter()
+                .any(|e| e.text.as_deref() == Some(reply.as_str())),
+            "response event should be readable back from the relay"
+        );
+        eprintln!("LIVE ROUNDTRIP OK: prompt -> poll -> response verified");
     }
 }

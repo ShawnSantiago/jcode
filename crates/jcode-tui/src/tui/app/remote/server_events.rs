@@ -4,6 +4,206 @@ use crate::tui::TuiState;
 use crate::tui::app as app_mod;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 
+fn allow_runtime_identity_mismatch() -> bool {
+    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
+}
+
+/// Parse a jcode version string into an orderable `(major, minor, patch)`, but
+/// only for *clean release* builds.
+///
+/// Dev/dirty builds share a base semver and cannot be ordered against each other
+/// or against releases (issue #277/#291: a self-dev / branched daemon must never
+/// be force-downgraded just because its version string differs). So we refuse to
+/// classify anything carrying a `-dev` or `dirty` marker as an orderable version
+/// and return `None`, leaving such daemons to the existing `server_has_update`
+/// (mtime-directional) path.
+fn parse_release_semver(version: &str) -> Option<(u32, u32, u32)> {
+    let lower = version.trim().to_ascii_lowercase();
+    if lower.contains("-dev") || lower.contains("dirty") {
+        return None;
+    }
+    // Take the leading token, e.g. "v0.17.0 (d741696f)" -> "0.17.0".
+    let token = lower
+        .split([' ', '(', ')', ','])
+        .next()
+        .unwrap_or(&lower)
+        .trim();
+    let token = token.strip_prefix('v').unwrap_or(token);
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// True when the connected server reports a clean release version strictly older
+/// than this client's own clean release version.
+///
+/// This is the missing client-side staleness signal behind issue #295: a server
+/// old enough to predate the self-reported staleness machinery reports
+/// `server_has_update: None`, so it can never tell us it is stale and the client
+/// happily attaches to it (then a `set_route`-shaped request explodes against the
+/// ancient protocol). We detect that case independently here.
+///
+/// Gated on clean release semvers on BOTH sides, so dev/dirty/self-dev daemons
+/// (which cannot be ordered) are never affected.
+fn server_release_is_older_than_client(server_version: Option<&str>, client_version: &str) -> bool {
+    let Some(server) = server_version.and_then(parse_release_semver) else {
+        return false;
+    };
+    let Some(client) = parse_release_semver(client_version) else {
+        return false;
+    };
+    server < client
+}
+
+/// Decide whether to defer applying remote session state because the server we
+/// attached to is not running the binary we expect.
+///
+/// Precedence:
+/// - `Some(true)`: the server self-reported a newer binary on disk -> defer.
+/// - `Some(false)`: the server is new enough to self-assess and found nothing
+///   newer to reload into -> trust it, do not fight it with a forced reload.
+/// - `None`: the server is too old to self-report. Fall back to our own
+///   client-side release-version comparison, which is the only signal that can
+///   catch a pre-self-heal daemon.
+fn should_defer_history_for_runtime_identity_with_allow(
+    server_has_update: Option<bool>,
+    client_detected_stale: bool,
+    allow_mismatch: bool,
+) -> bool {
+    if allow_mismatch {
+        return false;
+    }
+    match server_has_update {
+        Some(true) => true,
+        Some(false) => false,
+        None => client_detected_stale,
+    }
+}
+
+/// The client's own version string, used for release-staleness comparison.
+///
+/// Production always reads the compiled-in build metadata. A test-only env
+/// override exists so the end-to-end `handle_server_event` path can be exercised
+/// from a dev/dirty test binary (whose real version would otherwise be
+/// unorderable and short-circuit the comparison).
+fn client_release_version() -> String {
+    if cfg!(test) || cfg!(debug_assertions) {
+        if let Some(v) = std::env::var_os("JCODE_TEST_CLIENT_VERSION_OVERRIDE") {
+            return v.to_string_lossy().into_owned();
+        }
+    }
+    jcode_build_meta::VERSION.to_string()
+}
+
+fn should_defer_history_for_runtime_identity(
+    server_has_update: Option<bool>,
+    server_version: Option<&str>,
+) -> bool {
+    let client_detected_stale =
+        server_release_is_older_than_client(server_version, &client_release_version());
+    should_defer_history_for_runtime_identity_with_allow(
+        server_has_update,
+        client_detected_stale,
+        allow_runtime_identity_mismatch(),
+    )
+}
+
+#[cfg(test)]
+mod runtime_identity_tests {
+    use super::{
+        parse_release_semver, server_release_is_older_than_client,
+        should_defer_history_for_runtime_identity_with_allow,
+    };
+
+    #[test]
+    fn runtime_identity_gate_defers_stale_server_history_by_default() {
+        assert!(should_defer_history_for_runtime_identity_with_allow(
+            Some(true),
+            false,
+            false
+        ));
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            Some(false),
+            false,
+            false
+        ));
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            None, false, false
+        ));
+    }
+
+    #[test]
+    fn runtime_identity_gate_allows_explicit_mismatch_escape_hatch() {
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            Some(true),
+            false,
+            true
+        ));
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            None, true, true
+        ));
+    }
+
+    #[test]
+    fn client_detection_only_applies_when_server_cannot_self_report() {
+        // Ancient server (server_has_update: None) that the client independently
+        // measured as older -> defer. This is the issue #295 macOS case where a
+        // pre-self-heal daemon can never set server_has_update itself.
+        assert!(should_defer_history_for_runtime_identity_with_allow(
+            None, true, false
+        ));
+        // A server new enough to self-assess and report "no newer binary" is
+        // trusted, even if a naive version compare disagrees: forcing a reload
+        // would only loop against a server that has nothing newer to exec into.
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            Some(false),
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn parse_release_semver_refuses_unorderable_dev_builds() {
+        assert_eq!(parse_release_semver("v0.17.0 (d741696f)"), Some((0, 17, 0)));
+        assert_eq!(parse_release_semver("0.14.2"), Some((0, 14, 2)));
+        // Dev/dirty builds share a base semver and must not be ordered.
+        assert_eq!(parse_release_semver("v0.18.4-dev (102e9750, dirty)"), None);
+        assert_eq!(parse_release_semver("v0.14.2-dev (38452185, dirty)"), None);
+        assert_eq!(parse_release_semver("unknown"), None);
+    }
+
+    #[test]
+    fn server_release_older_than_client_is_selfdev_safe() {
+        // Clean release older than clean client -> stale.
+        assert!(server_release_is_older_than_client(
+            Some("v0.14.2 (38452185)"),
+            "v0.17.0 (d741696f)"
+        ));
+        // Equal or newer -> not stale.
+        assert!(!server_release_is_older_than_client(
+            Some("v0.17.0"),
+            "v0.17.0"
+        ));
+        assert!(!server_release_is_older_than_client(
+            Some("v0.18.0"),
+            "v0.17.0"
+        ));
+        // Either side dev/dirty/unparseable -> never claim staleness (protects
+        // self-dev and branched daemons from a forced downgrade).
+        assert!(!server_release_is_older_than_client(
+            Some("v0.14.2-dev (abc, dirty)"),
+            "v0.17.0"
+        ));
+        assert!(!server_release_is_older_than_client(
+            Some("v0.14.2"),
+            "v0.17.0-dev (abc, dirty)"
+        ));
+        assert!(!server_release_is_older_than_client(None, "v0.17.0"));
+    }
+}
+
 pub(in crate::tui::app) fn handle_server_event(
     app: &mut App,
     event: ServerEvent,
@@ -24,6 +224,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::ToolInput { .. }
             | ServerEvent::ToolExec { .. }
             | ServerEvent::ToolDone { .. }
+            | ServerEvent::SidePaneImages { .. }
             | ServerEvent::GeneratedImage { .. }
             | ServerEvent::BatchProgress { .. }
             | ServerEvent::TokenUsage { .. }
@@ -673,6 +874,45 @@ pub(in crate::tui::app) fn handle_server_event(
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();
+
+            if should_defer_history_for_runtime_identity(
+                server_has_update,
+                server_version.as_deref(),
+            ) {
+                let client_detected_stale = server_has_update.is_none();
+                app.remote_server_version = server_version;
+                app.remote_server_short_name = server_name.clone();
+                app.remote_server_icon = server_icon.clone();
+                app.remote_server_has_update = server_has_update;
+                app.pending_server_reload = true;
+                app.clear_remote_startup_phase();
+                if client_detected_stale {
+                    // The server was too old to self-report an update
+                    // (server_has_update: None), but we independently measured
+                    // its release version as older than ours. This is the
+                    // issue #295 case: a pre-self-heal daemon that would
+                    // otherwise reject newer protocol requests (e.g. set_route).
+                    app.set_status_notice(
+                        "Connected server is an older release; reloading it before attach",
+                    );
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "ℹ Connected server is running an older release ({}) than this client ({}). Reloading it before applying session state. If reload does not take, run `jcode server stop` and relaunch. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing.",
+                        app.remote_server_version.as_deref().unwrap_or("unknown"),
+                        jcode_build_meta::VERSION,
+                    )));
+                } else {
+                    app.set_status_notice(
+                        "Server/runtime mismatch detected; reloading server before attach",
+                    );
+                    app.push_display_message(DisplayMessage::system(
+                        "ℹ Connected server binary differs from the installed client channel. Reloading the server before applying remote session state. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing."
+                            .to_string(),
+                    ));
+                }
+                app.update_terminal_title();
+                return false;
+            }
+
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -769,6 +1009,8 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_client_count = client_count;
             app.remote_is_canary = is_canary;
             app.remote_server_version = server_version;
+            app.remote_server_short_name = server_name.clone();
+            app.remote_server_icon = server_icon.clone();
             app.remote_server_has_update = server_has_update;
             let history_total_tokens = total_tokens.or_else(|| {
                 token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
@@ -894,7 +1136,7 @@ pub(in crate::tui::app) fn handle_server_event(
                             .to_string()
                     } else {
                         format!(
-                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with `/rewind undo`.",
+                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
                             notice.message_index.unwrap_or_default(),
                             notice.changed_messages,
                             if notice.changed_messages == 1 {
@@ -1026,6 +1268,37 @@ pub(in crate::tui::app) fn handle_server_event(
             );
             true
         }
+        ServerEvent::SidePaneImages { session_id, images } => {
+            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+                crate::logging::info(&format!(
+                    "SidePaneImages: ignoring {} live image(s) for inactive session {}",
+                    images.len(),
+                    session_id
+                ));
+                return false;
+            }
+            if images.is_empty() {
+                return false;
+            }
+            // Append the freshly-read tool images so the pinned-image side pane
+            // updates immediately, without waiting for the next full History
+            // reload. A later History payload replaces this list wholesale, so
+            // duplicates are not a long-term concern.
+            let added = images.len();
+            app.remote_side_pane_images.extend(images);
+            crate::logging::info(&format!(
+                "SidePaneImages: appended {} live image(s) (total={}, user_hidden={}, explicit_hidden={}) session={}",
+                added,
+                app.remote_side_pane_images.len(),
+                app.side_panel_user_hidden,
+                app.side_panel_explicit_hidden,
+                session_id
+            ));
+            // Re-run the auto-hide bookkeeping so the pane reveals (unless the
+            // user explicitly hid it with Alt+M) and re-arms its auto-hide timer.
+            app.update_pinned_images_auto_hide();
+            true
+        }
         ServerEvent::SidePanelState { snapshot } => {
             app.set_side_panel_snapshot(snapshot);
             false
@@ -1090,6 +1363,8 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::McpStatus { servers } => {
+            let previous_tool_total: usize =
+                app.mcp_server_names.iter().map(|(_, count)| count).sum();
             app.mcp_server_names = servers
                 .iter()
                 .filter_map(|s| {
@@ -1098,6 +1373,26 @@ pub(in crate::tui::app) fn handle_server_event(
                     Some((name.to_string(), count))
                 })
                 .collect();
+            let new_tool_total: usize = app.mcp_server_names.iter().map(|(_, count)| count).sum();
+            // When MCP tools first become available (servers finished
+            // connecting), the next turn rebuilds the tool snapshot once to
+            // expose them — a single intentional prompt-cache miss we accept so
+            // the agent is reachable immediately at spawn instead of blocking on
+            // MCP connection (#206). Surface this so it isn't mistaken for a bug.
+            if previous_tool_total == 0 && new_tool_total > 0 {
+                let server_count = app
+                    .mcp_server_names
+                    .iter()
+                    .filter(|(_, count)| *count > 0)
+                    .count();
+                app.set_status_notice(format!(
+                    "MCP ready: {} tool{} from {} server{} (one-time tool refresh)",
+                    new_tool_total,
+                    if new_tool_total == 1 { "" } else { "s" },
+                    server_count,
+                    if server_count == 1 { "" } else { "s" },
+                ));
+            }
             false
         }
         ServerEvent::ModelChanged {
@@ -1380,6 +1675,12 @@ pub(in crate::tui::app) fn handle_server_event(
             }
 
             if let Some(scope) = runtime_activity_scope {
+                if app.onboarding_flow_active()
+                    && matches!(scope, "auth_activity" | "catalog_activity")
+                {
+                    app.set_status_notice(runtime_activity_status_notice(&message));
+                    return false;
+                }
                 if scope == "catalog_activity"
                     && let Some(progress) =
                         crate::message::parse_background_task_progress_notification_markdown(

@@ -12,11 +12,13 @@ pub mod gemini;
 pub mod google;
 pub mod integration;
 pub mod lifecycle;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod lifecycle_driver;
+pub(crate) mod live_provider_probes;
 pub mod login_diagnostics;
 pub mod login_flows;
 pub mod oauth;
+pub mod provider_e2e;
 pub mod refresh_state;
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
@@ -687,7 +689,14 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
             token_state(antigravity::load_tokens().map(|tokens| tokens.is_expired()))
     });
     record_auth_probe_step(&mut timings, "gemini", || {
-        status.gemini = token_state(gemini::load_tokens().map(|tokens| tokens.is_expired()))
+        // An official Gemini Developer API key is a static credential with no
+        // expiry handshake, so treat its presence as immediately Available and
+        // fall back to OAuth token state otherwise.
+        status.gemini = if gemini::has_api_key() {
+            AuthState::Available
+        } else {
+            token_state(gemini::load_tokens().map(|tokens| tokens.is_expired()))
+        }
     });
     record_auth_probe_step(&mut timings, "cursor", || {
         probe_cursor_status(&mut status, mode)

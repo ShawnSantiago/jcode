@@ -506,8 +506,8 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
 
     assert!(super::input::is_scroll_only_key(
         &app,
-        KeyCode::BackTab,
-        KeyModifiers::empty()
+        KeyCode::Char('g'),
+        KeyModifiers::ALT
     ));
 
     assert!(!super::input::is_scroll_only_key(
@@ -753,6 +753,7 @@ fn test_registered_command_suggestions_include_aliases_and_hide_secret_commands(
     assert!(commands.contains(&"/sessions"));
     assert!(commands.contains(&"/dictation"));
     assert!(commands.contains(&"/feedback"));
+    assert!(commands.contains(&"/plan"));
     assert!(!commands.contains(&"/z"));
     assert!(!commands.contains(&"/zz"));
     assert!(!commands.contains(&"/zzz"));
@@ -929,12 +930,12 @@ fn test_context_command_reports_session_context_snapshot() {
             .last()
             .expect("missing context report");
         assert_eq!(msg.title.as_deref(), Some("Context"));
-        assert!(msg.content.contains("# Session Context"));
-        assert!(msg.content.contains("## Prompt / Context Composition"));
-        assert!(msg.content.contains("## Compaction"));
-        assert!(msg.content.contains("## Session State"));
-        assert!(msg.content.contains("## Todos"));
-        assert!(msg.content.contains("## Side Panel"));
+        assert!(msg.content.contains("Session Context"));
+        assert!(msg.content.contains("Prompt / Context Composition"));
+        assert!(msg.content.contains("Compaction"));
+        assert!(msg.content.contains("Session State"));
+        assert!(msg.content.contains("Todos"));
+        assert!(msg.content.contains("Side Panel"));
         assert!(msg.content.contains("Inspect context summary"));
         assert!(msg.content.contains("[pending|high|confidence 77%]"));
         assert!(msg.content.contains("active skill: debug"));

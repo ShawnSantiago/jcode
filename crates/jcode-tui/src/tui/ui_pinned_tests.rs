@@ -130,6 +130,7 @@ fn pinned_content_image_layout_uses_high_zoom_viewport_for_generated_wide_diagra
         0,
         false,
         Some((10, 20)),
+        false,
     );
 
     match layout.render_mode {
@@ -146,6 +147,36 @@ fn pinned_content_image_layout_uses_high_zoom_viewport_for_generated_wide_diagra
         "pinned content should reserve enough rows to fill the visible pane, got {}",
         layout.rows
     );
+}
+
+#[test]
+fn pinned_content_wide_photo_fits_to_width_not_cropped() {
+    // A very wide screenshot (e.g. 3955x785, ~5:1) must show the FULL image, not
+    // crop to the left edge. With force_full_width=true the layout must fall
+    // back to a Fit render whenever a viewport zoom would overflow the pane.
+    let inner = Rect::new(0, 0, 55, 48);
+    let font = Some((8u16, 16u16));
+    let layout =
+        pinned_content_image_layout_with_font(3955, 785, inner, 0, false, font, true);
+
+    assert_eq!(
+        layout.render_mode,
+        SidePanelImageRenderMode::Fit,
+        "wide photo must use Fit so the whole width is visible"
+    );
+
+    // Sanity: the same wide image WITHOUT the full-width guard would have picked
+    // a scrollable viewport that overflows the pane width (the original bug).
+    let unguarded =
+        pinned_content_image_layout_with_font(3955, 785, inner, 0, false, font, false);
+    if let SidePanelImageRenderMode::ScrollableViewport { zoom_percent } = unguarded.render_mode {
+        let scaled_w_px = 3955u32 * zoom_percent as u32 / 100;
+        let avail_px = inner.width as u32 * 8;
+        assert!(
+            scaled_w_px > avail_px,
+            "test precondition: unguarded mode should overflow ({scaled_w_px}px > {avail_px}px)"
+        );
+    }
 }
 
 #[test]

@@ -480,6 +480,35 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
 }
 
 #[test]
+fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let calls = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+        calls: StdArc::clone(&calls),
+        route_count: 2,
+        delay: Duration::ZERO,
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    app.set_input_for_test("do not drop this draft");
+    let cursor = app.cursor_pos();
+
+    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT)
+        .unwrap();
+    wait_for_model_picker_load(&mut app);
+
+    assert_eq!(app.input(), "do not drop this draft");
+    assert_eq!(app.cursor_pos(), cursor);
+}
+
+#[test]
 fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
@@ -615,7 +644,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .expect("login prompt")
         .content
         .clone();
-    assert!(prompt.contains("**Cerebras API Key**"), "{prompt}");
+    assert!(prompt.contains("Cerebras API Key"), "{prompt}");
     assert!(
         prompt.contains("Stored variable: CEREBRAS_API_KEY"),
         "{prompt}"
@@ -628,7 +657,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         prompt.contains("Suggested default model: gpt-oss-120b"),
         "{prompt}"
     );
-    assert!(prompt.contains("**Paste your API key below**"), "{prompt}");
+    assert!(prompt.contains("Paste your API key below"), "{prompt}");
 
     let pending = app
         .pending_login
@@ -655,7 +684,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     }
                     assert!(login.success, "unexpected failed login event: {login:?}");
                     assert_eq!(login.provider, "Cerebras");
-                    assert!(login.message.contains("**Cerebras API key saved.**"));
+                    assert!(login.message.contains("Cerebras API key saved."));
                     assert!(
                         login
                             .message
@@ -699,7 +728,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     {
                         assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
                         assert_eq!(provider_key.as_deref(), Some("cerebras"));
-                        assert!(message.contains("**Cerebras is ready.**"), "{message}");
+                        assert!(message.contains("Cerebras is ready."), "{message}");
                         assert!(!message.contains("wrong-profile-first"), "{message}");
                     }
                     super::local::handle_bus_event(&mut app, Ok(event));
@@ -742,7 +771,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                 activation_events += 1;
                 assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
                 assert_eq!(provider_key.as_deref(), Some("cerebras"));
-                assert!(message.contains("**Cerebras is ready.**"), "{message}");
+                assert!(message.contains("Cerebras is ready."), "{message}");
             }
             _ => {}
         }
@@ -1875,10 +1904,11 @@ fn test_poke_status_reports_current_state() {
             &mut app,
             "/poke status"
         ));
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Auto-poke: **ON**. 1 incomplete todo.")
-        }));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| { msg.content.contains("Auto-poke: ON. 1 incomplete todo.") })
+        );
 
         app.auto_poke_incomplete_todos = true;
         app.is_processing = true;
@@ -1896,8 +1926,7 @@ fn test_poke_status_reports_current_state() {
             "/poke status"
         ));
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Auto-poke: **ON**. 1 incomplete todo.")
+            msg.content.contains("Auto-poke: ON. 1 incomplete todo.")
                 && msg.content.contains("A follow-up poke is queued.")
                 && msg.content.contains("A turn is currently running.")
         }));
@@ -2044,9 +2073,11 @@ fn test_btw_does_not_present_as_queued_when_turn_is_in_progress() {
             msg.content
                 .contains("/btw noted - answer will appear in the side panel.")
         }));
-        assert!(!app.display_messages().iter().any(|msg| {
-            msg.content.to_ascii_lowercase().contains("queued /btw")
-        }));
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|msg| { msg.content.to_ascii_lowercase().contains("queued /btw") })
+        );
     });
 }
 

@@ -84,7 +84,7 @@ pub fn resolve_tool_name(name: &str) -> &str {
         "file_glob" => "glob",
         "file_grep" => "grep",
         "skill" | "Skill" => "skill_manage",
-        "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
+        "todoread" | "todowrite" | "todo_read" | "todo_write" | "todos" => "todo",
         other => other,
     }
 }

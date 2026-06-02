@@ -99,7 +99,8 @@ impl MultiProvider {
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_copilot_api = provider_state.auth_status().copilot_has_api_token;
         let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();
-        let has_gemini_creds = auth::gemini::load_tokens().is_ok();
+        let has_gemini_creds =
+            auth::gemini::load_tokens().is_ok() || auth::gemini::has_api_key();
         let has_cursor_creds = provider_state
             .auth_status()
             .assessment_for_provider(crate::provider_catalog::CURSOR_LOGIN_PROVIDER)
@@ -305,6 +306,8 @@ impl MultiProvider {
             cursor: RwLock::new(cursor_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
+            openai_compatible_profiles: RwLock::new(HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(active),
             use_claude_cli,
             startup_notices: RwLock::new(Vec::new()),

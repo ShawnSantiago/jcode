@@ -3,9 +3,9 @@ use crate::desktop_rich_text::{
     AnsiColor, AnsiStyle, RichLine, RichLineStyle, RichSpanStyle, SyntaxTokenKind,
 };
 use crate::single_session::{
-    InlineWidgetKind, SingleSessionInlineSpan, SingleSessionInlineSpanKind,
-    SingleSessionToolLineKind, SingleSessionToolLineMetadata, SingleSessionToolVisualState,
-    SingleSessionTypography, single_session_assistant_font_family,
+    InlineWidgetKind, MODEL_PICKER_INLINE_ROW_LIMIT, SingleSessionInlineSpan,
+    SingleSessionInlineSpanKind, SingleSessionToolLineKind, SingleSessionToolLineMetadata,
+    SingleSessionToolVisualState, SingleSessionTypography, single_session_assistant_font_family,
     single_session_trimmed_line_end_preserving_inline_code_whitespace,
     single_session_user_font_family,
 };
@@ -48,11 +48,11 @@ const SLASH_SUGGESTIONS_INLINE_CARD_HIGHLIGHT_COLOR: [f32; 4] = [1.000, 1.000, 1
 const SLASH_SUGGESTIONS_INLINE_CARD_ACCENT_COLOR: [f32; 4] = [0.105, 0.355, 0.950, 0.48];
 pub(crate) const SLASH_SUGGESTIONS_INLINE_SELECTION_BACKGROUND_COLOR: [f32; 4] =
     [0.215, 0.420, 0.900, 0.155];
-const MODEL_PICKER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.982, 0.990, 1.000, 0.82];
-const MODEL_PICKER_CARD_BORDER_COLOR: [f32; 4] = [0.075, 0.195, 0.520, 0.24];
-const MODEL_PICKER_CARD_HIGHLIGHT_COLOR: [f32; 4] = [1.000, 1.000, 1.000, 0.64];
-const MODEL_PICKER_CARD_ACCENT_COLOR: [f32; 4] = [0.080, 0.355, 0.960, 0.48];
-const MODEL_PICKER_SELECTION_BACKGROUND_COLOR: [f32; 4] = [0.135, 0.360, 0.940, 0.145];
+const MODEL_PICKER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.946, 0.962, 0.988, 0.975];
+const MODEL_PICKER_CARD_BORDER_COLOR: [f32; 4] = [0.105, 0.140, 0.235, 0.26];
+const MODEL_PICKER_CARD_HIGHLIGHT_COLOR: [f32; 4] = [1.000, 1.000, 1.000, 0.55];
+const MODEL_PICKER_CARD_ACCENT_COLOR: [f32; 4] = [0.110, 0.310, 0.760, 0.40];
+const MODEL_PICKER_SELECTION_BACKGROUND_COLOR: [f32; 4] = [0.160, 0.330, 0.760, 0.105];
 const SINGLE_SESSION_SCROLLBAR_TRACK_WIDTH: f32 = 3.0;
 const SINGLE_SESSION_SCROLLBAR_GAP: f32 = 8.0;
 const SINGLE_SESSION_SCROLLBAR_THUMB_TRANSITION_DURATION: Duration = Duration::from_millis(140);
@@ -136,7 +136,6 @@ pub(crate) struct SingleSessionTextKey {
     pub(crate) activity_active: bool,
     pub(crate) welcome_handoff_visible: bool,
     pub(crate) text_scale_bits: u32,
-    pub(crate) body_top_offset_pixels_bits: u32,
     pub(crate) user_font_family: &'static str,
     pub(crate) assistant_font_family: &'static str,
     pub(crate) body: Vec<SingleSessionStyledLine>,
@@ -315,7 +314,7 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
     if app.has_activity_indicator() {
         push_streaming_activity_cue(&mut vertices, app, size, spinner_tick, None, None);
     }
-    push_single_session_selection(&mut vertices, app, size);
+    push_single_session_selection(&mut vertices, app, size, None);
     push_single_session_scrollbar(
         &mut vertices,
         app,
@@ -570,7 +569,7 @@ fn build_single_session_vertices_with_cached_body_internal(
             activity_cue_motion,
         );
     }
-    push_single_session_selection(&mut vertices, app, size);
+    push_single_session_selection(&mut vertices, app, size, Some(&viewport.lines));
     push_single_session_scrollbar_for_total_lines(
         &mut vertices,
         app,
@@ -1603,6 +1602,7 @@ fn push_single_session_inline_widget_card(
         inline_widget_bottom_limit_for_layout(app, session_layout, welcome_chrome_visible);
     let target_top = inline_widget_target_top(
         size,
+        app.render_inline_widget_kind(),
         app.text_scale(),
         body_bottom,
         welcome_chrome_visible,
@@ -1687,6 +1687,7 @@ fn push_single_session_inline_widget_card(
     if app.render_inline_widget_kind() == Some(InlineWidgetKind::ModelPicker) {
         push_single_session_inline_widget_structured_chrome(
             vertices,
+            app,
             app.render_inline_widget_kind(),
             &inline_lines,
             line_count,
@@ -1909,6 +1910,7 @@ fn interpolate_inline_widget_preview_pane_rect(
 #[allow(clippy::too_many_arguments)]
 fn push_single_session_inline_widget_structured_chrome(
     vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
     kind: Option<InlineWidgetKind>,
     inline_lines: &[SingleSessionStyledLine],
     line_count: usize,
@@ -1918,16 +1920,29 @@ fn push_single_session_inline_widget_structured_chrome(
     size: PhysicalSize<u32>,
 ) {
     match kind {
-        Some(InlineWidgetKind::ModelPicker) => push_inline_command_row_cards(
-            vertices,
-            kind,
-            inline_lines,
-            line_count,
-            typography,
-            layout,
-            reveal_progress,
-            size,
-        ),
+        Some(InlineWidgetKind::ModelPicker) => {
+            push_inline_command_row_cards(
+                vertices,
+                kind,
+                inline_lines,
+                line_count,
+                typography,
+                layout,
+                reveal_progress,
+                size,
+            );
+            push_model_picker_component_chrome(
+                vertices,
+                app,
+                kind,
+                inline_lines,
+                line_count,
+                typography,
+                layout,
+                reveal_progress,
+                size,
+            );
+        }
         Some(InlineWidgetKind::SessionSwitcher) => {
             push_session_switcher_section_panels(
                 vertices,
@@ -1959,6 +1974,103 @@ fn push_single_session_inline_widget_structured_chrome(
             );
         }
         _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_model_picker_component_chrome(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    kind: Option<InlineWidgetKind>,
+    inline_lines: &[SingleSessionStyledLine],
+    line_count: usize,
+    typography: &SingleSessionTypography,
+    layout: &InlineWidgetCardLayout,
+    reveal_progress: f32,
+    size: PhysicalSize<u32>,
+) {
+    let line_height = inline_widget_line_height(kind, typography);
+    let alpha = reveal_progress.clamp(0.0, 1.0);
+
+    let runs = inline_widget_list_row_runs(kind, inline_lines, line_count);
+    let (_, visible_window) = app
+        .model_picker
+        .visible_row_window(MODEL_PICKER_INLINE_ROW_LIMIT);
+    let current = app.model_picker.current_model.as_deref();
+    for (run, choice_index) in runs.iter().zip(visible_window.iter()) {
+        let Some(choice) = app.model_picker.choices.get(*choice_index) else {
+            continue;
+        };
+        let row_top =
+            layout.text_top + run.line as f32 * line_height - INLINE_COMMAND_MODEL_ROW_GAP_Y;
+        // Two text sub-lines per row; center the icon between them.
+        let center_y = row_top + line_height * 1.05;
+        if center_y + 11.0 > layout.visible_text_bottom {
+            continue;
+        }
+        let is_current = Some(choice.model.as_str()) == current;
+        // Circular icon badge, vertically centered on the row.
+        let badge_radius = 15.0;
+        let badge_cx = layout.card.x + INLINE_COMMAND_ROW_INSET_X + 14.0 + badge_radius;
+        let badge_bg = if is_current {
+            [0.815, 0.935, 0.870, 0.95]
+        } else {
+            [0.880, 0.905, 0.962, 0.92]
+        };
+        let badge_border = if is_current {
+            [0.220, 0.560, 0.420, 0.45]
+        } else {
+            [0.180, 0.300, 0.560, 0.30]
+        };
+        push_rounded_rect(
+            vertices,
+            Rect {
+                x: badge_cx - badge_radius,
+                y: center_y - badge_radius,
+                width: badge_radius * 2.0,
+                height: badge_radius * 2.0,
+            },
+            badge_radius,
+            with_alpha(badge_bg, badge_bg[3] * alpha),
+            size,
+        );
+        push_rounded_rect_border(
+            vertices,
+            Rect {
+                x: badge_cx - badge_radius,
+                y: center_y - badge_radius,
+                width: badge_radius * 2.0,
+                height: badge_radius * 2.0,
+            },
+            badge_radius,
+            1.0,
+            with_alpha(badge_border, badge_border[3] * alpha),
+            size,
+        );
+        let icon = if is_current {
+            LucideIcon::CircleCheck
+        } else {
+            LucideIcon::Bot
+        };
+        let icon_color = if is_current {
+            [0.045, 0.400, 0.235, 0.98]
+        } else {
+            [0.085, 0.215, 0.520, 0.92]
+        };
+        let icon_size = 18.0;
+        push_lucide_icon(
+            vertices,
+            icon,
+            Rect {
+                x: badge_cx - icon_size * 0.5,
+                y: center_y - icon_size * 0.5,
+                width: icon_size,
+                height: icon_size,
+            },
+            with_alpha(icon_color, icon_color[3] * alpha),
+            1.8,
+            size,
+        );
     }
 }
 
@@ -2005,7 +2117,7 @@ fn push_inline_command_row_cards(
             size,
         );
 
-        if selected {
+        if selected && !matches!(kind, Some(InlineWidgetKind::ModelPicker)) {
             push_inline_command_current_chip(
                 vertices,
                 kind,
@@ -2298,7 +2410,7 @@ fn inline_command_row_palette(
         },
         icon_background: INLINE_COMMAND_MODEL_ICON_BACKGROUND_COLOR,
         icon_color: INLINE_COMMAND_MODEL_ICON_COLOR,
-        icon: matches!(kind, Some(InlineWidgetKind::ModelPicker)).then_some(LucideIcon::Bot),
+        icon: None,
         selected,
     }
 }
@@ -2798,23 +2910,23 @@ const SLASH_SUGGESTIONS_INLINE_CARD_PADDING_Y: f32 = 5.0;
 const SLASH_SUGGESTIONS_INLINE_CARD_RADIUS: f32 = 13.0;
 const SLASH_SUGGESTIONS_INLINE_SELECTION_RADIUS: f32 = 7.0;
 const SLASH_SUGGESTIONS_INLINE_FONT_SCALE: f32 = 0.88;
-const INLINE_COMMAND_ROW_RADIUS: f32 = 12.0;
-const INLINE_COMMAND_ROW_INSET_X: f32 = 9.0;
+const INLINE_COMMAND_ROW_RADIUS: f32 = 10.0;
+const INLINE_COMMAND_ROW_INSET_X: f32 = 10.0;
 const INLINE_COMMAND_ROW_GAP_Y: f32 = 4.0;
 const INLINE_COMMAND_MODEL_ROW_GAP_Y: f32 = 5.5;
-const INLINE_COMMAND_ROW_BACKGROUND_COLOR: [f32; 4] = [0.972, 0.982, 1.000, 0.42];
-const INLINE_COMMAND_ROW_BORDER_COLOR: [f32; 4] = [0.080, 0.170, 0.420, 0.115];
-const INLINE_COMMAND_ROW_SELECTED_COLOR: [f32; 4] = [0.830, 0.900, 1.000, 0.58];
-const INLINE_COMMAND_ROW_SELECTED_BORDER_COLOR: [f32; 4] = [0.085, 0.300, 0.850, 0.30];
-const INLINE_COMMAND_ROW_ACCENT_COLOR: [f32; 4] = [0.100, 0.360, 0.940, 0.50];
+const INLINE_COMMAND_ROW_BACKGROUND_COLOR: [f32; 4] = [0.960, 0.972, 0.992, 0.74];
+const INLINE_COMMAND_ROW_BORDER_COLOR: [f32; 4] = [0.120, 0.160, 0.250, 0.14];
+const INLINE_COMMAND_ROW_SELECTED_COLOR: [f32; 4] = [0.890, 0.928, 1.000, 0.92];
+const INLINE_COMMAND_ROW_SELECTED_BORDER_COLOR: [f32; 4] = [0.090, 0.250, 0.650, 0.34];
+const INLINE_COMMAND_ROW_ACCENT_COLOR: [f32; 4] = [0.100, 0.300, 0.760, 0.40];
 const INLINE_COMMAND_SECTION_BACKGROUND_COLOR: [f32; 4] = [0.955, 0.972, 1.000, 0.30];
 const INLINE_COMMAND_PREVIEW_BACKGROUND_COLOR: [f32; 4] = [0.985, 0.990, 1.000, 0.34];
 const INLINE_COMMAND_SPLIT_DIVIDER_COLOR: [f32; 4] = [0.120, 0.220, 0.440, 0.16];
-const INLINE_COMMAND_CHIP_COLOR: [f32; 4] = [0.900, 0.940, 1.000, 0.64];
-const INLINE_COMMAND_CHIP_ICON_COLOR: [f32; 4] = [0.085, 0.270, 0.760, 0.92];
-const INLINE_COMMAND_MODEL_ICON_BACKGROUND_COLOR: [f32; 4] = [0.890, 0.930, 1.000, 0.54];
-const INLINE_COMMAND_MODEL_ICON_COLOR: [f32; 4] = [0.080, 0.260, 0.720, 0.88];
-const MODEL_PICKER_ROW_ACCENT_COLOR: [f32; 4] = [0.075, 0.345, 0.940, 0.56];
+const INLINE_COMMAND_CHIP_COLOR: [f32; 4] = [0.900, 0.930, 0.985, 0.54];
+const INLINE_COMMAND_CHIP_ICON_COLOR: [f32; 4] = [0.075, 0.230, 0.620, 0.86];
+const INLINE_COMMAND_MODEL_ICON_BACKGROUND_COLOR: [f32; 4] = [0.915, 0.940, 0.985, 0.50];
+const INLINE_COMMAND_MODEL_ICON_COLOR: [f32; 4] = [0.080, 0.230, 0.590, 0.84];
+const MODEL_PICKER_ROW_ACCENT_COLOR: [f32; 4] = [0.075, 0.280, 0.740, 0.46];
 const INLINE_COMMAND_SESSION_ROW_TOP_INSET: f32 = 3.0;
 const INLINE_COMMAND_SESSION_ROW_BOTTOM_INSET: f32 = 10.0;
 const RESUME_SESSION_SELECTED_TINT: [f32; 4] = [0.835, 0.905, 1.000, 0.66];
@@ -3033,7 +3145,7 @@ fn inline_widget_card_padding_y(kind: Option<InlineWidgetKind>) -> f32 {
 fn inline_widget_card_radius(kind: Option<InlineWidgetKind>) -> f32 {
     match kind {
         Some(InlineWidgetKind::SlashSuggestions) => SLASH_SUGGESTIONS_INLINE_CARD_RADIUS,
-        Some(InlineWidgetKind::ModelPicker) => 22.0,
+        Some(InlineWidgetKind::ModelPicker) => 26.0,
         _ => INLINE_WIDGET_CARD_RADIUS,
     }
 }
@@ -7909,6 +8021,7 @@ fn push_single_session_selection(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
+    visible_body_lines: Option<&[SingleSessionStyledLine]>,
 ) {
     if !app.has_body_selection() && !app.has_draft_selection() {
         return;
@@ -7917,7 +8030,15 @@ fn push_single_session_selection(
     let typography = single_session_typography_for_scale(app.text_scale());
     let line_height = typography.body_size * typography.body_line_height;
     let char_width = single_session_body_char_width();
-    let visible_lines = single_session_visible_body(app, size);
+    let visible_lines_storage = if let Some(lines) = visible_body_lines {
+        lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>()
+    } else {
+        single_session_visible_body(app, size)
+    };
+    let visible_lines = &visible_lines_storage;
     let body_top = single_session_body_top_for_app(app, size);
     for segment in app.selection_segments(&visible_lines) {
         let selected_columns = segment
@@ -8368,7 +8489,7 @@ fn single_session_text_key_for_body_lines(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
     _tick: u64,
-    body_top_offset_pixels: f32,
+    _body_top_offset_pixels: f32,
     body: Vec<SingleSessionStyledLine>,
     welcome_chrome_visible: bool,
 ) -> SingleSessionTextKey {
@@ -8433,7 +8554,6 @@ fn single_session_text_key_for_body_lines(
         activity_active: app.has_activity_indicator(),
         welcome_handoff_visible,
         text_scale_bits: app.text_scale().to_bits(),
-        body_top_offset_pixels_bits: body_top_offset_pixels.to_bits(),
         user_font_family: single_session_user_font_family(),
         assistant_font_family: single_session_assistant_font_family(),
         body,
@@ -8515,6 +8635,11 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
             && previous.text_scale_bits == key.text_scale_bits
             && user_font_compatible
     });
+    let width_layout_compatible = previous_key.is_some_and(|previous| {
+        previous.size.0 == key.size.0
+            && previous.text_scale_bits == key.text_scale_bits
+            && user_font_compatible
+    });
     let body_layout_compatible = previous_key.is_some_and(|previous| {
         previous.text_scale_bits == key.text_scale_bits
             && single_session_body_text_buffer_layout_bucket(previous.size, text_scale)
@@ -8529,12 +8654,13 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
             old_buffers.get_mut(index).and_then(Option::take)
         };
     let exact_previous = previous_key.filter(|_| exact_layout_compatible);
+    let width_previous = previous_key.filter(|_| width_layout_compatible);
     let body_previous = previous_key.filter(|_| body_layout_compatible);
 
     let title_buffer = take_reusable(
         &mut old_buffers,
         0,
-        exact_previous.is_some_and(|previous| previous.title == key.title),
+        width_previous.is_some_and(|previous| previous.title == key.title),
     )
     .unwrap_or_else(|| {
         single_session_text_buffer(
@@ -8604,12 +8730,14 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
         let inline_widget_font_size = inline_widget_font_size(key.inline_widget_kind, &typography);
         let inline_widget_line_height =
             inline_widget_line_height(key.inline_widget_kind, &typography);
-        let inline_widget_wrap =
-            if key.inline_widget_kind == Some(InlineWidgetKind::SlashSuggestions) {
-                Wrap::None
-            } else {
-                Wrap::Word
-            };
+        let inline_widget_wrap = if matches!(
+            key.inline_widget_kind,
+            Some(InlineWidgetKind::SlashSuggestions) | Some(InlineWidgetKind::ModelPicker)
+        ) {
+            Wrap::None
+        } else {
+            Wrap::Word
+        };
         single_session_styled_text_buffer(
             font_system,
             &key.inline_widget,
@@ -8672,7 +8800,7 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
     let version_buffer = take_reusable(
         &mut old_buffers,
         3,
-        exact_previous.is_some_and(|previous| previous.version == key.version),
+        width_previous.is_some_and(|previous| previous.version == key.version),
     )
     .unwrap_or_else(|| {
         single_session_text_buffer(
@@ -8709,7 +8837,7 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
     let welcome_hint_buffer = take_reusable(
         &mut old_buffers,
         6,
-        exact_previous.is_some_and(|previous| previous.welcome_hint == key.welcome_hint),
+        width_previous.is_some_and(|previous| previous.welcome_hint == key.welcome_hint),
     )
     .unwrap_or_else(|| {
         single_session_styled_text_buffer(
@@ -9204,6 +9332,7 @@ fn inline_widget_reserved_height(app: &SingleSessionApp) -> f32 {
 
 fn inline_widget_target_top(
     size: PhysicalSize<u32>,
+    kind: Option<InlineWidgetKind>,
     ui_scale: f32,
     body_bottom: f32,
     welcome_chrome_visible: bool,
@@ -9214,8 +9343,42 @@ fn inline_widget_target_top(
             + welcome_chrome_offset_pixels
             + fresh_welcome_inline_widget_gap_for_scale(ui_scale)
     } else {
-        body_bottom + INLINE_WIDGET_BODY_GAP
+        body_bottom + INLINE_WIDGET_BODY_GAP + inline_widget_card_padding_y(kind)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn inline_widget_body_and_card_vertical_geometry_for_test(
+    size: PhysicalSize<u32>,
+    kind: Option<InlineWidgetKind>,
+    ui_scale: f32,
+    body_base_bottom: f32,
+    line_count: usize,
+    text_width: f32,
+    reveal_progress: f32,
+    activity_reserved_height: f32,
+) -> Option<(f32, f32)> {
+    let typography = single_session_typography_for_scale(ui_scale);
+    let padding_y = inline_widget_card_padding_y(kind);
+    let visible_text_height = line_count as f32 * inline_widget_line_height(kind, &typography);
+    let reserved_height =
+        (visible_text_height + padding_y * 2.0 + INLINE_WIDGET_BODY_GAP) * reveal_progress;
+    let body_bottom =
+        (body_base_bottom - reserved_height - activity_reserved_height).max(PANEL_BODY_TOP_PADDING);
+    let target_top = inline_widget_target_top(size, kind, ui_scale, body_bottom, false, 0.0);
+    let bottom_limit =
+        (body_base_bottom - activity_reserved_height).min(single_session_draft_top(size));
+    inline_widget_card_layout_with_bottom_limit(
+        size,
+        kind,
+        &typography,
+        line_count,
+        text_width,
+        target_top,
+        reveal_progress,
+        bottom_limit,
+    )
+    .map(|layout| (body_bottom, layout.card.y))
 }
 
 pub(crate) fn single_session_body_bottom(size: PhysicalSize<u32>) -> f32 {
@@ -9528,6 +9691,7 @@ pub(crate) fn single_session_text_areas_for_state(
     let inline_widget_layout = if inline_widget_line_count > 0 {
         let target_top = inline_widget_target_top(
             size,
+            inline_widget_kind,
             ui_scale,
             body_bottom as f32,
             welcome_chrome_visible,

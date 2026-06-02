@@ -515,6 +515,121 @@ async fn test_no_repair_when_tool_results_present() {
     }
 }
 
+#[tokio::test]
+async fn test_parallel_image_tool_results_stay_contiguous() {
+    // Regression for Anthropic 400: "`tool_use` ids were found without `tool_result`
+    // blocks immediately after". When the assistant issues several parallel `read`
+    // calls that return images, each tool result is stored as its own user message in
+    // the form [tool_result, image, "[Attached image ...]" text]. After merging the
+    // consecutive user messages, the sibling label text blocks were wedged between the
+    // tool_results, which Anthropic rejects. The label must be folded into the
+    // tool_result content so every tool_result stays contiguous.
+    let provider = AnthropicProvider::new();
+
+    let make_image_result = |id: &str, label: &str| Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                content: format!("Image: {label}"),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            },
+            ContentBlock::Text {
+                text: format!(
+                    "[Attached image associated with the preceding tool result: {label}]"
+                ),
+                cache_control: None,
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "tool_a".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "a.png"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool_b".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "b.png"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool_c".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "c.png"}),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        make_image_result("tool_a", "a.png"),
+        make_image_result("tool_b", "b.png"),
+        make_image_result("tool_c", "c.png"),
+    ];
+
+    let formatted = provider.format_messages(&messages, false);
+
+    // assistant message + merged user tool_result message
+    assert_eq!(formatted.len(), 2);
+    let user_msg = &formatted[1];
+    assert_eq!(user_msg.role, "user");
+
+    // Every block in the user message must be a tool_result (no sibling text blocks
+    // wedged between them), and all three tool_use ids must be present.
+    let mut seen = std::collections::HashSet::new();
+    for block in &user_msg.content {
+        match block {
+            ApiContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                seen.insert(tool_use_id.clone());
+                // Each image tool_result should carry its image and folded label text.
+                match content {
+                    ToolResultContent::Blocks(blocks) => {
+                        assert!(
+                            blocks
+                                .iter()
+                                .any(|b| matches!(b, ToolResultContentBlock::Image { .. })),
+                            "image tool_result should contain an image block"
+                        );
+                        assert!(
+                            blocks.iter().any(|b| matches!(
+                                b,
+                                ToolResultContentBlock::Text { text }
+                                    if text.contains("[Attached image associated")
+                            )),
+                            "label text should be folded into the tool_result content"
+                        );
+                    }
+                    ToolResultContent::Text(_) => {
+                        panic!("image tool_result should use block content")
+                    }
+                }
+            }
+            _ => panic!("expected only tool_result blocks in the user message"),
+        }
+    }
+    assert_eq!(
+        seen,
+        ["tool_a", "tool_b", "tool_c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>()
+    );
+}
+
 #[test]
 fn test_cache_breakpoint_no_messages() {
     let mut messages: Vec<ApiMessage> = vec![];
@@ -1061,5 +1176,35 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
                 _ => {}
             }
         }
+    }
+}
+
+/// The runtime-provider identity that `set_credential_mode` writes must decode
+/// back to the exact same credential mode. This guards the model picker / header
+/// widget from reporting OAuth when an API key is in use (or vice versa): the
+/// env key is the single source of truth those surfaces read, so an asymmetric
+/// mapping here would surface an inaccurate auth method to the user.
+#[test]
+fn credential_mode_runtime_provider_identity_round_trips() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+    assert_eq!(
+        AnthropicCredentialMode::from_runtime_env(),
+        AnthropicCredentialMode::OAuth,
+        "OAuth selection must surface as the OAuth runtime identity"
+    );
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+    assert_eq!(
+        AnthropicCredentialMode::from_runtime_env(),
+        AnthropicCredentialMode::ApiKey,
+        "API-key selection must surface as the API-key runtime identity"
+    );
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
+        None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
     }
 }

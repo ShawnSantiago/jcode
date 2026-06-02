@@ -135,7 +135,7 @@ fn test_handle_server_event_session_renamed_updates_remote_title() {
     assert!(app.display_messages().iter().any(|message| {
         message
             .content
-            .contains("Renamed session to **Release planning**")
+            .contains("Renamed session to Release planning")
     }));
 }
 
@@ -1046,4 +1046,68 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
         assert_eq!(app.queued_messages().len(), 1);
         assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
     });
+}
+
+#[test]
+fn test_handle_server_event_side_pane_images_populates_pane_live() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot::default();
+    app.remote_session_id = Some("session_active".to_string());
+    assert!(app.remote_side_pane_images.is_empty());
+
+    let needs_redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::SidePaneImages {
+            session_id: "session_active".to_string(),
+            images: vec![crate::session::RenderedImage {
+                media_type: "image/png".to_string(),
+                data: "image-data".to_string(),
+                label: Some("openclaw.png".to_string()),
+                source: crate::session::RenderedImageSource::ToolResult {
+                    tool_name: "read".to_string(),
+                },
+            }],
+        },
+        &mut remote,
+    );
+
+    assert!(needs_redraw, "live side-pane image should request a redraw");
+    assert_eq!(app.remote_side_pane_images.len(), 1);
+    // The pane should reveal (not user-hidden) and arm its auto-hide timer.
+    assert!(!app.side_panel_user_hidden);
+    assert!(<App as crate::tui::TuiState>::pin_images(&app));
+    assert!(app.pinned_images_auto_hide_deadline.is_some());
+}
+
+#[test]
+fn test_handle_server_event_side_pane_images_ignores_inactive_session() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.remote_session_id = Some("session_active".to_string());
+
+    let needs_redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::SidePaneImages {
+            session_id: "session_other".to_string(),
+            images: vec![crate::session::RenderedImage {
+                media_type: "image/png".to_string(),
+                data: "image-data".to_string(),
+                label: None,
+                source: crate::session::RenderedImageSource::ToolResult {
+                    tool_name: "read".to_string(),
+                },
+            }],
+        },
+        &mut remote,
+    );
+
+    assert!(!needs_redraw);
+    assert!(app.remote_side_pane_images.is_empty());
 }

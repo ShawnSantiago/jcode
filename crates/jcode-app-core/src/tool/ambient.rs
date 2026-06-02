@@ -122,7 +122,9 @@ impl EndAmbientCycleTool {
 #[derive(Deserialize)]
 struct EndCycleInput {
     summary: String,
+    #[serde(deserialize_with = "super::serde_coerce::u32_from_string_or_number")]
     memories_modified: u32,
+    #[serde(deserialize_with = "super::serde_coerce::u32_from_string_or_number")]
     compactions: u32,
     #[serde(default)]
     proactive_work: Option<String>,
@@ -132,7 +134,10 @@ struct EndCycleInput {
 
 #[derive(Deserialize)]
 struct NextScheduleInput {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+    )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     context: Option<String>,
@@ -280,7 +285,10 @@ impl ScheduleAmbientTool {
 
 #[derive(Deserialize)]
 struct ScheduleInput {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+    )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     wake_at: Option<String>,
@@ -396,7 +404,10 @@ struct RequestPermissionInput {
     rationale: String,
     #[serde(default)]
     urgency: Option<String>,
-    #[serde(default = "default_false")]
+    #[serde(
+        default = "default_false",
+        deserialize_with = "super::serde_coerce::bool_from_string_or_bool"
+    )]
     wait: bool,
     #[serde(default)]
     context: Option<Value>,
@@ -722,7 +733,10 @@ struct ScheduleToolInput {
     schedule_id: Option<String>,
     #[serde(default)]
     task: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+    )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     wake_at: Option<String>,

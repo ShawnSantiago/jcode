@@ -74,6 +74,57 @@ fn test_end_cycle_input_minimal() {
     assert!(parsed.next_schedule.is_none());
 }
 
+/// Regression for #106: Claude's tool calling emits numeric arguments as JSON
+/// *strings* (e.g. `{"compactions": "0"}`). Before the fix, this failed with
+/// `invalid type: string "0", expected u32`, breaking every ambient cycle.
+#[test]
+fn test_end_cycle_input_accepts_string_numbers() {
+    let input = json!({
+        "summary": "Stringified counts",
+        "memories_modified": "5",
+        "compactions": "0",
+        "next_schedule": {
+            "wake_in_minutes": "20",
+            "context": "later",
+            "priority": "high"
+        }
+    });
+
+    let parsed: EndCycleInput = serde_json::from_value(input)
+        .expect("string-encoded numbers must deserialize (regression #106)");
+    assert_eq!(parsed.memories_modified, 5);
+    assert_eq!(parsed.compactions, 0);
+    assert_eq!(parsed.next_schedule.unwrap().wake_in_minutes, Some(20));
+}
+
+/// The `schedule_ambient` and `schedule` tools and the permission `wait` flag
+/// must survive the same stringified-argument quirk.
+#[test]
+fn test_ambient_inputs_accept_string_numbers_and_bools() {
+    let sched: ScheduleInput = serde_json::from_value(json!({
+        "wake_in_minutes": "15",
+        "context": "ctx"
+    }))
+    .expect("schedule_ambient must accept string wake_in_minutes (#106)");
+    assert_eq!(sched.wake_in_minutes, Some(15));
+
+    let perm: RequestPermissionInput = serde_json::from_value(json!({
+        "action": "delete",
+        "description": "remove file",
+        "rationale": "cleanup",
+        "wait": "true"
+    }))
+    .expect("request_permission must accept string wait flag (#106)");
+    assert!(perm.wait);
+
+    let tool: ScheduleToolInput = serde_json::from_value(json!({
+        "task": "do thing",
+        "wake_in_minutes": "30"
+    }))
+    .expect("schedule tool must accept string wake_in_minutes (#106)");
+    assert_eq!(tool.wake_in_minutes, Some(30));
+}
+
 #[test]
 fn test_schedule_input_deserialization() {
     let input = json!({

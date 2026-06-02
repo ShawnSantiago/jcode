@@ -18,6 +18,18 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn set_value(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -352,4 +364,106 @@ fn parses_candidate_finish_message() {
         candidate.finish_message.as_deref(),
         Some("Response blocked by safety filters")
     );
+}
+
+#[test]
+fn auth_mode_prefers_api_key_when_present() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _google = EnvVarGuard::unset("GOOGLE_API_KEY");
+    let _force = EnvVarGuard::unset("JCODE_GEMINI_FORCE_OAUTH");
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "test-developer-key");
+
+    match GeminiProvider::auth_mode() {
+        GeminiAuthMode::ApiKey(key) => assert_eq!(key, "test-developer-key"),
+        GeminiAuthMode::Oauth => panic!("expected API-key auth mode when GEMINI_API_KEY is set"),
+    }
+}
+
+#[test]
+fn auth_mode_force_oauth_overrides_api_key() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _google = EnvVarGuard::unset("GOOGLE_API_KEY");
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "test-developer-key");
+    let _force = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "1");
+
+    assert!(matches!(GeminiProvider::auth_mode(), GeminiAuthMode::Oauth));
+}
+
+#[test]
+fn auth_mode_defaults_to_oauth_without_api_key() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _key = EnvVarGuard::unset("GEMINI_API_KEY");
+    let _google = EnvVarGuard::unset("GOOGLE_API_KEY");
+    let _force = EnvVarGuard::unset("JCODE_GEMINI_FORCE_OAUTH");
+
+    assert!(matches!(GeminiProvider::auth_mode(), GeminiAuthMode::Oauth));
+}
+
+#[test]
+fn developer_api_base_url_defaults_to_generativelanguage() {
+    let _guard = crate::storage::lock_test_env();
+    let _endpoint = EnvVarGuard::unset("GEMINI_API_ENDPOINT");
+    let _version = EnvVarGuard::unset("GEMINI_API_VERSION");
+
+    assert_eq!(
+        GeminiProvider::developer_api_base_url(),
+        "https://generativelanguage.googleapis.com/v1beta"
+    );
+}
+
+#[test]
+fn developer_api_base_url_honors_env_overrides() {
+    let _guard = crate::storage::lock_test_env();
+    let _endpoint = EnvVarGuard::set_value("GEMINI_API_ENDPOINT", "https://example.test/");
+    let _version = EnvVarGuard::set_value("GEMINI_API_VERSION", "/v9/");
+
+    assert_eq!(
+        GeminiProvider::developer_api_base_url(),
+        "https://example.test/v9"
+    );
+}
+
+#[test]
+fn developer_api_response_parses_without_code_assist_envelope() {
+    // The Developer API returns the bare generateContent body; ensure it maps
+    // onto the same response type the Code Assist envelope yields.
+    let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [{ "text": "hello from developer api" }]
+                },
+                "finishReason": "STOP"
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 3,
+            "candidatesTokenCount": 5
+        }
+    }))
+    .expect("parse developer api response");
+
+    let candidate = response
+        .candidates
+        .expect("missing candidates")
+        .into_iter()
+        .next()
+        .expect("missing first candidate");
+    assert_eq!(candidate.finish_reason.as_deref(), Some("STOP"));
+    let text = candidate
+        .content
+        .expect("missing content")
+        .parts
+        .into_iter()
+        .next()
+        .and_then(|part| part.text)
+        .expect("missing text");
+    assert_eq!(text, "hello from developer api");
 }

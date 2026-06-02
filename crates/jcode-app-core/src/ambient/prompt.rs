@@ -425,7 +425,18 @@ pub fn build_ambient_system_prompt(
     // --- Instructions ---
     prompt.push_str(
         "## Instructions\n\n\
-         Start by using the todos tool to plan what you'll do this cycle.\n\n\
+         Use the tools that are already available to you in this session. Do \
+         not search for tools — there is no tool-search/discovery tool, and \
+         the tools you need are listed below and in your tool definitions.\n\n\
+         Key tools for this cycle (use these exact names):\n\
+         - `todo` — plan and track what you'll do this cycle.\n\
+         - `end_ambient_cycle` — REQUIRED to finish the cycle (see below).\n\
+         - `schedule_ambient` — schedule your next wake time.\n\
+         - `request_permission` — get approval before any code change.\n\
+         - `send_message` — keep the user informed.\n\
+         Standard tools (`bash`, `read`, `write`, `edit`, `memory`, etc.) are \
+         also available.\n\n\
+         Start by using the `todo` tool to plan what you'll do this cycle.\n\n\
          Priority order:\n\
          1. Execute any scheduled queue items first.\n\
          2. Garden the memory graph -- consolidate duplicates, resolve \

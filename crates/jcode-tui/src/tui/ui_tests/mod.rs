@@ -135,6 +135,7 @@ struct TestState {
     chat_native_scrollbar: bool,
     onboarding_preview: bool,
     suggestions: Vec<(String, String)>,
+    compacted_hidden_user_prompts: usize,
 }
 
 impl crate::tui::TuiState for TestState {
@@ -146,6 +147,9 @@ impl crate::tui::TuiState for TestState {
             .iter()
             .filter(|message| message.role == "user")
             .count()
+    }
+    fn compacted_hidden_user_prompts(&self) -> usize {
+        self.compacted_hidden_user_prompts
     }
     fn has_display_edit_tool_messages(&self) -> bool {
         self.display_messages.iter().any(|message| {
@@ -339,6 +343,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn diagram_pane_ratio(&self) -> u8 {
         50
+    }
+    fn diagram_pane_ratio_user_adjusted(&self) -> bool {
+        false
     }
     fn diagram_pane_animating(&self) -> bool {
         false

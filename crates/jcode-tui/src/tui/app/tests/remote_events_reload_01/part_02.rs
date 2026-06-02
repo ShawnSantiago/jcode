@@ -238,7 +238,7 @@ fn test_remote_poke_status_and_off_update_state() {
             .expect("/poke status should succeed remotely");
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Auto-poke: **ON**. 1 incomplete todo.")
+                .contains("Auto-poke: ON. 1 incomplete todo.")
                 && msg.content.contains("A follow-up poke is queued.")
                 && msg.content.contains("A turn is currently running.")
         }));
@@ -277,7 +277,7 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
         .expect("/rewind should be handled remotely");
 
     let last = app.display_messages().last().expect("history message");
-    assert!(last.content.contains("**Conversation history:**"));
+    assert!(last.content.contains("Conversation history:"));
     assert!(last.content.contains("1 👤 User - hello"));
     assert!(last.content.contains("2 🤖 Assistant - hi there"));
     assert!(!last.content.contains("No messages in conversation"));

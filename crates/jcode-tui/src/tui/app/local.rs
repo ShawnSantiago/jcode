@@ -56,6 +56,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     app.maybe_capture_runtime_memory_heartbeat();
     app.progress_mouse_scroll_animation();
+    needs_redraw |= app.update_chat_overscroll();
     needs_redraw |= app.update_pinned_images_auto_hide();
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;
@@ -70,6 +71,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
+    needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.poll_compaction_completion();
     needs_redraw |= app.maybe_refresh_overnight_display_card();
     needs_redraw |= super::commands::poll_local_transfer_prepare(app);
@@ -159,6 +161,9 @@ pub(super) fn handle_bus_event(
         Ok(BusEvent::LoginCompleted(login)) => {
             app.handle_login_completed(login);
             true
+        }
+        Ok(BusEvent::OnboardingModelValidated(result)) => {
+            app.handle_onboarding_model_validated(result)
         }
         Ok(BusEvent::ModelsUpdated) => {
             app.invalidate_model_picker_cache();
