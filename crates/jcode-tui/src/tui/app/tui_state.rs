@@ -73,7 +73,7 @@ impl App {
         )
     }
 
-    fn effective_remote_provider_model(&self) -> Option<String> {
+    pub(super) fn effective_remote_provider_model(&self) -> Option<String> {
         Self::sanitize_remote_model_hint(self.remote_provider_model.clone())
             .or_else(|| Self::sanitize_remote_model_hint(self.session.model.clone()))
             .or_else(|| self.configured_remote_model_hint())
@@ -1335,6 +1335,10 @@ impl crate::tui::TuiState for App {
 
     fn diagram_pane_ratio(&self) -> u8 {
         self.animated_diagram_pane_ratio()
+    }
+
+    fn diagram_pane_ratio_user_adjusted(&self) -> bool {
+        self.diagram_pane_ratio_user_adjusted
     }
 
     fn diagram_pane_animating(&self) -> bool {

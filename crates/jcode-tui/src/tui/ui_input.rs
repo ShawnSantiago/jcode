@@ -1474,7 +1474,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     if !model.is_empty() && !overscroll_is_placeholder(&model) {
         spans.push(Span::styled(
             model,
-            Style::default().fg(rgb(180, 180, 190)).bold(),
+            Style::default().fg(rgb(255, 150, 200)).bold(),
         ));
         // Reasoning level shown inline next to the model, e.g. " high".
         if let Some(effort) = data
@@ -1512,7 +1512,6 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         }
         spans.push(Span::styled(label.to_string(), Style::default().fg(color)));
     }
-
 
     // Context usage as a rounded bar
     if let Some((used, limit)) = overscroll_context_usage(&data) {
@@ -1618,15 +1617,18 @@ fn overscroll_provider_display(provider: &str) -> String {
     }
 }
 
-fn overscroll_auth_label(method: crate::tui::info_widget::AuthMethod) -> Option<(&'static str, Color)> {
+fn overscroll_auth_label(
+    method: crate::tui::info_widget::AuthMethod,
+) -> Option<(&'static str, Color)> {
     use crate::tui::info_widget::AuthMethod;
     match method {
         AuthMethod::Unknown => None,
-        AuthMethod::ApiKey
-        | AuthMethod::AnthropicApiKey
-        | AuthMethod::OpenAIApiKey => Some(("API key", rgb(180, 180, 190))),
-        AuthMethod::OpenRouterApiKey
-        | AuthMethod::OpenCodeApiKey => Some(("API key", rgb(140, 180, 255))),
+        AuthMethod::ApiKey | AuthMethod::AnthropicApiKey | AuthMethod::OpenAIApiKey => {
+            Some(("API key", rgb(180, 180, 190)))
+        }
+        AuthMethod::OpenRouterApiKey | AuthMethod::OpenCodeApiKey => {
+            Some(("API key", rgb(140, 180, 255)))
+        }
         AuthMethod::AnthropicOAuth => Some(("OAuth", rgb(255, 160, 100))),
         AuthMethod::OpenAIOAuth => Some(("OAuth", rgb(100, 200, 180))),
         AuthMethod::CopilotOAuth => Some(("OAuth", rgb(110, 200, 140))),

@@ -1,12 +1,13 @@
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::state::{
-    SessionInterruptQueues, queue_soft_interrupt_for_session, session_event_fanout_sender,
+    SessionControlHandle, SessionInterruptQueues, queue_soft_interrupt_for_session,
+    session_event_fanout_sender,
 };
 use super::{SessionAgents, SwarmMember};
 use crate::config::SafetyConfig;
 use crate::session::Session;
 use anyhow::{Context, Result};
-use jcode_agent_runtime::SoftInterruptSource;
+use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +19,9 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const ERROR_BACKOFF: Duration = Duration::from_secs(10);
 const LAUNCH_SESSION_WAIT: Duration = Duration::from_secs(45);
 const MAX_RESPONSE_CHARS: usize = 12_000;
+const CANCEL_SIGNAL_RESET: Duration = Duration::from_secs(5);
+
+type SessionCancelSignals = Arc<RwLock<HashMap<String, InterruptSignal>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RelayApiConfig {
@@ -121,6 +125,10 @@ fn normalize_api_base(api_base: &str) -> String {
     }
 }
 
+fn session_command_event_types_param() -> String {
+    "types=prompt,cancel".to_string()
+}
+
 fn default_device_id() -> String {
     if let Ok(value) = std::env::var("JCODE_JADE_RELAY_DEVICE_ID")
         && !value.trim().is_empty()
@@ -137,6 +145,7 @@ pub(super) fn spawn_if_configured(
     safety: &SafetyConfig,
     sessions: SessionAgents,
     soft_interrupt_queues: SessionInterruptQueues,
+    shutdown_signals: SessionCancelSignals,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) {
     if let Some(config) = RelayListenerConfig::from_safety(safety) {
@@ -147,11 +156,17 @@ pub(super) fn spawn_if_configured(
         ));
         let session_sessions = Arc::clone(&sessions);
         let session_interrupts = Arc::clone(&soft_interrupt_queues);
+        let session_shutdown_signals = Arc::clone(&shutdown_signals);
         let session_swarm = Arc::clone(&swarm_members);
         tokio::spawn(async move {
             let client = RelayClient::new(config);
             client
-                .run(session_sessions, session_interrupts, session_swarm)
+                .run(
+                    session_sessions,
+                    session_interrupts,
+                    session_shutdown_signals,
+                    session_swarm,
+                )
                 .await;
         });
     }
@@ -165,7 +180,12 @@ pub(super) fn spawn_if_configured(
         tokio::spawn(async move {
             let client = RelayLauncherClient::new(config);
             client
-                .run(sessions, soft_interrupt_queues, swarm_members)
+                .run(
+                    sessions,
+                    soft_interrupt_queues,
+                    shutdown_signals,
+                    swarm_members,
+                )
                 .await;
         });
     }
@@ -196,12 +216,13 @@ impl RelayClient {
         &self,
         sessions: SessionAgents,
         soft_interrupt_queues: SessionInterruptQueues,
+        shutdown_signals: SessionCancelSignals,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     ) {
         let after = if self.config.process_existing_prompts {
             0
         } else {
-            match self.poll_prompts(0, 0).await {
+            match self.poll_commands(0, 0).await {
                 Ok(response) => response.next_after,
                 Err(error) => {
                     crate::logging::warn(&format!("Jade relay initial poll failed: {error:#}"));
@@ -209,8 +230,14 @@ impl RelayClient {
                 }
             }
         };
-        self.run_from_after(after, sessions, soft_interrupt_queues, swarm_members)
-            .await;
+        self.run_from_after(
+            after,
+            sessions,
+            soft_interrupt_queues,
+            shutdown_signals,
+            swarm_members,
+        )
+        .await;
     }
 
     async fn run_from_after(
@@ -218,6 +245,7 @@ impl RelayClient {
         mut after: i64,
         sessions: SessionAgents,
         soft_interrupt_queues: SessionInterruptQueues,
+        shutdown_signals: SessionCancelSignals,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     ) {
         let mut last_heartbeat = Instant::now()
@@ -232,24 +260,42 @@ impl RelayClient {
                 last_heartbeat = Instant::now();
             }
 
-            match self.poll_prompts(after, RELAY_LONG_POLL_SECONDS).await {
+            match self.poll_commands(after, RELAY_LONG_POLL_SECONDS).await {
                 Ok(response) => {
                     after = response.next_after;
                     for event in response.events {
                         if event.seq > after {
                             after = event.seq;
                         }
-                        if let Err(error) = self
-                            .handle_prompt(
-                                event,
-                                &sessions,
-                                &soft_interrupt_queues,
-                                Arc::clone(&swarm_members),
-                            )
-                            .await
-                        {
+                        let result = match event.event_type() {
+                            "prompt" => {
+                                self.handle_prompt(
+                                    event,
+                                    &sessions,
+                                    &soft_interrupt_queues,
+                                    Arc::clone(&swarm_members),
+                                )
+                                .await
+                            }
+                            "cancel" => {
+                                self.handle_cancel(
+                                    event,
+                                    &sessions,
+                                    &soft_interrupt_queues,
+                                    &shutdown_signals,
+                                )
+                                .await
+                            }
+                            other => {
+                                crate::logging::debug(&format!(
+                                    "Jade relay ignoring unsupported session event type={other}"
+                                ));
+                                Ok(())
+                            }
+                        };
+                        if let Err(error) = result {
                             crate::logging::warn(&format!(
-                                "Jade relay prompt handling failed: {error:#}"
+                                "Jade relay event handling failed: {error:#}"
                             ));
                         }
                     }
@@ -279,11 +325,11 @@ impl RelayClient {
         ensure_success(response, "heartbeat").await.map(|_| ())
     }
 
-    async fn poll_prompts(&self, after: i64, wait: u32) -> Result<RelayEventsResponse> {
+    async fn poll_commands(&self, after: i64, wait: u32) -> Result<RelayEventsResponse> {
         let session = urlencoding_encode(&self.config.session_id);
         let mut params = vec![
             format!("after={}", after.max(0)),
-            "types=prompt".to_string(),
+            session_command_event_types_param(),
             format!("wait={wait}"),
             "limit=100".to_string(),
         ];
@@ -303,7 +349,13 @@ impl RelayClient {
             .context("decode relay poll response")
     }
 
-    async fn post_relay_event(&self, event_type: &str, text: &str, request_seq: i64) -> Result<()> {
+    async fn post_relay_event(
+        &self,
+        event_type: &str,
+        text: &str,
+        request_seq: i64,
+        data: Option<serde_json::Value>,
+    ) -> Result<i64> {
         let session = urlencoding_encode(&self.config.session_id);
         let mut body = serde_json::json!({
             "type": event_type,
@@ -311,6 +363,11 @@ impl RelayClient {
             "request_seq": request_seq,
             "origin": &self.config.api.device_id,
         });
+        if let Some(data) = data
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert("data".to_string(), data);
+        }
         add_user_id(&mut body, self.config.api.user_id.as_deref());
         let response = self
             .auth(
@@ -320,9 +377,12 @@ impl RelayClient {
             )
             .send()
             .await?;
-        ensure_success(response, "post relay event")
+        let response = ensure_success(response, "post relay event").await?;
+        let event = response
+            .json::<RelayEvent>()
             .await
-            .map(|_| ())
+            .context("decode relay event append response")?;
+        Ok(event.seq)
     }
 
     async fn handle_prompt(
@@ -344,6 +404,19 @@ impl RelayClient {
             text.chars().count()
         ));
 
+        let _ = self
+            .post_relay_event(
+                "status",
+                "Jade relay prompt processing started",
+                event.seq,
+                Some(serde_json::json!({
+                    "phase": "running",
+                    "prompt_seq": event.seq,
+                    "session_id": &self.config.session_id,
+                })),
+            )
+            .await;
+
         match deliver_to_session(
             &self.config.session_id,
             text,
@@ -353,13 +426,154 @@ impl RelayClient {
         )
         .await
         {
-            Ok(reply) => self.post_relay_event("response", &reply, event.seq).await,
+            Ok(reply) => {
+                let response_seq = self
+                    .post_relay_event(
+                        "response",
+                        &reply,
+                        event.seq,
+                        Some(serde_json::json!({
+                            "phase": "completed",
+                            "prompt_seq": event.seq,
+                            "session_id": &self.config.session_id,
+                        })),
+                    )
+                    .await?;
+                let _ = self
+                    .post_relay_event(
+                        "status",
+                        "Jade relay prompt processing completed",
+                        event.seq,
+                        Some(serde_json::json!({
+                            "phase": "completed",
+                            "prompt_seq": event.seq,
+                            "response_seq": response_seq,
+                            "session_id": &self.config.session_id,
+                        })),
+                    )
+                    .await;
+                Ok(())
+            }
             Err(error) => {
                 let message = format!("delivery failed: {error:#}");
-                let _ = self.post_relay_event("error", &message, event.seq).await;
+                let _ = self
+                    .post_relay_event(
+                        "error",
+                        &message,
+                        event.seq,
+                        Some(serde_json::json!({
+                            "phase": "failed",
+                            "prompt_seq": event.seq,
+                            "session_id": &self.config.session_id,
+                        })),
+                    )
+                    .await;
                 Err(error)
             }
         }
+    }
+
+    async fn handle_cancel(
+        &self,
+        event: RelayEvent,
+        sessions: &SessionAgents,
+        soft_interrupt_queues: &SessionInterruptQueues,
+        shutdown_signals: &SessionCancelSignals,
+    ) -> Result<()> {
+        let reason = event
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Cancel requested via Jade relay");
+        let interrupt = format!("[jade relay cancel] {reason}");
+        crate::logging::info(&format!(
+            "Jade relay cancel requested seq={} session={}",
+            event.seq, self.config.session_id
+        ));
+
+        let live_agent = {
+            let guard = sessions.read().await;
+            guard.contains_key(&self.config.session_id)
+        };
+        let queue = {
+            let guard = soft_interrupt_queues.read().await;
+            guard.get(&self.config.session_id).cloned()
+        };
+        let stop_signal = {
+            let guard = shutdown_signals.read().await;
+            guard.get(&self.config.session_id).cloned()
+        };
+
+        let (mode, signal_reset_ms) = if let (Some(queue), Some(stop_signal)) = (queue, stop_signal)
+        {
+            let control = SessionControlHandle::cancel_only(
+                self.config.session_id.clone(),
+                queue,
+                stop_signal,
+            );
+            if !control.queue_soft_interrupt(interrupt, true, SoftInterruptSource::User) {
+                anyhow::bail!(
+                    "session '{}' could not accept cancel interrupt",
+                    self.config.session_id
+                );
+            }
+            control.request_cancel();
+            let reset_control = control.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(CANCEL_SIGNAL_RESET).await;
+                reset_control.reset_cancel();
+            });
+            ("signalled", Some(CANCEL_SIGNAL_RESET.as_millis() as u64))
+        } else if live_agent {
+            if queue_soft_interrupt_for_session(
+                &self.config.session_id,
+                interrupt,
+                true,
+                SoftInterruptSource::User,
+                soft_interrupt_queues,
+                sessions,
+            )
+            .await
+            {
+                ("queued_no_signal", None)
+            } else {
+                anyhow::bail!(
+                    "session '{}' could not accept cancel",
+                    self.config.session_id
+                )
+            }
+        } else if queue_soft_interrupt_for_session(
+            &self.config.session_id,
+            interrupt,
+            true,
+            SoftInterruptSource::User,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await
+        {
+            ("queued_offline", None)
+        } else {
+            anyhow::bail!(
+                "session '{}' is not live and could not queue cancel",
+                self.config.session_id
+            )
+        };
+
+        self.post_relay_event(
+            "status",
+            "Jade relay cancel requested",
+            event.seq,
+            Some(serde_json::json!({
+                "phase": "cancel_requested",
+                "mode": mode,
+                "signal_reset_ms": signal_reset_ms,
+                "session_id": &self.config.session_id,
+            })),
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -388,6 +602,7 @@ impl RelayLauncherClient {
         &self,
         sessions: SessionAgents,
         soft_interrupt_queues: SessionInterruptQueues,
+        shutdown_signals: SessionCancelSignals,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     ) {
         let mut after = match self.poll_launches(0, 0).await {
@@ -423,6 +638,7 @@ impl RelayLauncherClient {
                                 event,
                                 &sessions,
                                 &soft_interrupt_queues,
+                                &shutdown_signals,
                                 Arc::clone(&swarm_members),
                             )
                             .await
@@ -568,6 +784,7 @@ impl RelayLauncherClient {
         event: RelayEvent,
         sessions: &SessionAgents,
         soft_interrupt_queues: &SessionInterruptQueues,
+        shutdown_signals: &SessionCancelSignals,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     ) -> Result<()> {
         let request =
@@ -609,6 +826,7 @@ impl RelayLauncherClient {
                 0,
                 sessions,
                 soft_interrupt_queues,
+                shutdown_signals,
                 swarm_members,
             );
             return Ok(());
@@ -643,6 +861,21 @@ impl RelayLauncherClient {
             )
             .await?;
 
+        let _ = self
+            .post_session_event(
+                &session_id,
+                "status",
+                "Jade relay launch prompt processing started",
+                prompt_seq,
+                Some(serde_json::json!({
+                    "phase": "running",
+                    "prompt_seq": prompt_seq,
+                    "session_id": &session_id,
+                    "source": "device_launch",
+                })),
+            )
+            .await;
+
         let after = match deliver_to_launched_session(
             &session_id,
             &request.text,
@@ -653,8 +886,35 @@ impl RelayLauncherClient {
         {
             Ok(reply) => {
                 let response_seq = self
-                    .post_session_event(&session_id, "response", &reply, prompt_seq, None)
+                    .post_session_event(
+                        &session_id,
+                        "response",
+                        &reply,
+                        prompt_seq,
+                        Some(serde_json::json!({
+                            "phase": "completed",
+                            "prompt_seq": prompt_seq,
+                            "session_id": &session_id,
+                            "source": "device_launch",
+                        })),
+                    )
                     .await?;
+                let status_seq = self
+                    .post_session_event(
+                        &session_id,
+                        "status",
+                        "Jade relay launch prompt processing completed",
+                        prompt_seq,
+                        Some(serde_json::json!({
+                            "phase": "completed",
+                            "prompt_seq": prompt_seq,
+                            "response_seq": response_seq,
+                            "session_id": &session_id,
+                            "source": "device_launch",
+                        })),
+                    )
+                    .await
+                    .unwrap_or(response_seq);
                 let _ = self
                     .post_device_event(
                         "launch_status",
@@ -668,12 +928,23 @@ impl RelayLauncherClient {
                         })),
                     )
                     .await;
-                response_seq
+                status_seq
             }
             Err(error) => {
                 let message = format!("delivery failed: {error:#}");
                 let error_seq = self
-                    .post_session_event(&session_id, "error", &message, prompt_seq, None)
+                    .post_session_event(
+                        &session_id,
+                        "error",
+                        &message,
+                        prompt_seq,
+                        Some(serde_json::json!({
+                            "phase": "failed",
+                            "prompt_seq": prompt_seq,
+                            "session_id": &session_id,
+                            "source": "device_launch",
+                        })),
+                    )
                     .await
                     .unwrap_or(prompt_seq);
                 let _ = self
@@ -697,6 +968,7 @@ impl RelayLauncherClient {
             after,
             sessions,
             soft_interrupt_queues,
+            shutdown_signals,
             swarm_members,
         );
         Ok(())
@@ -708,6 +980,7 @@ impl RelayLauncherClient {
         after: i64,
         sessions: &SessionAgents,
         soft_interrupt_queues: &SessionInterruptQueues,
+        shutdown_signals: &SessionCancelSignals,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     ) {
         let config = RelayListenerConfig {
@@ -717,13 +990,20 @@ impl RelayLauncherClient {
         };
         let sessions = Arc::clone(sessions);
         let soft_interrupt_queues = Arc::clone(soft_interrupt_queues);
+        let shutdown_signals = Arc::clone(shutdown_signals);
         tokio::spawn(async move {
             crate::logging::info(&format!(
                 "Starting Jade relay listener for launched session {session_id} after seq {after}"
             ));
             let client = RelayClient::new(config);
             client
-                .run_from_after(after, sessions, soft_interrupt_queues, swarm_members)
+                .run_from_after(
+                    after,
+                    sessions,
+                    soft_interrupt_queues,
+                    shutdown_signals,
+                    swarm_members,
+                )
                 .await;
         });
     }
@@ -983,10 +1263,22 @@ struct RelayEventsResponse {
 struct RelayEvent {
     #[serde(default)]
     seq: i64,
+    #[serde(default, rename = "type")]
+    event_type: String,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
     data: Option<serde_json::Value>,
+}
+
+impl RelayEvent {
+    fn event_type(&self) -> &str {
+        if self.event_type.trim().is_empty() {
+            "prompt"
+        } else {
+            self.event_type.trim()
+        }
+    }
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -1076,6 +1368,7 @@ mod tests {
     fn launch_request_reads_structured_data() {
         let event = RelayEvent {
             seq: 7,
+            event_type: "launch".to_string(),
             text: Some("hello from web".to_string()),
             data: Some(serde_json::json!({
                 "working_dir": "/tmp/repo",
@@ -1090,6 +1383,28 @@ mod tests {
         assert_eq!(parsed.model.as_deref(), Some("openai:gpt-test"));
         assert_eq!(parsed.provider_key.as_deref(), Some("openai"));
         assert!(parsed.selfdev);
+    }
+
+    #[test]
+    fn relay_session_listener_polls_prompt_and_cancel_commands() {
+        assert_eq!(session_command_event_types_param(), "types=prompt,cancel");
+    }
+
+    #[test]
+    fn relay_event_type_defaults_to_prompt_for_legacy_events() {
+        let legacy = RelayEvent {
+            seq: 1,
+            event_type: String::new(),
+            text: Some("hello".to_string()),
+            data: None,
+        };
+        assert_eq!(legacy.event_type(), "prompt");
+
+        let cancel = RelayEvent {
+            event_type: "cancel".to_string(),
+            ..legacy
+        };
+        assert_eq!(cancel.event_type(), "cancel");
     }
 
     #[test]

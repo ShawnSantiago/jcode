@@ -1404,12 +1404,12 @@ impl App {
         if !active {
             return Ok(false);
         }
-        let is_default = modifiers.contains(KeyModifiers::CONTROL)
-            && key_char_eq_ignore_ascii_case(code, 'd');
-        let is_favorite = modifiers.contains(KeyModifiers::CONTROL)
-            && key_char_eq_ignore_ascii_case(code, 'f');
-        let is_cycle_favorite = modifiers.contains(KeyModifiers::ALT)
-            && key_char_eq_ignore_ascii_case(code, 'f');
+        let is_default =
+            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'd');
+        let is_favorite =
+            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'f');
+        let is_cycle_favorite =
+            modifiers.contains(KeyModifiers::ALT) && key_char_eq_ignore_ascii_case(code, 'f');
         if is_default || is_favorite || is_cycle_favorite {
             self.handle_inline_interactive_key(code, modifiers)?;
             return Ok(true);
@@ -1767,9 +1767,9 @@ impl App {
                         && spawned == 0
                         && matches!(resolved_target, ResumeTarget::JcodeSession { .. })
                     {
-                        self.handle_session_picker_current_terminal_selection(std::slice::from_ref(
-                            target,
-                        ));
+                        self.handle_session_picker_current_terminal_selection(
+                            std::slice::from_ref(target),
+                        );
                         return;
                     }
                     failed.push(resume_target_manual_command(
@@ -2003,6 +2003,15 @@ impl App {
                     | PickerResult::SelectedInNewTerminal(ids)
                     | PickerResult::SelectedInCurrentTerminal(ids) => ids,
                     PickerResult::RestoreCrashedGroup(_) => Vec::new(),
+                    PickerResult::StartNewSession => {
+                        // User explicitly chose to start fresh; close the picker
+                        // and show the onboarding suggestion cards.
+                        self.session_picker_overlay = None;
+                        self.session_picker_mode = SessionPickerMode::Resume;
+                        let _ = cli;
+                        self.onboarding_show_suggestions();
+                        return Ok(());
+                    }
                 };
                 self.session_picker_overlay = None;
                 self.session_picker_mode = SessionPickerMode::Resume;
@@ -2033,6 +2042,13 @@ impl App {
             }
             OverlayAction::Selected(PickerResult::RestoreCrashedGroup(session_ids)) => {
                 self.handle_batch_crash_restore(&session_ids);
+            }
+            OverlayAction::Selected(PickerResult::StartNewSession) => {
+                // Only the onboarding picker emits this, and that case is
+                // handled by the onboarding arm above. Outside onboarding,
+                // treat it as a no-op close.
+                self.session_picker_overlay = None;
+                self.session_picker_mode = SessionPickerMode::Resume;
             }
         }
         Ok(())

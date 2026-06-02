@@ -496,6 +496,14 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
     );
     crate::env::remove_var("JCODE_OPENROUTER_TRANSPORT_STATE");
 
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openrouter");
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(Some("openrouter")),
+        OpenRouterTransportState::OpenRouterApiKey
+    );
+    assert!(OpenRouterTransportState::from_current_env(Some("openrouter")).is_real_openrouter());
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "jcode");
     assert_eq!(
         OpenRouterTransportState::from_current_env(Some("jcode")),

@@ -1010,6 +1010,95 @@ fn onboarding_external_filter_with_no_matches_has_no_target() {
     assert!(picker.latest_visible_resume_target().is_none());
 }
 
+fn codex_session(id: &str) -> SessionInfo {
+    let mut s = make_session(id, id, false, SessionStatus::Closed);
+    s.source = SessionSource::Codex;
+    s.model = Some("gpt-5-codex".to_string());
+    s.last_active_at = Some(Utc::now());
+    s.resume_target = ResumeTarget::CodexSession {
+        session_id: id.to_string(),
+        session_path: format!("/tmp/{id}.jsonl"),
+    };
+    s
+}
+
+#[test]
+fn onboarding_banner_defaults_to_start_new_when_transcripts_exist() {
+    let mut picker = SessionPicker::new(vec![codex_session("codex_one")]);
+    picker.activate_external_cli_filter(SessionFilterMode::Codex);
+    picker.activate_onboarding_banner(vec![Line::from("welcome")]);
+
+    assert!(picker.onboarding_banner_active());
+    // First-run onboarding highlights "Start a new session" by default so the
+    // common "just start" case is one Enter away; resuming is one Down away.
+    assert!(picker.onboarding_start_new_highlighted());
+}
+
+#[test]
+fn onboarding_banner_defaults_to_start_new_when_no_transcripts() {
+    // No Codex transcripts -> the only selectable affordance is "Start new".
+    let jcode = make_session("jcode_only", "jcode", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![jcode]);
+    picker.activate_external_cli_filter(SessionFilterMode::Codex);
+    picker.activate_onboarding_banner(vec![Line::from("welcome")]);
+
+    assert_eq!(picker.visible_session_count(), 0);
+    assert!(picker.onboarding_start_new_highlighted());
+}
+
+#[test]
+fn onboarding_banner_enter_returns_start_new_and_arrows_toggle_list() {
+    let mut picker = SessionPicker::new(vec![codex_session("codex_one")]);
+    picker.activate_external_cli_filter(SessionFilterMode::Codex);
+    picker.activate_onboarding_banner(vec![Line::from("welcome")]);
+
+    // Start-new is highlighted by default on first run.
+    assert!(picker.onboarding_start_new_highlighted());
+
+    // Enter while start-new is highlighted returns StartNewSession.
+    let action = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("overlay key");
+    assert!(matches!(
+        action,
+        OverlayAction::Selected(PickerResult::StartNewSession)
+    ));
+
+    // Down moves into the session list; Up returns to the start-new row.
+    picker.next();
+    assert!(!picker.onboarding_start_new_highlighted());
+    picker.previous();
+    assert!(picker.onboarding_start_new_highlighted());
+}
+
+#[test]
+fn onboarding_banner_renders_prompt_and_start_new_row() {
+    let mut picker = SessionPicker::new(vec![codex_session("codex_one")]);
+    picker.activate_external_cli_filter(SessionFilterMode::Codex);
+    picker.activate_onboarding_banner(vec![
+        Line::from("Welcome to jcode"),
+        Line::from("We found your Codex sessions."),
+    ]);
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render onboarding picker");
+
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+    assert!(
+        text.contains("Welcome to jcode"),
+        "onboarding prompt should render in the banner: {text:?}"
+    );
+    assert!(
+        text.contains("Start a new session"),
+        "start-new row should render in the banner: {text:?}"
+    );
+}
+
 #[test]
 fn test_keyboard_scroll_uses_preview_focus_for_paging() {
     let s1 = make_session("session_1", "one", false, SessionStatus::Closed);

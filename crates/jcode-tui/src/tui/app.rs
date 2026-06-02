@@ -602,6 +602,10 @@ pub struct App {
     // Cached pricing (input $/1M tokens, output $/1M tokens)
     cached_prompt_price: Option<f32>,
     cached_completion_price: Option<f32>,
+    // Cached cache-read pricing ($/1M tokens), when known for the active model.
+    cached_cache_read_price: Option<f32>,
+    // Model the cached_*_price values were resolved for, so we re-resolve on switch.
+    cached_price_model: Option<String>,
     // Context limit tracking (for compaction warning)
     context_limit: u64,
     context_warning_shown: bool,
@@ -728,6 +732,12 @@ pub struct App {
     /// TUI launches, so no in-TUI login event fires; this lets us still begin the
     /// flow once the TUI is ready and already authenticated.
     onboarding_startup_checked: bool,
+    /// Pending first-run model-validation request for the new-session screen.
+    /// In remote/client mode the live default model is reported by the server
+    /// asynchronously, so we record that a validation is wanted and let the
+    /// onboarding tick fire it once a concrete model id (not "unknown") is
+    /// known. `None` means no validation is pending.
+    onboarding_pending_model_validation: Option<onboarding_flow::OnboardingPendingValidation>,
     // Inline UI state for copy badges ([Alt] [⇧] [S])
     copy_badge_ui: CopyBadgeUiState,
     // Modal in-app selection/copy state for the chat viewport.
@@ -856,6 +866,9 @@ pub struct App {
     diagram_pane_ratio_from: u8,
     diagram_pane_ratio_target: u8,
     diagram_pane_anim_start: Option<Instant>,
+    // Set once the user manually resizes the pane (drag or +/- keys), so the
+    // adaptive image-width default stops overriding their explicit choice.
+    diagram_pane_ratio_user_adjusted: bool,
     // Whether the pinned diagram pane is visible
     diagram_pane_enabled: bool,
     // Position of pinned diagram pane (side or top)
@@ -895,6 +908,11 @@ pub struct App {
     // User explicitly hid the side panel with the side-panel toggle key. While set, incoming snapshots may update
     // pages but must not reopen the panel by restoring focused_page_id.
     side_panel_user_hidden: bool,
+    // True when the user explicitly hid the side panel (e.g. Alt+M) rather than
+    // it being auto-hidden. This makes the hide "sticky" so transient image
+    // repopulation (such as after a server reload/reconnect) does not re-reveal
+    // a panel the user deliberately closed.
+    side_panel_explicit_hidden: bool,
     // Pin read images to side pane
     pin_images: bool,
     // Auto-hide deadline for the pinned image side pane only.
