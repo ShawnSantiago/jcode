@@ -16,6 +16,11 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     // Style stack for nested formatting
     let mut bold = false;
     let mut italic = false;
+    // True while inside an emphasis run that opened with the reasoning sentinel.
+    // Smart-punctuation (e.g. apostrophes) splits a single reasoning line into
+    // multiple text events; only the first carries the sentinel, so we latch the
+    // dim/italic styling for the whole emphasis span.
+    let mut reasoning_emphasis = false;
     let mut strike = false;
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
@@ -101,7 +106,10 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             Event::End(TagEnd::Strong) => bold = false,
 
             Event::Start(Tag::Emphasis) => italic = true,
-            Event::End(TagEnd::Emphasis) => italic = false,
+            Event::End(TagEnd::Emphasis) => {
+                italic = false;
+                reasoning_emphasis = false;
+            }
 
             Event::Start(Tag::Strikethrough) => strike = true,
             Event::End(TagEnd::Strikethrough) => strike = false,
@@ -583,11 +591,19 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 } else if in_table {
                     current_cell.push_str(&text);
                 } else {
-                    // "Thought for X.Xs" footers and blockquote bodies (used for
-                    // streamed reasoning) render dim + italic.
+                    // "Thought for X.Xs" footers and streamed reasoning lines
+                    // (italic, prefixed with a sentinel) render dim with no gutter.
                     let is_thinking_duration =
                         text.starts_with("Thought for ") && text.ends_with('s');
-                    let mut style = if is_thinking_duration || blockquote_depth > 0 {
+                    let reasoning_text = text.strip_prefix(crate::REASONING_SENTINEL);
+                    if reasoning_text.is_some() {
+                        // Latch for the rest of this emphasis span so smart-
+                        // punctuation splits keep the dim/italic styling.
+                        reasoning_emphasis = true;
+                    }
+                    let is_reasoning = reasoning_emphasis;
+                    let text = reasoning_text.unwrap_or(&text);
+                    let mut style = if is_thinking_duration || is_reasoning {
                         Style::default().fg(md_dim_color()).italic()
                     } else {
                         match (bold, italic) {

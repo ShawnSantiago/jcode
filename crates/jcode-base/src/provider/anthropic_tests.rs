@@ -128,6 +128,69 @@ fn test_anthropic_reasoning_effort_request_parts() {
 }
 
 #[test]
+fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
+    // With no explicit reasoning effort, an adaptive-thinking model should still
+    // request summarized thinking when the user has opted into the display.
+    // Crucially, `output_config` must stay None so we do not force a stronger
+    // (more expensive) reasoning level than the model's default.
+    //
+    // `build_reasoning_request_parts_inner` takes the model directly, so we do
+    // not depend on `set_model` accepting a particular catalog entry. With no
+    // effort configured, `self.reasoning_effort()` resolves to None regardless
+    // of the default model.
+    let provider = AnthropicProvider::new();
+    // Make the test independent of the ambient config's anthropic_reasoning_effort
+    // by clearing the field directly; we only exercise the show_thinking path.
+    *provider.reasoning_effort.write().unwrap() = None;
+
+    // show_thinking = false: nothing requested.
+    let (thinking, output_config, _temp) =
+        provider.build_reasoning_request_parts_inner("claude-opus-4-8", true, false);
+    assert!(
+        thinking.is_none(),
+        "no thinking should be requested when both effort and show_thinking are off"
+    );
+    assert!(output_config.is_none());
+
+    // show_thinking = true: adaptive thinking requested, no output_config.
+    let (thinking, output_config, temperature) =
+        provider.build_reasoning_request_parts_inner("claude-opus-4-8", true, true);
+    match thinking.expect("show_thinking should enable adaptive thinking") {
+        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
+    }
+    assert!(
+        output_config.is_none(),
+        "show_thinking alone must not force an output reasoning effort"
+    );
+    assert_eq!(
+        temperature, None,
+        "thinking requests must omit OAuth temperature"
+    );
+}
+
+#[test]
+fn test_anthropic_show_thinking_enables_manual_thinking_without_effort() {
+    // Manual-thinking models (e.g. Opus 4.5) need a concrete budget; with only
+    // the display toggle on we fall back to the minimal budget. The model is
+    // passed directly so this does not depend on `set_model` validation.
+    let provider = AnthropicProvider::new();
+    // Independent of ambient config: clear any configured effort.
+    *provider.reasoning_effort.write().unwrap() = None;
+
+    let (thinking, _output_config, _temp) =
+        provider.build_reasoning_request_parts_inner("claude-opus-4-5", false, false);
+    assert!(thinking.is_none());
+
+    let (thinking, _output_config, _temperature) =
+        provider.build_reasoning_request_parts_inner("claude-opus-4-5", false, true);
+    match thinking.expect("show_thinking should enable manual thinking") {
+        ApiThinking::Enabled { budget_tokens } => assert_eq!(budget_tokens, 1_024),
+        ApiThinking::Adaptive { .. } => panic!("Opus 4.5 should use manual thinking"),
+    }
+}
+
+#[test]
 fn test_anthropic_max_alias_uses_strongest_real_effort() {
     assert_eq!(
         AnthropicProvider::actual_effort_for_model("claude-sonnet-4-6", "max"),

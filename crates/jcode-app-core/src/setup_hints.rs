@@ -53,6 +53,11 @@ pub struct SetupHintsState {
     pub startup_spawn_hint_dismissed: bool,
     pub mac_ghostty_guided: bool,
     pub mac_ghostty_dismissed: bool,
+    /// Number of times we have shown the terminal/setup nudge prompt to the user
+    /// (across all platforms). Used to cap the total number of nudges so we never
+    /// pester someone forever if they keep choosing "Not now".
+    #[serde(default)]
+    pub terminal_nudge_count: u64,
     /// Version of the installed macOS Cmd+; hotkey listener. Bumped when the
     /// listener implementation changes in a way that requires reinstalling the
     /// LaunchAgent for already-configured users (e.g. the run-loop fix that made
@@ -74,6 +79,11 @@ pub struct SetupHintsState {
 ///   connection.
 #[cfg(any(test, target_os = "macos"))]
 pub const HOTKEY_LISTENER_VERSION: u32 = 2;
+
+/// Maximum number of times we will ever show the terminal/setup nudge prompt
+/// to a user (across all launches and platforms). After this many nudges we stop
+/// asking, even if the user never explicitly picked "Don't ask again".
+pub const MAX_TERMINAL_NUDGES: u64 = 5;
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupHints {
@@ -119,6 +129,20 @@ impl SetupHintsState {
     pub fn save(&self) -> Result<()> {
         let path = Self::path()?;
         storage::write_json(&path, self)
+    }
+
+    /// Whether we are still allowed to show a terminal/setup nudge. Once we have
+    /// shown the prompt `MAX_TERMINAL_NUDGES` times we stop asking entirely.
+    #[cfg(any(test, windows, target_os = "macos"))]
+    fn nudge_budget_remaining(&self) -> bool {
+        self.terminal_nudge_count < MAX_TERMINAL_NUDGES
+    }
+
+    /// Record that a nudge prompt was shown to the user and persist the count.
+    #[cfg(any(test, windows, target_os = "macos"))]
+    fn record_nudge_shown(&mut self) {
+        self.terminal_nudge_count = self.terminal_nudge_count.saturating_add(1);
+        let _ = self.save();
     }
 }
 
@@ -651,7 +675,9 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
             return startup_hints;
         }
 
-        if !state.mac_ghostty_guided && !state.mac_ghostty_dismissed {
+        if !state.mac_ghostty_guided && !state.mac_ghostty_dismissed && state.nudge_budget_remaining()
+        {
+            state.record_nudge_shown();
             // Prefer any earlier-launch hint (alignment/welcome) if present so we
             // do not clobber it; otherwise surface the Terminal.app notice.
             if startup_hints.is_some() {

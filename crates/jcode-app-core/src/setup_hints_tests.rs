@@ -195,3 +195,21 @@ fn macos_terminal_notice_silent_for_modern_terminals() {
         assert!(state.mac_ghostty_dismissed);
     }
 }
+
+#[test]
+fn nudge_budget_caps_at_max_and_persists() {
+    let mut state = SetupHintsState::default();
+    assert_eq!(state.terminal_nudge_count, 0);
+
+    for shown in 1..=MAX_TERMINAL_NUDGES {
+        assert!(
+            state.nudge_budget_remaining(),
+            "should still allow nudge before #{shown}"
+        );
+        state.terminal_nudge_count = shown;
+    }
+
+    // After MAX_TERMINAL_NUDGES, we stop asking even without an explicit dismiss.
+    assert_eq!(state.terminal_nudge_count, MAX_TERMINAL_NUDGES);
+    assert!(!state.nudge_budget_remaining());
+}

@@ -697,8 +697,11 @@ pub struct App {
     thinking_buffer: String,
     // Whether the legacy single-line thought prefix was emitted this session
     thinking_prefix_emitted: bool,
-    // Whether we are currently streaming reasoning into an open blockquote region
+    // Whether we are currently streaming reasoning (dim+italic) text
     reasoning_streaming: bool,
+    // Incomplete trailing reasoning line awaiting a newline before it is emitted as
+    // a complete italic+dim line (reasoning is wrapped per whole line).
+    reasoning_pending_line: String,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
@@ -947,6 +950,14 @@ pub struct App {
     // the model switch and use stale provider/model state.
     remote_model_switch_in_flight: bool,
     pending_prompt_after_model_switch: Option<input::PreparedInput>,
+    // A manually submitted prompt that arrived before the remote session's
+    // bootstrap History payload was applied. Submitting in that window is racy:
+    // the locally-echoed user message is wiped by the `session_changed`
+    // `clear_display_messages()` in the History handler (the prompt "vanishes"
+    // while the server still streams a reply). Hold it until history loads and
+    // let `process_remote_followups` dispatch it, exactly like a staged startup
+    // prompt.
+    pending_prompt_before_history: Option<input::PreparedInput>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching
