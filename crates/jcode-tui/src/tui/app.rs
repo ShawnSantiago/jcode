@@ -695,8 +695,10 @@ pub struct App {
     thought_line_inserted: bool,
     // Buffer for accumulating thinking content during a thinking session
     thinking_buffer: String,
-    // Whether we've emitted the 💭 prefix for the current thinking session
+    // Whether the legacy single-line thought prefix was emitted this session
     thinking_prefix_emitted: bool,
+    // Whether we are currently streaming reasoning into an open blockquote region
+    reasoning_streaming: bool,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
@@ -747,6 +749,10 @@ pub struct App {
     copy_selection_pending_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_dragging: bool,
     copy_selection_goal_column: Option<usize>,
+    /// While drag-selecting with the mouse held at the top/bottom edge of a pane,
+    /// keep auto-scrolling on every tick (browser-style) until the drag leaves the
+    /// edge or ends. Stores the pane and whether to scroll upward.
+    copy_selection_edge_autoscroll: Option<(crate::tui::CopySelectionPane, bool)>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)
@@ -1034,6 +1040,10 @@ pub struct App {
     rate_limit_pending_message: Option<PendingRemoteMessage>,
     // Last turn-level stream error (used by /fix to choose recovery actions)
     last_stream_error: Option<String>,
+    // Raw text of the most recent user prompt that started a turn. Restored to the
+    // input box if the turn fails (e.g. "token refresh needed") so the user does not
+    // lose what they typed and can resend after recovering.
+    last_submitted_input: Option<String>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
     // Debug trace for scripted testing

@@ -1814,16 +1814,18 @@ fn single_session_vertices_do_not_draw_input_underline() {
 }
 
 #[test]
-fn single_session_vertices_draw_composer_chrome_and_submit_affordance() {
+fn single_session_vertices_draw_borderless_composer_and_submit_affordance() {
     let size = PhysicalSize::new(900, 700);
     let empty_app = SingleSessionApp::new(None);
     let empty_vertices = build_single_session_vertices(&empty_app, size, 0.0, 0);
 
-    assert!(vertices_have_color(
+    const REMOVED_COMPOSER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.990, 0.994, 1.000, 0.420];
+
+    assert!(!vertices_have_color(
         &empty_vertices,
-        COMPOSER_CARD_BACKGROUND_COLOR
+        REMOVED_COMPOSER_CARD_BACKGROUND_COLOR
     ));
-    assert!(vertices_have_rgb(
+    assert!(!vertices_have_rgb(
         &empty_vertices,
         COMPOSER_FOCUS_RING_COLOR
     ));
@@ -1840,9 +1842,9 @@ fn single_session_vertices_draw_composer_chrome_and_submit_affordance() {
     typed_app.handle_key(KeyInput::Character("ship it".to_string()));
     let typed_vertices = build_single_session_vertices(&typed_app, size, 0.0, 0);
 
-    assert!(vertices_have_color(
+    assert!(!vertices_have_color(
         &typed_vertices,
-        COMPOSER_CARD_BACKGROUND_COLOR
+        REMOVED_COMPOSER_CARD_BACKGROUND_COLOR
     ));
     assert!(vertices_have_color(
         &typed_vertices,
@@ -2110,10 +2112,7 @@ fn single_session_motion_geometry_survives_resize_and_text_scale_changes() {
     assert_case(
         "composer attachments",
         attachments_app,
-        &[
-            COMPOSER_CARD_BACKGROUND_COLOR,
-            ATTACHMENT_CHIP_BACKGROUND_COLOR,
-        ],
+        &[ATTACHMENT_CHIP_BACKGROUND_COLOR],
     );
 
     let mut stdin_app = SingleSessionApp::new(None);

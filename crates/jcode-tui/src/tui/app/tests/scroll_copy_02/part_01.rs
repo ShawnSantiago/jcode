@@ -759,6 +759,125 @@ fn test_ctrl_a_copies_chat_viewport_with_context_when_input_empty() {
 }
 
 #[test]
+fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    // Tall transcript so there is more content above the viewport to scroll into.
+    let lines = (1..=200)
+        .map(|idx| format!("line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+
+    let backend = ratatui::backend::TestBackend::new(60, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let area = layout.messages_area;
+    let top_row = area.y;
+    let lower_row = area.y + area.height / 2;
+    let col = area.x + 1;
+
+    // Anchor in the middle of the viewport.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row: lower_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    let before = app.scroll_offset();
+    // Dragging to the top boundary row should pull more transcript into view,
+    // just like selecting past the top edge of a browser window.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: col,
+        row: top_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(
+        app.scroll_offset() < before,
+        "drag to top edge should auto-scroll chat up (before={before}, after={})",
+        app.scroll_offset()
+    );
+
+    // Browser-style continuous scroll: holding the drag at the edge keeps pulling
+    // in more transcript on subsequent ticks without any further mouse movement.
+    let after_drag = app.scroll_offset();
+    assert!(app.progress_copy_selection_edge_autoscroll());
+    assert!(
+        app.scroll_offset() < after_drag,
+        "edge autoscroll tick should keep scrolling (after_drag={after_drag}, after_tick={})",
+        app.scroll_offset()
+    );
+
+    // The redraw loop must stay responsive while the mouse is held at the edge,
+    // even though the transcript is otherwise idle and no further mouse events
+    // arrive. Otherwise the deep-idle 5s cadence would stall the autoscroll.
+    assert!(
+        crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app),
+        "edge autoscroll should be reported active while drag is held at edge"
+    );
+    assert!(
+        crate::tui::periodic_redraw_required(&app),
+        "periodic redraw must be required while edge autoscroll is armed"
+    );
+    let policy = crate::perf::tui_policy();
+    let interval = crate::tui::redraw_interval_with_policy(&app, &policy);
+    assert!(
+        interval <= crate::tui::REDRAW_IDLE,
+        "redraw interval should stay fast during edge autoscroll, got {interval:?}"
+    );
+
+    // Simulate the real tick loop driving several frames with the mouse held
+    // still (no further drag events): it should keep scrolling toward the top.
+    let mut prev = app.scroll_offset();
+    for _ in 0..5 {
+        if prev == 0 {
+            break;
+        }
+        assert!(app.progress_copy_selection_edge_autoscroll());
+        assert!(
+            app.scroll_offset() < prev,
+            "held-still tick should keep scrolling up (prev={prev}, now={})",
+            app.scroll_offset()
+        );
+        prev = app.scroll_offset();
+    }
+
+    // Releasing the mouse stops the continuous autoscroll.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col,
+        row: top_row,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(
+        &app
+    ));
+}
+
+#[test]
 fn test_alt_a_copies_chat_viewport_with_context_when_input_empty() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();

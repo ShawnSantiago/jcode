@@ -92,7 +92,6 @@ const INLINE_WIDGET_LIST_REFLOW_SHIFT_DURATION: Duration = Duration::from_millis
 const INLINE_WIDGET_LIST_REFLOW_EXIT_DURATION: Duration = Duration::from_millis(135);
 const INLINE_WIDGET_LIST_REFLOW_COLOR: [f32; 4] = [0.105, 0.355, 0.950, 0.090];
 const COMPOSER_MOTION_DURATION: Duration = Duration::from_millis(165);
-pub(crate) const COMPOSER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.990, 0.994, 1.000, 0.420];
 pub(crate) const COMPOSER_FOCUS_RING_COLOR: [f32; 4] = [0.090, 0.250, 0.680, 0.185];
 pub(crate) const COMPOSER_PLACEHOLDER_RAIL_COLOR: [f32; 4] = [0.105, 0.185, 0.360, 0.185];
 pub(crate) const COMPOSER_SUBMIT_READY_COLOR: [f32; 4] = [0.105, 0.355, 0.950, 0.700];
@@ -985,26 +984,6 @@ fn push_single_session_composer_chrome(
         return;
     }
 
-    let radius = 13.0;
-    let focus_alpha = COMPOSER_FOCUS_RING_COLOR[3]
-        * (0.38 + 0.62 * visual.focus_opacity)
-        * (1.0 - visual.blocked_progress * 0.42);
-    let halo_inset = -2.0 - 2.0 * visual.focus_opacity;
-    push_rounded_rect(
-        vertices,
-        inset_rect(rect, halo_inset),
-        radius + 3.0,
-        with_alpha(COMPOSER_FOCUS_RING_COLOR, focus_alpha),
-        size,
-    );
-
-    let card_color = mix_color(
-        COMPOSER_CARD_BACKGROUND_COLOR,
-        [0.970, 0.984, 1.000, COMPOSER_CARD_BACKGROUND_COLOR[3]],
-        visual.blocked_progress * 0.35,
-    );
-    push_rounded_rect(vertices, rect, radius, card_color, size);
-
     push_single_session_attachment_chips(vertices, app, size, rect, attachment_chip_motion);
 
     let accent_alpha =
@@ -1628,16 +1607,27 @@ fn push_single_session_inline_widget_card(
     };
 
     if app.render_inline_widget_kind().is_some() {
-        let card_style = inline_widget_card_style(app.render_inline_widget_kind());
+        let kind = app.render_inline_widget_kind();
+        let card_style = inline_widget_card_style(kind);
+        let card_rect = if kind == Some(InlineWidgetKind::ModelPicker) {
+            inset_rect(layout.card, -6.0)
+        } else {
+            layout.card
+        };
+        let card_radius = if kind == Some(InlineWidgetKind::ModelPicker) {
+            layout.radius + 2.0
+        } else {
+            layout.radius
+        };
         push_rounded_rect(
             vertices,
             Rect {
-                x: layout.card.x + 0.0,
-                y: layout.card.y + 5.0,
-                width: layout.card.width,
-                height: layout.card.height,
+                x: card_rect.x,
+                y: card_rect.y + 5.0,
+                width: card_rect.width,
+                height: card_rect.height,
             },
-            layout.radius + 2.0,
+            card_radius + 2.0,
             with_alpha(
                 INLINE_WIDGET_CARD_SHADOW_COLOR,
                 INLINE_WIDGET_CARD_SHADOW_COLOR[3] * progress,
@@ -1646,36 +1636,38 @@ fn push_single_session_inline_widget_card(
         );
         push_rounded_rect(
             vertices,
-            layout.card,
-            layout.radius,
+            card_rect,
+            card_radius,
             with_alpha(card_style.border, card_style.border[3] * progress),
             size,
         );
         push_rounded_rect(
             vertices,
-            inset_rect(layout.card, 1.0),
-            (layout.radius - 1.0).max(1.0),
+            inset_rect(card_rect, 1.0),
+            (card_radius - 1.0).max(1.0),
             with_alpha(card_style.background, card_style.background[3] * progress),
             size,
         );
+        if kind != Some(InlineWidgetKind::ModelPicker) {
+            push_rounded_rect(
+                vertices,
+                Rect {
+                    x: card_rect.x + 1.5,
+                    y: card_rect.y + 1.5,
+                    width: 3.0,
+                    height: (card_rect.height - 3.0).max(0.0),
+                },
+                2.0,
+                with_alpha(card_style.accent, card_style.accent[3] * progress),
+                size,
+            );
+        }
         push_rounded_rect(
             vertices,
             Rect {
-                x: layout.card.x + 1.5,
-                y: layout.card.y + 1.5,
-                width: 3.0,
-                height: (layout.card.height - 3.0).max(0.0),
-            },
-            2.0,
-            with_alpha(card_style.accent, card_style.accent[3] * progress),
-            size,
-        );
-        push_rounded_rect(
-            vertices,
-            Rect {
-                x: layout.card.x + 8.0,
-                y: layout.card.y + 1.5,
-                width: (layout.card.width - 16.0).max(0.0),
+                x: card_rect.x + 8.0,
+                y: card_rect.y + 1.5,
+                width: (card_rect.width - 16.0).max(0.0),
                 height: 1.0,
             },
             0.5,
@@ -2210,7 +2202,7 @@ fn push_inline_command_row_card(
         with_alpha(palette.border, palette.border[3] * reveal_progress),
         size,
     );
-    if palette.selected {
+    if palette.selected && !is_model {
         push_rounded_rect(
             vertices,
             Rect {
@@ -3145,7 +3137,7 @@ fn inline_widget_card_padding_y(kind: Option<InlineWidgetKind>) -> f32 {
 fn inline_widget_card_radius(kind: Option<InlineWidgetKind>) -> f32 {
     match kind {
         Some(InlineWidgetKind::SlashSuggestions) => SLASH_SUGGESTIONS_INLINE_CARD_RADIUS,
-        Some(InlineWidgetKind::ModelPicker) => 26.0,
+        Some(InlineWidgetKind::ModelPicker) => 30.0,
         _ => INLINE_WIDGET_CARD_RADIUS,
     }
 }
@@ -3153,7 +3145,7 @@ fn inline_widget_card_radius(kind: Option<InlineWidgetKind>) -> f32 {
 fn inline_widget_selection_radius(kind: Option<InlineWidgetKind>) -> f32 {
     match kind {
         Some(InlineWidgetKind::SlashSuggestions) => SLASH_SUGGESTIONS_INLINE_SELECTION_RADIUS,
-        Some(InlineWidgetKind::ModelPicker) => 14.0,
+        Some(InlineWidgetKind::ModelPicker) => 16.0,
         _ => INLINE_WIDGET_SELECTION_RADIUS,
     }
 }

@@ -34,6 +34,7 @@ impl Provider for OpenRouterProvider {
             Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base);
         let allow_reasoning = allow_reasoning && !strict_openai_schema;
         let include_reasoning_content = include_reasoning_content && !strict_openai_schema;
+        let allow_image_input = self.supports_image_input();
 
         let mut effective_messages: Vec<Message> = messages.to_vec();
         let cache_supported = self.model_supports_cache(&model).await;
@@ -109,12 +110,22 @@ impl Provider for OpenRouterProvider {
                                 pending_user_parts.push(part);
                             }
                             ContentBlock::Image { media_type, data } => {
-                                pending_user_parts.push(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": format!("data:{};base64,{}", media_type, data)
-                                    }
-                                }));
+                                if allow_image_input {
+                                    pending_user_parts.push(serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{};base64,{}", media_type, data)
+                                        }
+                                    }));
+                                } else {
+                                    pending_user_parts.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": format!(
+                                            "[Image omitted: this provider/model does not support image input; media_type={}]",
+                                            media_type
+                                        )
+                                    }));
+                                }
                             }
                             ContentBlock::ToolResult {
                                 tool_use_id,
@@ -699,6 +710,10 @@ impl Provider for OpenRouterProvider {
     }
 
     fn supports_image_input(&self) -> bool {
+        if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
+            return false;
+        }
+
         // Direct OpenAI-compatible local providers such as Ollama and LM Studio
         // document image content support on /v1/chat/completions. We already
         // serialize image blocks using OpenAI's image_url content-part shape in

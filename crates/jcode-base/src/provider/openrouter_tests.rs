@@ -275,6 +275,171 @@ fn direct_openai_compatible_provider_advertises_image_input_support() {
 }
 
 #[test]
+fn direct_deepseek_profile_does_not_advertise_image_input_support() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert!(!provider.supports_image_input());
+}
+
+#[test]
+fn direct_deepseek_profile_omits_image_url_parts() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "aW1hZ2U=".to_string(),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        !request.contains(r#""type":"image_url""#),
+        "DeepSeek request must not contain unsupported image_url content parts: {request}"
+    );
+    assert!(
+        request.contains("Image omitted"),
+        "DeepSeek request should preserve a textual placeholder for omitted images: {request}"
+    );
+}
+
+#[test]
+fn default_named_openai_compatible_provider_uses_direct_compatible_request_path() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("TEST_DEFAULT_COMPAT_KEY", "test-key");
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+
+    std::fs::create_dir_all(&jcode_home).expect("create test config dir");
+    std::fs::write(
+        jcode_home.join("config.toml"),
+        format!(
+            r#"
+[provider]
+default_provider = "my-gateway"
+
+[providers.my-gateway]
+type = "openai-compatible"
+base_url = "{api_base}"
+api_key_env = "TEST_DEFAULT_COMPAT_KEY"
+default_model = "opaque/model@id"
+model_catalog = false
+"#
+        ),
+    )
+    .expect("write test config");
+    crate::config::invalidate_config_cache();
+
+    let provider =
+        crate::provider::MultiProvider::new_with_auth_status(crate::auth::AuthStatus::default());
+    assert_eq!(
+        provider.active_provider(),
+        crate::provider::ActiveProvider::OpenRouter
+    );
+    let openrouter = provider
+        .openrouter_provider()
+        .expect("openrouter execution slot");
+    assert!(
+        !openrouter.supports_provider_routing_features(),
+        "named openai-compatible defaults must not use OpenRouter provider routing features"
+    );
+    assert_eq!(
+        openrouter
+            .direct_openai_compatible_route_parts()
+            .as_ref()
+            .map(|parts| parts.1.as_str()),
+        Some("openai-compatible:my-gateway")
+    );
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = openrouter
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should parse");
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("POST /v1/chat/completions "),
+        "unexpected chat request: {request}"
+    );
+    assert!(
+        request.contains(r#""model":"opaque/model@id""#),
+        "request should use named profile default model: {request}"
+    );
+    assert!(
+        !request.contains(r#""provider":"#),
+        "direct OpenAI-compatible request must not include OpenRouter provider routing object: {request}"
+    );
+    assert!(
+        !request.contains("HTTP-Referer") && !request.contains("X-Title"),
+        "direct OpenAI-compatible request must not include OpenRouter-only headers: {request}"
+    );
+}
+
+#[test]
 fn minimax_profile_exposes_static_models_before_catalog_refresh() {
     let models = crate::provider_catalog::openai_compatible_profile_static_models(
         jcode_provider_metadata::MINIMAX_PROFILE,
