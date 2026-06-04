@@ -69,7 +69,7 @@ impl Tool for PrWatchTool {
     }
 
     fn description(&self) -> &str {
-        "PR feedback watch state. Start a local watch, run read-only gh collection, schedule follow-up polls, list watches, show status, or compute readiness. No pushes, comments, thread resolution, or merges are performed."
+        "PR feedback watch state. Start a local watch, collect gh feedback, schedule read-and-resolve follow-up cycles, list watches, show status, or compute readiness. Scheduled cycles read PR feedback, implement local fixes for actionable comments, validate, and resolve addressed review threads by default. Pushes, comments, and merges still require separate authorization."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -81,7 +81,7 @@ impl Tool for PrWatchTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "stop", "readiness", "handoff"],
-                    "description": "Action. poll_now performs read-only gh CLI collection and updates local state; no mutations are performed."
+                    "description": "Action. poll_now collects PR feedback with gh, updates local state, and scheduled follow-ups are read-and-resolve by default; pushes, comments, and merges require separate authorization."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
                 "pr": {"type": "integer", "description": "Pull request number."},
@@ -206,7 +206,7 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
     }
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     Ok(ToolOutput::new(format!(
-        "PR watch initialized: {}\nPath: {}\nMode: local state initialized. Use poll_now for read-only gh collection{}{}",
+        "PR watch initialized: {}\nPath: {}\nMode: read-and-resolve scheduled follow-ups. Use poll_now to refresh feedback state; scheduled cycles fix actionable comments and resolve addressed threads by default{}{}",
         state.watch_id,
         path.display(),
         scheduled.as_deref().map(|s| format!("\nScheduled: {s}")).unwrap_or_default(),
@@ -542,23 +542,23 @@ fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> S
 
 fn scheduled_policy_suffix(state: &PrWatchState) -> &'static str {
     if state.policy.resolve_threads {
-        "Read PR feedback, implement local fixes for actionable comments, validate, and resolve addressed review threads. Do not push, comment, or merge unless separately authorized."
+        "Read PR feedback, implement local fixes for actionable comments, validate, push needed fixes when authorized by the user/session, and resolve addressed review threads. Do not merge unless separately authorized."
     } else {
-        "Read PR feedback only. Do not push, comment, resolve threads, or merge."
+        "Read PR feedback only. Do not push, comment, resolve threads, or merge. This read-only mode is opt-out and should be used only when explicitly requested."
     }
 }
 
 fn scheduled_policy_context(state: &PrWatchState) -> String {
     if state.policy.resolve_threads {
-        "Scheduled by pr_watch schedule_next; read feedback and resolve addressed threads when fixes are complete.".to_string()
+        "Scheduled by pr_watch schedule_next; read feedback, fix actionable comments, validate, push authorized fixes, and resolve addressed threads.".to_string()
     } else {
-        "Scheduled by pr_watch schedule_next; read-only poll only.".to_string()
+        "Scheduled by pr_watch schedule_next; read-only poll only because resolve_threads=false was explicitly set.".to_string()
     }
 }
 
 fn scheduled_monitor_policy_context(state: &PrWatchState) -> String {
     if state.policy.resolve_threads {
-        "Scheduled by pr_watch monitor; structured monitor may resolve addressed threads when fixes are complete.".to_string()
+        "Scheduled by pr_watch monitor; structured monitor should fix actionable comments, validate, push authorized fixes, and resolve addressed threads.".to_string()
     } else {
         "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string()
     }
@@ -2659,7 +2659,8 @@ mod tests {
         assert!(prompt.contains("repo=owner/repo"));
         assert!(prompt.contains("pr=13"));
         assert!(prompt.contains("resolve addressed review threads"));
-        assert!(prompt.contains("Do not push, comment, or merge"));
+        assert!(prompt.contains("push needed fixes when authorized"));
+        assert!(prompt.contains("Do not merge unless separately authorized"));
 
         let mut baselined = state;
         baselined
@@ -2670,6 +2671,7 @@ mod tests {
         baselined.policy.resolve_threads = false;
         let read_only_prompt = scheduled_poll_prompt(&baselined);
         assert!(read_only_prompt.contains("Read PR feedback only"));
+        assert!(read_only_prompt.contains("read-only mode is opt-out"));
         assert!(read_only_prompt.contains("Do not push, comment, resolve threads, or merge"));
     }
     #[test]
