@@ -71,7 +71,7 @@ impl Default for WritePolicy {
             commit: false,
             push: false,
             comment: false,
-            resolve_threads: false,
+            resolve_threads: true,
         }
     }
 }

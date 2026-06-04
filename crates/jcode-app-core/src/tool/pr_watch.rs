@@ -401,9 +401,7 @@ fn maybe_schedule_next(
             state.watch_id
         )],
         git_branch: None,
-        additional_context: Some(
-            "Scheduled by pr_watch schedule_next; read-only poll only.".to_string(),
-        ),
+        additional_context: Some(scheduled_policy_context(state)),
     })?;
     super::ambient::nudge_schedule_runner();
     Ok(Some(format!(
@@ -469,9 +467,7 @@ fn maybe_schedule_next_monitor(
             state.watch_id
         )],
         git_branch: None,
-        additional_context: Some(
-            "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string(),
-        ),
+        additional_context: Some(scheduled_monitor_policy_context(state)),
     })?;
     super::ambient::nudge_schedule_runner();
     Ok(Some(format!(
@@ -516,21 +512,23 @@ fn find_existing_scheduled_watch_item<'a>(
 }
 
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
+    let policy_suffix = scheduled_policy_suffix(state);
     if state.last_successful_fetch.is_empty() {
         return format!(
-            "Run the first read-only PR watch baseline acknowledgement for {}. Use pr_watch with action=ack_baseline, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
-            state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+            "Run the first PR watch baseline acknowledgement for {}. Use pr_watch with action=ack_baseline, repo={}, pr={}, watch_id={}, schedule_next=true. {}",
+            state.watch_id, state.pr.repo, state.pr.number, state.watch_id, policy_suffix
         );
     }
     format!(
-        "Run the next read-only PR watch poll for {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
-        state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+        "Run the next PR watch poll for {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. {}",
+        state.watch_id, state.pr.repo, state.pr.number, state.watch_id, policy_suffix
     )
 }
 
 fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> String {
+    let policy_suffix = scheduled_policy_suffix(state);
     format!(
-        "Run the next structured PR watch monitor cycle for {}. Use pr_watch with action=monitor, repo={}, pr={}, watch_id={}, schedule_next=true, poll_interval_seconds={}, quiet_cycles_required={}, max_runtime_seconds={}. The monitor is read-only: do not push, comment, resolve threads, or merge.",
+        "Run the next structured PR watch monitor cycle for {}. Use pr_watch with action=monitor, repo={}, pr={}, watch_id={}, schedule_next=true, poll_interval_seconds={}, quiet_cycles_required={}, max_runtime_seconds={}. {}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -538,7 +536,32 @@ fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> S
         state.polling.poll_interval_seconds,
         state.polling.required_quiet_cycles,
         max_runtime_seconds,
+        policy_suffix,
     )
+}
+
+fn scheduled_policy_suffix(state: &PrWatchState) -> &'static str {
+    if state.policy.resolve_threads {
+        "Read PR feedback, implement local fixes for actionable comments, validate, and resolve addressed review threads. Do not push, comment, or merge unless separately authorized."
+    } else {
+        "Read PR feedback only. Do not push, comment, resolve threads, or merge."
+    }
+}
+
+fn scheduled_policy_context(state: &PrWatchState) -> String {
+    if state.policy.resolve_threads {
+        "Scheduled by pr_watch schedule_next; read feedback and resolve addressed threads when fixes are complete.".to_string()
+    } else {
+        "Scheduled by pr_watch schedule_next; read-only poll only.".to_string()
+    }
+}
+
+fn scheduled_monitor_policy_context(state: &PrWatchState) -> String {
+    if state.policy.resolve_threads {
+        "Scheduled by pr_watch monitor; structured monitor may resolve addressed threads when fixes are complete.".to_string()
+    } else {
+        "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string()
+    }
 }
 
 async fn ack_baseline(
@@ -2433,7 +2456,12 @@ mod tests {
         assert!(prompt.contains("poll_interval_seconds=120"));
         assert!(prompt.contains("quiet_cycles_required=2"));
         assert!(prompt.contains("max_runtime_seconds=540"));
-        assert!(prompt.contains("read-only"));
+        assert!(prompt.contains("resolve addressed review threads"));
+
+        state.policy.resolve_threads = false;
+        let read_only_prompt = scheduled_monitor_prompt(&state, 540);
+        assert!(read_only_prompt.contains("Read PR feedback only"));
+        assert!(read_only_prompt.contains("resolve threads"));
     }
 
     #[test]
@@ -2621,7 +2649,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_prompt_is_read_only_and_specific() {
+    fn scheduled_prompt_honors_resolve_threads_policy_and_is_specific() {
         let state = PrWatchState::new(PrTarget {
             repo: "owner/repo".into(),
             number: 13,
@@ -2630,14 +2658,19 @@ mod tests {
         assert!(prompt.contains("action=ack_baseline"));
         assert!(prompt.contains("repo=owner/repo"));
         assert!(prompt.contains("pr=13"));
-        assert!(prompt.contains("Do not push"));
-        assert!(prompt.contains("merge"));
+        assert!(prompt.contains("resolve addressed review threads"));
+        assert!(prompt.contains("Do not push, comment, or merge"));
 
         let mut baselined = state;
         baselined
             .last_successful_fetch
             .insert("metadata".to_string(), "2026-05-13T21:00:00Z".to_string());
         assert!(scheduled_poll_prompt(&baselined).contains("action=poll_now"));
+
+        baselined.policy.resolve_threads = false;
+        let read_only_prompt = scheduled_poll_prompt(&baselined);
+        assert!(read_only_prompt.contains("Read PR feedback only"));
+        assert!(read_only_prompt.contains("Do not push, comment, resolve threads, or merge"));
     }
     #[test]
     fn ack_baseline_marks_current_feedback_seen_without_actionable() {
