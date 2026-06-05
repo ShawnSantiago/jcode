@@ -129,8 +129,7 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
             ContentBlock::ToolUse {
                 id: "tool_1".to_string(),
                 name: "bash".to_string(),
-                input: serde_json::json!({"command": "echo hi"}),
-            },
+                input: serde_json::json!({"command": "echo hi"}), thought_signature: None, },
             ContentBlock::ToolResult {
                 tool_use_id: "tool_1".to_string(),
                 content: "hi".to_string(),
@@ -690,8 +689,7 @@ fn test_save_persists_full_session_content() -> Result<()> {
             name: "bash".to_string(),
             input: serde_json::json!({
                 "command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
-            }),
-        }],
+            }), thought_signature: None, }],
     );
 
     session.save()?;
@@ -911,8 +909,7 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
             name: "bash".to_string(),
             input: serde_json::json!({
                 "command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
-            }),
-        }],
+            }), thought_signature: None, }],
     );
 
     let persisted = session.redacted_for_export();
@@ -1026,8 +1023,7 @@ fn test_summarize_tool_calls_includes_tool_only_assistant_messages() {
             name: "bash".to_string(),
             input: serde_json::json!({
                 "command": "pwd"
-            }),
-        }],
+            }), thought_signature: None, }],
     );
 
     let summaries = summarize_tool_calls(&session, 10);
@@ -1057,6 +1053,79 @@ fn test_render_messages_honors_system_display_role_override() {
     assert_eq!(rendered.len(), 1);
     assert_eq!(rendered[0].role, "system");
     assert!(rendered[0].content.contains("Background Task Completed"));
+}
+
+#[test]
+fn test_render_messages_renders_persisted_reasoning() {
+    use jcode_tui_markdown::REASONING_SENTINEL;
+
+    let mut session = Session::create_with_id(
+        "session_render_reasoning_test".to_string(),
+        None,
+        Some("render reasoning test".to_string()),
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::ReasoningTrace {
+                text: "step one\nstep two".to_string(),
+            },
+            ContentBlock::Text {
+                text: "Here is the answer.".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    let content = &rendered[0].content;
+    // Reasoning lines are rendered as dim/italic markup with the sentinel.
+    assert!(
+        content.contains(&format!("*{0}step one{0}*", REASONING_SENTINEL)),
+        "expected reasoning markup, got: {content:?}"
+    );
+    assert!(
+        content.contains(&format!("*{0}step two{0}*", REASONING_SENTINEL)),
+        "expected reasoning markup, got: {content:?}"
+    );
+    // Answer text follows the reasoning block.
+    assert!(content.contains("Here is the answer."));
+    let reasoning_end = content.find("step two").unwrap();
+    let answer_start = content.find("Here is the answer.").unwrap();
+    assert!(
+        reasoning_end < answer_start,
+        "reasoning should precede the answer text: {content:?}"
+    );
+}
+
+#[test]
+fn test_render_messages_renders_legacy_reasoning_variant() {
+    use jcode_tui_markdown::REASONING_SENTINEL;
+
+    let mut session = Session::create_with_id(
+        "session_render_legacy_reasoning_test".to_string(),
+        None,
+        Some("render legacy reasoning test".to_string()),
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Reasoning {
+            text: "legacy thought".to_string(),
+        }],
+    );
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    assert!(
+        rendered[0]
+            .content
+            .contains(&format!("*{0}legacy thought{0}*", REASONING_SENTINEL)),
+        "expected legacy reasoning markup, got: {:?}",
+        rendered[0].content
+    );
 }
 
 #[test]
@@ -1433,8 +1502,7 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
             ContentBlock::ToolUse {
                 id: "tool_img_1".to_string(),
                 name: "view_image".to_string(),
-                input: serde_json::json!({"file_path": "/tmp/screenshot.png"}),
-            },
+                input: serde_json::json!({"file_path": "/tmp/screenshot.png"}), thought_signature: None, },
             ContentBlock::ToolResult {
                 tool_use_id: "tool_img_1".to_string(),
                 content: "rendered image".to_string(),
@@ -1473,4 +1541,60 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
             tool_name: "view_image".to_string(),
         }
     );
+}
+
+#[test]
+fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-reasoning-persist-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_reasoning_trace_roundtrip";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: "msg_assistant".to_string(),
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::ReasoningTrace {
+                text: "step 1: consider the run loop ordering".to_string(),
+            },
+            ContentBlock::Text {
+                text: "Here is my answer.".to_string(),
+                cache_control: None,
+            },
+        ],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save()?;
+
+    // The reasoning must be persisted to the on-disk transcript, not just held
+    // in memory, so it can be recalled/debugged after a restart.
+    let raw = std::fs::read_to_string(session_path(session_id)?)?;
+    assert!(
+        raw.contains("reasoning_trace"),
+        "transcript should serialize reasoning_trace block"
+    );
+    assert!(raw.contains("step 1: consider the run loop ordering"));
+
+    let loaded = Session::load(session_id)?;
+    let assistant = loaded
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .ok_or_else(|| anyhow!("assistant message missing after reload"))?;
+    let has_trace = assistant.content.iter().any(|b| {
+        matches!(
+            b,
+            ContentBlock::ReasoningTrace { text }
+                if text == "step 1: consider the run loop ordering"
+        )
+    });
+    assert!(has_trace, "ReasoningTrace must survive save/load roundtrip");
+    Ok(())
 }

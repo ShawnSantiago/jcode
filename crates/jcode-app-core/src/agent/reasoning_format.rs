@@ -93,9 +93,12 @@ mod tests {
         assert!(!s.contains("Thinking"), "no header expected: {s:?}");
         assert!(!s.contains('>'), "no blockquote gutter expected: {s:?}");
         assert!(!s.contains("Thought for"), "no footer expected: {s:?}");
-        // Each line wrapped in italic with the sentinel prefix.
-        assert!(s.contains(&format!("*{}alpha*", REASONING_SENTINEL)));
-        assert!(s.contains(&format!("*{}beta*", REASONING_SENTINEL)));
+        // Each line wrapped in italic with the sentinel inside both ends.
+        assert!(s.contains(&format!(
+            "*{0}alpha{0}*",
+            REASONING_SENTINEL
+        )));
+        assert!(s.contains(&format!("*{0}beta{0}*", REASONING_SENTINEL)));
         assert!(s.ends_with("\n\n"));
     }
 
@@ -106,7 +109,7 @@ mod tests {
         s.push_str(&f.push_delta("two\n"));
         // No emphasis emitted until the line completed; then a single run.
         assert!(
-            s.contains(&format!("*{}one two*", REASONING_SENTINEL)),
+            s.contains(&format!("*{0}one two{0}*", REASONING_SENTINEL)),
             "{s:?}"
         );
     }
@@ -124,7 +127,7 @@ mod tests {
         f.push_delta("trailing");
         let s = f.finish(None);
         assert!(
-            s.contains(&format!("*{}trailing*", REASONING_SENTINEL)),
+            s.contains(&format!("*{0}trailing{0}*", REASONING_SENTINEL)),
             "{s:?}"
         );
     }

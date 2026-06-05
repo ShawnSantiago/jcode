@@ -192,7 +192,7 @@ impl Provider for OpenRouterProvider {
                             ContentBlock::Reasoning { text } => {
                                 reasoning_content.push_str(text);
                             }
-                            ContentBlock::ToolUse { id, name, input } => {
+                            ContentBlock::ToolUse { id, name, input, .. } => {
                                 let args = if input.is_object() {
                                     serde_json::to_string(input).unwrap_or_default()
                                 } else {

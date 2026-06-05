@@ -935,6 +935,12 @@ pub enum ServerEvent {
         /// Upstream provider (e.g., which provider OpenRouter routed to, or calculated preference)
         #[serde(skip_serializing_if = "Option::is_none")]
         upstream_provider: Option<String>,
+        /// Server-resolved billing credential for this session: `Oauth`
+        /// (subscription) vs `ApiKey` (cost-based), or `None` when the active
+        /// provider has no OAuth-vs-API-key distinction. Lets remote clients
+        /// render usage/billing without re-deriving it from the provider name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,

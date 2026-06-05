@@ -293,8 +293,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 id,
                 name,
                 input: serde_json::Value::Null,
-                intent: None,
-            });
+                intent: None, thought_signature: None, });
             eager_stream_redraw
         }
         ServerEvent::ToolInput { delta } => {
@@ -311,8 +310,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 id: id.clone(),
                 name: name.clone(),
                 input: parsed_input.clone(),
-                intent: ToolCall::intent_from_input(&parsed_input),
-            };
+                intent: ToolCall::intent_from_input(&parsed_input), thought_signature: None, };
             if let Some(key) = App::experimental_feature_key_for_tool(&tool_call) {
                 app.note_experimental_feature_use(key);
             }
@@ -527,6 +525,8 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             if !app.streaming_text.is_empty() {
                 let content = app.take_streaming_text();
+                let content = app.collapse_reasoning_for_commit(content);
+                if !content.trim().is_empty() {
                 app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),
                     content,
@@ -535,6 +535,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     title: None,
                     tool_data: None,
                 });
+                }
             }
             app.clear_streaming_render_state();
             app.stream_buffer.clear();
@@ -599,6 +600,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 if !app.streaming_text.is_empty() {
                     let duration = app.display_turn_duration_secs();
                     let content = app.take_streaming_text();
+                    let content = app.collapse_reasoning_for_commit(content);
+                    if !content.trim().is_empty() {
                     app.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content,
@@ -607,6 +610,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         title: None,
                         tool_data: None,
                     });
+                    }
                     app.push_turn_footer(duration);
                 } else if app.has_streaming_footer_stats() {
                     let duration = app.display_turn_duration_secs();
@@ -868,6 +872,7 @@ pub(in crate::tui::app) fn handle_server_event(
             connection_type,
             status_detail,
             upstream_provider,
+            resolved_credential,
             reasoning_effort,
             service_tier,
             compaction_mode,
@@ -997,6 +1002,9 @@ pub(in crate::tui::app) fn handle_server_event(
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
+            if session_changed || resolved_credential.is_some() {
+                app.remote_resolved_credential = resolved_credential;
+            }
             if session_changed || connection_type.is_some() {
                 app.connection_type = connection_type;
             }
@@ -1106,6 +1114,9 @@ pub(in crate::tui::app) fn handle_server_event(
                     history_model.as_deref().unwrap_or("<none>")
                 ));
                 remote.mark_history_loaded();
+                // History arrived: cancel the "stuck on loading session…"
+                // recovery watchdog so it doesn't re-request on a later tick.
+                app.clear_remote_history_wait();
                 if messages.is_empty() && !session_changed && !app.display_messages().is_empty() {
                     crate::logging::info(
                         "Preserving locally restored display history for metadata-only History bootstrap",
@@ -1557,6 +1568,8 @@ pub(in crate::tui::app) fn handle_server_event(
             if !app.streaming_text.is_empty() {
                 let duration = app.display_turn_duration_secs();
                 let flushed = app.take_streaming_text();
+                let flushed = app.collapse_reasoning_for_commit(flushed);
+                if !flushed.trim().is_empty() {
                 app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),
                     content: flushed,
@@ -1565,6 +1578,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     title: None,
                     tool_data: None,
                 });
+                }
                 app.push_turn_footer(duration);
             }
             app.mark_soft_interrupt_injected(&content);

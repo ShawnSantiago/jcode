@@ -23,6 +23,11 @@ path = "src/lib.rs"
 # so this crate (and ultimately the root crate) controls app-core's features.
 jcode-app-core = { path = "../jcode-app-core", default-features = false }
 
+# Pure math kernels for the idle animations (3D samplers, glyph chooser,
+# HSV->RGB). Pinned to opt-level = 3 in all profiles via workspace Cargo.toml so
+# the hot trig loops stay optimized even in debug/selfdev builds.
+jcode-tui-anim = { path = "../jcode-tui-anim" }
+
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 futures = "0.3"
@@ -75,6 +80,7 @@ jcode-tui-style = { path = "../jcode-tui-style" }
 jcode-tui-tool-display = { path = "../jcode-tui-tool-display" }
 jcode-tui-usage-overlay = { path = "../jcode-tui-usage-overlay" }
 jcode-terminal-image = { path = "../jcode-terminal-image" }
+jcode-productivity-core = { path = "../jcode-productivity-core" }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 
 [features]

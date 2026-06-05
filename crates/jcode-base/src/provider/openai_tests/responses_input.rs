@@ -4,8 +4,7 @@ fn assistant_tool_use(id: &str, name: &str, input: serde_json::Value) -> ChatMes
         content: vec![ContentBlock::ToolUse {
             id: id.to_string(),
             name: name.to_string(),
-            input,
-        }],
+            input, thought_signature: None, }],
         timestamp: None,
         tool_duration_ms: None,
     }

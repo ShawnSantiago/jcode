@@ -73,6 +73,7 @@ mod model_context;
 mod navigation;
 mod observe;
 pub(crate) mod onboarding_flow;
+mod productivity;
 mod onboarding_flow_control;
 mod remote;
 mod remote_notifications;
@@ -162,6 +163,11 @@ pub(in crate::tui::app) struct KvCacheRequestSignature {
 
 #[derive(Debug, Clone)]
 struct KvCacheBaseline {
+    /// Session this baseline was captured for. Baselines must only be diffed
+    /// against requests from the same session; otherwise a session switch makes
+    /// the new (often smaller) history look like a broken prefix and produces a
+    /// spurious `harness:_prefix_changed` miss.
+    session_id: Option<String>,
     input_tokens: u64,
     completed_at: Instant,
     provider: String,
@@ -762,6 +768,12 @@ pub struct App {
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
+    /// Server-resolved billing credential reported by a remote server: OAuth
+    /// (subscription) vs API key (cost-based), or `None` when the active
+    /// provider has no OAuth-vs-API-key distinction. Lets the info widget choose
+    /// subscription vs cost-based usage display for remote sessions without
+    /// re-deriving it from the provider name.
+    remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
@@ -803,6 +815,16 @@ pub struct App {
     runtime_mode: AppRuntimeMode,
     // Remote rewind/undo request waiting for the server's replacement History payload.
     pending_remote_rewind_notice: Option<PendingRemoteRewindNotice>,
+    // History-recovery watchdog for the "stuck on loading session…" bug. When a
+    // remote (re)connect never receives the bootstrap `History` event, every
+    // prompt path is gated behind `has_loaded_history()` and the session is
+    // permanently stuck on "loading session…" until the user runs `/restart`.
+    // These track when the current connection began waiting for history and how
+    // many times we have re-requested it, so the watchdog can re-issue
+    // `GetHistory` a few times before giving up.
+    remote_history_wait_started: Option<Instant>,
+    remote_history_recovery_attempts: u32,
+    remote_history_recovery_last_attempt: Option<Instant>,
     // Server was just spawned - allow initial connection retries in run_remote
     server_spawning: bool,
     // Whether running in replay mode (readonly playback of a saved session)
@@ -1103,6 +1125,8 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
+    /// Whether a `/productivity` report generation is currently in flight.
+    productivity_refreshing: bool,
     /// Last time the passive overnight progress card polled its run files.
     last_overnight_card_refresh: Option<Instant>,
 }
@@ -1185,7 +1209,7 @@ impl App {
             self.kv_cache_turn_call_index = 1;
         }
 
-        let baseline = self.kv_cache_baseline.clone();
+        let baseline = self.kv_cache_baseline_for_current_session();
         let signature =
             Self::kv_cache_request_signature(messages, tools, system_static, system_dynamic);
         let baseline_messages_prefix_matches = baseline
@@ -1230,7 +1254,7 @@ impl App {
             self.kv_cache_turn_call_index = 1;
         }
 
-        let baseline = self.kv_cache_baseline.clone();
+        let baseline = self.kv_cache_baseline_for_current_session();
         let baseline_messages_prefix_matches = baseline
             .as_ref()
             .and_then(|baseline| baseline.signature.as_ref())
@@ -1252,6 +1276,35 @@ impl App {
             baseline_messages_prefix_matches,
             baseline,
         });
+    }
+
+    /// Session id the next KV-cache baseline should be tagged with.
+    ///
+    /// A single `App` can stream several sessions over its lifetime (remote
+    /// session switches, local handoffs). The baseline must only be compared
+    /// against requests from the same session, so we capture the active id here.
+    fn kv_cache_session_id(&self) -> Option<String> {
+        if self.is_remote {
+            self.remote_session_id.clone()
+        } else {
+            Some(self.session.id.clone())
+        }
+    }
+
+    /// Return the stored baseline only when it belongs to the active session.
+    ///
+    /// Diffing a request against a baseline captured for a different (often
+    /// larger) session makes the new history look like a broken prefix and
+    /// emits a spurious `harness:_prefix_changed` miss. Treat a foreign baseline
+    /// as absent (warmup) instead.
+    fn kv_cache_baseline_for_current_session(&self) -> Option<KvCacheBaseline> {
+        let baseline = self.kv_cache_baseline.clone()?;
+        let current = self.kv_cache_session_id();
+        if baseline.session_id == current {
+            Some(baseline)
+        } else {
+            None
+        }
     }
 
     fn maybe_push_cold_cache_warning(
@@ -1312,8 +1365,11 @@ impl App {
 
         self.record_kv_cache_miss_sample(&request);
 
+        let baseline_session_id = self.kv_cache_session_id();
+
         if !has_cache_telemetry {
             self.kv_cache_baseline = Some(KvCacheBaseline {
+                session_id: baseline_session_id,
                 input_tokens: self.streaming_input_tokens,
                 completed_at: Instant::now(),
                 provider: request.provider,
@@ -1345,6 +1401,7 @@ impl App {
         self.log_kv_cache_usage_summary(&request, optimal_input_tokens);
 
         self.kv_cache_baseline = Some(KvCacheBaseline {
+            session_id: baseline_session_id,
             input_tokens: self.streaming_input_tokens,
             completed_at: Instant::now(),
             provider: request.provider,
@@ -1550,7 +1607,7 @@ impl App {
             upstream_provider: self.upstream_provider.clone(),
             signature: None,
             baseline_messages_prefix_matches: None,
-            baseline: self.kv_cache_baseline.clone(),
+            baseline: self.kv_cache_baseline_for_current_session(),
         }
     }
 
@@ -1683,7 +1740,7 @@ impl App {
         KvCacheRequestSignature {
             system_static_hash: stable_hash_str(system_static),
             tools_hash: stable_hash_json(tools),
-            messages_hash: stable_hash_json(messages),
+            messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
             message_hashes: message_hashes(messages),
             message_count: messages.len(),
             tool_count: tools.len(),
@@ -1749,8 +1806,58 @@ fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
         .unwrap_or_default()
 }
 
+/// Project a message down to the fields that actually influence a provider's
+/// KV-cache key, dropping harness-only / volatile metadata.
+///
+/// Providers never receive `Message.timestamp`, `Message.tool_duration_ms`,
+/// history-only `ReasoningTrace` blocks, or the positional `cache_control`
+/// ephemeral breakpoint markers. Hashing the raw `Message` therefore reports
+/// spurious `harness:_prefix_changed` misses whenever one of those fields is
+/// backfilled on an already-sent boundary message, even though the bytes sent
+/// upstream are unchanged. This was confirmed in production logs: at the exact
+/// instant the harness flagged a tail message, `PROVIDER_CANONICAL_INPUT`
+/// showed an append-only prefix (`prefix_matches=true`) and the request still
+/// served 82-98% from cache. Projecting to the cache-relevant shape keeps the
+/// fingerprint aligned with what the provider actually caches.
+fn cache_relevant_message_value(message: &Message) -> serde_json::Value {
+    let mut value = serde_json::to_value(message).unwrap_or(serde_json::Value::Null);
+    if let serde_json::Value::Object(map) = &mut value {
+        // Struct-level metadata that is never part of the prompt token stream.
+        // For user messages the human-readable timestamp is already baked into
+        // the text by `Message::with_timestamps` before this hash is computed,
+        // so removing the redundant struct field cannot hide a real change.
+        map.remove("timestamp");
+        map.remove("tool_duration_ms");
+        if let Some(serde_json::Value::Array(blocks)) = map.get_mut("content") {
+            // `ReasoningTrace` is documented as history-only and is never
+            // replayed to any provider, so it must not affect the cache key.
+            blocks.retain(|block| {
+                block.get("type").and_then(|kind| kind.as_str()) != Some("reasoning_trace")
+            });
+            for block in blocks.iter_mut() {
+                if let serde_json::Value::Object(block) = block
+                    && block.get("type").and_then(|kind| kind.as_str()) == Some("text")
+                {
+                    // The ephemeral cache breakpoint marker hops to the newest
+                    // message each turn; it marks where caching ends, not the
+                    // cached content itself.
+                    block.remove("cache_control");
+                }
+            }
+        }
+    }
+    value
+}
+
+fn cache_relevant_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    messages.iter().map(cache_relevant_message_value).collect()
+}
+
 fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    messages.iter().map(stable_hash_json).collect()
+    messages
+        .iter()
+        .map(|message| stable_hash_json(&cache_relevant_message_value(message)))
+        .collect()
 }
 
 fn ratio_pct(numerator: u64, denominator: u64) -> u8 {

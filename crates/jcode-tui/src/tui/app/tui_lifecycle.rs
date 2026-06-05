@@ -396,6 +396,7 @@ impl App {
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
+            remote_resolved_credential: None,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
@@ -420,6 +421,9 @@ impl App {
             is_remote: false,
             runtime_mode: AppRuntimeMode::TestHarness,
             pending_remote_rewind_notice: None,
+            remote_history_wait_started: None,
+            remote_history_recovery_attempts: 0,
+            remote_history_recovery_last_attempt: None,
             server_spawning: false,
             is_replay: false,
             suppress_terminal_title_updates: false,
@@ -581,6 +585,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             usage_report_refreshing: false,
+            productivity_refreshing: false,
             last_overnight_card_refresh: None,
         };
 
@@ -790,6 +795,7 @@ impl App {
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
+            remote_resolved_credential: None,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
@@ -814,6 +820,9 @@ impl App {
             is_remote: false,
             runtime_mode: AppRuntimeMode::TestHarness,
             pending_remote_rewind_notice: None,
+            remote_history_wait_started: None,
+            remote_history_recovery_attempts: 0,
+            remote_history_recovery_last_attempt: None,
             server_spawning: false,
             is_replay: false,
             suppress_terminal_title_updates: false,
@@ -975,6 +984,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             usage_report_refreshing: false,
+            productivity_refreshing: false,
             last_overnight_card_refresh: None,
         };
 

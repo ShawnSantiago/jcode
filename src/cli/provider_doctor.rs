@@ -4,7 +4,10 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::auth::provider_e2e::{DoctorReport, DoctorTier, run_provider_e2e};
+use crate::auth::provider_e2e::{
+    DoctorReport, DoctorTier, native_doctor_supports_provider, run_antigravity_native_e2e,
+    run_claude_native_e2e, run_provider_e2e,
+};
 use crate::live_tests::LiveVerificationStageStatus;
 
 pub async fn run_provider_doctor_command(
@@ -16,6 +19,26 @@ pub async fn run_provider_doctor_command(
     let tier: DoctorTier = tier
         .parse()
         .map_err(|message: String| anyhow!("{message}"))?;
+
+    // Native-runtime providers cannot be driven by the OpenAI-compatible doctor;
+    // route them to their native drivers, which exercise the production runtime.
+    if native_doctor_supports_provider(provider) {
+        let is_antigravity = matches!(
+            crate::auth::lifecycle::normalized_auth_provider_id(Some(provider)),
+            Some("antigravity")
+        );
+        let report = if is_antigravity {
+            run_antigravity_native_e2e(provider, model, tier).await?
+        } else {
+            run_claude_native_e2e(provider, model, tier).await?
+        };
+        emit_report(&report, emit_json);
+        return if report.tier_passed {
+            Ok(())
+        } else {
+            anyhow::bail!("provider-doctor: one or more checks failed for {provider}")
+        };
+    }
 
     let profile =
         crate::provider_catalog::openai_compatible_profile_by_id(provider).with_context(|| {
@@ -46,20 +69,24 @@ pub async fn run_provider_doctor_command(
 
     let report = run_provider_e2e(profile, api_key.as_deref(), model, tier).await?;
 
-    if emit_json {
-        println!("{}", report_to_json(&report));
-    } else {
-        let colorize = std::io::stdout().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none()
-            && std::env::var_os("JCODE_NO_COLOR").is_none();
-        print!("{}", format_report(&report, colorize));
-    }
+    emit_report(&report, emit_json);
 
     // Non-zero exit when the chosen tier did not fully pass, so scripts/CI can gate on it.
     if report.tier_passed {
         Ok(())
     } else {
         anyhow::bail!("provider-doctor: one or more checks failed for {provider}")
+    }
+}
+
+fn emit_report(report: &DoctorReport, emit_json: bool) {
+    if emit_json {
+        println!("{}", report_to_json(report));
+    } else {
+        let colorize = std::io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none()
+            && std::env::var_os("JCODE_NO_COLOR").is_none();
+        print!("{}", format_report(report, colorize));
     }
 }
 

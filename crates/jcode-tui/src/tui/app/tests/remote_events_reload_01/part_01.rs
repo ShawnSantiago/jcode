@@ -178,6 +178,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
@@ -230,6 +231,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
@@ -285,6 +287,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
@@ -844,8 +847,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         id: "tool_1".to_string(),
         name: "bash".to_string(),
         input: serde_json::Value::Null,
-        intent: None,
-    });
+        intent: None, thought_signature: None, });
     app.interleave_message = Some("queued interrupt".to_string());
     app.pending_soft_interrupts
         .push("pending soft interrupt".to_string());

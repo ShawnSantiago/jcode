@@ -3265,7 +3265,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "agentgrep",
  "anyhow",
@@ -3839,6 +3839,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-productivity-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "jcode-storage",
+ "rayon",
+ "resvg",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "usvg",
+]
+
+[[package]]
 name = "jcode-protocol"
 version = "0.1.0"
 dependencies = [
@@ -3902,6 +3917,15 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-render-core"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "serde",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
@@ -4014,12 +4038,14 @@ dependencies = [
  "jcode-build-meta",
  "jcode-core",
  "jcode-logging",
+ "jcode-productivity-core",
  "jcode-protocol",
  "jcode-provider-core",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-terminal-image",
  "jcode-tui-account-picker",
+ "jcode-tui-anim",
  "jcode-tui-core",
  "jcode-tui-markdown",
  "jcode-tui-mermaid",
@@ -4053,6 +4079,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-tui-anim"
+version = "0.1.0"
+
+[[package]]
 name = "jcode-tui-core"
 version = "0.1.0"
 dependencies = [
@@ -4065,6 +4095,7 @@ dependencies = [
 name = "jcode-tui-markdown"
 version = "0.1.0"
 dependencies = [
+ "jcode-render-core",
  "jcode-tui-mermaid",
  "jcode-tui-workspace",
  "pulldown-cmark",
@@ -6231,6 +6262,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.37",
+ "rustls-native-certs 0.8.3",
  "rustls-pki-types",
  "serde",
  "serde_json",

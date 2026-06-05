@@ -185,13 +185,21 @@ pub(super) async fn handle_get_model_catalog(
 ) -> Result<()> {
     let started = Instant::now();
     let build_started = Instant::now();
-    let (provider_name, provider_model, available_models, available_model_routes, source) = {
+    let (
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+        resolved_credential,
+        source,
+    ) = {
         match agent.try_lock() {
             Ok(agent_guard) => (
                 Some(agent_guard.provider_name()),
                 Some(agent_guard.provider_model()),
                 agent_guard.available_models_display(),
                 agent_guard.model_routes(),
+                agent_guard.active_resolved_credential(),
                 "live",
             ),
             Err(_) => {
@@ -199,15 +207,16 @@ pub(super) async fn handle_get_model_catalog(
                     "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
                     session_id
                 ));
-                let persisted_model = Session::load_for_remote_startup(session_id)
+                let persisted = Session::load_for_remote_startup(session_id)
                     .or_else(|_| Session::load_startup_stub(session_id))
-                    .ok()
-                    .and_then(|session| session.model);
+                    .ok();
+                let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
                 (
                     Some(provider.name().to_string()),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
                     provider.model_routes(),
+                    provider.active_resolved_credential(),
                     "fallback",
                 )
             }
@@ -241,6 +250,7 @@ pub(super) async fn handle_get_model_catalog(
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
+        resolved_credential,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
@@ -525,6 +535,7 @@ async fn send_history_from_persisted_session(
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
+        resolved_credential: provider.active_resolved_credential(),
         reasoning_effort: session
             .reasoning_effort
             .clone()
@@ -572,6 +583,7 @@ pub(super) async fn send_history(
         skills,
         tool_names,
         upstream_provider,
+        resolved_credential,
         connection_type,
         status_detail,
         reasoning_effort,
@@ -646,6 +658,7 @@ pub(super) async fn send_history(
             skills,
             tool_names,
             agent_guard.last_upstream_provider(),
+            agent_guard.active_resolved_credential(),
             agent_guard.last_connection_type(),
             agent_guard.last_status_detail(),
             reasoning_effort,
@@ -738,6 +751,7 @@ pub(super) async fn send_history(
         connection_type,
         status_detail,
         upstream_provider,
+        resolved_credential,
         reasoning_effort,
         service_tier,
         compaction_mode,

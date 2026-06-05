@@ -266,8 +266,22 @@ pub(crate) fn render_system_message(
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
     let display_content = normalize_system_content_for_display(&msg.content);
-    // System messages render as plaintext, never markdown.
-    let mut lines = render_plaintext_lines(&display_content, wrap_width);
+    // Authored summaries that use markdown (bold/lists/headings/links) render as
+    // markdown so they read cleanly. Plain status/help text keeps the original
+    // line-oriented plaintext path, which preserves authored indentation and
+    // wraps long lines to width: markdown parsing would otherwise strip leading
+    // indentation and leave long paragraphs unwrapped (stretching edge to edge).
+    // Either way, color is forced to the system color so output stays distinct.
+    let mut lines = if content_has_markdown_formatting(&display_content) {
+        // Keep single newlines as hard breaks rather than letting markdown
+        // collapse them into one paragraph, then wrap to width so long lines
+        // still respect the layout/gutters.
+        let hard_broken = preserve_hard_line_breaks_for_markdown(&display_content);
+        let rendered = markdown::render_markdown_with_width(&hard_broken, Some(wrap_width));
+        markdown::wrap_lines(rendered, wrap_width)
+    } else {
+        render_plaintext_lines(&display_content, wrap_width)
+    };
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
@@ -277,6 +291,98 @@ pub(crate) fn render_system_message(
         }
     }
     lines
+}
+
+/// Heuristic: does authored system content use markdown formatting that is
+/// worth rendering (bold/italic, inline code, headings, lists, links,
+/// blockquotes, fenced code, tables)?
+///
+/// Plain status/help text (no markdown) keeps the original plaintext path so
+/// authored indentation is preserved and long lines wrap to width. We only opt
+/// into markdown when a marker is actually present, which avoids regressing
+/// indented/aligned output that markdown parsing would otherwise flatten.
+fn content_has_markdown_formatting(content: &str) -> bool {
+    // Inline markers that can appear anywhere on a line.
+    if content.contains("**")
+        || content.contains("__")
+        || content.contains('`')
+        || content.contains("](")
+    {
+        return true;
+    }
+    // Block markers only count at the start of a (trimmed) line.
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("# ")
+            || trimmed.starts_with("## ")
+            || trimmed.starts_with("### ")
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+            || trimmed.starts_with("> ")
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("~~~")
+            || trimmed.starts_with('|')
+            || trimmed
+                .split_once('.')
+                .is_some_and(|(num, rest)| {
+                    !num.is_empty()
+                        && num.chars().all(|c| c.is_ascii_digit())
+                        && rest.starts_with(' ')
+                })
+    })
+}
+
+/// Convert single newlines in authored system content into markdown hard line
+/// breaks (a trailing `  ` before the newline) so the renderer keeps each
+/// source line on its own row instead of reflowing them into one paragraph.
+///
+/// Blank-line paragraph boundaries are left untouched, and lines that already
+/// belong to block constructs (list items, headings, fenced code, blockquotes,
+/// tables) are not given a hard break since markdown already breaks on them.
+fn preserve_hard_line_breaks_for_markdown(content: &str) -> Cow<'_, str> {
+    if !content.contains('\n') {
+        return Cow::Borrowed(content);
+    }
+
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut out = String::with_capacity(content.len() + lines.len() * 2);
+    let mut in_fence = false;
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        out.push_str(line);
+
+        let is_last = idx + 1 == lines.len();
+        if is_last {
+            continue;
+        }
+        let next = lines[idx + 1];
+        let next_trimmed = next.trim_start();
+        // Don't touch paragraph breaks (blank line follows), fenced code, or the
+        // current/next line being a markdown block construct that already forces
+        // its own line.
+        let current_blank = line.trim().is_empty();
+        let next_blank = next.trim().is_empty();
+        let next_is_block = next_trimmed.starts_with('#')
+            || next_trimmed.starts_with("- ")
+            || next_trimmed.starts_with("* ")
+            || next_trimmed.starts_with("+ ")
+            || next_trimmed.starts_with("> ")
+            || next_trimmed.starts_with('|')
+            || next_trimmed
+                .split_once('.')
+                .is_some_and(|(num, _)| !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()));
+        if in_fence || current_blank || next_blank || next_is_block {
+            out.push('\n');
+        } else {
+            // Hard break: two trailing spaces before the newline.
+            out.push_str("  \n");
+        }
+    }
+    Cow::Owned(out)
 }
 
 pub(crate) fn render_usage_message(
@@ -1727,8 +1833,7 @@ pub(crate) fn render_tool_message(
                 intent: call
                     .get("intent")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            };
+                    .map(|s| s.to_string()), thought_signature: None, };
 
             let sub_result = sub_results.get(&(i + 1));
             let sub_errored = sub_result.map(|result| result.errored).unwrap_or_else(|| {

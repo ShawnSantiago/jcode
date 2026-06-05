@@ -675,7 +675,9 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
             return startup_hints;
         }
 
-        if !state.mac_ghostty_guided && !state.mac_ghostty_dismissed && state.nudge_budget_remaining()
+        if !state.mac_ghostty_guided
+            && !state.mac_ghostty_dismissed
+            && state.nudge_budget_remaining()
         {
             state.record_nudge_shown();
             // Prefer any earlier-launch hint (alignment/welcome) if present so we

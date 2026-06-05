@@ -189,6 +189,49 @@ fn available_models_display_seeds_from_persisted_catalog() {
 }
 
 #[test]
+fn build_contents_replays_thought_signature_on_function_call() {
+    // Gemini 3 (Antigravity Cloud Code backend) rejects function calls that
+    // omit the original thoughtSignature on later turns. Verify the signature
+    // captured on the ToolUse block is replayed verbatim on the functionCall
+    // part, and that an absent/empty signature stays absent.
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_sig".to_string(),
+                name: "read".to_string(),
+                input: json!({"path":"README.md"}),
+                thought_signature: Some("SIGNATURE_ABC".to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_nosig".to_string(),
+                name: "bash".to_string(),
+                input: json!({"command":"ls"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let contents = build_contents(&messages);
+    assert_eq!(
+        contents[0].parts[0].thought_signature.as_deref(),
+        Some("SIGNATURE_ABC"),
+        "signature must be replayed on the matching function call part"
+    );
+    assert_eq!(
+        contents[1].parts[0].thought_signature, None,
+        "missing signature must not be fabricated"
+    );
+}
+
+#[test]
 fn build_contents_preserves_tool_calls_and_results() {
     let messages = vec![
         Message {
@@ -196,8 +239,7 @@ fn build_contents_preserves_tool_calls_and_results() {
             content: vec![ContentBlock::ToolUse {
                 id: "call_1".to_string(),
                 name: "read".to_string(),
-                input: json!({"path":"README.md"}),
-            }],
+                input: json!({"path":"README.md"}), thought_signature: None, }],
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -238,8 +280,7 @@ fn build_contents_normalizes_non_object_tool_call_args_for_gemini_struct() {
         content: vec![ContentBlock::ToolUse {
             id: "call_primitive".to_string(),
             name: "read".to_string(),
-            input: json!(20),
-        }],
+            input: json!(20), thought_signature: None, }],
         timestamp: None,
         tool_duration_ms: None,
     }];
