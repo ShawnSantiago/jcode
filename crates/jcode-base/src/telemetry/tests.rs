@@ -27,6 +27,20 @@ fn test_do_not_track() {
 }
 
 #[test]
+fn test_is_ci_detects_ci_env() {
+    let _guard = lock_test_env();
+    // Clear any inherited CI markers so the baseline is deterministic.
+    for key in ["CI", "GITHUB_ACTIONS", "BUILDKITE", "JENKINS_URL", "GITLAB_CI", "CIRCLECI"] {
+        crate::env::remove_var(key);
+    }
+    assert!(!is_ci(), "expected non-CI baseline after clearing CI markers");
+    crate::env::set_var("CI", "true");
+    assert!(is_ci(), "CI env var should mark the run as CI (gates install skip)");
+    crate::env::remove_var("CI");
+    assert!(!is_ci());
+}
+
+#[test]
 fn test_error_counters() {
     let _guard = lock_telemetry_test_state();
     reset_counters();

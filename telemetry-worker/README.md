@@ -56,6 +56,9 @@ npm run migrate:workflow
 npm run migrate:tokens
 npm run migrate:dashboard-indexes
 npm run migrate:feedback-text
+npm run migrate:daily-active
+npm run migrate:daily-active-backfill
+npm run migrate:daily-active-ci
 
 # Run the health dashboard query
 npm run health
@@ -64,16 +67,19 @@ npm run health
 ## Querying Data
 
 ```bash
-# Total installs
-wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) FROM events WHERE event = 'install'"
+# Total installs (raw, and excluding CI runners which mint a fresh id per job)
+wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) AS raw_installs, COUNT(DISTINCT CASE WHEN is_ci = 0 THEN telemetry_id END) AS installs_noci FROM events WHERE event = 'install'"
 
 # Weekly / monthly active users (canonical: use the rollup so every window
 # shares one "meaningful" definition and includes session_crash + turn_end days).
+# meaningful_release_*_noci is the headline product metric: real users on the
+# release channel, excluding automated CI traffic (ephemeral runners that mint a
+# fresh telemetry_id per job and otherwise inflate users/installs and tank retention).
 # WAU (last 7 UTC days):
-wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) AS raw_wau, COUNT(DISTINCT CASE WHEN meaningful_active > 0 THEN telemetry_id END) AS meaningful_wau, COUNT(DISTINCT CASE WHEN meaningful_release_active > 0 THEN telemetry_id END) AS meaningful_release_wau FROM daily_active_users WHERE activity_date > date('now', '-7 days')"
+wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) AS raw_wau, COUNT(DISTINCT CASE WHEN meaningful_active > 0 THEN telemetry_id END) AS meaningful_wau, COUNT(DISTINCT CASE WHEN meaningful_release_active > 0 THEN telemetry_id END) AS meaningful_release_wau, COUNT(DISTINCT CASE WHEN meaningful_release_active > 0 AND last_is_ci = 0 THEN telemetry_id END) AS meaningful_release_wau_noci FROM daily_active_users WHERE activity_date > date('now', '-7 days')"
 
 # MAU (last 30 UTC days):
-wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) AS raw_mau, COUNT(DISTINCT CASE WHEN meaningful_active > 0 THEN telemetry_id END) AS meaningful_mau, COUNT(DISTINCT CASE WHEN meaningful_release_active > 0 THEN telemetry_id END) AS meaningful_release_mau FROM daily_active_users WHERE activity_date > date('now', '-30 days')"
+wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) AS raw_mau, COUNT(DISTINCT CASE WHEN meaningful_active > 0 THEN telemetry_id END) AS meaningful_mau, COUNT(DISTINCT CASE WHEN meaningful_release_active > 0 THEN telemetry_id END) AS meaningful_release_mau, COUNT(DISTINCT CASE WHEN meaningful_release_active > 0 AND last_is_ci = 0 THEN telemetry_id END) AS meaningful_release_mau_noci FROM daily_active_users WHERE activity_date > date('now', '-30 days')"
 
 # Raw vs meaningful active users this week, directly from raw events (matches the
 # rollup definition: counts session_end/session_crash AND turn_end activity).
@@ -152,11 +158,13 @@ wrangler d1 execute jcode-telemetry --command "SELECT AVG(first_assistant_respon
 - zeroed transport totals after transport-aware releases (missing migration)
 - `daily_active_users` row counts diverging from raw distinct-user checks
 - headline DAU including `build_channel != 'release'` or raw event counts instead of distinct users
+- headline DAU/installs including CI traffic (`is_ci = 1`); prefer the `*_noci` columns. A spike in `ci_ids_30d` / `ci_install_ids` from `health.sql` means CI runners are inflating user and install counts.
 
 ## Accuracy notes
 
 - DAU/WAU/MAU should be distinct `telemetry_id` counts, never event counts. Heavy users and long-running agents can emit thousands of `turn_end` events in a day.
 - Use `meaningful_release_active` for headline product usage. It excludes local/dev/git-checkout traffic and open/close sessions with no meaningful lifecycle activity.
+- For the cleanest headline numbers, prefer the `*_noci` columns, which additionally exclude `is_ci = 1` traffic. Ephemeral CI runners mint a fresh `telemetry_id` per job, so unfiltered they look like brand-new users and installs, inflating active-user/install counts and depressing retention. The client also skips the `install` event under CI, so historical CI installs (before that ships) are the main residual source; the rollup's `last_is_ci` flag lets dashboards filter the rest. Raw events stay tagged (not dropped) so CI crash/error signal is still queryable.
 - Meaningful activity is derived from `session_end`/`session_crash` **and** `turn_end` events. A `turn_end` only fires after a real user turn completes, so counting it keeps the metric accurate for users whose `session_end` is lost (process killed, machine shutdown, dropped final flush, or a session still open at UTC midnight).
 - Raw events remain the source of truth. The `daily_active_users` table is an ingest-time rollup for cheap dashboard queries and is backfillable from `events`.
 - The worker uses `INSERT OR IGNORE` keyed by `event_id`; rollups and detail rows are updated only when the canonical raw event insert succeeds, so client retries do not inflate counts.

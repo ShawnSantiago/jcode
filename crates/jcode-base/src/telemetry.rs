@@ -1190,6 +1190,17 @@ pub fn record_install_if_first_run() {
     if !is_enabled() {
         return;
     }
+    // Skip install/onboarding emission under CI. Ephemeral runners start with a
+    // fresh ~/.jcode (so a new telemetry_id) on every job, which would otherwise
+    // look like a brand-new install and user, inflating install/active counts,
+    // the onboarding funnel, and depressing retention. Session/turn/lifecycle
+    // events are still emitted (tagged is_ci) so CI crash/error signal stays
+    // queryable; product dashboards filter is_ci out of the headline metrics.
+    if is_ci() {
+        logging::debug("skipping telemetry install/onboarding under CI");
+        mark_current_version_recorded();
+        return;
+    }
     let first_run = is_first_run();
     let id = match get_or_create_id() {
         Some(id) => id,

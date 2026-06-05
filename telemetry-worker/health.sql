@@ -89,6 +89,17 @@ outliers AS (
         FROM lifecycle
         GROUP BY telemetry_id
     )
+),
+ci_noise AS (
+    SELECT
+        COUNT(DISTINCT telemetry_id) AS ci_ids_30d,
+        COUNT(DISTINCT CASE WHEN event = 'install' THEN telemetry_id END) AS ci_install_ids,
+        COUNT(DISTINCT CASE WHEN event IN ('session_end', 'session_crash') THEN telemetry_id END) AS ci_lifecycle_ids
+    FROM events
+    INDEXED BY idx_events_event_created_telemetry
+    WHERE event IN ('install', 'session_start', 'turn_end', 'session_end', 'session_crash')
+      AND created_at > datetime('now', '-30 days')
+      AND is_ci = 1
 )
 SELECT
     install_events,
@@ -101,8 +112,11 @@ SELECT
     lifecycle_ids_without_install,
     meaningful_sessions,
     meaningful_users_30d,
+    ci_ids_30d,
+    ci_install_ids,
+    ci_lifecycle_ids,
     max_session_events_one_id,
     top5_session_events,
     total_session_events,
     ROUND(CAST(session_ends + session_crashes AS REAL) / NULLIF(session_starts, 0), 3) AS lifecycle_completion_ratio
-FROM event_counts, identity_counts, meaningful, outliers;
+FROM event_counts, identity_counts, meaningful, outliers, ci_noise;

@@ -241,6 +241,8 @@ CREATE TABLE IF NOT EXISTS daily_active_users (
     turn_end_count INTEGER DEFAULT 0,
     session_end_count INTEGER DEFAULT 0,
     session_crash_count INTEGER DEFAULT 0,
+    ci_active INTEGER DEFAULT 0,
+    last_is_ci INTEGER DEFAULT 0,
     last_build_channel TEXT,
     PRIMARY KEY (activity_date, telemetry_id)
 );
@@ -250,3 +252,6 @@ CREATE INDEX IF NOT EXISTS idx_daily_active_date
 
 CREATE INDEX IF NOT EXISTS idx_daily_active_date_release
     ON daily_active_users(activity_date, release_active, meaningful_release_active);
+
+CREATE INDEX IF NOT EXISTS idx_daily_active_date_ci
+    ON daily_active_users(activity_date, last_is_ci, meaningful_release_active);

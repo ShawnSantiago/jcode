@@ -361,6 +361,7 @@ async function recordDailyActivity(env, body) {
   const meaningful = isMeaningfulLifecycleEvent(body) ? 1 : 0;
   const release = body.build_channel === "release" ? 1 : 0;
   const meaningfulRelease = meaningful && release ? 1 : 0;
+  const isCi = boolToInt(body.is_ci);
   const sessionStartCount = body.event === "session_start" ? 1 : 0;
   const turnEndCount = body.event === "turn_end" ? 1 : 0;
   const sessionEndCount = body.event === "session_end" ? 1 : 0;
@@ -379,8 +380,10 @@ async function recordDailyActivity(env, body) {
         turn_end_count,
         session_end_count,
         session_crash_count,
+        ci_active,
+        last_is_ci,
         last_build_channel
-      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(activity_date, telemetry_id) DO UPDATE SET
         last_seen_at = datetime('now'),
         raw_active = 1,
@@ -391,6 +394,8 @@ async function recordDailyActivity(env, body) {
         turn_end_count = turn_end_count + excluded.turn_end_count,
         session_end_count = session_end_count + excluded.session_end_count,
         session_crash_count = session_crash_count + excluded.session_crash_count,
+        ci_active = MAX(ci_active, excluded.ci_active),
+        last_is_ci = excluded.last_is_ci,
         last_build_channel = COALESCE(excluded.last_build_channel, daily_active_users.last_build_channel)
     `).bind(
       activityDate,
@@ -402,6 +407,8 @@ async function recordDailyActivity(env, body) {
       turnEndCount,
       sessionEndCount,
       sessionCrashCount,
+      isCi,
+      isCi,
       body.build_channel || null,
     ).run();
   } catch (err) {
