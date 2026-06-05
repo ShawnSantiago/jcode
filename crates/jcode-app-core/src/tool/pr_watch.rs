@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jcode_pr_watch_core::{
     ActionableItem, CheckRunState, CycleOutcome, Marker, PrTarget, PrWatchState, SurfaceError,
-    WatchEvent, normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments,
+    WatchEvent, WritePolicy, normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments,
     parse_gh_pr_view, parse_gh_review_comments, parse_gh_review_threads, parse_gh_reviews,
 };
 use serde::Deserialize;
@@ -57,6 +57,16 @@ struct PrWatchInput {
     max_runtime_seconds: Option<u64>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    local_fix: Option<bool>,
+    #[serde(default)]
+    commit: Option<bool>,
+    #[serde(default)]
+    push: Option<bool>,
+    #[serde(default)]
+    comment: Option<bool>,
+    #[serde(default)]
+    resolve_threads: Option<bool>,
 }
 
 const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
@@ -69,7 +79,7 @@ impl Tool for PrWatchTool {
     }
 
     fn description(&self) -> &str {
-        "PR feedback watch state. Start a local watch, collect gh feedback, schedule read-and-resolve follow-up cycles, list watches, show status, or compute readiness. Scheduled cycles read PR feedback, implement local fixes for actionable comments, validate, and resolve addressed review threads by default. Pushes, comments, and merges still require separate authorization."
+        "PR feedback watch state. Start a local watch, collect gh feedback, schedule detached read-and-resolve follow-up cycles, list watches, show status, or compute readiness. Scheduled cycles read PR feedback, implement local fixes for actionable comments, validate, commit/push/comment authorized fixes, and resolve addressed review threads by default. Merges still require separate authorization."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -91,7 +101,12 @@ impl Tool for PrWatchTool {
                 "poll_interval_seconds": {"type": "integer", "description": "Interval for the next scheduled poll. Defaults to state polling interval."},
                 "quiet_cycles_required": {"type": "integer", "description": "Quiet cycles required before the monitor stops as satisfied. Defaults to watch state or 3."},
                 "max_runtime_seconds": {"type": "integer", "description": "Maximum monitor runtime budget. Single-cycle monitor caps this to 900 and records the bounded value."},
-                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."}
+                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to spawn so PR watches continue even when the creating session is idle."},
+                "local_fix": {"type": "boolean", "description": "Whether scheduled cycles may implement local fixes. Defaults to true."},
+                "commit": {"type": "boolean", "description": "Whether scheduled cycles may commit validated PR watch fixes. Defaults to true."},
+                "push": {"type": "boolean", "description": "Whether scheduled cycles may push validated PR watch fixes. Defaults to true."},
+                "comment": {"type": "boolean", "description": "Whether scheduled cycles may post PR comments after validation. Defaults to true."},
+                "resolve_threads": {"type": "boolean", "description": "Whether scheduled cycles may resolve addressed review threads. Defaults to true; set false for read-only watches."}
             }
         })
     }
@@ -188,6 +203,7 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
     let target = target_from_params(&params)?;
     let mut state = PrWatchState::new(target);
     let path = state_path(store, &state.watch_id);
+    apply_policy_fields(&mut state.policy, &params);
     apply_schedule_fields(&mut state, &params);
     let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
@@ -206,9 +222,10 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
     }
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     Ok(ToolOutput::new(format!(
-        "PR watch initialized: {}\nPath: {}\nMode: read-and-resolve scheduled follow-ups. Use poll_now to refresh feedback state; scheduled cycles fix actionable comments and resolve addressed threads by default{}{}",
+        "PR watch initialized: {}\nPath: {}\nMode: {}. Use poll_now to refresh feedback state; scheduled cycles follow the stored policy{}{}",
         state.watch_id,
         path.display(),
+        policy_mode_label(&state.policy),
         scheduled.as_deref().map(|s| format!("\nScheduled: {s}")).unwrap_or_default(),
         if would_write {
             ""
@@ -251,6 +268,52 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     if params.schedule_next {
         let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
         state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+}
+
+fn apply_policy_fields(policy: &mut WritePolicy, params: &PrWatchInput) {
+    if let Some(value) = params.local_fix {
+        policy.local_fix = value;
+    }
+    if let Some(value) = params.commit {
+        policy.commit = value;
+    }
+    if let Some(value) = params.push {
+        policy.push = value;
+    }
+    if let Some(value) = params.comment {
+        policy.comment = value;
+    }
+    if let Some(value) = params.resolve_threads {
+        policy.resolve_threads = value;
+    }
+}
+
+fn policy_mode_label(policy: &WritePolicy) -> &'static str {
+    if policy.local_fix && policy.commit && policy.push && policy.comment && policy.resolve_threads
+    {
+        "auto-finish read-and-resolve scheduled follow-ups"
+    } else if !policy.local_fix
+        && !policy.commit
+        && !policy.push
+        && !policy.comment
+        && !policy.resolve_threads
+    {
+        "read-only scheduled follow-ups"
+    } else {
+        "custom-policy scheduled follow-ups"
+    }
+}
+
+fn schedule_target_from_params(params: &PrWatchInput, ctx: &ToolContext) -> Result<ScheduleTarget> {
+    match params.target.as_deref() {
+        Some("resume") => Ok(ScheduleTarget::Session {
+            session_id: ctx.session_id.clone(),
+        }),
+        Some("spawn") | None => Ok(ScheduleTarget::Spawn {
+            parent_session_id: ctx.session_id.clone(),
+        }),
+        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
     }
 }
 
@@ -375,15 +438,7 @@ fn maybe_schedule_next(
         let stale_id = existing.id.clone();
         manager.cancel_schedule(&stale_id)?;
     }
-    let target = match params.target.as_deref() {
-        Some("spawn") => ScheduleTarget::Spawn {
-            parent_session_id: ctx.session_id.clone(),
-        },
-        Some("resume") | None => ScheduleTarget::Session {
-            session_id: ctx.session_id.clone(),
-        },
-        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
-    };
+    let target = schedule_target_from_params(params, ctx)?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -441,15 +496,7 @@ fn maybe_schedule_next_monitor(
         let stale_id = existing.id.clone();
         manager.cancel_schedule(&stale_id)?;
     }
-    let target = match params.target.as_deref() {
-        Some("spawn") => ScheduleTarget::Spawn {
-            parent_session_id: ctx.session_id.clone(),
-        },
-        Some("resume") | None => ScheduleTarget::Session {
-            session_id: ctx.session_id.clone(),
-        },
-        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
-    };
+    let target = schedule_target_from_params(params, ctx)?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -598,6 +645,7 @@ async fn ack_baseline(
     let collected_at = now_iso();
     let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
+    apply_policy_fields(&mut state.policy, &params);
     apply_schedule_fields(&mut state, &params);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
@@ -883,6 +931,7 @@ async fn poll_now(
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
+    apply_policy_fields(&mut state.policy, &params);
     apply_schedule_fields(&mut state, &params);
     if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
         && state.pending_actionable.is_empty()
@@ -1012,6 +1061,7 @@ async fn monitor_once(
             partial_failure = outcome.partial_failure;
             mode = "poll";
         }
+        apply_policy_fields(&mut state.policy, &params);
         apply_schedule_fields(&mut state, &params);
         if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
             && state.pending_actionable.is_empty()
@@ -2147,6 +2197,11 @@ mod tests {
                 .is_some()
         );
         assert!(schema.pointer("/properties/max_runtime_seconds").is_some());
+        assert!(schema.pointer("/properties/local_fix").is_some());
+        assert!(schema.pointer("/properties/commit").is_some());
+        assert!(schema.pointer("/properties/push").is_some());
+        assert!(schema.pointer("/properties/comment").is_some());
+        assert!(schema.pointer("/properties/resolve_threads").is_some());
         assert!(!actions.iter().any(|value| value == "authorize"));
     }
 
@@ -2162,7 +2217,71 @@ mod tests {
             quiet_cycles_required: None,
             max_runtime_seconds,
             target: None,
+            local_fix: None,
+            commit: None,
+            push: None,
+            comment: None,
+            resolve_threads: None,
         }
+    }
+
+    #[test]
+    fn default_watch_policy_is_auto_finish() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+
+        assert!(state.policy.local_fix);
+        assert!(state.policy.commit);
+        assert!(state.policy.push);
+        assert!(state.policy.comment);
+        assert!(state.policy.resolve_threads);
+        assert_eq!(
+            policy_mode_label(&state.policy),
+            "auto-finish read-and-resolve scheduled follow-ups"
+        );
+    }
+
+    #[test]
+    fn policy_fields_can_make_watch_read_only() {
+        let mut policy = WritePolicy::default();
+        let mut params = monitor_params(None);
+        params.local_fix = Some(false);
+        params.commit = Some(false);
+        params.push = Some(false);
+        params.comment = Some(false);
+        params.resolve_threads = Some(false);
+
+        apply_policy_fields(&mut policy, &params);
+
+        assert!(!policy.local_fix);
+        assert!(!policy.commit);
+        assert!(!policy.push);
+        assert!(!policy.comment);
+        assert!(!policy.resolve_threads);
+        assert_eq!(policy_mode_label(&policy), "read-only scheduled follow-ups");
+    }
+
+    #[test]
+    fn schedule_target_defaults_to_spawn_for_detached_watchers() {
+        let params = monitor_params(None);
+        let ctx = ToolContext {
+            working_dir: None,
+            session_id: "session-1".to_string(),
+            message_id: "message-1".to_string(),
+            tool_call_id: "tool-1".to_string(),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::Direct,
+        };
+
+        let target = schedule_target_from_params(&params, &ctx).expect("target");
+
+        assert!(matches!(
+            target,
+            ScheduleTarget::Spawn { parent_session_id } if parent_session_id == "session-1"
+        ));
     }
 
     #[test]
@@ -2642,6 +2761,11 @@ mod tests {
             quiet_cycles_required: None,
             max_runtime_seconds: None,
             target: None,
+            local_fix: None,
+            commit: None,
+            push: None,
+            comment: None,
+            resolve_threads: None,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);

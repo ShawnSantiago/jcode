@@ -68,9 +68,9 @@ impl Default for WritePolicy {
     fn default() -> Self {
         Self {
             local_fix: true,
-            commit: false,
-            push: false,
-            comment: false,
+            commit: true,
+            push: true,
+            comment: true,
             resolve_threads: true,
         }
     }
