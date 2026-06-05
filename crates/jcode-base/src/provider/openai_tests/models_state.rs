@@ -98,12 +98,23 @@ fn test_persistent_ws_idle_policy_thresholds() {
     assert!(persistent_ws_idle_needs_healthcheck(Duration::from_secs(
         WEBSOCKET_PERSISTENT_HEALTHCHECK_IDLE_SECS
     )));
-    assert!(!persistent_ws_idle_requires_reconnect(Duration::from_secs(
-        30
-    )));
-    assert!(persistent_ws_idle_requires_reconnect(Duration::from_secs(
-        WEBSOCKET_PERSISTENT_IDLE_RECONNECT_SECS
-    )));
+
+    // Default idle-reconnect window: reuse below threshold, reconnect at/above it.
+    let default = WEBSOCKET_PERSISTENT_IDLE_RECONNECT_SECS_DEFAULT;
+    assert!(!idle_requires_reconnect_with(
+        Some(default),
+        Duration::from_secs(default - 1)
+    ));
+    assert!(idle_requires_reconnect_with(
+        Some(default),
+        Duration::from_secs(default)
+    ));
+
+    // Disabled (None / env=0): never force a reconnect on idle alone.
+    assert!(!idle_requires_reconnect_with(
+        None,
+        Duration::from_secs(u32::MAX as u64)
+    ));
 }
 
 #[tokio::test]

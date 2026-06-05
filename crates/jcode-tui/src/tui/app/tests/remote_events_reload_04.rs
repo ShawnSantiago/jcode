@@ -405,7 +405,11 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         app.display_messages()[0].content,
         "hello from persisted history"
     );
-    assert_eq!(app.session.messages.len(), 1);
+    // The remote client renders persisted history into `display_messages`,
+    // then calls `strip_transcript_for_remote_client()` to release the backing
+    // transcript (the server is the source of truth for the live transcript).
+    // So the stripped `session.messages` is expected to be empty here.
+    assert_eq!(app.session.messages.len(), 0);
     assert_eq!(app.remote_session_id.as_deref(), Some(session_id));
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
 
@@ -655,6 +659,51 @@ fn test_info_widget_remote_opencode_shows_cost_based_usage() {
     assert!(usage.available);
     assert_eq!(usage.input_tokens, 12_000);
     assert_eq!(usage.output_tokens, 3_400);
+}
+
+#[test]
+fn test_info_widget_remote_anthropic_api_key_shows_cost_based_usage() {
+    // Remote Anthropic sessions billed via API key (server resolves
+    // ResolvedCredential::ApiKey) should display cost-based usage instead of
+    // subscription bars, mirroring local behavior. OAuth subscription sessions
+    // (server resolves ResolvedCredential::Oauth) keep the subscription usage
+    // provider.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_provider_model = Some("claude-sonnet-4-20250514".to_string());
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+    app.total_input_tokens = 12_000;
+    app.total_output_tokens = 3_400;
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::AnthropicApiKey
+    );
+    let usage = data
+        .usage_info
+        .as_ref()
+        .expect("remote anthropic api-key usage info");
+    assert_eq!(
+        usage.provider,
+        crate::tui::info_widget::UsageProvider::CostBased
+    );
+    assert_eq!(usage.input_tokens, 12_000);
+    assert_eq!(usage.output_tokens, 3_400);
+
+    // OAuth subscription keeps subscription bars; the server now reports the
+    // resolved credential directly, so the widget reflects AnthropicOAuth.
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::AnthropicOAuth
+    );
+    assert_eq!(
+        data.usage_info.as_ref().map(|info| info.provider),
+        Some(crate::tui::info_widget::UsageProvider::Anthropic)
+    );
 }
 
 #[test]

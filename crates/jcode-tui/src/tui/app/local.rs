@@ -30,6 +30,7 @@ pub(super) async fn process_turn_with_input(
     {
         Ok(()) => {
             app.last_stream_error = None;
+            app.last_submitted_input = None;
         }
         Err(error) => {
             let err_str = crate::util::format_error_chain(&error);
@@ -55,6 +56,7 @@ pub(super) async fn process_turn_with_input(
 pub(super) fn handle_tick(app: &mut App) -> bool {
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     app.maybe_capture_runtime_memory_heartbeat();
+    needs_redraw |= app.progress_copy_selection_edge_autoscroll();
     app.progress_mouse_scroll_animation();
     needs_redraw |= app.update_chat_overscroll();
     needs_redraw |= app.update_pinned_images_auto_hide();
@@ -147,6 +149,10 @@ pub(super) fn handle_bus_event(
         Ok(BusEvent::UiActivity(activity)) => handle_ui_activity(app, activity),
         Ok(BusEvent::GitStatusCompleted(result)) => {
             super::commands::handle_git_status_completed(app, result);
+            true
+        }
+        Ok(BusEvent::ProductivityReportReady(event)) => {
+            app.handle_productivity_report_ready(event);
             true
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,

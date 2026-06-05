@@ -156,48 +156,67 @@ impl App {
         }
     }
 
-    fn widget_auth_method(&self, route: WidgetRouteInfo) -> crate::tui::info_widget::AuthMethod {
+    /// Resolve the active credential (OAuth vs API key) for a dual-auth
+    /// provider (Anthropic / OpenAI). This is the one place billing identity is
+    /// decided for the info widget, regardless of transport:
+    ///
+    /// * Remote sessions use [`App::remote_resolved_credential`], which the
+    ///   server resolved authoritatively from its live credentials.
+    /// * Local sessions use [`resolve_dual_credential_auth`], shared with the
+    ///   header tag and model-switch line so all surfaces agree.
+    ///
+    /// Returns `None` when neither transport can determine the credential (e.g.
+    /// the server didn't report one, or no credentials are configured locally).
+    fn dual_credential_active(
+        &self,
+        route: WidgetRouteInfo,
+        provider: jcode_provider_core::ActiveProvider,
+    ) -> Option<crate::auth::ActiveCredential> {
         if route.is_remote {
-            return crate::tui::info_widget::AuthMethod::Unknown;
+            return self.remote_resolved_credential.map(Into::into);
         }
 
         let auth_status = crate::auth::AuthStatus::check_fast();
         let runtime_provider = active_runtime_provider_key();
+        crate::auth::resolve_dual_credential_auth(
+            provider,
+            &auth_status,
+            runtime_provider.as_deref(),
+        )
+        .map(|resolved| resolved.active)
+    }
+
+    fn widget_auth_method(&self, route: WidgetRouteInfo) -> crate::tui::info_widget::AuthMethod {
+        use crate::auth::ActiveCredential;
+        use crate::tui::info_widget::AuthMethod;
 
         match route.provider {
             WidgetProviderKind::Anthropic => {
-                if matches!(
-                    runtime_provider.as_deref(),
-                    Some("claude-api" | "anthropic-api")
-                ) {
-                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
-                } else if matches!(runtime_provider.as_deref(), Some("claude" | "anthropic")) {
-                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
-                } else if auth_status.anthropic.has_oauth {
-                    // Anthropic Auto prefers OAuth (Claude subscription) before
-                    // falling back to a direct API key.
-                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
-                } else if auth_status.anthropic.has_api_key {
-                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
-                } else {
-                    crate::tui::info_widget::AuthMethod::Unknown
+                match self
+                    .dual_credential_active(route, jcode_provider_core::ActiveProvider::Claude)
+                {
+                    Some(ActiveCredential::OAuth) => AuthMethod::AnthropicOAuth,
+                    Some(ActiveCredential::ApiKey) => AuthMethod::AnthropicApiKey,
+                    None => AuthMethod::Unknown,
                 }
             }
             WidgetProviderKind::OpenAI => {
-                if matches!(runtime_provider.as_deref(), Some("openai-api")) {
-                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
-                } else if matches!(runtime_provider.as_deref(), Some("openai")) {
-                    crate::tui::info_widget::AuthMethod::OpenAIOAuth
-                } else if auth_status.openai_has_oauth {
-                    crate::tui::info_widget::AuthMethod::OpenAIOAuth
-                } else if auth_status.openai_has_api_key {
-                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
-                } else {
-                    crate::tui::info_widget::AuthMethod::Unknown
+                match self
+                    .dual_credential_active(route, jcode_provider_core::ActiveProvider::OpenAI)
+                {
+                    Some(ActiveCredential::OAuth) => AuthMethod::OpenAIOAuth,
+                    Some(ActiveCredential::ApiKey) => AuthMethod::OpenAIApiKey,
+                    None => AuthMethod::Unknown,
                 }
             }
+            // Providers below have no OAuth-vs-API-key ambiguity to resolve from
+            // remote credentials; remote sessions render usage via
+            // `widget_usage_info`'s `is_remote` handling, so report Unknown here
+            // and let the local heuristics run only for local sessions.
+            _ if route.is_remote => AuthMethod::Unknown,
             WidgetProviderKind::OpenCode => crate::tui::info_widget::AuthMethod::OpenCodeApiKey,
             WidgetProviderKind::OpenRouter => {
+                let runtime_provider = active_runtime_provider_key();
                 let transport_state =
                     crate::provider::openrouter::OpenRouterTransportState::from_current_env(
                         runtime_provider.as_deref(),
@@ -213,6 +232,7 @@ impl App {
             WidgetProviderKind::CostBasedApiKey => crate::tui::info_widget::AuthMethod::ApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
+                let auth_status = crate::auth::AuthStatus::check_fast();
                 if auth_status.gemini == crate::auth::AuthState::Available {
                     crate::tui::info_widget::AuthMethod::GeminiOAuth
                 } else {
@@ -429,6 +449,10 @@ impl crate::tui::TuiState for App {
 
     fn chat_overscroll_active(&self) -> bool {
         self.chat_overscroll_active()
+    }
+
+    fn copy_selection_edge_autoscroll_active(&self) -> bool {
+        self.copy_selection_edge_autoscroll.is_some() && self.copy_selection_dragging
     }
 
     fn provider_name(&self) -> String {
@@ -860,7 +884,8 @@ impl crate::tui::TuiState for App {
                             tool_result_count += 1;
                             tool_result_chars += content.len();
                         }
-                        ContentBlock::Reasoning { text } => {
+                        ContentBlock::Reasoning { text }
+                        | ContentBlock::ReasoningTrace { text } => {
                             asst_chars += text.len();
                         }
                         ContentBlock::AnthropicThinking {

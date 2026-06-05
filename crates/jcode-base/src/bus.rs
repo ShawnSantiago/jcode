@@ -129,6 +129,9 @@ pub struct OnboardingModelValidated {
     pub session_id: String,
     /// Friendly model label shown to the user (e.g. "GPT-5.5 (low)").
     pub model_label: String,
+    /// Provider key backing the default model (e.g. "anthropic", "openai") so
+    /// the readiness summary can avoid listing the default provider twice.
+    pub provider_key: Option<String>,
     /// Whether the live validation ping succeeded.
     pub ok: bool,
     /// Optional short detail (failure reason) shown after a failed check.
@@ -253,6 +256,27 @@ impl UiActivity {
 pub struct GitStatusCompleted {
     pub session_id: String,
     pub result: std::result::Result<String, String>,
+}
+
+/// Result of a `/productivity` report generation run.
+///
+/// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
+/// display/copy them without depending on the productivity crate's types here in
+/// `jcode-base`.
+#[derive(Clone, Debug)]
+pub struct ProductivityReportReady {
+    pub session_id: String,
+    pub result: std::result::Result<ProductivityReportPayload, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProductivityReportPayload {
+    /// Rendered Markdown report for the transcript.
+    pub markdown: String,
+    /// PNG dashboard bytes.
+    pub png: Vec<u8>,
+    /// Filesystem path the PNG was saved to.
+    pub png_path: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -382,6 +406,8 @@ pub enum BusEvent {
     SidePanelUpdated(SidePanelUpdated),
     /// Deferred Mermaid rendering completed and cached content may now be visible
     MermaidRenderCompleted,
+    /// Productivity report finished generating off the UI thread
+    ProductivityReportReady(ProductivityReportReady),
 }
 
 pub struct Bus {

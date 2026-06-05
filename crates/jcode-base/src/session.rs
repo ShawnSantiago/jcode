@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 mod crash;
 mod journal;
+mod maintenance;
 mod memory_profile;
 mod model;
 mod persistence;
@@ -17,6 +18,7 @@ pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
+pub use maintenance::prune_old_session_backups;
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
@@ -1013,7 +1015,9 @@ impl Session {
         for msg in &mut redacted.messages {
             for block in &mut msg.content {
                 match block {
-                    ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => {
+                    ContentBlock::Text { text, .. }
+                    | ContentBlock::Reasoning { text }
+                    | ContentBlock::ReasoningTrace { text } => {
                         *text = crate::message::redact_secrets(text);
                     }
                     ContentBlock::AnthropicThinking { thinking, .. } => {

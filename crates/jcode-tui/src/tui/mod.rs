@@ -140,6 +140,14 @@ pub trait TuiState {
     fn chat_overscroll_active(&self) -> bool {
         false
     }
+    /// Whether a mouse drag-selection is currently held at the top/bottom edge of
+    /// a pane and should keep auto-scrolling on every tick (browser-style). When
+    /// true the redraw loop must stay responsive even if the transcript is
+    /// otherwise idle, since the terminal sends no further events while the mouse
+    /// is held still.
+    fn copy_selection_edge_autoscroll_active(&self) -> bool {
+        false
+    }
     fn provider_name(&self) -> String;
     fn provider_model(&self) -> String;
     /// Upstream provider (e.g., which provider OpenRouter routed to)
@@ -1185,10 +1193,13 @@ fn full_frame_status_animation_active_with_policy(
 
 fn primary_status_spinner_fast_path_available_with_policy(
     state: &dyn TuiState,
-    policy: &crate::perf::TuiPerfPolicy,
+    _policy: &crate::perf::TuiPerfPolicy,
 ) -> bool {
-    policy.enable_decorative_animations
-        && state.is_processing()
+    // The single-cell spinner fast path is available in every performance tier,
+    // including Minimal/SSH/WSL where decorative animations are off. Keep these
+    // conditions in sync with `app::run_shell::status_spinner_only_symbol`, which
+    // is what actually gates the spinner-only tick in the run loop.
+    state.is_processing()
         && app::run_shell::status_uses_primary_spinner(&state.status())
         && state.streaming_text().is_empty()
         && !state.centered_mode()
@@ -1200,8 +1211,11 @@ fn primary_status_spinner_needs_full_redraw_with_policy(
     state: &dyn TuiState,
     policy: &crate::perf::TuiPerfPolicy,
 ) -> bool {
-    policy.enable_decorative_animations
-        && state.is_processing()
+    // The primary spinner only needs the more expensive full-redraw cadence when
+    // the cheap single-cell fast path cannot run (e.g. centered composer). When
+    // the fast path is available we keep full redraws at the slow passive-liveness
+    // rate and let the one-cell renderer animate the spinner.
+    state.is_processing()
         && app::run_shell::status_uses_primary_spinner(&state.status())
         && state.streaming_text().is_empty()
         && !primary_status_spinner_fast_path_available_with_policy(state, policy)
@@ -1227,6 +1241,7 @@ pub(crate) fn redraw_interval_with_policy(
         && !state.is_processing()
         && state.streaming_text().is_empty()
         && !state.has_pending_mouse_scroll_animation()
+        && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
@@ -1267,6 +1282,7 @@ pub(crate) fn redraw_interval_with_policy(
         || !state.streaming_text().is_empty()
         || state.status_notice().is_some()
         || state.has_pending_mouse_scroll_animation()
+        || state.copy_selection_edge_autoscroll_active()
         || state.has_notification()
         || rate_limit_countdown_redraw_active(state)
     {
@@ -1304,6 +1320,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         && !state.is_processing()
         && state.streaming_text().is_empty()
         && !state.has_pending_mouse_scroll_animation()
+        && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
@@ -1324,6 +1341,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         || !state.streaming_text().is_empty()
         || state.status_notice().is_some()
         || state.has_pending_mouse_scroll_animation()
+        || state.copy_selection_edge_autoscroll_active()
         || state.chat_overscroll_active()
         || state.has_notification()
         || rate_limit_countdown_redraw_active(state)

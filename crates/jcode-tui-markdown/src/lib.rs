@@ -98,9 +98,69 @@ mod render_lazy;
 #[path = "markdown_render_support.rs"]
 mod render_support;
 
+mod render_core_adapter;
+pub use render_core_adapter::{
+    document_to_lines, render_markdown_via_core, render_markdown_via_core_wrapped,
+    styled_line_to_line,
+};
+
 pub use render_full::render_markdown_with_width;
 pub use render_lazy::render_markdown_lazy;
 pub use render_support::extract_copy_targets_from_rendered_lines;
+
+/// Invisible sentinel prepended (inside `*…*`) to streamed reasoning/thinking
+/// lines. The renderer strips it and styles the line dim + italic with no
+/// blockquote gutter. Kept zero-width so it stays invisible if it ever leaks
+/// into copied text. Shared with the TUI/server reasoning formatters.
+pub const REASONING_SENTINEL: &str = "\u{2063}";
+
+/// Escape characters that pulldown-cmark would otherwise interpret as inline
+/// markdown (emphasis, code, links, etc.). Reasoning lines are rendered inside a
+/// single `*…*` emphasis run; without escaping, a stray `*`, `` ` ``, `[`, or
+/// `_` in the model's thinking would prematurely close or nest that run and the
+/// dim/italic styling would break partway through the line.
+fn escape_reasoning_inline_markdown(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    for ch in line.chars() {
+        match ch {
+            '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '&' | '~' | '|' | '$' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Wrap one complete reasoning/thinking line as dim+italic markdown: the
+/// invisible [`REASONING_SENTINEL`] is placed just inside *both* ends of an
+/// `*…*` emphasis run that the renderer strips and styles dim, with no
+/// blockquote gutter. The line body is escaped so embedded markdown cannot break
+/// the styling. Empty lines become a bare newline (no empty emphasis run). The
+/// result always ends in `\n`.
+///
+/// The sentinel must wrap both ends because CommonMark's emphasis flanking rules
+/// require the opening `*` to not be followed by whitespace and the closing `*`
+/// to not be preceded by whitespace. A reasoning line that starts or ends with
+/// whitespace (or is whitespace-only) would otherwise leave the asterisks as
+/// literal text and break the dim/italic styling. The zero-width sentinels
+/// guarantee both asterisks are flanked by non-whitespace regardless of the body.
+///
+/// Shared by the server and TUI reasoning formatters so the wrapping/escaping
+/// rules stay in lockstep with the renderer that consumes them.
+pub fn reasoning_line_markup(line: &str) -> String {
+    if line.is_empty() {
+        "\n".to_string()
+    } else {
+        format!(
+            "*{0}{1}{0}*\n",
+            REASONING_SENTINEL,
+            escape_reasoning_inline_markdown(line)
+        )
+    }
+}
+
 use render_support::{
     highlight_code_cached, line_plain_text, placeholder_code_block, ranges_overlap, render_table,
 };

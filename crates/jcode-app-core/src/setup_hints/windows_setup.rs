@@ -437,14 +437,26 @@ pub(super) fn maybe_show_windows_setup_hints(
         let _ = state.save();
     }
 
+    let wants_hotkey_nudge = !state.hotkey_configured && !state.hotkey_dismissed;
+    let wants_alacritty_nudge =
+        !state.alacritty_configured && !state.alacritty_dismissed && !already_using_alacritty;
+
+    // Stop pestering the user once we have shown the nudge prompt enough times,
+    // even if they never explicitly chose "Don't ask again".
+    if (wants_hotkey_nudge || wants_alacritty_nudge) && !state.nudge_budget_remaining() {
+        return startup_hints;
+    }
+
     let mut did_setup_hotkey = false;
     let mut did_install_alacritty = false;
 
-    if !state.hotkey_configured && !state.hotkey_dismissed {
+    if wants_hotkey_nudge {
+        state.record_nudge_shown();
         did_setup_hotkey = nudge_hotkey(state);
     }
 
-    if !state.alacritty_configured && !state.alacritty_dismissed && !already_using_alacritty {
+    if wants_alacritty_nudge {
+        state.record_nudge_shown();
         did_install_alacritty = nudge_alacritty(state);
     }
 

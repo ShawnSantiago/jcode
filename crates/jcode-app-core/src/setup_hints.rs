@@ -1,7 +1,8 @@
 //! Platform setup hints shown on startup.
 //!
 //! - Windows: suggest Alt+; hotkey setup and Alacritty install.
-//! - macOS: detect suboptimal terminal and offer guided Ghostty setup via jcode.
+//! - macOS: if the user is on the default built-in Terminal.app, show a one-time
+//!   notice that it renders jcode poorly and suggest a modern terminal (Ghostty).
 //! - Linux: create a .desktop launcher file.
 //!
 //! Each nudge can be dismissed permanently with "Don't ask again".
@@ -12,8 +13,6 @@ use crate::storage;
 use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-#[cfg(any(windows, target_os = "macos"))]
-use std::io::Write;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
@@ -54,6 +53,11 @@ pub struct SetupHintsState {
     pub startup_spawn_hint_dismissed: bool,
     pub mac_ghostty_guided: bool,
     pub mac_ghostty_dismissed: bool,
+    /// Number of times we have shown the terminal/setup nudge prompt to the user
+    /// (across all platforms). Used to cap the total number of nudges so we never
+    /// pester someone forever if they keep choosing "Not now".
+    #[serde(default)]
+    pub terminal_nudge_count: u64,
     /// Version of the installed macOS Cmd+; hotkey listener. Bumped when the
     /// listener implementation changes in a way that requires reinstalling the
     /// LaunchAgent for already-configured users (e.g. the run-loop fix that made
@@ -75,6 +79,11 @@ pub struct SetupHintsState {
 ///   connection.
 #[cfg(any(test, target_os = "macos"))]
 pub const HOTKEY_LISTENER_VERSION: u32 = 2;
+
+/// Maximum number of times we will ever show the terminal/setup nudge prompt
+/// to a user (across all launches and platforms). After this many nudges we stop
+/// asking, even if the user never explicitly picked "Don't ask again".
+pub const MAX_TERMINAL_NUDGES: u64 = 5;
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupHints {
@@ -121,27 +130,20 @@ impl SetupHintsState {
         let path = Self::path()?;
         storage::write_json(&path, self)
     }
-}
 
-#[cfg(target_os = "macos")]
-fn is_ghostty_installed() -> bool {
-    if std::path::Path::new("/Applications/Ghostty.app").exists() {
-        return true;
+    /// Whether we are still allowed to show a terminal/setup nudge. Once we have
+    /// shown the prompt `MAX_TERMINAL_NUDGES` times we stop asking entirely.
+    #[cfg(any(test, windows, target_os = "macos"))]
+    fn nudge_budget_remaining(&self) -> bool {
+        self.terminal_nudge_count < MAX_TERMINAL_NUDGES
     }
 
-    if let Some(home) = dirs::home_dir() {
-        if home.join("Applications/Ghostty.app").exists() {
-            return true;
-        }
+    /// Record that a nudge prompt was shown to the user and persist the count.
+    #[cfg(any(test, windows, target_os = "macos"))]
+    fn record_nudge_shown(&mut self) {
+        self.terminal_nudge_count = self.terminal_nudge_count.saturating_add(1);
+        let _ = self.save();
     }
-
-    std::process::Command::new("which")
-        .arg("ghostty")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -307,82 +309,50 @@ fn startup_hints_for_launch(state: &SetupHintsState) -> Option<StartupHints> {
 }
 
 /// Read a single-character choice from the user.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 fn read_choice() -> String {
     let mut input = String::new();
     let _ = io::stdin().read_line(&mut input);
     input.trim().to_lowercase()
 }
 
-#[cfg(target_os = "macos")]
-fn macos_guided_ghostty_message(current_terminal: MacTerminalKind) -> String {
-    format!(
-        "I want to upgrade my macOS terminal setup for jcode. Please guide me step-by-step, wait for confirmation between steps, and keep each step concise.\n\nCurrent terminal: {}\nGoal: install Ghostty and use it for jcode.\n\nPlease help me with:\n1) Detecting if Homebrew is installed (and installing it if missing)\n2) Installing Ghostty\n3) Launching Ghostty and setting it as my preferred terminal for jcode\n4) Optional: adding a macOS keyboard shortcut/launcher flow for jcode\n5) Verifying jcode runs in Ghostty and that inline images/graphics work\n\nAssume I am not an expert; provide exact commands and where to click in macOS settings when needed.",
-        current_terminal.label()
-    )
-}
+/// Pure decision for the macOS terminal notice, given the detected terminal.
+///
+/// We deliberately only nudge for the default built-in Terminal.app: other
+/// terminals (iTerm2, WezTerm, Alacritty, Ghostty, etc.) are fine, so we leave
+/// them alone. Regardless of the result the nudge is marked handled so it is
+/// only ever shown once. The notice is informational (no prompt, no AI handoff).
+///
+/// This mutates `state`'s nudge flags but does not persist; the caller is
+/// responsible for saving.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_terminal_notice(
+    state: &mut SetupHintsState,
+    terminal: MacTerminalKind,
+) -> Option<StartupHints> {
+    state.mac_ghostty_guided = true;
+    state.mac_ghostty_dismissed = true;
 
-#[cfg(target_os = "macos")]
-fn nudge_macos_ghostty(state: &mut SetupHintsState) -> Option<String> {
-    let terminal = effective_macos_terminal();
-    let using_ghostty = terminal == MacTerminalKind::Ghostty;
-    let ghostty_installed = is_ghostty_installed();
-
-    if using_ghostty {
-        state.mac_ghostty_guided = true;
-        state.mac_ghostty_dismissed = true;
-        let _ = state.save();
+    if terminal != MacTerminalKind::AppleTerminal {
         return None;
     }
 
-    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    eprintln!(
-        "\x1b[36m│\x1b[0m \x1b[1m💡 Better macOS terminal for jcode: Ghostty\x1b[0m                \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    Current terminal: {:<37} \x1b[36m│\x1b[0m",
-        format!("{}.", terminal.label())
-    );
-    if ghostty_installed {
-        eprintln!(
-            "\x1b[36m│\x1b[0m    Ghostty is installed, but you are not using it now.      \x1b[36m│\x1b[0m"
-        );
-    } else {
-        eprintln!(
-            "\x1b[36m│\x1b[0m    Ghostty offers fast rendering and great jcode UX.         \x1b[36m│\x1b[0m"
-        );
-    }
-    eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    Let jcode guide you through setup right now?             \x1b[36m│\x1b[0m"
-    );
-    eprintln!(
-        "\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Yes      \x1b[90m[n]\x1b[0m Not now      \x1b[90m[d]\x1b[0m Don't ask again    \x1b[36m│\x1b[0m"
-    );
-    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-    eprint!("\x1b[36m  >\x1b[0m ");
-    let _ = io::stderr().flush();
+    let message = "The built-in macOS Terminal.app renders jcode poorly (slow, limited colors, no inline images). Consider a modern terminal such as Ghostty, iTerm2, or Alacritty for a much better experience.".to_string();
 
-    let choice = read_choice();
+    Some(StartupHints::with_status_and_display(
+        "Tip: Terminal.app renders jcode poorly. Try Ghostty, iTerm2, or Alacritty.".to_string(),
+        "Terminal",
+        message,
+    ))
+}
 
-    match choice.as_str() {
-        "y" | "yes" => {
-            state.mac_ghostty_guided = true;
-            let _ = state.save();
-            Some(macos_guided_ghostty_message(terminal))
-        }
-        "d" | "dont" => {
-            state.mac_ghostty_dismissed = true;
-            let _ = state.save();
-            None
-        }
-        _ => None,
-    }
+/// macOS entry point: show the one-time Terminal.app notice for the effective
+/// terminal.
+#[cfg(target_os = "macos")]
+fn nudge_macos_ghostty(state: &mut SetupHintsState) -> Option<StartupHints> {
+    let hints = macos_terminal_notice(state, effective_macos_terminal());
+    let _ = state.save();
+    hints
 }
 
 /// Manual `jcode setup-hotkey` command.
@@ -705,17 +675,19 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
             return startup_hints;
         }
 
-        if !state.mac_ghostty_guided && !state.mac_ghostty_dismissed {
-            let mut hints = startup_hints.unwrap_or_default();
-            hints.auto_send_message = nudge_macos_ghostty(&mut state);
-            return if hints.auto_send_message.is_none()
-                && hints.status_notice.is_none()
-                && hints.display_message.is_none()
-            {
-                None
-            } else {
-                Some(hints)
-            };
+        if !state.mac_ghostty_guided
+            && !state.mac_ghostty_dismissed
+            && state.nudge_budget_remaining()
+        {
+            state.record_nudge_shown();
+            // Prefer any earlier-launch hint (alignment/welcome) if present so we
+            // do not clobber it; otherwise surface the Terminal.app notice.
+            if startup_hints.is_some() {
+                // Still mark the nudge as handled so it is only ever shown once.
+                let _ = nudge_macos_ghostty(&mut state);
+                return startup_hints;
+            }
+            return nudge_macos_ghostty(&mut state);
         }
 
         return startup_hints;

@@ -293,8 +293,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 id,
                 name,
                 input: serde_json::Value::Null,
-                intent: None,
-            });
+                intent: None, thought_signature: None, });
             eager_stream_redraw
         }
         ServerEvent::ToolInput { delta } => {
@@ -311,8 +310,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 id: id.clone(),
                 name: name.clone(),
                 input: parsed_input.clone(),
-                intent: ToolCall::intent_from_input(&parsed_input),
-            };
+                intent: ToolCall::intent_from_input(&parsed_input), thought_signature: None, };
             if let Some(key) = App::experimental_feature_key_for_tool(&tool_call) {
                 app.note_experimental_feature_use(key);
             }
@@ -527,6 +525,8 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             if !app.streaming_text.is_empty() {
                 let content = app.take_streaming_text();
+                let content = app.collapse_reasoning_for_commit(content);
+                if !content.trim().is_empty() {
                 app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),
                     content,
@@ -535,6 +535,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     title: None,
                     tool_data: None,
                 });
+                }
             }
             app.clear_streaming_render_state();
             app.stream_buffer.clear();
@@ -599,6 +600,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 if !app.streaming_text.is_empty() {
                     let duration = app.display_turn_duration_secs();
                     let content = app.take_streaming_text();
+                    let content = app.collapse_reasoning_for_commit(content);
+                    if !content.trim().is_empty() {
                     app.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content,
@@ -607,6 +610,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         title: None,
                         tool_data: None,
                     });
+                    }
                     app.push_turn_footer(duration);
                 } else if app.has_streaming_footer_stats() {
                     let duration = app.display_turn_duration_secs();
@@ -616,6 +620,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
                 app.stream_message_ended = false;
+                // Turn completed successfully; drop the saved prompt so a later
+                // unrelated failure cannot restore stale text into the input box.
+                app.last_submitted_input = None;
                 app.processing_started = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
@@ -740,6 +747,9 @@ pub(in crate::tui::app) fn handle_server_event(
             if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
             {
                 app.clear_pending_remote_retry();
+                // No automatic retry will resend this turn, so restore the prompt the
+                // user typed back into the input box instead of dropping it.
+                app.restore_failed_input_to_box();
                 return app.schedule_auto_poke_followup_if_needed()
                     || app.schedule_overnight_poke_followup_if_needed();
             }
@@ -862,6 +872,7 @@ pub(in crate::tui::app) fn handle_server_event(
             connection_type,
             status_detail,
             upstream_provider,
+            resolved_credential,
             reasoning_effort,
             service_tier,
             compaction_mode,
@@ -991,6 +1002,9 @@ pub(in crate::tui::app) fn handle_server_event(
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
+            if session_changed || resolved_credential.is_some() {
+                app.remote_resolved_credential = resolved_credential;
+            }
             if session_changed || connection_type.is_some() {
                 app.connection_type = connection_type;
             }
@@ -1100,6 +1114,9 @@ pub(in crate::tui::app) fn handle_server_event(
                     history_model.as_deref().unwrap_or("<none>")
                 ));
                 remote.mark_history_loaded();
+                // History arrived: cancel the "stuck on loading session…"
+                // recovery watchdog so it doesn't re-request on a later tick.
+                app.clear_remote_history_wait();
                 if messages.is_empty() && !session_changed && !app.display_messages().is_empty() {
                     crate::logging::info(
                         "Preserving locally restored display history for metadata-only History bootstrap",
@@ -1363,8 +1380,6 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::McpStatus { servers } => {
-            let previous_tool_total: usize =
-                app.mcp_server_names.iter().map(|(_, count)| count).sum();
             app.mcp_server_names = servers
                 .iter()
                 .filter_map(|s| {
@@ -1373,26 +1388,10 @@ pub(in crate::tui::app) fn handle_server_event(
                     Some((name.to_string(), count))
                 })
                 .collect();
-            let new_tool_total: usize = app.mcp_server_names.iter().map(|(_, count)| count).sum();
-            // When MCP tools first become available (servers finished
-            // connecting), the next turn rebuilds the tool snapshot once to
-            // expose them — a single intentional prompt-cache miss we accept so
-            // the agent is reachable immediately at spawn instead of blocking on
-            // MCP connection (#206). Surface this so it isn't mistaken for a bug.
-            if previous_tool_total == 0 && new_tool_total > 0 {
-                let server_count = app
-                    .mcp_server_names
-                    .iter()
-                    .filter(|(_, count)| *count > 0)
-                    .count();
-                app.set_status_notice(format!(
-                    "MCP ready: {} tool{} from {} server{} (one-time tool refresh)",
-                    new_tool_total,
-                    if new_tool_total == 1 { "" } else { "s" },
-                    server_count,
-                    if server_count == 1 { "" } else { "s" },
-                ));
-            }
+            // Keep MCP readiness non-intrusive. The footer/tool indicator reads
+            // `mcp_server_names` directly, so avoid a transient status notice here:
+            // status notices render near the prompt and can cover text while the
+            // user is typing during startup.
             false
         }
         ServerEvent::ModelChanged {
@@ -1569,6 +1568,8 @@ pub(in crate::tui::app) fn handle_server_event(
             if !app.streaming_text.is_empty() {
                 let duration = app.display_turn_duration_secs();
                 let flushed = app.take_streaming_text();
+                let flushed = app.collapse_reasoning_for_commit(flushed);
+                if !flushed.trim().is_empty() {
                 app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),
                     content: flushed,
@@ -1577,6 +1578,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     title: None,
                     tool_data: None,
                 });
+                }
                 app.push_turn_footer(duration);
             }
             app.mark_soft_interrupt_injected(&content);

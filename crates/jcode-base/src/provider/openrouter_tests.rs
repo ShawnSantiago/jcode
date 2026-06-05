@@ -13,8 +13,15 @@ struct SharedEnvLock;
 static ENV_LOCK: SharedEnvLock = SharedEnvLock;
 
 impl SharedEnvLock {
-    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'static, ()>> {
-        crate::storage::test_env_lock().lock()
+    /// Acquire the process-global test env lock.
+    ///
+    /// This recovers from a poisoned mutex (`into_inner`) instead of
+    /// propagating the `PoisonError`. The env guard only protects shared
+    /// process env state, so a panic in one test must not cascade into a
+    /// flood of unrelated `PoisonError` failures across every other test
+    /// that takes this lock.
+    fn lock(&self) -> std::sync::MutexGuard<'static, ()> {
+        crate::storage::lock_test_env()
     }
 }
 
@@ -78,6 +85,13 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
         EnvVarGuard::remove("JCODE_OPENROUTER_MODEL"),
         EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE"),
         EnvVarGuard::remove("JCODE_OPENROUTER_ALLOW_NO_AUTH"),
+        EnvVarGuard::remove("JCODE_OPENROUTER_TRANSPORT_STATE"),
+        EnvVarGuard::remove("JCODE_OPENROUTER_PROVIDER_FEATURES"),
+        EnvVarGuard::remove("JCODE_OPENROUTER_MODEL_CATALOG"),
+        EnvVarGuard::remove("JCODE_OPENROUTER_AUTH_HEADER"),
+        EnvVarGuard::remove("JCODE_OPENROUTER_AUTH_HEADER_NAME"),
+        EnvVarGuard::remove("JCODE_OPENROUTER_STATIC_MODELS"),
+        EnvVarGuard::remove("JCODE_ACTIVE_PROVIDER"),
         EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER"),
         EnvVarGuard::remove("JCODE_NAMED_PROVIDER_PROFILE"),
         EnvVarGuard::remove("JCODE_PROVIDER_PROFILE_NAME"),
@@ -206,7 +220,7 @@ fn openai_compatible_models_endpoint_allows_models_array_with_name_ids() {
 
 #[test]
 fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
 
@@ -229,7 +243,7 @@ fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
 
 #[test]
 fn named_openai_compatible_provider_exposes_static_models_as_routes() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
 
@@ -258,7 +272,7 @@ fn named_openai_compatible_provider_exposes_static_models_as_routes() {
 
 #[test]
 fn direct_openai_compatible_provider_advertises_image_input_support() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
 
     let profile = crate::config::NamedProviderConfig {
@@ -272,6 +286,171 @@ fn direct_openai_compatible_provider_advertises_image_input_support() {
         .expect("local named profile should initialize without auth");
 
     assert!(provider.supports_image_input());
+}
+
+#[test]
+fn direct_deepseek_profile_does_not_advertise_image_input_support() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert!(!provider.supports_image_input());
+}
+
+#[test]
+fn direct_deepseek_profile_omits_image_url_parts() {
+    let _lock = ENV_LOCK.lock();
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "aW1hZ2U=".to_string(),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        !request.contains(r#""type":"image_url""#),
+        "DeepSeek request must not contain unsupported image_url content parts: {request}"
+    );
+    assert!(
+        request.contains("Image omitted"),
+        "DeepSeek request should preserve a textual placeholder for omitted images: {request}"
+    );
+}
+
+#[test]
+fn default_named_openai_compatible_provider_uses_direct_compatible_request_path() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("TEST_DEFAULT_COMPAT_KEY", "test-key");
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+
+    std::fs::create_dir_all(&jcode_home).expect("create test config dir");
+    std::fs::write(
+        jcode_home.join("config.toml"),
+        format!(
+            r#"
+[provider]
+default_provider = "my-gateway"
+
+[providers.my-gateway]
+type = "openai-compatible"
+base_url = "{api_base}"
+api_key_env = "TEST_DEFAULT_COMPAT_KEY"
+default_model = "opaque/model@id"
+model_catalog = false
+"#
+        ),
+    )
+    .expect("write test config");
+    crate::config::invalidate_config_cache();
+
+    let provider =
+        crate::provider::MultiProvider::new_with_auth_status(crate::auth::AuthStatus::default());
+    assert_eq!(
+        provider.active_provider(),
+        crate::provider::ActiveProvider::OpenRouter
+    );
+    let openrouter = provider
+        .openrouter_provider()
+        .expect("openrouter execution slot");
+    assert!(
+        !openrouter.supports_provider_routing_features(),
+        "named openai-compatible defaults must not use OpenRouter provider routing features"
+    );
+    assert_eq!(
+        openrouter
+            .direct_openai_compatible_route_parts()
+            .as_ref()
+            .map(|parts| parts.1.as_str()),
+        Some("openai-compatible:my-gateway")
+    );
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = openrouter
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should parse");
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("POST /v1/chat/completions "),
+        "unexpected chat request: {request}"
+    );
+    assert!(
+        request.contains(r#""model":"opaque/model@id""#),
+        "request should use named profile default model: {request}"
+    );
+    assert!(
+        !request.contains(r#""provider":"#),
+        "direct OpenAI-compatible request must not include OpenRouter provider routing object: {request}"
+    );
+    assert!(
+        !request.contains("HTTP-Referer") && !request.contains("X-Title"),
+        "direct OpenAI-compatible request must not include OpenRouter-only headers: {request}"
+    );
 }
 
 #[test]
@@ -369,7 +548,7 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
 
 #[test]
 fn comtegra_profile_uses_endpoint_default_max_tokens() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _override = EnvVarGuard::remove("JCODE_OPENROUTER_MAX_TOKENS");
 
     assert_eq!(
@@ -384,7 +563,7 @@ fn comtegra_profile_uses_endpoint_default_max_tokens() {
 
 #[test]
 fn max_tokens_env_overrides_profile_default() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _override = EnvVarGuard::set("JCODE_OPENROUTER_MAX_TOKENS", "4096");
 
     assert_eq!(
@@ -395,7 +574,7 @@ fn max_tokens_env_overrides_profile_default() {
 
 #[test]
 fn test_configured_api_base_accepts_https() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
     crate::env::set_var(
         "JCODE_OPENROUTER_API_BASE",
@@ -411,7 +590,7 @@ fn test_configured_api_base_accepts_https() {
 
 #[test]
 fn test_configured_api_base_rejects_insecure_http_remote() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
     crate::env::set_var("JCODE_OPENROUTER_API_BASE", "http://example.com/v1");
     assert_eq!(configured_api_base(), DEFAULT_API_BASE);
@@ -424,7 +603,7 @@ fn test_configured_api_base_rejects_insecure_http_remote() {
 
 #[test]
 fn autodetects_single_saved_openai_compatible_profile() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -449,7 +628,7 @@ fn autodetects_single_saved_openai_compatible_profile() {
 
 #[test]
 fn autodetects_single_saved_local_openai_compatible_profile() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -479,7 +658,14 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
 
 #[test]
 fn openrouter_transport_state_distinguishes_runtime_identities() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
+    // Isolate the on-disk config/credential lookup the same way the sibling
+    // autodetect tests do, so this test does not read whatever provider
+    // profile happens to be configured on the host machine.
+    let temp = TempDir::new().expect("create temp dir");
+    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
     assert_eq!(
@@ -538,7 +724,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
 
 #[test]
 fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -572,7 +758,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
 
 #[test]
 fn autodetected_profile_seeds_default_model_and_cache_namespace() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -892,7 +1078,7 @@ async fn collect_openrouter_live_smoke_stream(
 #[tokio::test]
 #[ignore = "live smoke: requires OPENROUTER_API_KEY or configured OpenRouter credentials"]
 async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
-    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _env_lock = ENV_LOCK.lock();
     let Some(token) = OpenRouterProvider::get_api_key() else {
         eprintln!(
             "skipping live OpenRouter smoke: OPENROUTER_API_KEY or configured OpenRouter credentials not found"
@@ -1015,7 +1201,7 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
 
 #[test]
 fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_display() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
@@ -1098,7 +1284,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
 
 #[test]
 fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
@@ -1196,7 +1382,7 @@ fn cerebras_live_catalog_models_are_selectable_on_explicit_switch() {
 
 #[test]
 fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://api.deepseek.com");
     let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "DEEPSEEK_API_KEY");
     let _api_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "test");
@@ -1211,7 +1397,7 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
 
 #[test]
 fn named_openai_compatible_model_context_window_overrides_default() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let mut config = crate::config::NamedProviderConfig {
         base_url: "https://compat.example.test/v1".to_string(),
@@ -1234,7 +1420,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
 
 #[test]
 fn named_openai_compatible_loads_api_key_from_env_file() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());

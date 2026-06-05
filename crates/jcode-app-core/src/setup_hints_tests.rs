@@ -152,3 +152,64 @@ fn previous_listener_version_user_gets_migrated_on_update() {
         );
     }
 }
+
+#[test]
+fn macos_terminal_notice_only_fires_for_default_terminal_app() {
+    let mut state = SetupHintsState::default();
+    let hints = macos_terminal_notice(&mut state, MacTerminalKind::AppleTerminal)
+        .expect("Terminal.app should produce a notice");
+
+    assert_eq!(
+        hints.status_notice.as_deref(),
+        Some("Tip: Terminal.app renders jcode poorly. Try Ghostty, iTerm2, or Alacritty.")
+    );
+    let (title, message) = hints.display_message.expect("expected display message");
+    assert_eq!(title, "Terminal");
+    assert!(message.contains("Terminal.app renders jcode poorly"));
+    assert!(message.contains("Ghostty"));
+    // It is a plain notice, not an AI handoff prompt.
+    assert!(hints.auto_send_message.is_none());
+    // The nudge is marked handled so it only ever shows once.
+    assert!(state.mac_ghostty_guided);
+    assert!(state.mac_ghostty_dismissed);
+}
+
+#[test]
+fn macos_terminal_notice_silent_for_modern_terminals() {
+    for terminal in [
+        MacTerminalKind::Ghostty,
+        MacTerminalKind::Iterm2,
+        MacTerminalKind::WezTerm,
+        MacTerminalKind::Warp,
+        MacTerminalKind::Alacritty,
+        MacTerminalKind::Vscode,
+        MacTerminalKind::Unknown,
+    ] {
+        let mut state = SetupHintsState::default();
+        assert!(
+            macos_terminal_notice(&mut state, terminal).is_none(),
+            "{terminal:?} should not be nudged"
+        );
+        // Even when silent, the nudge is marked handled so we never re-check it.
+        assert!(state.mac_ghostty_guided);
+        assert!(state.mac_ghostty_dismissed);
+    }
+}
+
+#[test]
+fn nudge_budget_caps_at_max_and_persists() {
+    let mut state = SetupHintsState::default();
+    assert_eq!(state.terminal_nudge_count, 0);
+
+    for shown in 1..=MAX_TERMINAL_NUDGES {
+        assert!(
+            state.nudge_budget_remaining(),
+            "should still allow nudge before #{shown}"
+        );
+        state.terminal_nudge_count = shown;
+    }
+
+    // After MAX_TERMINAL_NUDGES, we stop asking even without an explicit dismiss.
+    assert_eq!(state.terminal_nudge_count, MAX_TERMINAL_NUDGES);
+    assert!(!state.nudge_budget_remaining());
+}

@@ -1578,6 +1578,38 @@ pub(crate) fn copy_point_from_screen(
     }
 }
 
+/// Number of rows at the top/bottom of a pane that act as the browser-style
+/// auto-scroll "hot zone". Dragging a selection anywhere inside this band keeps
+/// pulling in more transcript, instead of requiring the cursor to land exactly
+/// on the boundary row. Scales gently with pane height and is capped so small
+/// panes keep a usable middle region.
+fn edge_autoscroll_zone_rows(height: u16) -> u16 {
+    (height / 4).clamp(1, 3)
+}
+
+#[cfg(test)]
+mod edge_autoscroll_zone_tests {
+    use super::edge_autoscroll_zone_rows;
+
+    #[test]
+    fn zone_is_at_least_one_row_for_tiny_panes() {
+        // Even a 1-2 row pane should keep a usable hot zone so the edge still triggers.
+        assert_eq!(edge_autoscroll_zone_rows(0), 1);
+        assert_eq!(edge_autoscroll_zone_rows(1), 1);
+        assert_eq!(edge_autoscroll_zone_rows(3), 1);
+        assert_eq!(edge_autoscroll_zone_rows(4), 1);
+    }
+
+    #[test]
+    fn zone_scales_with_height_but_is_capped() {
+        assert_eq!(edge_autoscroll_zone_rows(8), 2);
+        assert_eq!(edge_autoscroll_zone_rows(12), 3);
+        // Capped at 3 so tall panes keep a large neutral middle region.
+        assert_eq!(edge_autoscroll_zone_rows(40), 3);
+        assert_eq!(edge_autoscroll_zone_rows(200), 3);
+    }
+}
+
 pub(crate) fn copy_pane_vertical_edge_point(
     pane: crate::tui::CopySelectionPane,
     column: u16,
@@ -1585,19 +1617,52 @@ pub(crate) fn copy_pane_vertical_edge_point(
 ) -> Option<(crate::tui::CopySelectionPoint, bool)> {
     let snapshot = copy_snapshot_for_pane(pane)?;
     let area = snapshot.content_area;
-    if column < area.x || column >= area.x.saturating_add(area.width) || area.height == 0 {
+    if area.width == 0 || area.height == 0 {
         return None;
     }
 
-    let (edge_row, upward) = if row < area.y {
+    // Browser-style edge auto-scroll: terminals clamp the mouse to the visible
+    // viewport, so a drag that "leaves" the top/bottom of the pane is reported on
+    // the boundary row itself. We additionally treat a small band near each edge
+    // as a hot zone, so dragging *near* (not just exactly onto) the top/bottom
+    // keeps pulling in more transcript, just like dragging a selection toward the
+    // edge of a browser window. The horizontal position is clamped into the pane
+    // so the selection extends no matter where along the edge the cursor sits.
+    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    let zone = edge_autoscroll_zone_rows(area.height);
+    let top_trigger = area.y.saturating_add(zone);
+    let bottom_trigger = last_row.saturating_sub(zone);
+    let (edge_row, upward) = if row <= top_trigger {
         (area.y, true)
-    } else if row >= area.y.saturating_add(area.height) {
-        (area.y.saturating_add(area.height).saturating_sub(1), false)
+    } else if row >= bottom_trigger {
+        (last_row, false)
     } else {
         return None;
     };
 
-    copy_point_from_snapshot(&snapshot, column, edge_row).map(|point| (point, upward))
+    let clamped_col = column.clamp(area.x, area.x.saturating_add(area.width).saturating_sub(1));
+
+    copy_point_from_snapshot(&snapshot, clamped_col, edge_row).map(|point| (point, upward))
+}
+
+/// Edge point for tick-driven continuous auto-scroll, where there is no live
+/// mouse position. Uses the top/bottom boundary row of the pane and its left
+/// content column so the selection keeps extending to the freshly revealed line.
+pub(crate) fn copy_pane_autoscroll_edge_point(
+    pane: crate::tui::CopySelectionPane,
+    upward: bool,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let snapshot = copy_snapshot_for_pane(pane)?;
+    let area = snapshot.content_area;
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let edge_row = if upward {
+        area.y
+    } else {
+        area.y.saturating_add(area.height).saturating_sub(1)
+    };
+    copy_point_from_snapshot(&snapshot, area.x, edge_row)
 }
 
 #[cfg(test)]

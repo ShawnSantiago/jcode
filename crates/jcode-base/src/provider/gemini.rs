@@ -114,8 +114,8 @@ impl GeminiProvider {
     fn developer_api_base_url() -> String {
         let endpoint = std::env::var("GEMINI_API_ENDPOINT")
             .unwrap_or_else(|_| GEMINI_API_ENDPOINT.to_string());
-        let version = std::env::var("GEMINI_API_VERSION")
-            .unwrap_or_else(|_| GEMINI_API_VERSION.to_string());
+        let version =
+            std::env::var("GEMINI_API_VERSION").unwrap_or_else(|_| GEMINI_API_VERSION.to_string());
         format!(
             "{}/{}",
             endpoint.trim_end_matches('/'),
@@ -137,9 +137,7 @@ impl GeminiProvider {
                 !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
             })
             .unwrap_or(false);
-        if !force_oauth
-            && let Some(api_key) = gemini_auth::api_key()
-        {
+        if !force_oauth && let Some(api_key) = gemini_auth::api_key() {
             return GeminiAuthMode::ApiKey(api_key);
         }
         GeminiAuthMode::Oauth
@@ -1015,15 +1013,25 @@ pub(crate) fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
                         });
                     }
                     crate::message::ContentBlock::Reasoning { .. }
+                    | crate::message::ContentBlock::ReasoningTrace { .. }
                     | crate::message::ContentBlock::AnthropicThinking { .. }
                     | crate::message::ContentBlock::OpenAIReasoning { .. } => {}
-                    crate::message::ContentBlock::ToolUse { id, name, input } => {
+                    crate::message::ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                    } => {
                         parts.push(GeminiPart {
                             function_call: Some(GeminiFunctionCall {
                                 name: name.clone(),
                                 args: crate::message::ToolCall::input_as_object(input),
                                 id: Some(id.clone()),
                             }),
+                            thought_signature: thought_signature
+                                .as_ref()
+                                .filter(|sig| !sig.is_empty())
+                                .cloned(),
                             ..Default::default()
                         });
                     }

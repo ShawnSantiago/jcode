@@ -246,6 +246,7 @@ impl Agent {
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
+            let mut reasoning_fmt = crate::agent::reasoning_format::ReasoningStreamFormatter::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             let mut openai_native_compaction: Option<(String, usize)> = None;
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
@@ -367,20 +368,32 @@ impl Agent {
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Only send thinking content if enabled in config
                         if crate::config::config().display.show_thinking {
-                            let _ = event_tx.send(ServerEvent::TextDelta {
-                                text: format!("💭 {}\n", thinking_text),
-                            });
+                            let formatted = reasoning_fmt.push_delta(&thinking_text);
+                            if !formatted.is_empty() {
+                                let _ = event_tx.send(ServerEvent::TextDelta { text: formatted });
+                            }
                         }
-                        if store_reasoning_content {
-                            reasoning_content.push_str(&thinking_text);
-                        }
+                        // Always capture reasoning text so it can be persisted as a
+                        // history-only trace, regardless of provider replay support.
+                        reasoning_content.push_str(&thinking_text);
                     }
-                    StreamEvent::ThinkingDone { duration_secs } => {
-                        let _ = event_tx.send(ServerEvent::TextDelta {
-                            text: format!("Thought for {:.1}s\n", duration_secs),
-                        });
+                    StreamEvent::ThinkingDone { duration_secs: _ } => {
+                        if reasoning_fmt.is_open() {
+                            let closing = reasoning_fmt.finish(None);
+                            if !closing.is_empty() {
+                                let _ = event_tx.send(ServerEvent::TextDelta { text: closing });
+                            }
+                        }
                     }
                     StreamEvent::TextDelta(text) => {
+                        // Close any open reasoning blockquote before real output so the
+                        // answer renders as a normal paragraph rather than inside the quote.
+                        if reasoning_fmt.is_open() && !text.trim().is_empty() {
+                            let closing = reasoning_fmt.finish(None);
+                            if !closing.is_empty() {
+                                let _ = event_tx.send(ServerEvent::TextDelta { text: closing });
+                            }
+                        }
                         text_content.push_str(&text);
                         if !text_wrapped_detected {
                             if let Some(marker_idx) = text_content
@@ -410,6 +423,12 @@ impl Agent {
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if reasoning_fmt.is_open() {
+                            let closing = reasoning_fmt.finish(None);
+                            if !closing.is_empty() {
+                                let _ = event_tx.send(ServerEvent::TextDelta { text: closing });
+                            }
+                        }
                         let _ = event_tx.send(ServerEvent::ToolStart {
                             id: id.clone(),
                             name: name.clone(),
@@ -420,6 +439,7 @@ impl Agent {
                             name,
                             input: serde_json::Value::Null,
                             intent: None,
+                            thought_signature: None,
                         });
                         current_tool_input.clear();
                     }
@@ -442,6 +462,15 @@ impl Agent {
 
                             tool_calls.push(tool);
                             current_tool_input.clear();
+                        }
+                    }
+                    StreamEvent::ToolUseSignature(signature) => {
+                        // Attach Gemini 3 thought signature to the most recent
+                        // tool call so it can be persisted and replayed.
+                        if let Some(tool) = tool_calls.last_mut() {
+                            if !signature.is_empty() {
+                                tool.thought_signature = Some(signature);
+                            }
                         }
                     }
                     StreamEvent::ToolResult {
@@ -785,21 +814,21 @@ impl Agent {
                     cache_control: None,
                 });
             }
+            crate::message::push_reasoning_blocks(
+                &mut content_blocks,
+                &provider_name,
+                &reasoning_content,
+                Some(&reasoning_signature),
+                store_reasoning_content,
+            );
             if store_reasoning_content {
-                crate::message::push_reasoning_content_block(
-                    &mut content_blocks,
-                    &provider_name,
-                    &reasoning_content,
-                    Some(&reasoning_signature),
-                );
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
-                    input: tc.input.clone(),
-                });
+                    input: tc.input.clone(), thought_signature: None, });
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
@@ -1265,6 +1294,7 @@ mod tests {
             name: name.to_string(),
             input,
             intent: None,
+            thought_signature: None,
         }
     }
 
