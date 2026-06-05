@@ -220,6 +220,8 @@ pub(in crate::tui::app) fn handle_server_event(
         &event,
         ServerEvent::TextDelta { .. }
             | ServerEvent::TextReplace { .. }
+            | ServerEvent::ReasoningDelta { .. }
+            | ServerEvent::ReasoningDone { .. }
             | ServerEvent::ToolStart { .. }
             | ServerEvent::ToolInput { .. }
             | ServerEvent::ToolExec { .. }
@@ -276,6 +278,31 @@ pub(in crate::tui::app) fn handle_server_event(
             app.replace_streaming_text(text);
             app.resume_streaming_tps();
             true
+        }
+        ServerEvent::ReasoningDelta { text } => {
+            // Reasoning streams live (dim+italic) before the answer. Flush any
+            // buffered normal text first so ordering is preserved, then render the
+            // in-progress reasoning line token-by-token.
+            if let Some(chunk) = app.stream_buffer.flush() {
+                app.append_streaming_text(&chunk);
+            }
+            if matches!(
+                app.status,
+                ProcessingStatus::Sending
+                    | ProcessingStatus::Connecting(_)
+                    | ProcessingStatus::Thinking(_)
+            ) || (app.is_processing && matches!(app.status, ProcessingStatus::Idle))
+            {
+                app.status = ProcessingStatus::Streaming;
+            }
+            app.resume_streaming_tps();
+            app.append_reasoning_text(&text);
+            app.last_stream_activity = Some(Instant::now());
+            eager_stream_redraw
+        }
+        ServerEvent::ReasoningDone { .. } => {
+            app.close_reasoning_region(None);
+            eager_stream_redraw
         }
         ServerEvent::ToolStart { id, name } => {
             // Tool-call JSON is provider-generated output and is included in output-token
@@ -371,6 +398,15 @@ pub(in crate::tui::app) fn handle_server_event(
             if app.record_completed_stream_cache_usage() {
                 app.total_input_tokens = app.total_input_tokens.saturating_add(input);
                 app.total_output_tokens = app.total_output_tokens.saturating_add(output);
+                // The server only reports tokens, never a dollar cost, so the
+                // remote client prices each completed call itself. This is the
+                // first usage snapshot for this call, so bill the full counts.
+                app.accrue_remote_call_cost(
+                    input,
+                    output,
+                    app.streaming_cache_read_tokens.unwrap_or(0),
+                    app.streaming_cache_creation_tokens.unwrap_or(0),
+                );
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
@@ -382,6 +418,19 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.total_output_tokens = app
                     .total_output_tokens
                     .saturating_add(output.saturating_sub(previous_output));
+                // Bill only the new tokens since the previous snapshot for this
+                // same call, so a call that reports usage multiple times while
+                // streaming is billed exactly once overall.
+                app.accrue_remote_call_cost(
+                    input.saturating_sub(previous_input),
+                    output.saturating_sub(previous_output),
+                    app.streaming_cache_read_tokens
+                        .unwrap_or(0)
+                        .saturating_sub(previous_cache_read.unwrap_or(0)),
+                    app.streaming_cache_creation_tokens
+                        .unwrap_or(0)
+                        .saturating_sub(previous_cache_creation.unwrap_or(0)),
+                );
 
                 let had_cache_telemetry =
                     previous_cache_read.is_some() || previous_cache_creation.is_some();
@@ -409,13 +458,20 @@ pub(in crate::tui::app) fn handle_server_event(
                         );
                     app.last_cache_reported_input_tokens = Some(input);
                     app.last_cache_read_tokens = Some(app.streaming_cache_read_tokens.unwrap_or(0));
+                    app.last_cache_creation_tokens =
+                        Some(app.streaming_cache_creation_tokens.unwrap_or(0));
                 }
 
                 if let Some(baseline) = app.kv_cache_baseline.as_mut() {
                     baseline.input_tokens = input;
                     baseline.completed_at = Instant::now();
                 }
-                app.cache_next_optimal_input_tokens = Some(input);
+                app.cache_next_optimal_input_tokens =
+                    Some(crate::tui::info_widget::effective_prompt_tokens(
+                        input,
+                        app.streaming_cache_read_tokens.unwrap_or(0),
+                        app.streaming_cache_creation_tokens.unwrap_or(0),
+                    ));
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
@@ -952,6 +1008,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.total_cache_optimal_input_tokens = 0;
                 app.last_cache_reported_input_tokens = None;
                 app.last_cache_read_tokens = None;
+                app.last_cache_creation_tokens = None;
                 app.last_cache_optimal_input_tokens = None;
                 app.cache_next_optimal_input_tokens = None;
                 app.kv_cache_baseline = None;

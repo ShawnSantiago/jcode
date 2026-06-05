@@ -844,6 +844,115 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
 }
 
 #[test]
+fn test_anthropic_api_cost_accounts_for_split_cache_tokens() {
+    // Anthropic reports usage with *split* accounting: `input_tokens` already
+    // excludes cache-read and cache-creation tokens. The cost figure must
+    //   - bill fresh input at the input rate,
+    //   - bill cache-read tokens at the (cheaper) cache-read rate WITHOUT also
+    //     subtracting them from the fresh input (double subtraction), and
+    //   - bill cache-creation (cache-write) tokens, which Anthropic charges at a
+    //     premium over the input rate.
+    let _guard = crate::storage::lock_test_env();
+    let saved_runtime = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+    crate::auth::AuthStatus::invalidate_cache();
+
+    // claude-sonnet-4-6 API pricing: input $3/Mtok, output $15/Mtok,
+    // cache-read $0.30/Mtok. Cache-write (1h TTL) is billed at 2x input = $6/Mtok.
+    let mut app = create_named_provider_test_app("anthropic", "claude-sonnet-4-6");
+    crate::provider::anthropic::set_cache_ttl_1h(true);
+
+    // A representative cold turn: most of the prompt is freshly written to cache,
+    // a little is read back, and only a small uncached remainder is fresh input.
+    app.streaming_input_tokens = 1_000; // uncached fresh input
+    app.streaming_cache_read_tokens = Some(40_000); // served from cache
+    app.streaming_cache_creation_tokens = Some(100_000); // written to cache (premium)
+    app.streaming_output_tokens = 2_000;
+    app.update_cost_impl();
+
+    // Expected:
+    //   fresh input:    1_000  * $3   / 1e6 = $0.003
+    //   output:         2_000  * $15  / 1e6 = $0.030
+    //   cache read:    40_000  * $0.3 / 1e6 = $0.012
+    //   cache write:  100_000  * $6   / 1e6 = $0.600
+    //   total                                = $0.645
+    let expected = 0.003 + 0.030 + 0.012 + 0.600;
+    assert!(
+        (app.total_cost - expected).abs() < 1e-4,
+        "anthropic split-accounting cost should be ~${expected:.4}, got ${:.4}",
+        app.total_cost
+    );
+
+    if let Some(value) = saved_runtime {
+        crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    }
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
+#[test]
+fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
+    // The default interactive TUI is a remote client: it receives per-call
+    // ServerEvent::TokenUsage but never runs the local finish_turn cost path.
+    // Anthropic API-key sessions must still accrue a dollar cost from those
+    // events (the server reports tokens, not cost), and OAuth subscription
+    // sessions must stay at $0.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_provider_model = Some("claude-sonnet-4-6".to_string());
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+    crate::provider::anthropic::set_cache_ttl_1h(true);
+
+    // One completed call with split-accounting cache telemetry.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 1_000,
+            output: 2_000,
+            cache_read_input: Some(40_000),
+            cache_creation_input: Some(100_000),
+        },
+        &mut remote,
+    );
+
+    // Same expected math as the local split-accounting test:
+    //   input 1_000 * $3 + output 2_000 * $15 + read 40_000 * $0.3
+    //   + write 100_000 * ($3 * 2x) = $0.645
+    let expected = 0.003 + 0.030 + 0.012 + 0.600;
+    assert!(
+        (app.total_cost - expected).abs() < 1e-4,
+        "remote anthropic api-key cost should be ~${expected:.4}, got ${:.4}",
+        app.total_cost
+    );
+    assert_eq!(app.total_input_tokens, 1_000);
+    assert_eq!(app.total_output_tokens, 2_000);
+
+    // OAuth subscription sessions are not metered per token; cost stays $0.
+    let mut oauth_app = create_test_app();
+    oauth_app.is_remote = true;
+    oauth_app.remote_provider_name = Some("Claude".to_string());
+    oauth_app.remote_provider_model = Some("claude-sonnet-4-6".to_string());
+    oauth_app.remote_resolved_credential =
+        Some(jcode_provider_core::ResolvedCredential::Oauth);
+    oauth_app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 1_000,
+            output: 2_000,
+            cache_read_input: Some(40_000),
+            cache_creation_input: Some(100_000),
+        },
+        &mut remote,
+    );
+    assert_eq!(oauth_app.total_cost, 0.0);
+    assert_eq!(oauth_app.total_input_tokens, 1_000);
+}
+
+#[test]
 fn test_info_widget_local_gemini_shows_oauth_auth_method() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");

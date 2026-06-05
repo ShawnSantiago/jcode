@@ -138,7 +138,13 @@ fn escape_reasoning_inline_markdown(line: &str) -> String {
 /// `*…*` emphasis run that the renderer strips and styles dim, with no
 /// blockquote gutter. The line body is escaped so embedded markdown cannot break
 /// the styling. Empty lines become a bare newline (no empty emphasis run). The
-/// result always ends in `\n`.
+/// result always ends in a CommonMark hard break (`"  \n"`).
+///
+/// The trailing two spaces are a CommonMark *hard break*: without them,
+/// consecutive reasoning lines (each terminated by a single `\n`) collapse into
+/// one paragraph where the line breaks render as spaces, so multi-line thinking
+/// shows up as a single run-on line. The hard break keeps each reasoning line on
+/// its own visual row, matching the model's line structure.
 ///
 /// The sentinel must wrap both ends because CommonMark's emphasis flanking rules
 /// require the opening `*` to not be followed by whitespace and the closing `*`
@@ -154,7 +160,25 @@ pub fn reasoning_line_markup(line: &str) -> String {
         "\n".to_string()
     } else {
         format!(
-            "*{0}{1}{0}*\n",
+            "*{0}{1}{0}*  \n",
+            REASONING_SENTINEL,
+            escape_reasoning_inline_markdown(line)
+        )
+    }
+}
+
+/// Wrap the in-progress (not yet newline-terminated) reasoning line as dim+italic
+/// markdown, identical to [`reasoning_line_markup`] but *without* the trailing
+/// newline so it renders as the live tail of the streaming buffer. Callers
+/// truncate and re-emit this tail on each streamed delta so reasoning trickles in
+/// token-by-token instead of one whole line at a time. An empty line yields an
+/// empty string (nothing to render yet).
+pub fn reasoning_partial_markup(line: &str) -> String {
+    if line.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "*{0}{1}{0}*",
             REASONING_SENTINEL,
             escape_reasoning_inline_markdown(line)
         )

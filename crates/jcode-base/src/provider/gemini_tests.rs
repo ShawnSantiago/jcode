@@ -352,6 +352,44 @@ fn build_tools_rewrites_const_for_gemini_schema_compatibility() {
     );
 }
 
+#[test]
+fn build_tools_strips_additional_properties_for_gemini_schema_compatibility() {
+    // The Gemini Code Assist generateContent endpoint rejects `additionalProperties`
+    // (and other draft-JSON-Schema keywords) with HTTP 400, so build_tools must
+    // strip them recursively while preserving the rest of the schema.
+    let defs = vec![ToolDefinition {
+        name: "read".to_string(),
+        description: "Reads a file".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "properties": {
+                "file_path": { "type": "string" },
+                "opts": {
+                    "type": "object",
+                    "properties": { "limit": { "type": "integer" } },
+                    "additionalProperties": false
+                }
+            },
+            "required": ["file_path"],
+            "additionalProperties": false
+        }),
+    }];
+
+    let built = build_tools(&defs).expect("gemini tools");
+    let parameters = &built[0].function_declarations[0].parameters;
+
+    assert!(!schema_contains_key(parameters, "additionalProperties"));
+    assert!(!schema_contains_key(parameters, "$schema"));
+    // Real schema content is preserved.
+    assert_eq!(parameters["properties"]["file_path"]["type"], json!("string"));
+    assert_eq!(
+        parameters["properties"]["opts"]["properties"]["limit"]["type"],
+        json!("integer")
+    );
+    assert_eq!(parameters["required"], json!(["file_path"]));
+}
+
 #[tokio::test]
 async fn build_tools_from_registry_definitions_omits_const_keywords() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);

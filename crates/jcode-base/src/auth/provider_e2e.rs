@@ -25,8 +25,10 @@ use crate::auth::live_provider_probes::{
     fetch_live_openai_compatible_models, run_live_antigravity_native_smoke,
     run_live_antigravity_native_stream_smoke, run_live_antigravity_native_tool_smoke,
     run_live_claude_native_smoke, run_live_claude_native_stream_smoke,
-    run_live_claude_native_tool_smoke, run_live_openai_compatible_smoke,
-    run_live_openai_compatible_stream_smoke, run_live_openai_compatible_tool_smoke,
+    run_live_claude_native_tool_smoke, run_live_native_provider_smoke,
+    run_live_native_provider_stream_smoke, run_live_native_provider_tool_smoke,
+    run_live_openai_compatible_smoke, run_live_openai_compatible_stream_smoke,
+    run_live_openai_compatible_tool_smoke,
 };
 use crate::live_tests::{
     self, LiveVerificationAuth, LiveVerificationEvent, LiveVerificationResult,
@@ -343,7 +345,7 @@ pub async fn run_provider_e2e(
                 checks.push(DoctorCheck::failed(
                     checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
                     label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
-                    error.to_string(),
+                    format_error_chain(&error),
                 ));
                 return Ok(finish_report(
                     provider_id,
@@ -443,13 +445,15 @@ pub async fn run_provider_e2e(
 
 /// The native-runtime providers this doctor can drive directly (i.e. providers
 /// whose live path is not OpenAI-compatible and so cannot be exercised by
-/// [`run_provider_e2e`]). Today this is the Claude OAuth/subscription provider
-/// and the Antigravity (Google OAuth Cloud Code) provider.
+/// [`run_provider_e2e`]). Today this is the Claude OAuth/subscription provider,
+/// the Antigravity (Google OAuth Cloud Code) provider, and the generic
+/// native-runtime providers (OpenAI, Gemini, Cursor, Copilot, Bedrock).
 pub fn native_doctor_supports_provider(provider_id: &str) -> bool {
-    matches!(
-        crate::auth::lifecycle::normalized_auth_provider_id(Some(provider_id)),
-        Some("claude") | Some("antigravity")
-    )
+    match crate::auth::lifecycle::normalized_auth_provider_id(Some(provider_id)) {
+        Some("claude") | Some("antigravity") => true,
+        Some(other) => NativeProviderKind::from_normalized(other).is_some(),
+        None => false,
+    }
 }
 
 /// The wiring contract for the native Claude (OAuth/subscription) provider.
@@ -631,7 +635,7 @@ pub async fn run_claude_native_e2e(
                 checks.push(DoctorCheck::failed(
                     checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
                     label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
-                    error.to_string(),
+                    format_error_chain(&error),
                 ));
                 return Ok(finish_report(
                     provider_id,
@@ -767,7 +771,7 @@ async fn run_native_claude_api_checks(
         Err(error) => checks.push(DoctorCheck::failed(
             checkpoints::NON_STREAMING_CHAT_COMPLETION,
             label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
-            error.to_string(),
+            format_error_chain(&error),
         )),
     }
 
@@ -784,7 +788,7 @@ async fn run_native_claude_api_checks(
         Err(error) => checks.push(DoctorCheck::failed(
             checkpoints::STREAMING_CHAT_COMPLETION,
             label_for(checkpoints::STREAMING_CHAT_COMPLETION),
-            error.to_string(),
+            format_error_chain(&error),
         )),
     }
 
@@ -815,7 +819,7 @@ async fn run_native_claude_api_checks(
                 checks.push(DoctorCheck::failed(
                     checkpoint,
                     label_for(checkpoint),
-                    error.to_string(),
+                    format_error_chain(&error),
                 ));
             }
         }
@@ -988,7 +992,7 @@ pub async fn run_antigravity_native_e2e(
                 checks.push(DoctorCheck::failed(
                     checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
                     label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
-                    error.to_string(),
+                    format_error_chain(&error),
                 ));
                 return Ok(finish_report(
                     provider_id,
@@ -1110,7 +1114,7 @@ async fn run_native_antigravity_api_checks(
         Err(error) => checks.push(DoctorCheck::failed(
             checkpoints::NON_STREAMING_CHAT_COMPLETION,
             label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
-            error.to_string(),
+            format_error_chain(&error),
         )),
     }
 
@@ -1127,7 +1131,7 @@ async fn run_native_antigravity_api_checks(
         Err(error) => checks.push(DoctorCheck::failed(
             checkpoints::STREAMING_CHAT_COMPLETION,
             label_for(checkpoints::STREAMING_CHAT_COMPLETION),
-            error.to_string(),
+            format_error_chain(&error),
         )),
     }
 
@@ -1158,7 +1162,641 @@ async fn run_native_antigravity_api_checks(
                 checks.push(DoctorCheck::failed(
                     checkpoint,
                     label_for(checkpoint),
-                    error.to_string(),
+                    format_error_chain(&error),
+                ));
+            }
+        }
+    }
+}
+
+// === Generic native-runtime doctor =========================================
+//
+// Claude and Antigravity each have a bespoke `run_*_native_e2e` driver above
+// because their credential/catalog stories are unusual (OAuth-vs-API-key mode
+// pinning for Claude; Google project resolution + thought-signature replay for
+// Antigravity). The remaining native-runtime providers (OpenAI OAuth, Gemini
+// Code Assist, Cursor, GitHub Copilot, AWS Bedrock) share the same shape:
+// resolve a credential, fetch the live catalog through the production runtime,
+// then run the shared wiring + API probes. `run_generic_native_e2e` drives all
+// of them from a single [`NativeProviderSpec`] so adding a provider is a small,
+// declarative change rather than a copy of the ~200-line driver.
+
+/// The native-runtime providers driven by the generic doctor (everything except
+/// Claude and Antigravity, which keep their bespoke drivers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeProviderKind {
+    OpenAi,
+    Gemini,
+    Cursor,
+    Copilot,
+    Bedrock,
+    Jcode,
+    Azure,
+}
+
+impl NativeProviderKind {
+    /// Map a normalized auth-provider id to a generic native kind, if any.
+    pub fn from_normalized(provider_id: &str) -> Option<Self> {
+        match provider_id {
+            "openai" => Some(Self::OpenAi),
+            "gemini" => Some(Self::Gemini),
+            "cursor" => Some(Self::Cursor),
+            "copilot" => Some(Self::Copilot),
+            "bedrock" => Some(Self::Bedrock),
+            "jcode" => Some(Self::Jcode),
+            "azure-openai" => Some(Self::Azure),
+            _ => None,
+        }
+    }
+
+    fn spec(self) -> NativeProviderSpec {
+        match self {
+            Self::OpenAi => NativeProviderSpec {
+                provider_id: "openai",
+                label: "OpenAI",
+                contract: WiringContract {
+                    api_method: "openai-oauth".to_string(),
+                    route_provider: "OpenAI".to_string(),
+                    expected_runtime: "openai",
+                    expected_namespace: None,
+                    switch_prefix: "openai-oauth:".to_string(),
+                },
+                auth_source: "OpenAI ChatGPT OAuth / API key via auth.json",
+                auth_env_key: None,
+                login_hint: "jcode login --provider openai",
+            },
+            Self::Gemini => NativeProviderSpec {
+                provider_id: "gemini",
+                label: "Google Gemini",
+                contract: WiringContract {
+                    api_method: "code-assist-oauth".to_string(),
+                    route_provider: "Gemini".to_string(),
+                    expected_runtime: "gemini",
+                    expected_namespace: None,
+                    switch_prefix: "gemini:".to_string(),
+                },
+                auth_source: "Gemini Code Assist Google OAuth via gemini_oauth.json",
+                auth_env_key: None,
+                login_hint: "jcode login --provider gemini",
+            },
+            Self::Cursor => NativeProviderSpec {
+                provider_id: "cursor",
+                label: "Cursor",
+                contract: WiringContract {
+                    api_method: "cursor".to_string(),
+                    route_provider: "Cursor".to_string(),
+                    expected_runtime: "cursor",
+                    expected_namespace: None,
+                    switch_prefix: "cursor:".to_string(),
+                },
+                auth_source: "Cursor API key / CLI session via auth.json",
+                auth_env_key: Some("CURSOR_API_KEY"),
+                login_hint: "jcode login --provider cursor",
+            },
+            Self::Copilot => NativeProviderSpec {
+                provider_id: "copilot",
+                label: "GitHub Copilot",
+                contract: WiringContract {
+                    api_method: "copilot".to_string(),
+                    route_provider: "Copilot".to_string(),
+                    expected_runtime: "copilot",
+                    expected_namespace: None,
+                    switch_prefix: "copilot:".to_string(),
+                },
+                auth_source: "GitHub Copilot device-flow token via hosts.json",
+                auth_env_key: None,
+                login_hint: "jcode login --provider copilot",
+            },
+            Self::Bedrock => NativeProviderSpec {
+                provider_id: "bedrock",
+                label: "AWS Bedrock",
+                contract: WiringContract {
+                    api_method: "bedrock".to_string(),
+                    route_provider: "AWS Bedrock".to_string(),
+                    expected_runtime: "bedrock",
+                    expected_namespace: None,
+                    switch_prefix: "bedrock:".to_string(),
+                },
+                auth_source: "AWS Bedrock API key / AWS credentials",
+                auth_env_key: Some("AWS_BEARER_TOKEN_BEDROCK"),
+                login_hint: "jcode login --provider bedrock",
+            },
+            Self::Jcode => NativeProviderSpec {
+                provider_id: "jcode",
+                label: "Jcode Subscription",
+                // The Jcode subscription runtime routes through the OpenRouter
+                // transport, so its catalog routes carry the `openrouter`
+                // api_method/label and switch with the `openrouter:` prefix even
+                // though its runtime identity is `jcode`.
+                contract: WiringContract {
+                    api_method: "openrouter".to_string(),
+                    route_provider: "auto".to_string(),
+                    expected_runtime: "jcode",
+                    expected_namespace: None,
+                    switch_prefix: "openrouter:".to_string(),
+                },
+                auth_source: "Jcode subscription API key (JCODE_API_KEY)",
+                auth_env_key: Some("JCODE_API_KEY"),
+                login_hint: "jcode login --provider jcode",
+            },
+            Self::Azure => NativeProviderSpec {
+                provider_id: "azure-openai",
+                label: "Azure OpenAI",
+                // Azure OpenAI reuses the OpenRouter transport (configured via
+                // Azure env), so its routes carry the generic `openrouter`
+                // api_method/label and switch with the `openrouter:` prefix while
+                // keeping the `azure-openai` runtime identity.
+                contract: WiringContract {
+                    api_method: "openrouter".to_string(),
+                    route_provider: "auto".to_string(),
+                    expected_runtime: "azure-openai",
+                    expected_namespace: None,
+                    switch_prefix: "openrouter:".to_string(),
+                },
+                auth_source: "Azure OpenAI API key / Entra ID (AZURE_OPENAI_*)",
+                auth_env_key: Some("AZURE_OPENAI_API_KEY"),
+                login_hint: "jcode login --provider azure",
+            },
+        }
+    }
+
+    /// Build the production runtime for this provider, pinned to no model yet.
+    /// Returns an error only when the runtime cannot be constructed at all (e.g.
+    /// Copilot with no credential file); model selection happens later.
+    fn build_runtime(self) -> anyhow::Result<std::sync::Arc<dyn crate::provider::Provider>> {
+        use anyhow::Context as _;
+        use crate::provider::Provider;
+        let runtime: std::sync::Arc<dyn Provider> = match self {
+            Self::OpenAi => {
+                let credentials = crate::auth::codex::load_credentials().unwrap_or_else(|_| {
+                    crate::auth::codex::CodexCredentials {
+                        access_token: String::new(),
+                        refresh_token: String::new(),
+                        id_token: None,
+                        account_id: None,
+                        expires_at: None,
+                    }
+                });
+                std::sync::Arc::new(crate::provider::openai::OpenAIProvider::new(credentials))
+            }
+            Self::Gemini => std::sync::Arc::new(crate::provider::gemini::GeminiProvider::new()),
+            Self::Cursor => {
+                std::sync::Arc::new(crate::provider::cursor::CursorCliProvider::new())
+            }
+            Self::Copilot => {
+                // `new()` requires a loadable GitHub token; fall back to an empty
+                // token so the offline tier can still construct the runtime for
+                // its static catalog. Live tiers resolve the real credential
+                // separately and fail with a clear message if it is missing.
+                //
+                // Disable the startup prefetch grace window: the runtime's
+                // `complete` blocks on `wait_for_init`, which is only released by
+                // `detect_tier_and_set_default` (run from `prefetch_models`). With
+                // the default grace window the doctor's immediate prefetch returns
+                // early without marking init done, so the live probes would hang.
+                crate::env::set_var("JCODE_COPILOT_PREFETCH_STARTUP_GRACE_MS", "0");
+                let runtime = match crate::provider::copilot::CopilotApiProvider::new() {
+                    Ok(runtime) => runtime,
+                    Err(_) => crate::provider::copilot::CopilotApiProvider::new_with_token(
+                        String::new(),
+                    ),
+                };
+                std::sync::Arc::new(runtime)
+            }
+            Self::Bedrock => {
+                std::sync::Arc::new(crate::provider::bedrock::BedrockProvider::new())
+            }
+            Self::Jcode => {
+                std::sync::Arc::new(crate::provider::jcode::JcodeProvider::new())
+            }
+            Self::Azure => {
+                // Azure OpenAI is the OpenRouter transport configured via Azure
+                // env; apply that env (endpoint/key/header wiring) before building
+                // so the runtime points at the user's Azure deployment.
+                crate::auth::azure::apply_runtime_env()
+                    .context("apply Azure OpenAI runtime env")?;
+                let runtime = crate::provider::openrouter::OpenRouterProvider::new()
+                    .context("construct Azure OpenAI (OpenRouter transport) runtime")?;
+                // Azure exposes a single user-configured deployment rather than a
+                // live catalog; pin the runtime to it so the catalog/picker
+                // checks have a model to assert.
+                if let Some(model) = crate::auth::azure::load_model() {
+                    let _ = runtime.set_model(&model);
+                }
+                std::sync::Arc::new(runtime)
+            }
+        };
+        Ok(runtime)
+    }
+
+    /// Resolve (best-effort) the live credential the runtime would use, returning
+    /// a short non-secret descriptor for the credential check detail. Errors are
+    /// surfaced to fail the `auth_credential_loaded` checkpoint.
+    async fn resolve_credential(self) -> anyhow::Result<String> {
+        use anyhow::Context as _;
+        match self {
+            Self::OpenAi => {
+                let credentials = crate::auth::codex::load_credentials()
+                    .context("load OpenAI credentials (run `jcode login --provider openai`)")?;
+                if credentials.access_token.trim().is_empty() {
+                    anyhow::bail!("resolved an empty OpenAI access token");
+                }
+                Ok("OpenAI credential resolved".to_string())
+            }
+            Self::Gemini => {
+                let tokens = crate::auth::gemini::load_or_refresh_tokens()
+                    .await
+                    .context("load Gemini OAuth tokens")?;
+                if tokens.access_token.trim().is_empty() {
+                    anyhow::bail!("resolved an empty Gemini access token");
+                }
+                Ok("Gemini Code Assist OAuth credential resolved".to_string())
+            }
+            Self::Cursor => {
+                let key = crate::auth::cursor::load_api_key()
+                    .context("load Cursor credential (run `jcode login --provider cursor`)")?;
+                if key.trim().is_empty() {
+                    anyhow::bail!("resolved an empty Cursor credential");
+                }
+                Ok("Cursor credential resolved".to_string())
+            }
+            Self::Copilot => {
+                let token = crate::auth::copilot::load_github_token()
+                    .context("load GitHub Copilot token (run `jcode login --provider copilot`)")?;
+                if token.trim().is_empty() {
+                    anyhow::bail!("resolved an empty GitHub Copilot token");
+                }
+                Ok("GitHub Copilot token resolved".to_string())
+            }
+            Self::Bedrock => {
+                if !crate::provider::bedrock::BedrockProvider::has_credentials() {
+                    anyhow::bail!(
+                        "no AWS Bedrock credentials found (set AWS_BEARER_TOKEN_BEDROCK, AWS_PROFILE, \
+                         or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)"
+                    );
+                }
+                Ok("AWS Bedrock credential resolved".to_string())
+            }
+            Self::Jcode => {
+                if !crate::subscription_catalog::has_credentials() {
+                    anyhow::bail!(
+                        "no Jcode subscription credential found (set JCODE_API_KEY or run \
+                         `jcode login --provider jcode`)"
+                    );
+                }
+                Ok("Jcode subscription credential resolved".to_string())
+            }
+            Self::Azure => {
+                if !crate::auth::azure::has_configuration() {
+                    anyhow::bail!(
+                        "Azure OpenAI is not fully configured (need AZURE_OPENAI_ENDPOINT plus an \
+                         API key or Entra ID); run `jcode login --provider azure`"
+                    );
+                }
+                Ok(format!(
+                    "Azure OpenAI configured ({})",
+                    crate::auth::azure::method_detail()
+                ))
+            }
+        }
+    }
+
+    /// Pick the cheapest sensible model from a catalog for a smoke run, by
+    /// provider-specific heuristics. Returns `None` to let the caller fall back
+    /// to the runtime default.
+    fn cheapest_model(self, catalog: &[String]) -> Option<String> {
+        let usable = |m: &&String| {
+            let t = m.trim();
+            !t.is_empty() && t != "default" && !t.contains("[1m]")
+        };
+        // Prefer cheaper "mini"/"flash"/"haiku"/"fast" tiers when present.
+        let cheap_markers: &[&str] = match self {
+            Self::OpenAi => &["mini", "nano"],
+            Self::Gemini => &["flash"],
+            Self::Cursor => &["composer", "fast", "mini"],
+            Self::Copilot => &["mini", "haiku", "flash", "fast"],
+            Self::Bedrock => &["haiku", "micro", "lite", "mini", "flash"],
+            Self::Jcode => &["mini", "flash", "haiku", "lite", "nano"],
+            Self::Azure => &["mini", "nano", "flash", "haiku"],
+        };
+        for marker in cheap_markers {
+            if let Some(model) = catalog
+                .iter()
+                .filter(usable)
+                .find(|m| m.to_ascii_lowercase().contains(marker))
+            {
+                return Some(model.clone());
+            }
+        }
+        catalog.iter().find(usable).cloned()
+    }
+}
+
+/// Declarative description of a generic native provider's doctor wiring.
+struct NativeProviderSpec {
+    /// Canonical, normalized provider id (also the ledger/report id).
+    provider_id: &'static str,
+    /// Human display label for messages and the report.
+    label: &'static str,
+    /// jcode-side routing/activation contract for the wiring checkpoints.
+    contract: WiringContract,
+    /// Non-secret description of the credential source for the ledger.
+    auth_source: &'static str,
+    /// Env var to associate with the credential (for `non_secret`), if any.
+    auth_env_key: Option<&'static str>,
+    /// `jcode login` hint surfaced when the credential cannot be resolved.
+    login_hint: &'static str,
+}
+
+/// Run the strict provider/model diagnostic for a generic native-runtime
+/// provider (OpenAI, Gemini, Cursor, Copilot, Bedrock).
+///
+/// Drives the production runtime end to end: credential resolution, the live
+/// model catalog (via the runtime's own `prefetch_models`), the shared
+/// auth-lifecycle wiring checks, and (on the full tier) live non-streaming,
+/// streaming, and tool-call probes through the exact code path a real session
+/// uses. Records the same strict checkpoints so the coverage ledger can promote
+/// the provider to READY.
+pub async fn run_generic_native_e2e(
+    kind: NativeProviderKind,
+    requested_model: Option<&str>,
+    tier: DoctorTier,
+) -> anyhow::Result<DoctorReport> {
+    let spec = kind.spec();
+    let provider_id = spec.provider_id.to_string();
+    let provider_label = spec.label.to_string();
+    let auth = || LiveVerificationAuth::non_secret(spec.auth_source, spec.auth_env_key);
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+
+    // --- Stage 1: credential resolution ---
+    if tier.requires_api_key() {
+        match kind.resolve_credential().await {
+            Ok(detail) => checks.push(DoctorCheck::passed(
+                checkpoints::AUTH_CREDENTIAL_LOADED,
+                label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+                detail,
+            )),
+            Err(error) => {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::AUTH_CREDENTIAL_LOADED,
+                    label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+                    format!("{error}. Run `{}` to sign in.", spec.login_hint),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    requested_model.unwrap_or("").to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    auth(),
+                ));
+            }
+        }
+    } else {
+        checks.push(DoctorCheck::skipped(
+            checkpoints::AUTH_CREDENTIAL_LOADED,
+            label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+            "offline tier: no credential required".to_string(),
+        ));
+    }
+
+    // Build the production runtime (cheap; no blocking network in any ctor).
+    let runtime = match kind.build_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            checks.push(DoctorCheck::failed(
+                checkpoints::AUTH_CREDENTIAL_LOADED,
+                label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+                format!("could not construct the {} runtime: {error}", spec.label),
+            ));
+            return Ok(finish_report(
+                provider_id,
+                provider_label,
+                requested_model.unwrap_or("").to_string(),
+                tier,
+                checks,
+                DoctorSpend::default(),
+                auth(),
+            ));
+        }
+    };
+
+    // --- Stage 2: live model catalog (or static for offline) ---
+    let catalog_models: Vec<String> = if tier.requires_api_key() {
+        match runtime.prefetch_models().await {
+            Ok(()) => {
+                let models = runtime.available_models_display();
+                if models.is_empty() {
+                    checks.push(DoctorCheck::failed(
+                        checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                        label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                        format!("live {} catalog returned no models", spec.label),
+                    ));
+                    return Ok(finish_report(
+                        provider_id,
+                        provider_label,
+                        requested_model.unwrap_or("").to_string(),
+                        tier,
+                        checks,
+                        DoctorSpend::default(),
+                        auth(),
+                    ));
+                }
+                checks.push(DoctorCheck::passed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    format!("{} live model(s) available", models.len()),
+                ));
+                models
+            }
+            Err(error) => {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    format_error_chain(&error),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    requested_model.unwrap_or("").to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    auth(),
+                ));
+            }
+        }
+    } else {
+        checks.push(DoctorCheck::skipped(
+            checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+            label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+            format!(
+                "offline tier: using known {} model ids (no network)",
+                spec.label
+            ),
+        ));
+        runtime.available_models_display()
+    };
+
+    // Pick the model under test.
+    let default_model = runtime.model();
+    let selected = match requested_model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) => {
+            if tier.requires_api_key() && !catalog_models.iter().any(|m| m == model) {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    format!(
+                        "requested model `{model}` is not in the live catalog ({} model(s): {})",
+                        catalog_models.len(),
+                        truncate_list(&catalog_models)
+                    ),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    model.to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    auth(),
+                ));
+            }
+            model.to_string()
+        }
+        None => kind
+            .cheapest_model(&catalog_models)
+            .or_else(|| {
+                catalog_models
+                    .iter()
+                    .find(|m| **m == default_model)
+                    .cloned()
+            })
+            .or_else(|| catalog_models.first().cloned())
+            .unwrap_or(default_model),
+    };
+
+    // --- Stage 3: auth-lifecycle wiring (catalog reload, picker, fallback, switch) ---
+    run_wiring_checks_for_contract(
+        spec.provider_id,
+        &spec.contract,
+        &selected,
+        &catalog_models,
+        &mut checks,
+    );
+
+    // --- Stage 4: API-dependent checkpoints (live native runtime) ---
+    let mut spend = DoctorSpend::default();
+    if tier == DoctorTier::Full {
+        // Pin the model before running the live probes so the runtime uses it.
+        if let Err(error) = runtime.set_model(&selected) {
+            for checkpoint in API_DEPENDENT_CHECKPOINTS {
+                checks.push(DoctorCheck::failed(
+                    checkpoint,
+                    label_for(checkpoint),
+                    format!("could not select model `{selected}`: {error}"),
+                ));
+            }
+        } else {
+            run_generic_native_api_checks(runtime.as_ref(), &selected, spec.label, &mut checks, &mut spend)
+                .await;
+        }
+    } else {
+        for checkpoint in API_DEPENDENT_CHECKPOINTS {
+            checks.push(DoctorCheck::skipped(
+                checkpoint,
+                label_for(checkpoint),
+                format!(
+                    "{} tier: requires --tier full (spends balance)",
+                    tier.as_str()
+                ),
+            ));
+        }
+    }
+
+    Ok(finish_report(
+        provider_id,
+        provider_label,
+        selected,
+        tier,
+        checks,
+        spend,
+        auth(),
+    ))
+}
+
+/// Drive the three generic live native probes and fold their results into the
+/// six API-dependent checkpoints, mirroring [`run_native_claude_api_checks`].
+async fn run_generic_native_api_checks(
+    provider: &dyn crate::provider::Provider,
+    selected: &str,
+    label: &str,
+    checks: &mut Vec<DoctorCheck>,
+    spend: &mut DoctorSpend,
+) {
+    // Non-streaming completion.
+    match run_live_native_provider_smoke(provider, selected, label).await {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            checks.push(DoctorCheck::passed(
+                checkpoints::NON_STREAMING_CHAT_COMPLETION,
+                label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
+                "received expected completion".to_string(),
+            ));
+        }
+        Err(error) => checks.push(DoctorCheck::failed(
+            checkpoints::NON_STREAMING_CHAT_COMPLETION,
+            label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
+            format_error_chain(&error),
+        )),
+    }
+
+    // Streaming completion.
+    match run_live_native_provider_stream_smoke(provider, selected, label).await {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            checks.push(DoctorCheck::passed(
+                checkpoints::STREAMING_CHAT_COMPLETION,
+                label_for(checkpoints::STREAMING_CHAT_COMPLETION),
+                "received expected streamed completion".to_string(),
+            ));
+        }
+        Err(error) => checks.push(DoctorCheck::failed(
+            checkpoints::STREAMING_CHAT_COMPLETION,
+            label_for(checkpoints::STREAMING_CHAT_COMPLETION),
+            format_error_chain(&error),
+        )),
+    }
+
+    // Tool call + derived execution/result/smoke checkpoints (one round-trip).
+    match run_live_native_provider_tool_smoke(provider, selected, label).await {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            for checkpoint in [
+                checkpoints::TOOL_CALL_PARSE,
+                checkpoints::TOOL_EXECUTION_LOOP,
+                checkpoints::TOOL_RESULT_FOLLOWUP,
+                checkpoints::REAL_JCODE_TOOL_SMOKE,
+            ] {
+                checks.push(DoctorCheck::passed(
+                    checkpoint,
+                    label_for(checkpoint),
+                    "tool call parsed and executed".to_string(),
+                ));
+            }
+        }
+        Err(error) => {
+            for checkpoint in [
+                checkpoints::TOOL_CALL_PARSE,
+                checkpoints::TOOL_EXECUTION_LOOP,
+                checkpoints::TOOL_RESULT_FOLLOWUP,
+                checkpoints::REAL_JCODE_TOOL_SMOKE,
+            ] {
+                checks.push(DoctorCheck::failed(
+                    checkpoint,
+                    label_for(checkpoint),
+                    format_error_chain(&error),
                 ));
             }
         }
@@ -1408,7 +2046,7 @@ async fn run_full_api_checks(
         Err(error) => checks.push(DoctorCheck::failed(
             checkpoints::NON_STREAMING_CHAT_COMPLETION,
             label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
-            error.to_string(),
+            format_error_chain(&error),
         )),
     }
 
@@ -1425,7 +2063,7 @@ async fn run_full_api_checks(
         Err(error) => checks.push(DoctorCheck::failed(
             checkpoints::STREAMING_CHAT_COMPLETION,
             label_for(checkpoints::STREAMING_CHAT_COMPLETION),
-            error.to_string(),
+            format_error_chain(&error),
         )),
     }
 
@@ -1456,7 +2094,7 @@ async fn run_full_api_checks(
                 checks.push(DoctorCheck::failed(
                     checkpoint,
                     label_for(checkpoint),
-                    error.to_string(),
+                    format_error_chain(&error),
                 ));
             }
         }
@@ -1597,9 +2235,105 @@ fn truncate_list(models: &[String]) -> String {
     out
 }
 
+/// Render an `anyhow::Error` as its full cause chain (`outer: cause: root`).
+///
+/// The doctor wraps probe failures with high-level context (e.g. "open native
+/// provider stream"), so `format_error_chain(&error)` alone shows only that outer label
+/// and hides the actionable root cause (the live HTTP/JSON error). Joining the
+/// chain surfaces the real reason a checkpoint failed in the report and ledger.
+fn format_error_chain(error: &anyhow::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for cause in error.chain() {
+        let message = cause.to_string();
+        // Skip empty or exact-duplicate adjacent frames so the chain stays tight.
+        if message.trim().is_empty() {
+            continue;
+        }
+        if parts.last().map(String::as_str) == Some(message.as_str()) {
+            continue;
+        }
+        parts.push(message);
+    }
+    if parts.is_empty() {
+        error.to_string()
+    } else {
+        parts.join(": ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_error_chain_joins_context_with_root_cause() {
+        use anyhow::Context as _;
+        let root: anyhow::Result<()> = Err(anyhow::anyhow!("HTTP 429 usage_limit_reached"));
+        let wrapped = root
+            .context("native provider stream event error")
+            .context("open native provider stream")
+            .unwrap_err();
+        let rendered = format_error_chain(&wrapped);
+        // Outer-most context first, root cause last, all joined.
+        assert_eq!(
+            rendered,
+            "open native provider stream: native provider stream event error: HTTP 429 usage_limit_reached"
+        );
+    }
+
+    #[test]
+    fn format_error_chain_dedupes_and_handles_single_error() {
+        let single = anyhow::anyhow!("standalone failure");
+        assert_eq!(format_error_chain(&single), "standalone failure");
+    }
+
+    #[test]
+    fn native_provider_kind_maps_every_generic_id() {
+        for (id, expected) in [
+            ("openai", NativeProviderKind::OpenAi),
+            ("gemini", NativeProviderKind::Gemini),
+            ("cursor", NativeProviderKind::Cursor),
+            ("copilot", NativeProviderKind::Copilot),
+            ("bedrock", NativeProviderKind::Bedrock),
+            ("jcode", NativeProviderKind::Jcode),
+            ("azure-openai", NativeProviderKind::Azure),
+        ] {
+            assert_eq!(NativeProviderKind::from_normalized(id), Some(expected));
+        }
+        // Native providers with bespoke drivers are intentionally not generic.
+        assert_eq!(NativeProviderKind::from_normalized("claude"), None);
+        assert_eq!(NativeProviderKind::from_normalized("antigravity"), None);
+        assert_eq!(NativeProviderKind::from_normalized("openrouter"), None);
+    }
+
+    #[test]
+    fn native_provider_specs_are_self_consistent() {
+        // Every generic kind's spec must carry a switch_prefix that the wiring
+        // contract's api_method-derived routes will satisfy, and a stable id.
+        for kind in [
+            NativeProviderKind::OpenAi,
+            NativeProviderKind::Gemini,
+            NativeProviderKind::Cursor,
+            NativeProviderKind::Copilot,
+            NativeProviderKind::Bedrock,
+            NativeProviderKind::Jcode,
+            NativeProviderKind::Azure,
+        ] {
+            let spec = kind.spec();
+            assert!(!spec.provider_id.is_empty(), "{kind:?} has empty id");
+            assert!(!spec.label.is_empty(), "{kind:?} has empty label");
+            assert!(
+                spec.contract.switch_prefix.ends_with(':'),
+                "{kind:?} switch_prefix must end with ':'"
+            );
+            // Round-trips through the id map.
+            assert_eq!(
+                NativeProviderKind::from_normalized(spec.provider_id),
+                Some(kind),
+                "{kind:?} id does not round-trip"
+            );
+        }
+    }
 
     #[test]
     fn spend_accumulates_openai_style_usage_and_cost() {

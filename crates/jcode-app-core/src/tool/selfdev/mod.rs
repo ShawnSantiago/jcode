@@ -23,6 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 mod build_queue;
 mod launch;
 mod reload;
+mod setup;
 mod status;
 #[cfg(test)]
 mod tests;
@@ -30,6 +31,9 @@ mod tests;
 pub use launch::{enter_selfdev_session, schedule_selfdev_prompt_delivery};
 pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
 pub use status::selfdev_status_output;
+
+/// Public GitHub source used when cloning the jcode repository for self-dev.
+pub const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
 
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
@@ -364,6 +368,88 @@ impl SelfDevTool {
     pub fn new() -> Self {
         Self
     }
+
+    /// Description shown to the model, tailored to whether this is a self-dev
+    /// session. Outside self-dev mode the tool is an on-ramp (enter/setup/
+    /// reload/find-config); inside self-dev it manages builds and reloads.
+    pub fn description_for(is_selfdev: bool) -> &'static str {
+        if is_selfdev {
+            "Manage self-dev builds, tests, and reloads while working on jcode itself."
+        } else {
+            "Enter self-dev mode to work on jcode itself. Also sets up the dev \
+             environment, reloads jcode to a newer build, and locates jcode config/paths."
+        }
+    }
+
+    /// JSON schema advertised to the model, tailored to the session mode.
+    ///
+    /// Outside self-dev mode only the on-ramp actions are exposed
+    /// (`enter`, `setup`, `reload`, `find-config`, `status`). Inside a self-dev
+    /// session the full build/test/reload/socket surface is exposed.
+    pub fn schema_for(is_selfdev: bool) -> Value {
+        if is_selfdev {
+            json!({
+                "type": "object",
+                "properties": {
+                    "intent": super::intent_schema_property(),
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "enter",
+                            "setup",
+                            "build",
+                            "test",
+                            "cancel-build",
+                            "reload",
+                            "status",
+                            "find-config",
+                            "socket-info",
+                            "socket-help"
+                        ],
+                        "description": "Action."
+                    },
+                    "prompt": { "type": "string" },
+                    "context": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "target": {
+                        "type": "string",
+                        "enum": ["auto", "tui", "desktop", "all"],
+                        "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; all builds both."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command for action=test. Runs under the selfdev worktree compile lock."
+                    },
+                    "request_id": { "type": "string" },
+                    "task_id": { "type": "string" }
+                },
+                "required": ["action"]
+            })
+        } else {
+            json!({
+                "type": "object",
+                "properties": {
+                    "intent": super::intent_schema_property(),
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "enter",
+                            "setup",
+                            "reload",
+                            "status",
+                            "find-config"
+                        ],
+                        "description": "Action. `enter` spawns a self-dev session (optionally seeded with `prompt`); `setup` checks/installs the dev prerequisites (rust toolchain, git, repo clone); `reload` restarts jcode into a newer installed build; `status` shows build/version state; `find-config` locates jcode config and key paths."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Optional task to seed the spawned self-dev session when action=enter."
+                    }
+                },
+                "required": ["action"]
+            })
+        }
+    }
 }
 
 #[async_trait]
@@ -373,45 +459,17 @@ impl Tool for SelfDevTool {
     }
 
     fn description(&self) -> &str {
-        "Manage self-dev builds and reloads."
+        // Default to the non-self-dev (on-ramp) description. The agent's tool
+        // definition builder substitutes the self-dev description for canary
+        // sessions via `SelfDevTool::description_for`.
+        SelfDevTool::description_for(false)
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "intent": super::intent_schema_property(),
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "enter",
-                        "build",
-                        "test",
-                        "cancel-build",
-                        "reload",
-                        "status",
-                        "socket-info",
-                        "socket-help"
-                    ],
-                    "description": "Action."
-                },
-                "prompt": { "type": "string" },
-                "context": { "type": "string" },
-                "reason": { "type": "string" },
-                "target": {
-                    "type": "string",
-                    "enum": ["auto", "tui", "desktop", "all"],
-                    "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; all builds both."
-                },
-                "command": {
-                    "type": "string",
-                    "description": "Shell command for action=test. Runs under the selfdev worktree compile lock."
-                },
-                "request_id": { "type": "string" },
-                "task_id": { "type": "string" }
-            },
-            "required": ["action"]
-        })
+        // Default to the non-self-dev (on-ramp) schema. The agent's tool
+        // definition builder substitutes the full self-dev schema for canary
+        // sessions via `SelfDevTool::schema_for`.
+        SelfDevTool::schema_for(false)
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
@@ -419,9 +477,30 @@ impl Tool for SelfDevTool {
         let action = params.action.clone();
 
         let title = format!("selfdev {}", action);
+        let is_selfdev = SelfDevTool::session_is_selfdev(&ctx.session_id);
 
         let result = match action.as_str() {
+            // Available in every session.
             "enter" => self.do_enter(params.prompt, &ctx).await,
+            "setup" => self.do_setup(&ctx).await,
+            "status" => self.do_status().await,
+            "find-config" => self.do_find_config(&ctx).await,
+            "reload" => {
+                if is_selfdev {
+                    self.do_reload(
+                        params.context,
+                        &ctx.session_id,
+                        ctx.execution_mode,
+                        ctx.working_dir.as_deref(),
+                    )
+                    .await
+                } else {
+                    self.do_reload_to_newer_build(&ctx).await
+                }
+            }
+
+            // Self-dev-only actions: building, testing, and low-level socket
+            // access only make sense once you are working on jcode itself.
             "build" => {
                 self.do_build(
                     params.reason,
@@ -446,42 +525,29 @@ impl Tool for SelfDevTool {
                 self.do_cancel_build(params.request_id, params.task_id, &ctx)
                     .await
             }
-            "reload" => {
-                if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
-                    Ok(ToolOutput::new(
-                        "`selfdev reload` is only available inside a self-dev session. Use `selfdev enter` first.",
-                    ))
-                } else {
-                    self.do_reload(
-                        params.context,
-                        &ctx.session_id,
-                        ctx.execution_mode,
-                        ctx.working_dir.as_deref(),
-                    )
-                    .await
-                }
-            }
-            "status" => self.do_status().await,
             "socket-info" => {
-                if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
-                    Ok(ToolOutput::new(
-                        "`selfdev socket-info` is only available inside a self-dev session. Use `selfdev enter` first.",
-                    ))
-                } else {
+                if is_selfdev {
                     self.do_socket_info().await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "socket-info",
+                    )))
                 }
             }
             "socket-help" => {
-                if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
-                    Ok(ToolOutput::new(
-                        "`selfdev socket-help` is only available inside a self-dev session. Use `selfdev enter` first.",
-                    ))
-                } else {
+                if is_selfdev {
                     self.do_socket_help().await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "socket-help",
+                    )))
                 }
             }
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'enter', 'build', 'test', 'cancel-build', 'reload', 'status', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
+                 'test', 'cancel-build', 'reload', 'status', 'find-config', 'socket-info', or \
+                 'socket-help'. Outside self-dev mode use 'enter', 'setup', 'reload', 'status', \
+                 or 'find-config'.",
                 action
             ))),
         };
@@ -512,6 +578,17 @@ impl SelfDevTool {
         session::Session::load(session_id)
             .map(|session| session.is_canary)
             .unwrap_or(false)
+    }
+
+    /// Guidance returned when a self-dev-only action is requested from a regular
+    /// session. Points the agent at `selfdev enter` to get the full toolset.
+    fn selfdev_only_action_message(action: &str) -> String {
+        format!(
+            "`selfdev {action}` is only available inside a self-dev session. \
+             Run `selfdev enter` first (optionally with a `prompt`) to open a \
+             self-dev session, which exposes builds, tests, reloads, and the \
+             debug socket."
+        )
     }
 
     fn resolve_repo_dir(working_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {

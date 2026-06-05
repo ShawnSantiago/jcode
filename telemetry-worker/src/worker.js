@@ -361,6 +361,7 @@ async function recordDailyActivity(env, body) {
   const meaningful = isMeaningfulLifecycleEvent(body) ? 1 : 0;
   const release = body.build_channel === "release" ? 1 : 0;
   const meaningfulRelease = meaningful && release ? 1 : 0;
+  const isCi = boolToInt(body.is_ci);
   const sessionStartCount = body.event === "session_start" ? 1 : 0;
   const turnEndCount = body.event === "turn_end" ? 1 : 0;
   const sessionEndCount = body.event === "session_end" ? 1 : 0;
@@ -379,8 +380,10 @@ async function recordDailyActivity(env, body) {
         turn_end_count,
         session_end_count,
         session_crash_count,
+        ci_active,
+        last_is_ci,
         last_build_channel
-      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(activity_date, telemetry_id) DO UPDATE SET
         last_seen_at = datetime('now'),
         raw_active = 1,
@@ -391,6 +394,8 @@ async function recordDailyActivity(env, body) {
         turn_end_count = turn_end_count + excluded.turn_end_count,
         session_end_count = session_end_count + excluded.session_end_count,
         session_crash_count = session_crash_count + excluded.session_crash_count,
+        ci_active = MAX(ci_active, excluded.ci_active),
+        last_is_ci = excluded.last_is_ci,
         last_build_channel = COALESCE(excluded.last_build_channel, daily_active_users.last_build_channel)
     `).bind(
       activityDate,
@@ -402,6 +407,8 @@ async function recordDailyActivity(env, body) {
       turnEndCount,
       sessionEndCount,
       sessionCrashCount,
+      isCi,
+      isCi,
       body.build_channel || null,
     ).run();
   } catch (err) {
@@ -413,22 +420,41 @@ async function recordDailyActivity(env, body) {
 
 function isMeaningfulLifecycleEvent(body) {
   const errors = body.errors || {};
-  return ["session_end", "session_crash"].includes(body.event) && (
-    (body.turns || 0) > 0
-    || boolToInt(body.had_user_prompt) > 0
-    || boolToInt(body.had_assistant_response) > 0
-    || (body.assistant_responses || 0) > 0
-    || (body.tool_calls || 0) > 0
-    || (body.executed_tool_calls || 0) > 0
-    || (body.duration_secs || 0) > 0
-    || (errors.provider_timeout || 0) > 0
-    || (errors.auth_failed || 0) > 0
-    || (errors.tool_error || 0) > 0
-    || (errors.mcp_error || 0) > 0
-    || (errors.rate_limited || 0) > 0
-    || (body.provider_switches || 0) > 0
-    || (body.model_switches || 0) > 0
-  );
+  if (["session_end", "session_crash"].includes(body.event)) {
+    return (
+      (body.turns || 0) > 0
+      || boolToInt(body.had_user_prompt) > 0
+      || boolToInt(body.had_assistant_response) > 0
+      || (body.assistant_responses || 0) > 0
+      || (body.tool_calls || 0) > 0
+      || (body.executed_tool_calls || 0) > 0
+      || (body.duration_secs || 0) > 0
+      || (errors.provider_timeout || 0) > 0
+      || (errors.auth_failed || 0) > 0
+      || (errors.tool_error || 0) > 0
+      || (errors.mcp_error || 0) > 0
+      || (errors.rate_limited || 0) > 0
+      || (body.provider_switches || 0) > 0
+      || (body.model_switches || 0) > 0
+    );
+  }
+  // A turn_end event only fires after a real user turn completes (a prompt was
+  // submitted and the agent did work), so it is strong evidence of meaningful
+  // activity even when the session_end/session_crash event is lost (process
+  // killed, machine shutdown, network drop on the final flush, or a session
+  // still open at UTC midnight). Counting it here avoids undercounting the
+  // headline meaningful DAU for those users.
+  if (body.event === "turn_end") {
+    return (
+      (body.assistant_responses || 0) > 0
+      || (body.tool_calls || 0) > 0
+      || (body.executed_tool_calls || 0) > 0
+      || (body.file_write_calls || 0) > 0
+      || (body.tests_run || 0) > 0
+      || boolToInt(body.turn_success) > 0
+    );
+  }
+  return false;
 }
 
 async function insertSessionDetails(env, body, columns) {

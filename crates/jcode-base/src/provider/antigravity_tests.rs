@@ -202,6 +202,36 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("claude-sonnet-4-6"),
         "claude-sonnet-4-6"
     );
+
+    // ...except the catalog-advertised-but-unserviceable `gemini-3.1-pro-high`,
+    // which is remapped to the equivalent working "Gemini 3.1 Pro (High)" id.
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-3.1-pro-high"),
+        "gemini-pro-agent"
+    );
+    // Its sibling `-low` works as-is and must not be remapped.
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-3.1-pro-low"),
+        "gemini-3.1-pro-low"
+    );
+}
+
+#[test]
+fn remap_unsupported_model_only_touches_broken_pro_high() {
+    assert_eq!(
+        remap_unsupported_model("gemini-3.1-pro-high"),
+        "gemini-pro-agent"
+    );
+    for model in [
+        "gemini-3.1-pro-low",
+        "gemini-pro-agent",
+        "gemini-3-flash",
+        "claude-sonnet-4-6",
+        "gpt-oss-120b-medium",
+        "default",
+    ] {
+        assert_eq!(remap_unsupported_model(model), model);
+    }
 }
 
 #[test]

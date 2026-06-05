@@ -18,6 +18,22 @@ use crate::provider::anthropic::AnthropicProvider;
 use crate::provider::antigravity::AntigravityProvider;
 use crate::provider_catalog::{OpenAiCompatibleProfile, ResolvedOpenAiCompatibleProfile};
 
+/// Resolve the per-request timeout for an OpenAI-compatible smoke probe.
+///
+/// Defaults to `default_secs` (the historical hard-coded values), but callers can
+/// raise it via `JCODE_LIVE_SMOKE_TIMEOUT_SECS` for slow reasoning models (e.g.
+/// NVIDIA's 550B Nemotron Ultra, which emits long hidden reasoning and can take
+/// well over a minute to return a single completion). The override applies a floor
+/// so it can only extend, never shorten, the built-in deadline.
+fn smoke_timeout(default_secs: u64) -> std::time::Duration {
+    let secs = std::env::var("JCODE_LIVE_SMOKE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|override_secs| override_secs.max(default_secs))
+        .unwrap_or(default_secs);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Apply the right auth headers for a resolved OpenAI-compatible profile.
 ///
 /// Most providers use `Authorization: Bearer <key>`. Anthropic's
@@ -164,7 +180,7 @@ pub async fn run_live_openai_compatible_smoke(
     });
     let request = crate::provider::shared_http_client().post(&url).json(&body);
     let request = apply_provider_auth(request, &resolved, api_key);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
+    let response = tokio::time::timeout(smoke_timeout(30), request.send())
         .await
         .context("timed out running live smoke completion")?
         .with_context(|| format!("run live {} smoke completion", resolved.display_name))?;
@@ -265,7 +281,7 @@ pub async fn run_live_openai_compatible_stream_smoke(
     });
     let request = crate::provider::shared_http_client().post(&url).json(&body);
     let request = apply_provider_auth(request, &resolved, api_key);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(45), request.send())
+    let response = tokio::time::timeout(smoke_timeout(45), request.send())
         .await
         .context("timed out running live stream smoke completion")?
         .with_context(|| format!("run live {} stream smoke completion", resolved.display_name))?;
@@ -376,7 +392,7 @@ pub async fn run_live_openai_compatible_tool_smoke(
     }
     let request = crate::provider::shared_http_client().post(&url).json(&body);
     let request = apply_provider_auth(request, &resolved, api_key);
-    let response = tokio::time::timeout(std::time::Duration::from_secs(45), request.send())
+    let response = tokio::time::timeout(smoke_timeout(45), request.send())
         .await
         .context("timed out running live tool-call smoke completion")?
         .with_context(|| format!("run live {} tool-call smoke", resolved.display_name))?;
@@ -589,7 +605,7 @@ async fn consume_native_stream(
         let mut pending_tool: Option<NativeClaudeToolCall> = None;
         while let Some(event) = stream.next().await {
             outcome.total_events += 1;
-            match event.context("native Claude stream event error")? {
+            match event.context("native provider stream event error")? {
                 StreamEvent::TextDelta(text) => {
                     outcome.chunk_count += 1;
                     outcome.text.push_str(&text);
@@ -659,7 +675,7 @@ async fn consume_native_stream(
         Ok(outcome)
     })
     .await
-    .context("native Claude stream timed out")?
+    .context("native provider stream timed out")?
 }
 
 /// Stage: non-streaming chat completion.
@@ -1245,6 +1261,302 @@ pub async fn run_live_antigravity_native_tool_smoke(
     ensure!(
         second.text.contains("42"),
         "native Antigravity tool follow-up did not reflect the tool result token: {:?}",
+        crate::util::truncate_str(second.text.trim(), 200)
+    );
+
+    let total_input = first.input_tokens + second.input_tokens;
+    let total_output = first.output_tokens + second.output_tokens;
+    let mut stage = crate::live_tests::LiveVerificationStage::passed(
+        crate::live_tests::checkpoints::TOOL_CALL_PARSE,
+    )
+    .with_duration_ms(started.elapsed().as_millis() as u64)
+    .with_evidence("model", serde_json::json!(model))
+    .with_evidence("tool_name", serde_json::json!(tool_call.name))
+    .with_evidence("tool_arguments", parsed_arguments)
+    .with_evidence(
+        "thought_signature_present",
+        serde_json::json!(tool_call.thought_signature.is_some()),
+    )
+    .with_evidence("followup_consumed_result", serde_json::json!(true));
+    if total_input != 0 || total_output != 0 {
+        stage = stage.with_evidence("usage", usage_evidence(total_input, total_output, 0, 0));
+    }
+    Ok(stage)
+}
+
+// === Generic native-runtime probes ========================================
+//
+// The native Claude and native Antigravity probes above each build a concrete
+// provider type and then drain its stream. Most other native-runtime providers
+// (OpenAI OAuth, Gemini Code Assist, Cursor, Copilot, Bedrock, ...) need the
+// same three stages with identical assertions; the only thing that varies is
+// which `Provider` runtime is driven. These generic probes accept a pre-built,
+// model-pinned `&dyn Provider` so a single doctor driver can exercise any
+// native provider's production runtime (auth, request shaping, stream
+// translation, tool-name mapping, thought-signature replay) end to end without
+// per-provider probe duplication.
+
+/// Stage: non-streaming chat completion against an arbitrary native provider.
+///
+/// "Non-streaming" means a single turn that produces a coherent final answer;
+/// every native runtime streams under the hood, so we assert the runtime
+/// returned the expected token and reached a clean end-of-message.
+pub async fn run_live_native_provider_smoke(
+    provider: &dyn Provider,
+    model: &str,
+    label: &str,
+) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
+    let started = std::time::Instant::now();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let system = "You are a live provider smoke test. Answer with the exact requested token only.";
+    let outcome = consume_native_stream(
+        provider,
+        &messages,
+        &[],
+        system,
+        std::time::Duration::from_secs(120),
+    )
+    .await?;
+
+    ensure!(
+        outcome.saw_message_end,
+        "native {label} smoke ended without a message_end event ({})",
+        outcome.diagnostics()
+    );
+    ensure!(
+        outcome.text.contains("AUTH_TEST_OK"),
+        "native {label} smoke returned unexpected content: {:?} ({})",
+        crate::util::truncate_str(outcome.text.trim(), 200),
+        outcome.diagnostics()
+    );
+
+    let mut stage = crate::live_tests::LiveVerificationStage::passed(
+        crate::live_tests::checkpoints::NON_STREAMING_CHAT_COMPLETION,
+    )
+    .with_duration_ms(started.elapsed().as_millis() as u64)
+    .with_evidence("model", serde_json::json!(model))
+    .with_evidence("matched_expected_content", serde_json::json!(true))
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason.clone()));
+    if let Some(usage) = outcome.usage_evidence() {
+        stage = stage.with_evidence("usage", usage);
+    }
+    Ok(stage)
+}
+
+/// Stage: streaming chat completion against an arbitrary native provider.
+///
+/// Some native runtimes deliver a single coalesced response that jcode re-emits
+/// as one or more text deltas, so we assert the runtime produced streamed text
+/// and a clean end-of-message rather than requiring a high delta count.
+pub async fn run_live_native_provider_stream_smoke(
+    provider: &dyn Provider,
+    model: &str,
+    label: &str,
+) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
+    let started = std::time::Instant::now();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Without using any tools, write the numbers 1 through 5, each on its own \
+                   line, then write STREAM_TEST_OK on the final line. Respond with plain text \
+                   only and do not call any tool."
+                .to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let system = "You are a live provider streaming smoke test. Follow the instructions exactly \
+                  and never call a tool; reply with plain streamed text only.";
+
+    const MAX_ATTEMPTS: usize = 3;
+    let mut outcome = NativeClaudeStreamOutcome::default();
+    let mut attempts = 0usize;
+    let mut last_err: Option<String> = None;
+    while attempts < MAX_ATTEMPTS {
+        attempts += 1;
+        let candidate = consume_native_stream(
+            provider,
+            &messages,
+            &[],
+            system,
+            std::time::Duration::from_secs(120),
+        )
+        .await?;
+
+        let ok = candidate.saw_message_end
+            && candidate.chunk_count > 0
+            && candidate.text.contains("STREAM_TEST_OK");
+        outcome = candidate;
+        if ok {
+            break;
+        }
+        last_err = Some(format!(
+            "attempt {attempts}/{MAX_ATTEMPTS}: {}",
+            outcome.diagnostics()
+        ));
+    }
+
+    ensure!(
+        outcome.saw_message_end,
+        "native {label} stream smoke ended without a message_end event ({})",
+        outcome.diagnostics()
+    );
+    ensure!(
+        outcome.chunk_count > 0,
+        "native {label} stream smoke produced no streamed text deltas after {attempts} attempt(s) ({}); last: {}",
+        outcome.diagnostics(),
+        last_err.as_deref().unwrap_or("n/a")
+    );
+    ensure!(
+        outcome.text.contains("STREAM_TEST_OK"),
+        "native {label} stream smoke returned unexpected content: {:?} ({})",
+        crate::util::truncate_str(outcome.text.trim(), 200),
+        outcome.diagnostics()
+    );
+
+    let mut stage = crate::live_tests::LiveVerificationStage::passed(
+        crate::live_tests::checkpoints::STREAMING_CHAT_COMPLETION,
+    )
+    .with_duration_ms(started.elapsed().as_millis() as u64)
+    .with_evidence("model", serde_json::json!(model))
+    .with_evidence("chunk_count", serde_json::json!(outcome.chunk_count))
+    .with_evidence("attempts", serde_json::json!(attempts))
+    .with_evidence("total_events", serde_json::json!(outcome.total_events))
+    .with_evidence("matched_expected_content", serde_json::json!(true))
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason.clone()));
+    if let Some(usage) = outcome.usage_evidence() {
+        stage = stage.with_evidence("usage", usage);
+    }
+    Ok(stage)
+}
+
+/// Stage: tool-call parse + execution loop + result follow-up against an
+/// arbitrary native provider.
+///
+/// Full two-turn round-trip: ask the model to call a tool (assert a parseable
+/// tool_use), then feed a synthetic tool_result back (assert the model consumes
+/// it). Any provider-emitted `thought_signature` (e.g. Gemini-3 via the Cloud
+/// Code backend) is carried onto the replayed assistant tool_use block, since
+/// some backends reject a follow-up turn that omits it.
+pub async fn run_live_native_provider_tool_smoke(
+    provider: &dyn Provider,
+    model: &str,
+    label: &str,
+) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
+    let started = std::time::Instant::now();
+
+    let tool_name = "read";
+    let tools = vec![ToolDefinition {
+        name: tool_name.to_string(),
+        description: "Reads a file from the local filesystem.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}},
+            "required": ["file_path"],
+            "additionalProperties": false
+        }),
+    }];
+    let system = "You are a live provider tool smoke test. When asked to read a file, you MUST \
+                  call the read tool with the given path. Do not answer in text first.";
+
+    let first_turn = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Read the file at /tmp/auth_tool_probe.txt using the read tool. \
+                   Call the tool now; do not answer in text."
+                .to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let first = consume_native_stream(
+        provider,
+        &first_turn,
+        &tools,
+        system,
+        std::time::Duration::from_secs(120),
+    )
+    .await?;
+
+    ensure!(
+        !first.tool_calls.is_empty(),
+        "native {label} tool smoke produced no tool call (stop_reason={:?}, text={:?})",
+        first.stop_reason,
+        crate::util::truncate_str(first.text.trim(), 200)
+    );
+    let tool_call = first.tool_calls[0].clone();
+    ensure!(
+        tool_call.name == tool_name,
+        "native {label} tool smoke called unexpected tool {:?} (expected {tool_name})",
+        tool_call.name
+    );
+    let parsed_arguments = crate::message::ToolCall::parse_streamed_input_to_object(
+        if tool_call.input_json.trim().is_empty() {
+            "{}"
+        } else {
+            tool_call.input_json.trim()
+        },
+    );
+    ensure!(
+        parsed_arguments.is_object(),
+        "native {label} tool smoke produced non-object tool arguments: {:?}",
+        tool_call.input_json
+    );
+
+    // Second turn: replay the assistant's tool_use (carrying any thought
+    // signature the backend requires) and answer it with a synthetic
+    // tool_result, then assert the model consumes the result.
+    let mut followup = first_turn.clone();
+    followup.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: tool_call.id.clone(),
+            name: tool_call.name.clone(),
+            input: parsed_arguments.clone(),
+            thought_signature: tool_call.thought_signature.clone(),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    });
+    followup.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: tool_call.id.clone(),
+            content: "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it."
+                .to_string(),
+            is_error: Some(false),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    });
+
+    let second = consume_native_stream(
+        provider,
+        &followup,
+        &tools,
+        system,
+        std::time::Duration::from_secs(120),
+    )
+    .await?;
+
+    ensure!(
+        second.saw_message_end,
+        "native {label} tool follow-up ended without a message_end event"
+    );
+    ensure!(
+        second.text.contains("42"),
+        "native {label} tool follow-up did not reflect the tool result token: {:?}",
         crate::util::truncate_str(second.text.trim(), 200)
     );
 

@@ -252,7 +252,8 @@ fn reload_timeout_secs_ignores_empty_invalid_and_zero_values() {
 
 #[test]
 fn schema_only_advertises_core_selfdev_fields() {
-    let schema = SelfDevTool::new().parameters_schema();
+    // The full (self-dev) schema exposes the build/test/reload surface.
+    let schema = SelfDevTool::schema_for(true);
     let props = schema["properties"]
         .as_object()
         .expect("selfdev schema should have properties");
@@ -267,6 +268,68 @@ fn schema_only_advertises_core_selfdev_fields() {
     assert!(props.contains_key("task_id"));
     assert!(!props.contains_key("notify"));
     assert!(!props.contains_key("wake"));
+
+    let actions: Vec<&str> = schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for expected in [
+        "enter",
+        "setup",
+        "build",
+        "test",
+        "cancel-build",
+        "reload",
+        "status",
+        "find-config",
+        "socket-info",
+        "socket-help",
+    ] {
+        assert!(actions.contains(&expected), "missing action {expected}");
+    }
+}
+
+#[test]
+fn non_selfdev_schema_only_exposes_onramp_actions() {
+    // The default schema (what a regular session advertises) is the on-ramp
+    // surface: no build/test/socket actions, only enter/setup/reload/status/
+    // find-config.
+    let default_schema = SelfDevTool::new().parameters_schema();
+    let onramp_schema = SelfDevTool::schema_for(false);
+    assert_eq!(default_schema, onramp_schema);
+
+    let props = onramp_schema["properties"]
+        .as_object()
+        .expect("schema properties");
+    assert!(props.contains_key("action"));
+    assert!(props.contains_key("prompt"));
+    // Build/test-only fields are hidden outside self-dev mode.
+    assert!(!props.contains_key("reason"));
+    assert!(!props.contains_key("target"));
+    assert!(!props.contains_key("command"));
+    assert!(!props.contains_key("request_id"));
+    assert!(!props.contains_key("task_id"));
+
+    let actions: Vec<&str> = onramp_schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted = actions.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        vec!["enter", "find-config", "reload", "setup", "status"]
+    );
+    for hidden in ["build", "test", "cancel-build", "socket-info", "socket-help"] {
+        assert!(
+            !actions.contains(&hidden),
+            "on-ramp schema should not expose {hidden}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -495,11 +558,13 @@ async fn enter_falls_back_to_fresh_session_when_parent_missing() {
 }
 
 #[tokio::test]
-async fn reload_requires_selfdev_session() {
+async fn reload_in_non_selfdev_session_is_upgrade_in_place() {
     let _storage_guard = crate::storage::lock_test_env();
     let _lock = lock_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
     let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    // Test mode short-circuits the actual server reload signal.
+    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
     session.save().expect("save session");
@@ -509,14 +574,99 @@ async fn reload_requires_selfdev_session() {
     let output = tool
         .execute(json!({"action": "reload"}), ctx)
         .await
-        .expect("reload should return guidance instead of failing");
+        .expect("reload should route to upgrade-in-place");
 
+    // It must NOT be the old "only available inside a self-dev session" error;
+    // a regular session can reload into a newer installed build.
     assert!(
-        output
+        !output
             .output
             .contains("only available inside a self-dev session")
     );
-    assert!(output.output.contains("selfdev enter"));
+    assert!(output.output.contains("Test mode"));
+}
+
+#[tokio::test]
+async fn socket_actions_require_selfdev_session() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+
+    let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.save().expect("save session");
+
+    let tool = SelfDevTool::new();
+    for action in ["socket-info", "socket-help"] {
+        let ctx = create_test_context(&session.id, session.working_dir.clone().map(Into::into));
+        let output = tool
+            .execute(json!({"action": action}), ctx)
+            .await
+            .expect("socket action should return guidance instead of failing");
+        assert!(
+            output
+                .output
+                .contains("only available inside a self-dev session"),
+            "{action} should be gated"
+        );
+        assert!(output.output.contains("selfdev enter"));
+    }
+}
+
+#[tokio::test]
+async fn find_config_reports_key_paths() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+
+    let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.save().expect("save session");
+
+    let tool = SelfDevTool::new();
+    let ctx = create_test_context(&session.id, None);
+    let output = tool
+        .execute(json!({"action": "find-config"}), ctx)
+        .await
+        .expect("find-config should succeed");
+
+    assert!(output.output.contains("Config file:"));
+    assert!(output.output.contains("config.toml"));
+    assert!(output.output.contains("Build channels"));
+    let metadata = output.metadata.expect("find-config metadata");
+    assert!(metadata["config_path"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn setup_reports_dependency_checks() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    // Test mode avoids attempting a real git clone when no repo is detected.
+    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+
+    let mut session = session::Session::create(None, Some("Normal Session".to_string()));
+    session.save().expect("save session");
+
+    let tool = SelfDevTool::new();
+    let ctx = create_test_context(&session.id, Some(repo.path().to_path_buf()));
+    let output = tool
+        .execute(json!({"action": "setup"}), ctx)
+        .await
+        .expect("setup should succeed");
+
+    assert!(output.output.contains("Self-dev setup"));
+    assert!(output.output.contains("**cargo**") || output.output.contains("cargo"));
+    assert!(output.output.contains("repository"));
+    let metadata = output.metadata.expect("setup metadata");
+    assert!(metadata["checks"].as_array().is_some());
+    // The fixture repo should be detected as the repository.
+    assert_eq!(
+        metadata["repo_dir"].as_str(),
+        Some(repo.path().to_string_lossy().as_ref())
+    );
 }
 
 #[tokio::test]
