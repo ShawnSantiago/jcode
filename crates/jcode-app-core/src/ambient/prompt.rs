@@ -219,7 +219,9 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
     // id-based sort/truncate picks the true most-recent set even when file
     // mtime order and id (timestamp) order disagree near the boundary, while
     // still bounding work far below "load every session file".
-    let load_budget = RECENT_SESSION_LIMIT.saturating_mul(4).max(RECENT_SESSION_LIMIT);
+    let load_budget = RECENT_SESSION_LIMIT
+        .saturating_mul(4)
+        .max(RECENT_SESSION_LIMIT);
     let mut loaded = 0usize;
     for (path, _modified) in candidates {
         if loaded >= load_budget {

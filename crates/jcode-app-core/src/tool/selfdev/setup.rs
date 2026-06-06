@@ -21,11 +21,7 @@ impl SetupCheck {
         }
     }
 
-    fn missing(
-        name: &'static str,
-        detail: impl Into<String>,
-        fix: impl Into<String>,
-    ) -> Self {
+    fn missing(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             name,
             ok: false,
@@ -102,36 +98,25 @@ impl SelfDevTool {
         if repo_dir.is_none() {
             // Only attempt a clone when git is available and we're not in a
             // synthetic test session.
-            let git_available = checks
-                .iter()
-                .any(|check| check.name == "git" && check.ok);
+            let git_available = checks.iter().any(|check| check.name == "git" && check.ok);
             if SelfDevTool::is_test_session() {
-                clone_note = Some(
-                    "Test mode: skipped cloning the jcode source.".to_string(),
-                );
+                clone_note = Some("Test mode: skipped cloning the jcode source.".to_string());
             } else if git_available {
                 match Self::clone_selfdev_source() {
                     Ok(path) => {
-                        clone_note = Some(format!(
-                            "Cloned jcode source into {}.",
-                            path.display()
-                        ));
+                        clone_note = Some(format!("Cloned jcode source into {}.", path.display()));
                         repo_dir = Some(path);
                     }
                     Err(err) => {
-                        clone_note = Some(format!(
-                            "Could not clone jcode source automatically: {err}",
-                        ));
+                        clone_note =
+                            Some(format!("Could not clone jcode source automatically: {err}",));
                     }
                 }
             }
         }
 
         match &repo_dir {
-            Some(path) => checks.push(SetupCheck::ok(
-                "repository",
-                path.display().to_string(),
-            )),
+            Some(path) => checks.push(SetupCheck::ok("repository", path.display().to_string())),
             None => {
                 let target = Self::selfdev_clone_dir()
                     .map(|p| p.display().to_string())
@@ -152,10 +137,9 @@ impl SelfDevTool {
         // build before `selfdev reload`/`enter` can hand off into a dev binary.
         if let Some(repo) = repo_dir.as_deref() {
             match build::find_dev_binary(repo) {
-                Some(binary) => checks.push(SetupCheck::ok(
-                    "dev binary",
-                    binary.display().to_string(),
-                )),
+                Some(binary) => {
+                    checks.push(SetupCheck::ok("dev binary", binary.display().to_string()))
+                }
                 None => checks.push(SetupCheck::missing(
                     "dev binary",
                     "no built binary in target/selfdev or target/release",
@@ -222,7 +206,11 @@ impl SelfDevTool {
         let format_path = |path: Option<&std::path::Path>| match path {
             Some(p) => {
                 let exists = p.exists();
-                format!("{} {}", p.display(), if exists { "(exists)" } else { "(missing)" })
+                format!(
+                    "{} {}",
+                    p.display(),
+                    if exists { "(exists)" } else { "(missing)" }
+                )
             }
             None => "unavailable".to_string(),
         };
@@ -293,9 +281,7 @@ impl SelfDevTool {
     /// is strictly newer than the running process).
     pub(super) async fn do_reload_to_newer_build(&self, _ctx: &ToolContext) -> Result<ToolOutput> {
         if SelfDevTool::is_test_session() {
-            return Ok(ToolOutput::new(
-                "Test mode: skipped reload-to-newer-build.",
-            ));
+            return Ok(ToolOutput::new("Test mode: skipped reload-to-newer-build."));
         }
 
         if !server::server_has_newer_binary() {

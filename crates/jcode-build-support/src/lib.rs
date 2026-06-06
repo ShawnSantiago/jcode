@@ -818,6 +818,14 @@ pub fn repair_stale_shared_server_channel() -> Result<SharedServerRepair> {
     if previous.as_deref().map(str::trim).filter(|s| !s.is_empty()) == Some(stable_version) {
         return Ok(SharedServerRepair::AlreadyCurrent);
     }
+    if previous
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some_and(|previous| !is_release_channel_marker(previous))
+    {
+        return Ok(SharedServerRepair::AlreadyCurrent);
+    }
 
     // Only repair when stable is strictly newer than the current shared-server
     // binary on disk. This never downgrades, and it preserves a self-dev pin
@@ -836,6 +844,15 @@ pub fn repair_stale_shared_server_channel() -> Result<SharedServerRepair> {
             .map(str::to_string),
         repaired_to: stable_version.to_string(),
     })
+}
+
+fn is_release_channel_marker(marker: &str) -> bool {
+    let marker = marker.trim();
+    let marker = marker.strip_prefix('v').unwrap_or(marker);
+    marker.starts_with("main-")
+        || marker
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 /// True when `shared` exists and is strictly older (by mtime) than `stable`, or

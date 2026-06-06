@@ -807,6 +807,30 @@ fn repair_preserves_fresher_selfdev_pin() {
 }
 
 #[test]
+fn repair_preserves_older_selfdev_pin() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let selfdev_old = "56f43c3d-dirty-deadbeef";
+        let stable_new = "0.22.0";
+        write_versioned_binary(selfdev_old, base);
+        write_versioned_binary(stable_new, base + Duration::from_secs(120));
+        update_shared_server_symlink(selfdev_old).expect("pin older self-dev");
+        update_stable_symlink(stable_new).expect("stable new");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "repair must not overwrite a deliberately-pinned self-dev build"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev_old),
+        );
+    });
+}
+
+#[test]
 fn repair_never_downgrades_when_stable_is_older() {
     use std::time::{Duration, SystemTime};
     with_temp_jcode_home(|| {
