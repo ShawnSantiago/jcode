@@ -297,6 +297,10 @@ fn has_policy_field_override(params: &PrWatchInput) -> bool {
         || params.resolve_threads.is_some()
 }
 
+fn should_schedule_after_existing_check(params: &PrWatchInput, existing_future: bool) -> bool {
+    params.schedule_next || (has_policy_field_override(params) && existing_future)
+}
+
 fn policy_mode_label(policy: &WritePolicy) -> &'static str {
     if policy.local_fix && policy.commit && policy.push && policy.comment && policy.resolve_threads
     {
@@ -425,29 +429,34 @@ fn maybe_schedule_next(
         }
         return Ok(None);
     }
-    if has_policy_field_override(params) {
-        let _ = cancel_queued_watch_items(state)?;
+    let policy_override = has_policy_field_override(params);
+    if !params.schedule_next && !policy_override {
+        return Ok(None);
     }
-    if !params.schedule_next {
+    let mut manager = AmbientManager::new()?;
+    let existing = find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now")
+        .or_else(|| {
+            find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline")
+        })
+        .map(|item| (item.id.clone(), item.scheduled_for));
+    let existing_future = existing
+        .as_ref()
+        .map(|(_, scheduled_for)| *scheduled_for > Utc::now())
+        .unwrap_or(false);
+    if !should_schedule_after_existing_check(params, existing_future) {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_poll_prompt(state);
-    let mut manager = AmbientManager::new()?;
-    if let Some(existing) =
-        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(
-            || find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline"),
-        )
-    {
-        if existing.scheduled_for > Utc::now() && !has_policy_field_override(params) {
+    if let Some((existing_id, scheduled_for)) = existing {
+        if scheduled_for > Utc::now() && !policy_override {
             return Ok(Some(format!(
                 "{} at {} (already scheduled)",
-                existing.id,
-                existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+                existing_id,
+                scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
             )));
         }
-        let stale_id = existing.id.clone();
-        manager.cancel_schedule(&stale_id)?;
+        manager.cancel_schedule(&existing_id)?;
     }
     let target = schedule_target_from_params(params, ctx)?;
     let id = manager.schedule(ScheduleRequest {
@@ -488,27 +497,31 @@ fn maybe_schedule_next_monitor(
         }
         return Ok(None);
     }
-    if has_policy_field_override(params) {
-        let _ = cancel_queued_watch_items(state)?;
+    let policy_override = has_policy_field_override(params);
+    if !params.schedule_next && !policy_override {
+        return Ok(None);
     }
-    if !params.schedule_next {
+    let mut manager = AmbientManager::new()?;
+    let existing = find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
+        .map(|item| (item.id.clone(), item.scheduled_for));
+    let existing_future = existing
+        .as_ref()
+        .map(|(_, scheduled_for)| *scheduled_for > Utc::now())
+        .unwrap_or(false);
+    if !should_schedule_after_existing_check(params, existing_future) {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
-    let mut manager = AmbientManager::new()?;
-    if let Some(existing) =
-        find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
-    {
-        if existing.scheduled_for > Utc::now() && !has_policy_field_override(params) {
+    if let Some((existing_id, scheduled_for)) = existing {
+        if scheduled_for > Utc::now() && !policy_override {
             return Ok(Some(format!(
                 "{} at {} (already scheduled)",
-                existing.id,
-                existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+                existing_id,
+                scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
             )));
         }
-        let stale_id = existing.id.clone();
-        manager.cancel_schedule(&stale_id)?;
+        manager.cancel_schedule(&existing_id)?;
     }
     let target = schedule_target_from_params(params, ctx)?;
     let id = manager.schedule(ScheduleRequest {
@@ -1184,13 +1197,13 @@ async fn monitor_once(
         }
         write_state_atomic(&path, &state)?;
     }
-    if would_write && has_policy_field_override(&params) {
-        let _ = cancel_queued_watch_items(&state)?;
-    }
     let status = monitor_status_for_state(&state, partial_failure);
     let scheduled = if monitor_should_schedule_followup(status) {
         maybe_schedule_next_monitor(ctx, &state, &params)?
     } else {
+        if would_write && has_policy_field_override(&params) {
+            let _ = cancel_queued_watch_items(&state)?;
+        }
         None
     };
     let readiness = state.readiness();
@@ -2334,6 +2347,21 @@ mod tests {
 
         params.push = Some(false);
         assert!(has_policy_field_override(&params));
+    }
+
+    #[test]
+    fn policy_override_without_schedule_next_only_replaces_existing_future_item() {
+        let mut params = monitor_params(None);
+        params.schedule_next = false;
+
+        assert!(!should_schedule_after_existing_check(&params, true));
+
+        params.push = Some(false);
+        assert!(!should_schedule_after_existing_check(&params, false));
+        assert!(should_schedule_after_existing_check(&params, true));
+
+        params.schedule_next = true;
+        assert!(should_schedule_after_existing_check(&params, false));
     }
 
     #[test]
