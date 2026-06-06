@@ -1059,7 +1059,11 @@ fn test_render_messages_honors_system_display_role_override() {
 
 #[test]
 fn test_render_messages_renders_persisted_reasoning() {
-    use jcode_tui_markdown::REASONING_SENTINEL;
+    use jcode_render_core::REASONING_SENTINEL;
+
+    let _env_lock = lock_env();
+    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
+    crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
         "session_render_reasoning_test".to_string(),
@@ -1104,7 +1108,11 @@ fn test_render_messages_renders_persisted_reasoning() {
 
 #[test]
 fn test_render_messages_renders_legacy_reasoning_variant() {
-    use jcode_tui_markdown::REASONING_SENTINEL;
+    use jcode_render_core::REASONING_SENTINEL;
+
+    let _env_lock = lock_env();
+    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
+    crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
         "session_render_legacy_reasoning_test".to_string(),
@@ -1128,6 +1136,90 @@ fn test_render_messages_renders_legacy_reasoning_variant() {
         "expected legacy reasoning markup, got: {:?}",
         rendered[0].content
     );
+}
+
+#[test]
+fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
+    use jcode_render_core::REASONING_SENTINEL;
+
+    let _env_lock = lock_env();
+    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "current");
+    crate::config::invalidate_config_cache();
+
+    let mut session = Session::create_with_id(
+        "session_render_reasoning_current_test".to_string(),
+        None,
+        Some("render reasoning current test".to_string()),
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::ReasoningTrace {
+                text: "step one\nstep two\nstep three".to_string(),
+            },
+            ContentBlock::Text {
+                text: "Here is the answer.".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    let content = &rendered[0].content;
+    // In `current` mode only the *live* reasoning block is ever shown; it streams
+    // then is discarded once the model answers. Re-rendered history therefore
+    // shows no past reasoning at all (no trace line, no lines, no sentinel).
+    assert!(
+        !content.contains(REASONING_SENTINEL),
+        "no reasoning markup expected in current mode on reload: {content:?}"
+    );
+    assert!(
+        !content.contains("step one")
+            && !content.contains("step two")
+            && !content.contains("thought"),
+        "individual reasoning lines/trace must not be replayed in current mode: {content:?}"
+    );
+    // The answer text is preserved.
+    assert!(content.contains("Here is the answer."));
+}
+
+#[test]
+fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
+    use jcode_render_core::REASONING_SENTINEL;
+
+    let _env_lock = lock_env();
+    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "off");
+    crate::config::invalidate_config_cache();
+
+    let mut session = Session::create_with_id(
+        "session_render_reasoning_off_test".to_string(),
+        None,
+        Some("render reasoning off test".to_string()),
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::ReasoningTrace {
+                text: "secret thought".to_string(),
+            },
+            ContentBlock::Text {
+                text: "Here is the answer.".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    let content = &rendered[0].content;
+    assert!(
+        !content.contains(REASONING_SENTINEL) && !content.contains("secret thought"),
+        "reasoning must be hidden entirely in off mode: {content:?}"
+    );
+    assert!(content.contains("Here is the answer."));
 }
 
 #[test]

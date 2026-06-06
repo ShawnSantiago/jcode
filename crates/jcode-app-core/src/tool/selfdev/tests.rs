@@ -324,7 +324,13 @@ fn non_selfdev_schema_only_exposes_onramp_actions() {
         sorted,
         vec!["enter", "find-config", "reload", "setup", "status"]
     );
-    for hidden in ["build", "test", "cancel-build", "socket-info", "socket-help"] {
+    for hidden in [
+        "build",
+        "test",
+        "cancel-build",
+        "socket-info",
+        "socket-help",
+    ] {
         assert!(
             !actions.contains(&hidden),
             "on-ramp schema should not expose {hidden}"

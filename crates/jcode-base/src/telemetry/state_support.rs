@@ -1,7 +1,7 @@
 use super::{SESSION_STATE, sanitize_telemetry_label};
 use crate::storage;
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 pub(super) fn telemetry_id_path() -> Option<PathBuf> {
@@ -263,6 +263,52 @@ pub(super) fn new_event_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+pub(super) fn is_jcode_repo_dir(dir: &Path) -> bool {
+    let cargo_toml = dir.join("Cargo.toml");
+    if !cargo_toml.exists() || !dir.join(".git").exists() {
+        return false;
+    }
+
+    std::fs::read_to_string(cargo_toml)
+        .map(|content| content.contains("name = \"jcode\""))
+        .unwrap_or(false)
+}
+
+fn find_jcode_repo_in_ancestors(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| is_jcode_repo_dir(dir))
+        .map(Path::to_path_buf)
+}
+
+fn telemetry_jcode_repo_dir() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("JCODE_REPO_DIR") {
+        let path = PathBuf::from(path);
+        if is_jcode_repo_dir(&path) {
+            return Some(path);
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(repo) = find_jcode_repo_in_ancestors(&manifest_dir) {
+        return Some(repo);
+    }
+
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(repo) = exe
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .filter(|dir| is_jcode_repo_dir(dir))
+    {
+        return Some(repo.to_path_buf());
+    }
+
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| find_jcode_repo_in_ancestors(&cwd))
+}
+
 pub(super) fn build_channel() -> String {
     if std::env::var(jcode_selfdev_types::CLIENT_SELFDEV_ENV).is_ok() {
         return "selfdev".to_string();
@@ -276,14 +322,14 @@ pub(super) fn build_channel() -> String {
             return "local_build".to_string();
         }
     }
-    if crate::build::get_repo_dir().is_some() {
+    if telemetry_jcode_repo_dir().is_some() {
         return "git_checkout".to_string();
     }
     "release".to_string()
 }
 
 pub(super) fn is_git_checkout() -> bool {
-    crate::build::get_repo_dir().is_some()
+    telemetry_jcode_repo_dir().is_some()
 }
 
 pub(super) fn is_ci() -> bool {

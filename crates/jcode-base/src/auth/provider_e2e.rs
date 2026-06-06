@@ -22,13 +22,14 @@ use crate::auth::lifecycle::{
     AuthActivationRequest, activate_auth_change, validate_catalog_invariants,
 };
 use crate::auth::live_provider_probes::{
-    fetch_live_openai_compatible_models, run_live_antigravity_native_smoke,
-    run_live_antigravity_native_stream_smoke, run_live_antigravity_native_tool_smoke,
+    fetch_live_openai_compatible_models, run_live_antigravity_native_reasoning_smoke,
+    run_live_antigravity_native_smoke, run_live_antigravity_native_stream_smoke,
+    run_live_antigravity_native_tool_smoke, run_live_claude_native_reasoning_smoke,
     run_live_claude_native_smoke, run_live_claude_native_stream_smoke,
-    run_live_claude_native_tool_smoke, run_live_native_provider_smoke,
-    run_live_native_provider_stream_smoke, run_live_native_provider_tool_smoke,
-    run_live_openai_compatible_smoke, run_live_openai_compatible_stream_smoke,
-    run_live_openai_compatible_tool_smoke,
+    run_live_claude_native_tool_smoke, run_live_native_provider_reasoning_smoke,
+    run_live_native_provider_smoke, run_live_native_provider_stream_smoke,
+    run_live_native_provider_tool_smoke, run_live_openai_compatible_smoke,
+    run_live_openai_compatible_stream_smoke, run_live_openai_compatible_tool_smoke,
 };
 use crate::live_tests::{
     self, LiveVerificationAuth, LiveVerificationEvent, LiveVerificationResult,
@@ -273,6 +274,7 @@ const FULL_PIPELINE_LABELS: &[(&str, &str)] = &[
     (checkpoints::TOOL_EXECUTION_LOOP, "Tool execution loop"),
     (checkpoints::TOOL_RESULT_FOLLOWUP, "Tool-result followup"),
     (checkpoints::REAL_JCODE_TOOL_SMOKE, "Real Jcode tool smoke"),
+    (checkpoints::REASONING_CAPABILITY, "Reasoning capability"),
 ];
 
 fn label_for(checkpoint: &str) -> &'static str {
@@ -291,17 +293,89 @@ fn label_for(checkpoint: &str) -> &'static str {
 /// declined a second tool call). Surfacing it keeps the coverage observable in
 /// the doctor report instead of collapsing to a generic pass string.
 fn tool_stage_detail(stage: &crate::live_tests::LiveVerificationStage) -> String {
-    match stage
+    let multi = match stage
         .evidence
         .get("multi_tool_replay")
         .and_then(|value| value.as_str())
     {
-        Some("verified") => "tool call parsed and executed; multi-call signature replay verified".to_string(),
-        Some("skipped") => {
-            "tool call parsed and executed; multi-call signature replay skipped (no 2nd tool call)"
-                .to_string()
+        Some("verified") => "multi-call signature replay verified",
+        Some("skipped") => "multi-call signature replay skipped (no 2nd tool call)",
+        _ => "",
+    };
+    let parallel = match stage
+        .evidence
+        .get("parallel_tool_calls")
+        .and_then(|value| value.as_str())
+    {
+        Some("verified") => "parallel tool calls verified",
+        Some("skipped") => "parallel tool calls skipped (single call)",
+        _ => "",
+    };
+    let mut detail = "tool call parsed and executed".to_string();
+    for part in [multi, parallel] {
+        if !part.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(part);
         }
-        _ => "tool call parsed and executed".to_string(),
+    }
+    detail
+}
+
+/// Human-readable detail for a passed reasoning-capability stage. The stage
+/// records `reasoning_capability` as `streamed` (visible reasoning text),
+/// `opaque` (no text but a reasoning signal: thought signature, reasoning item,
+/// or reasoning tokens), or `none` (neither). All three are passes; `opaque` and
+/// `none` are legitimate because providers like Gemini-3 and OpenAI hide their
+/// reasoning. Surfacing the classification keeps the observation visible in the
+/// doctor report.
+fn reasoning_stage_detail(stage: &crate::live_tests::LiveVerificationStage) -> String {
+    match stage
+        .evidence
+        .get("reasoning_capability")
+        .and_then(|value| value.as_str())
+    {
+        Some("streamed") => "reasoning streamed (visible thinking text)".to_string(),
+        Some("opaque") => {
+            "reasoning hidden but signaled (opaque: thought signature / reasoning item)".to_string()
+        }
+        Some("none") => "no reasoning signal observed (model hides or skips reasoning)".to_string(),
+        _ => "reasoning turn completed".to_string(),
+    }
+}
+
+/// Fold a reasoning-capability probe result into a [`DoctorCheck`], honoring the
+/// observe-only contract.
+///
+/// A clean turn records a passed checkpoint carrying the `streamed`/`opaque`/
+/// `none` classification (all three are passes; hiding reasoning is legitimate).
+/// A probe *error* (network, or a turn that did not complete with a coherent
+/// answer) is recorded as **skipped**, never failed: this checkpoint must never
+/// flip a provider to "not user-ready", and it is not part of the strict
+/// coverage ladder, so an observational miss should not fail the tier. The
+/// broader chat/streaming checkpoints already guard turn completion.
+fn push_reasoning_check(
+    result: anyhow::Result<LiveVerificationStage>,
+    checks: &mut Vec<DoctorCheck>,
+    spend: &mut DoctorSpend,
+) {
+    match result {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            let detail = reasoning_stage_detail(&stage);
+            checks.push(DoctorCheck::passed(
+                checkpoints::REASONING_CAPABILITY,
+                label_for(checkpoints::REASONING_CAPABILITY),
+                detail,
+            ));
+        }
+        Err(error) => checks.push(DoctorCheck::skipped(
+            checkpoints::REASONING_CAPABILITY,
+            label_for(checkpoints::REASONING_CAPABILITY),
+            format!(
+                "observe-only reasoning probe did not complete: {}",
+                format_error_chain(&error)
+            ),
+        )),
     }
 }
 
@@ -314,6 +388,7 @@ const API_DEPENDENT_CHECKPOINTS: &[&str] = &[
     checkpoints::TOOL_EXECUTION_LOOP,
     checkpoints::TOOL_RESULT_FOLLOWUP,
     checkpoints::REAL_JCODE_TOOL_SMOKE,
+    checkpoints::REASONING_CAPABILITY,
 ];
 
 /// Run the strict provider/model diagnostic.
@@ -846,6 +921,13 @@ async fn run_native_claude_api_checks(
             }
         }
     }
+
+    // Reasoning capability (observe-only; never gates readiness).
+    push_reasoning_check(
+        run_live_claude_native_reasoning_smoke(selected).await,
+        checks,
+        spend,
+    );
 }
 
 /// The wiring contract for the native Antigravity (Google OAuth Cloud Code)
@@ -1190,6 +1272,13 @@ async fn run_native_antigravity_api_checks(
             }
         }
     }
+
+    // Reasoning capability (observe-only; never gates readiness).
+    push_reasoning_check(
+        run_live_antigravity_native_reasoning_smoke(selected).await,
+        checks,
+        spend,
+    );
 }
 
 // === Generic native-runtime doctor =========================================
@@ -1825,6 +1914,13 @@ async fn run_generic_native_api_checks(
             }
         }
     }
+
+    // Reasoning capability (observe-only; never gates readiness).
+    push_reasoning_check(
+        run_live_native_provider_reasoning_smoke(provider, selected, label).await,
+        checks,
+        spend,
+    );
 }
 
 /// The jcode-side wiring a given compat profile is expected to activate.
@@ -2476,5 +2572,72 @@ mod tests {
         assert!(with_account.source.contains("user@example.com"));
         let anonymous = native_antigravity_auth("");
         assert!(anonymous.source.contains("Antigravity Google OAuth"));
+    }
+
+    #[test]
+    fn tool_stage_detail_surfaces_multi_and_parallel_phases() {
+        let verified = LiveVerificationStage::passed(checkpoints::TOOL_CALL_PARSE)
+            .with_evidence("multi_tool_replay", serde_json::json!("verified"))
+            .with_evidence("parallel_tool_calls", serde_json::json!("verified"));
+        let detail = tool_stage_detail(&verified);
+        assert!(detail.contains("tool call parsed and executed"));
+        assert!(detail.contains("multi-call signature replay verified"));
+        assert!(detail.contains("parallel tool calls verified"));
+
+        let skipped = LiveVerificationStage::passed(checkpoints::TOOL_CALL_PARSE)
+            .with_evidence("multi_tool_replay", serde_json::json!("skipped"))
+            .with_evidence("parallel_tool_calls", serde_json::json!("skipped"));
+        let detail = tool_stage_detail(&skipped);
+        assert!(detail.contains("multi-call signature replay skipped"));
+        assert!(detail.contains("parallel tool calls skipped"));
+
+        // With no evidence the base string is unchanged (back-compat).
+        let bare = LiveVerificationStage::passed(checkpoints::TOOL_CALL_PARSE);
+        assert_eq!(tool_stage_detail(&bare), "tool call parsed and executed");
+    }
+
+    #[test]
+    fn reasoning_stage_detail_describes_each_classification() {
+        for (value, needle) in [
+            ("streamed", "reasoning streamed"),
+            ("opaque", "reasoning hidden but signaled"),
+            ("none", "no reasoning signal observed"),
+        ] {
+            let stage = LiveVerificationStage::passed(checkpoints::REASONING_CAPABILITY)
+                .with_evidence("reasoning_capability", serde_json::json!(value));
+            assert!(
+                reasoning_stage_detail(&stage).contains(needle),
+                "classification {value} should mention {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_reasoning_check_records_pass_for_clean_turn() {
+        let mut checks = Vec::new();
+        let mut spend = DoctorSpend::default();
+        let stage = LiveVerificationStage::passed(checkpoints::REASONING_CAPABILITY)
+            .with_evidence("reasoning_capability", serde_json::json!("opaque"));
+        push_reasoning_check(Ok(stage), &mut checks, &mut spend);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].checkpoint, checkpoints::REASONING_CAPABILITY);
+        assert_eq!(checks[0].status, LiveVerificationStageStatus::Passed);
+        assert!(!checks[0].is_failure());
+    }
+
+    #[test]
+    fn push_reasoning_check_skips_never_fails_on_probe_error() {
+        // The observe-only reasoning checkpoint must never produce a failure that
+        // could flip the tier to not-ready; a probe error is recorded as skipped.
+        let mut checks = Vec::new();
+        let mut spend = DoctorSpend::default();
+        push_reasoning_check(
+            Err(anyhow::anyhow!("network blip")),
+            &mut checks,
+            &mut spend,
+        );
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, LiveVerificationStageStatus::Skipped);
+        assert!(!checks[0].is_failure());
     }
 }

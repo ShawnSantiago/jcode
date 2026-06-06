@@ -502,7 +502,7 @@ fn detect_project_profile() -> ProjectProfile {
     let Some(root) = cwd.as_deref() else {
         return profile;
     };
-    profile.repo_present = root.join(".git").exists() || crate::build::is_jcode_repo(root);
+    profile.repo_present = root.join(".git").exists() || is_jcode_repo_dir(root);
     let mut scanned_files = 0usize;
     for entry in walkdir::WalkDir::new(root)
         .max_depth(3)

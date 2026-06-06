@@ -2193,3 +2193,71 @@ fn strict_openai_schema_endpoint_allows_other_providers() {
         "https://api.openai.com/v1"
     ));
 }
+
+#[test]
+fn runtime_display_name_tracks_active_openai_compatible_profile() {
+    // Regression for issue #329: switching to a direct OpenAI-compatible
+    // profile (NVIDIA NIM) at runtime must surface that profile's display
+    // name, not the fixed "OpenRouter" aggregator label. The machine-facing
+    // `name()` stays "openrouter" because billing/routing logic keys off it.
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+
+    // Configure both the OpenRouter aggregator and NVIDIA NIM credentials so
+    // the slot can host either runtime. Set after the isolate guard, which
+    // clears every profile api-key env var.
+    let _or_key = EnvVarGuard::set("OPENROUTER_API_KEY", "or-test-key");
+    let _nim_key = EnvVarGuard::set("NVIDIA_API_KEY", "nim-test-key");
+    crate::config::invalidate_config_cache();
+
+    let provider =
+        crate::provider::MultiProvider::new_with_auth_status(crate::auth::AuthStatus::default());
+
+    // Switch to a NVIDIA NIM model via the profile-prefixed model request.
+    provider
+        .set_model("nvidia-nim:nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        .expect("switch to nvidia-nim profile");
+
+    assert_eq!(
+        Provider::name(&provider),
+        "OpenRouter",
+        "machine-facing name must stay stable for billing/routing"
+    );
+    assert_eq!(
+        Provider::display_name(&provider),
+        "NVIDIA NIM",
+        "header/UI display name must reflect the active runtime profile"
+    );
+
+    // Switching back to the plain OpenRouter aggregator restores the label.
+    provider
+        .set_model("anthropic/claude-sonnet-4")
+        .expect("switch back to openrouter aggregator");
+    assert_eq!(Provider::display_name(&provider), "OpenRouter");
+}
+
+#[test]
+fn runtime_display_name_for_profile_runtime_instance() {
+    // Direct unit coverage of the per-instance resolver used by
+    // `Provider::display_name`.
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("NVIDIA_API_KEY", "nim-test-key");
+
+    let nim = OpenRouterProvider::new_openai_compatible_profile_runtime(
+        crate::provider_catalog::NVIDIA_NIM_PROFILE,
+    )
+    .expect("build nvidia-nim runtime");
+    assert_eq!(nim.runtime_display_name(), "NVIDIA NIM");
+    assert_eq!(Provider::name(&nim), "openrouter");
+}

@@ -65,8 +65,13 @@ impl App {
             return;
         }
         let is_tool = message.role == "tool";
+        // Maintain the cached display-message counters incrementally for this
+        // single append, then bump the version without a full O(M) rescan.
+        // Appending is the hot path; rescanning every append was O(M^2) over a
+        // long session.
+        self.adjust_display_message_stats(&message, true);
         self.display_messages.push(message);
-        self.bump_display_messages_version();
+        self.bump_display_messages_version_no_stats();
         if is_tool && self.diff_mode.has_side_pane() && self.diff_pane_auto_scroll {
             self.diff_pane_scroll = usize::MAX;
         }
@@ -336,6 +341,9 @@ impl App {
 
     pub(super) fn clear_display_messages(&mut self) {
         self.compacted_history_lazy = CompactedHistoryLazyState::default();
+        // The transcript is about to be discarded; forget where the live reasoning
+        // block started so a stale offset can't slice the new stream.
+        self.reasoning_block_start = None;
         if !self.display_messages.is_empty() {
             self.display_messages.clear();
             self.bump_display_messages_version();

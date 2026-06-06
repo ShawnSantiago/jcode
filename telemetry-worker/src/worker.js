@@ -1,6 +1,3 @@
-import { getStats } from "./stats.js";
-import { DASHBOARD_HTML } from "./dashboard.js";
-
 let cachedEventColumns = null;
 let cachedSessionDetailColumns = null;
 let cachedTurnDetailColumns = null;
@@ -13,33 +10,11 @@ export default {
       });
     }
 
-    const url = new URL(request.url);
-
-    // Read-only dashboard surface (GET). The HTML page is public; the JSON stats
-    // endpoint is gated behind DASHBOARD_TOKEN so raw aggregates are not exposed
-    // to anyone who finds the URL. Raw events are never returned, only counts.
-    if (request.method === "GET") {
-      if (url.pathname === "/" || url.pathname === "/dashboard") {
-        return htmlResponse(DASHBOARD_HTML);
-      }
-      if (url.pathname === "/v1/stats") {
-        if (!isAuthorized(request, env)) {
-          return jsonResponse({ error: "Unauthorized" }, 401);
-        }
-        try {
-          const stats = await getStats(env);
-          return jsonResponse(stats);
-        } catch (err) {
-          return jsonResponse({ error: "Internal error", detail: String(err?.message || err) }, 500);
-        }
-      }
-      return jsonResponse({ error: "Not found" }, 404);
-    }
-
     if (request.method !== "POST") {
       return jsonResponse({ error: "Method not allowed" }, 405);
     }
 
+    const url = new URL(request.url);
     if (url.pathname !== "/v1/event") {
       return jsonResponse({ error: "Not found" }, 404);
     }
@@ -78,21 +53,6 @@ export default {
     }
   },
 };
-
-// When DASHBOARD_TOKEN is unset the stats endpoint stays locked (deny by
-// default) rather than leaking aggregates. Accepts either a Bearer header or a
-// ?token= query param so it works from curl and the browser fetch alike.
-function isAuthorized(request, env) {
-  const expected = env.DASHBOARD_TOKEN;
-  if (!expected) {
-    return false;
-  }
-  const url = new URL(request.url);
-  const header = request.headers.get("authorization") || "";
-  const bearer = header.startsWith("Bearer ") ? header.slice(7) : null;
-  const provided = bearer || url.searchParams.get("token") || request.headers.get("x-dashboard-token");
-  return provided != null && provided === expected;
-}
 
 async function insertEvent(env, body) {
   const columns = await getEventColumns(env);
@@ -633,21 +593,10 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-function htmlResponse(html, status = 200) {
-  return new Response(html, {
-    status,
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store",
-      ...corsHeaders(),
-    },
-  });
-}
-
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Dashboard-Token",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
   };
 }

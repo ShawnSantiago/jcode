@@ -15,7 +15,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -39,10 +38,7 @@ const MAX_RETRIES: u32 = 3;
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 const WEBSOCKET_UPGRADE_REQUIRED_ERROR: StatusCode = StatusCode::UPGRADE_REQUIRED;
-const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
 const WEBSOCKET_CONNECT_TIMEOUT_SECS: u64 = 8;
-const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 8;
-const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 300;
 /// Maximum age of a persistent WebSocket connection before forcing reconnect
 const WEBSOCKET_PERSISTENT_MAX_AGE_SECS: u64 = 3000; // 50 min (server limit is 60 min)
 /// Default idle window after which we reconnect instead of reusing the socket.
@@ -94,15 +90,7 @@ static WEBSOCKET_PERSISTENT_IDLE_RECONNECT_SECS: LazyLock<Option<u64>> = LazyLoc
     }
 });
 const WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS: u64 = 1500;
-/// Base websocket cooldown after a fallback in auto mode.
-/// Keep this short so one flaky attempt does not pin the TUI to HTTPS for a long time.
-const WEBSOCKET_MODEL_COOLDOWN_BASE_SECS: u64 = 60;
-/// Maximum websocket cooldown after repeated fallback streaks.
-const WEBSOCKET_MODEL_COOLDOWN_MAX_SECS: u64 = 600;
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_768;
-static FALLBACK_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
-static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: AtomicU64 = AtomicU64::new(0);
-static NORMALIZED_NULL_TOOL_ARGUMENTS: AtomicU64 = AtomicU64::new(0);
 static WEBSOCKET_COOLDOWNS: LazyLock<Arc<RwLock<HashMap<String, Instant>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 static WEBSOCKET_FAILURE_STREAKS: LazyLock<Arc<RwLock<HashMap<String, u32>>>> =
@@ -185,14 +173,26 @@ pub(crate) enum OpenAICredentialMode {
 
 impl OpenAICredentialMode {
     fn from_runtime_env() -> Self {
-        match std::env::var("JCODE_RUNTIME_PROVIDER")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("openai-api") => Self::ApiKey,
-            Some("openai") => Self::OAuth,
-            _ => Self::Auto,
+        // Canonical parse: recognizes every runtime/route/CLI/prefix alias for
+        // the OpenAI OAuth-vs-API decision in one place, so this can never drift
+        // from the other vocabularies (see jcode_provider_core::auth_mode).
+        match jcode_provider_core::runtime_env_pinned_mode(
+            jcode_provider_core::DualAuthProvider::OpenAI,
+        ) {
+            Some(jcode_provider_core::AuthMode::ApiKey) => Self::ApiKey,
+            Some(jcode_provider_core::AuthMode::Oauth) => Self::OAuth,
+            None => Self::Auto,
+        }
+    }
+
+    /// The canonical dual-auth route this explicit mode pins, if any.
+    /// `Auto` has no explicit pin and returns `None`.
+    pub(crate) fn auth_route(self) -> Option<jcode_provider_core::AuthRoute> {
+        use jcode_provider_core::{AuthMode, AuthRoute};
+        match self {
+            Self::Auto => None,
+            Self::OAuth => Some(AuthRoute::openai(AuthMode::Oauth)),
+            Self::ApiKey => Some(AuthRoute::openai(AuthMode::ApiKey)),
         }
     }
 
@@ -902,14 +902,8 @@ impl OpenAIProvider {
         // Keep the runtime provider identity in sync with the explicit credential
         // choice so UI surfaces report the auth method requests will actually use.
         // `Auto` leaves the existing identity untouched.
-        match mode {
-            OpenAICredentialMode::OAuth => {
-                crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai");
-            }
-            OpenAICredentialMode::ApiKey => {
-                crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-api");
-            }
-            OpenAICredentialMode::Auto => {}
+        if let Some(route) = mode.auth_route() {
+            crate::env::set_var("JCODE_RUNTIME_PROVIDER", route.runtime_provider_key());
         }
         Ok(())
     }
@@ -1216,9 +1210,7 @@ impl OpenAIProvider {
 
 mod stream;
 
-use self::openai_stream_runtime::{
-    PersistentWsResult, extract_error_with_retry, is_retryable_error, openai_access_token,
-};
+use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai_access_token};
 
 use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
@@ -1231,16 +1223,19 @@ mod openai_stream_runtime;
 
 mod websocket_health;
 
+use self::websocket_health::{
+    WEBSOCKET_COMPLETION_TIMEOUT_SECS, WEBSOCKET_FALLBACK_NOTICE,
+    WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS, classify_websocket_fallback_reason,
+    is_stream_activity_event, is_websocket_activity_payload, is_websocket_fallback_notice,
+    is_websocket_first_activity_payload, record_websocket_fallback, record_websocket_success,
+    summarize_websocket_fallback_reason, websocket_activity_timeout_kind,
+    websocket_cooldown_remaining, websocket_next_activity_timeout_secs,
+};
 #[cfg(test)]
 use self::websocket_health::{
-    WebsocketFallbackReason, clear_websocket_cooldown, normalize_transport_model,
-    set_websocket_cooldown, websocket_cooldown_for_streak, websocket_remaining_timeout_secs,
-};
-use self::websocket_health::{
-    classify_websocket_fallback_reason, is_stream_activity_event, is_websocket_activity_payload,
-    is_websocket_fallback_notice, is_websocket_first_activity_payload, record_websocket_fallback,
-    record_websocket_success, summarize_websocket_fallback_reason, websocket_activity_timeout_kind,
-    websocket_cooldown_remaining, websocket_next_activity_timeout_secs,
+    WEBSOCKET_MODEL_COOLDOWN_BASE_SECS, WEBSOCKET_MODEL_COOLDOWN_MAX_SECS, WebsocketFallbackReason,
+    clear_websocket_cooldown, normalize_transport_model, set_websocket_cooldown,
+    websocket_cooldown_for_streak, websocket_remaining_timeout_secs,
 };
 
 #[cfg(test)]

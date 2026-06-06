@@ -743,6 +743,10 @@ impl Provider for OpenRouterProvider {
         "openrouter"
     }
 
+    fn display_name(&self) -> String {
+        self.runtime_display_name()
+    }
+
     fn model(&self) -> String {
         self.model
             .try_read()

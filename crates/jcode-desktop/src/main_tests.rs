@@ -702,6 +702,123 @@ fn desktop_background_wake_only_tracks_active_frame_animation() {
 }
 
 #[test]
+fn next_animation_redraw_paces_active_animations_and_settles_when_idle() {
+    let now = Instant::now();
+
+    // While an animation is active, the next redraw is scheduled one frame
+    // interval out rather than immediately, so the loop does not busy-spin.
+    assert_eq!(
+        next_animation_redraw_at(now, true),
+        Some(now + DESKTOP_ANIMATION_FRAME_INTERVAL)
+    );
+    // Once the animation settles, no further redraw is scheduled and the loop
+    // can park on ControlFlow::Wait.
+    assert_eq!(next_animation_redraw_at(now, false), None);
+    // The pacing interval must be positive; a zero interval would reintroduce
+    // the busy-spin it exists to prevent.
+    assert!(DESKTOP_ANIMATION_FRAME_INTERVAL > Duration::ZERO);
+}
+
+#[test]
+fn hero_reveal_worker_count_falls_back_to_serial_for_small_images() {
+    // Tiny images should not pay thread-spawn overhead.
+    assert_eq!(hero_reveal_worker_count(0), 1);
+    assert_eq!(hero_reveal_worker_count(1024), 1);
+    // Large images should use more than one worker when parallelism is available.
+    let big = hero_reveal_worker_count(8 * 1024 * 1024);
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    assert!(big >= 1);
+    assert!(big <= available.max(1));
+}
+
+#[test]
+fn fill_hero_reveal_values_matches_serial_reference() {
+    let width = 64_u32;
+    let height = 48_u32;
+    let alpha_bounds = HeroMaskPixelBounds {
+        min_x: 4,
+        min_y: 4,
+        max_x: width - 4,
+        max_y: height - 4,
+    };
+    // A handful of normalized stroke segments tracing a rough path.
+    let segments = vec![
+        WelcomeHeroStrokeSegment {
+            start: [0.1, 0.2],
+            end: [0.4, 0.5],
+            start_progress: 0.0,
+            end_progress: 0.4,
+        },
+        WelcomeHeroStrokeSegment {
+            start: [0.4, 0.5],
+            end: [0.8, 0.3],
+            start_progress: 0.4,
+            end_progress: 0.8,
+        },
+        WelcomeHeroStrokeSegment {
+            start: [0.8, 0.3],
+            end: [0.9, 0.9],
+            start_progress: 0.8,
+            end_progress: 1.0,
+        },
+    ];
+    // Mark a checkerboard of lit pixels so both branches exercise lit/unlit.
+    let mut glyph_rgba = vec![0_u8; (width * height * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            if (x + y) % 3 == 0 {
+                let index = ((y * width + x) * 4) as usize;
+                glyph_rgba[index] = 200;
+            }
+        }
+    }
+    let brush_delay_px = (alpha_bounds.height() * 0.10).max(5.0);
+
+    // Serial reference computed directly here.
+    let mut expected = vec![1.0_f32; (width * height) as usize];
+    let mut expected_min = f32::INFINITY;
+    let mut expected_max = 0.0_f32;
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_index = (y * width + x) as usize;
+            if glyph_rgba[pixel_index * 4] <= 2 {
+                continue;
+            }
+            let (path_progress, distance) = nearest_hero_stroke_progress(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                alpha_bounds,
+                &segments,
+            );
+            let width_delay = (distance / brush_delay_px).min(1.0) * 0.045;
+            let value = (path_progress + width_delay).clamp(0.0, 1.0);
+            expected[pixel_index] = value;
+            expected_min = expected_min.min(value);
+            expected_max = expected_max.max(value);
+        }
+    }
+
+    // The parallel implementation must produce bit-identical output regardless
+    // of how many worker threads it chose.
+    let mut actual = vec![1.0_f32; (width * height) as usize];
+    let (actual_min, actual_max) = fill_hero_reveal_values(
+        &mut actual,
+        width,
+        height,
+        &glyph_rgba,
+        alpha_bounds,
+        &segments,
+        brush_delay_px,
+    );
+
+    assert_eq!(actual, expected, "parallel hero reveal fill must match serial");
+    assert_eq!(actual_min.to_bits(), expected_min.to_bits());
+    assert_eq!(actual_max.to_bits(), expected_max.to_bits());
+}
+
+#[test]
 fn desktop_async_job_slots_are_bounded_and_released() -> Result<()> {
     let counter = std::sync::atomic::AtomicUsize::new(0);
     let first = try_acquire_desktop_async_job_slot(&counter, 2)?;

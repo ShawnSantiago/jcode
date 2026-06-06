@@ -148,8 +148,8 @@ use memory_ui::{group_into_tiles, render_memory_tiles, split_by_display_width};
 use messages::get_cached_message_lines;
 #[cfg_attr(test, allow(unused_imports))]
 pub(crate) use messages::{
-    render_assistant_message, render_background_task_message, render_swarm_message,
-    render_system_message, render_tool_message, render_usage_message,
+    render_assistant_message, render_background_task_message, render_reasoning_message,
+    render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
@@ -1632,9 +1632,17 @@ pub(crate) fn copy_pane_vertical_edge_point(
     let zone = edge_autoscroll_zone_rows(area.height);
     let top_trigger = area.y.saturating_add(zone);
     let bottom_trigger = last_row.saturating_sub(zone);
-    let (edge_row, upward) = if row <= top_trigger {
+    // Only engage the hot zone when there is actually more transcript to pull in
+    // that direction. Otherwise dragging into the bottom band while the view is
+    // already pinned to the end (the common case) would snap the selection to the
+    // last visible line and fight precise highlighting of the bottom rows. When
+    // there is nothing to scroll, fall through (`None`) so the caller extends the
+    // selection to the exact cell under the cursor instead.
+    let can_scroll_up = snapshot.scroll > 0;
+    let can_scroll_down = snapshot.visible_end < snapshot.wrapped_plain_line_count();
+    let (edge_row, upward) = if row <= top_trigger && can_scroll_up {
         (area.y, true)
-    } else if row >= bottom_trigger {
+    } else if row >= bottom_trigger && can_scroll_down {
         (last_row, false)
     } else {
         return None;
@@ -1643,6 +1651,77 @@ pub(crate) fn copy_pane_vertical_edge_point(
     let clamped_col = column.clamp(area.x, area.x.saturating_add(area.width).saturating_sub(1));
 
     copy_point_from_snapshot(&snapshot, clamped_col, edge_row).map(|point| (point, upward))
+}
+
+/// Resolve the selection point for a drag at `(column, row)`, clamping vertical
+/// overshoot to the nearest in-bounds line edge.
+///
+/// Terminals report a drag that "leaves" the pane on the boundary row, but a
+/// drag *into the empty space below the last content line* (common with short
+/// transcripts that leave blank rows underneath) lands on a row that maps to no
+/// line at all, so `copy_point_from_screen` returns `None`. Native terminal and
+/// browser selection treat that as "select through the end of the last line".
+/// This mirrors that: dragging below the last visible line snaps to the end of
+/// that line, and dragging above the first visible line snaps to its start, so
+/// the boundary line is fully covered even when there is nothing more to scroll.
+pub(crate) fn copy_pane_drag_point(
+    pane: crate::tui::CopySelectionPane,
+    column: u16,
+    row: u16,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let snapshot = copy_snapshot_for_pane(pane)?;
+    let area = snapshot.content_area;
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+
+    // A direct hit on a real line wins: precise per-cell selection.
+    if let Some(point) = copy_point_from_snapshot(&snapshot, column, row) {
+        return Some(point);
+    }
+
+    let line_count = snapshot.wrapped_plain_line_count();
+    if line_count == 0 {
+        return None;
+    }
+    let last_line = line_count.saturating_sub(1);
+    let last_visible_line = snapshot.visible_end.saturating_sub(1).min(last_line);
+    let first_visible_line = snapshot.scroll.min(last_line);
+
+    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    let clamped_col = column.clamp(area.x, area.x.saturating_add(area.width).saturating_sub(1));
+
+    // Below the visible content: snap to the end of the last visible line.
+    if row >= last_row {
+        let text = snapshot.wrapped_plain_line(last_visible_line).unwrap_or("");
+        return Some(crate::tui::CopySelectionPoint {
+            pane,
+            abs_line: last_visible_line,
+            column: line_display_width(text),
+        });
+    }
+
+    // Above the visible content: snap to the start of the first visible line.
+    if row <= area.y {
+        return Some(crate::tui::CopySelectionPoint {
+            pane,
+            abs_line: first_visible_line,
+            column: snapshot.wrapped_copy_offset(first_visible_line).unwrap_or(0),
+        });
+    }
+
+    // Interior row that maps to no line (e.g. a blank gap row between/after
+    // content within the visible band): fall back to the boundary-clamped point.
+    copy_point_from_snapshot(
+        &snapshot,
+        clamped_col,
+        row.clamp(area.y, last_row),
+    )
+    .or(Some(crate::tui::CopySelectionPoint {
+        pane,
+        abs_line: last_visible_line,
+        column: line_display_width(snapshot.wrapped_plain_line(last_visible_line).unwrap_or("")),
+    }))
 }
 
 /// Edge point for tick-driven continuous auto-scroll, where there is no live
@@ -1803,6 +1882,72 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
     }
 
     Some(out)
+}
+
+/// Compute `(char_count, line_count)` for the current copy selection without
+/// allocating the full joined selection string. Mirrors `copy_selection_text`
+/// so the status line "N chars · M lines" matches what would be copied, but is
+/// allocation-free so it can run cheaply on every render frame / drag move.
+pub(crate) fn copy_selection_metrics(
+    range: crate::tui::CopySelectionRange,
+) -> Option<(usize, usize)> {
+    if range.start.pane != range.end.pane {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(range.start.pane)?;
+    let (start, end) =
+        if (range.start.abs_line, range.start.column) <= (range.end.abs_line, range.end.column) {
+            (range.start, range.end)
+        } else {
+            (range.end, range.start)
+        };
+
+    if start.abs_line >= snapshot.wrapped_plain_line_count()
+        || end.abs_line >= snapshot.wrapped_plain_line_count()
+    {
+        return None;
+    }
+
+    if let Some(metrics) =
+        copy_selection::copy_selection_metrics_from_raw_lines(&snapshot, start, end)
+    {
+        return Some(metrics);
+    }
+
+    let mut chars = 0usize;
+    let mut lines = 0usize;
+    for abs_line in start.abs_line..=end.abs_line {
+        if abs_line > start.abs_line {
+            chars += 1; // joining '\n'
+        }
+        lines += 1;
+        let text = snapshot.wrapped_plain_line(abs_line)?;
+        if abs_line != start.abs_line && abs_line != end.abs_line {
+            let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+            if copy_start == 0 {
+                chars += text.chars().count();
+                continue;
+            }
+        }
+        let line_width = line_display_width(&text);
+        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+        let start_col = if abs_line == start.abs_line {
+            clamp_display_col(&text, start.column).max(copy_start)
+        } else {
+            copy_start
+        };
+        let end_col = if abs_line == end.abs_line {
+            clamp_display_col(&text, end.column).max(copy_start)
+        } else {
+            line_width
+        };
+        if end_col < start_col {
+            continue;
+        }
+        chars += display_col_slice(&text, start_col, end_col).chars().count();
+    }
+
+    Some((chars, lines.max(1)))
 }
 
 pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {

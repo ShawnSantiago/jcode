@@ -130,7 +130,7 @@ pub(super) fn account_count_summary(count: usize) -> String {
 }
 
 pub(super) fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
-    jcode_tui_account_picker::action_kind_label(command)
+    crate::action_kind_label(command)
 }
 
 pub(super) fn action_kind_badge(command: &AccountPickerCommand) -> (&'static str, Color) {

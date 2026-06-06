@@ -61,9 +61,20 @@ fn server_release_is_older_than_client(server_version: Option<&str>, client_vers
 /// attached to is not running the binary we expect.
 ///
 /// Precedence:
+/// - The client independently measured the server's release version as strictly
+///   older than its own clean release version -> defer. This wins even over the
+///   server's own `server_has_update: Some(false)` self-report, because a stale
+///   long-lived daemon legitimately reports "no newer binary to reload into"
+///   (its `shared-server` channel still points at its own old build) while the
+///   client can plainly see it is an older release. Trusting the server here is
+///   exactly what left "current client, stale server" stuck (the daemon's reload
+///   decision runs old code that can never drag itself forward). The newer
+///   client is authoritative, so it defers and repairs the channel before
+///   reloading.
 /// - `Some(true)`: the server self-reported a newer binary on disk -> defer.
 /// - `Some(false)`: the server is new enough to self-assess and found nothing
-///   newer to reload into -> trust it, do not fight it with a forced reload.
+///   newer to reload into, AND the client could not prove it is older -> trust
+///   it, do not fight it with a forced reload.
 /// - `None`: the server is too old to self-report. Fall back to our own
 ///   client-side release-version comparison, which is the only signal that can
 ///   catch a pre-self-heal daemon.
@@ -75,10 +86,16 @@ fn should_defer_history_for_runtime_identity_with_allow(
     if allow_mismatch {
         return false;
     }
+    // A client-proven-older server always wins: never let an old daemon's
+    // (locally correct but globally wrong) "no update" self-report veto the
+    // client's own release-order comparison.
+    if client_detected_stale {
+        return true;
+    }
     match server_has_update {
         Some(true) => true,
         Some(false) => false,
-        None => client_detected_stale,
+        None => false,
     }
 }
 
@@ -147,19 +164,29 @@ mod runtime_identity_tests {
     }
 
     #[test]
-    fn client_detection_only_applies_when_server_cannot_self_report() {
+    fn client_detected_older_server_always_defers() {
         // Ancient server (server_has_update: None) that the client independently
         // measured as older -> defer. This is the issue #295 macOS case where a
         // pre-self-heal daemon can never set server_has_update itself.
         assert!(should_defer_history_for_runtime_identity_with_allow(
             None, true, false
         ));
-        // A server new enough to self-assess and report "no newer binary" is
-        // trusted, even if a naive version compare disagrees: forcing a reload
-        // would only loop against a server that has nothing newer to exec into.
-        assert!(!should_defer_history_for_runtime_identity_with_allow(
+        // A server that self-reports "no newer binary" (Some(false)) but that the
+        // client can PROVE is an older release -> still defer. The daemon's
+        // self-report is locally correct (its own shared-server channel points at
+        // its old build) but globally wrong; the newer client is authoritative.
+        // This is the "current client, stale server" report: trusting Some(false)
+        // here is exactly what left the server stuck on the old version forever.
+        assert!(should_defer_history_for_runtime_identity_with_allow(
             Some(false),
             true,
+            false
+        ));
+        // Same-release/newer server (client could not prove it is older) that
+        // self-reports "no newer binary" -> trust it, do not force a reload loop.
+        assert!(!should_defer_history_for_runtime_identity_with_allow(
+            Some(false),
+            false,
             false
         ));
     }
@@ -286,14 +313,16 @@ pub(in crate::tui::app) fn handle_server_event(
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.append_streaming_text(&chunk);
             }
-            if matches!(
-                app.status,
-                ProcessingStatus::Sending
-                    | ProcessingStatus::Connecting(_)
-                    | ProcessingStatus::Thinking(_)
-            ) || (app.is_processing && matches!(app.status, ProcessingStatus::Idle))
-            {
-                app.status = ProcessingStatus::Streaming;
+            // Surface active reasoning in the status line. The server emits a
+            // `ConnectionPhase::Streaming` when reasoning starts (to kick off the
+            // client TPS timer), so the status arrives here as `Streaming`; flip it
+            // to `Thinking` while reasoning deltas flow. The next `TextDelta` moves
+            // it back to `Streaming`.
+            if !matches!(app.status, ProcessingStatus::RunningTool(_)) {
+                let thinking_start = *app.thinking_start.get_or_insert_with(Instant::now);
+                if !matches!(app.status, ProcessingStatus::Thinking(_)) {
+                    app.status = ProcessingStatus::Thinking(thinking_start);
+                }
             }
             app.resume_streaming_tps();
             app.append_reasoning_text(&text);
@@ -301,6 +330,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw
         }
         ServerEvent::ReasoningDone { .. } => {
+            app.thinking_start = None;
             app.close_reasoning_region(None);
             eager_stream_redraw
         }
@@ -320,7 +350,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 id,
                 name,
                 input: serde_json::Value::Null,
-                intent: None, thought_signature: None, });
+                intent: None,
+                thought_signature: None,
+            });
             eager_stream_redraw
         }
         ServerEvent::ToolInput { delta } => {
@@ -337,7 +369,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 id: id.clone(),
                 name: name.clone(),
                 input: parsed_input.clone(),
-                intent: ToolCall::intent_from_input(&parsed_input), thought_signature: None, };
+                intent: ToolCall::intent_from_input(&parsed_input),
+                thought_signature: None,
+            };
             if let Some(key) = App::experimental_feature_key_for_tool(&tool_call) {
                 app.note_experimental_feature_use(key);
             }
@@ -381,42 +415,44 @@ pub(in crate::tui::app) fn handle_server_event(
             cache_read_input,
             cache_creation_input,
         } => {
-            let previous_input = app.streaming_input_tokens;
-            let previous_output = app.streaming_output_tokens;
-            let previous_cache_read = app.streaming_cache_read_tokens;
-            let previous_cache_creation = app.streaming_cache_creation_tokens;
-            let was_recorded = app.current_api_usage_recorded;
+            let previous_input = app.streaming.streaming_input_tokens;
+            let previous_output = app.streaming.streaming_output_tokens;
+            let previous_cache_read = app.streaming.streaming_cache_read_tokens;
+            let previous_cache_creation = app.streaming.streaming_cache_creation_tokens;
+            let was_recorded = app.kv_cache.current_api_usage_recorded;
             app.accumulate_streaming_output_tokens(output, call_output_tokens_seen);
-            app.streaming_input_tokens = input;
-            app.streaming_output_tokens = output;
+            app.streaming.streaming_input_tokens = input;
+            app.streaming.streaming_output_tokens = output;
             if cache_read_input.is_some() {
-                app.streaming_cache_read_tokens = cache_read_input;
+                app.streaming.streaming_cache_read_tokens = cache_read_input;
             }
             if cache_creation_input.is_some() {
-                app.streaming_cache_creation_tokens = cache_creation_input;
+                app.streaming.streaming_cache_creation_tokens = cache_creation_input;
             }
             if app.record_completed_stream_cache_usage() {
-                app.total_input_tokens = app.total_input_tokens.saturating_add(input);
-                app.total_output_tokens = app.total_output_tokens.saturating_add(output);
+                app.token_accounting.total_input_tokens =
+                    app.token_accounting.total_input_tokens.saturating_add(input);
+                app.token_accounting.total_output_tokens =
+                    app.token_accounting.total_output_tokens.saturating_add(output);
                 // The server only reports tokens, never a dollar cost, so the
                 // remote client prices each completed call itself. This is the
                 // first usage snapshot for this call, so bill the full counts.
                 app.accrue_remote_call_cost(
                     input,
                     output,
-                    app.streaming_cache_read_tokens.unwrap_or(0),
-                    app.streaming_cache_creation_tokens.unwrap_or(0),
+                    app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+                    app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
                 );
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
                 app.last_turn_input_tokens = (input > 0).then_some(input);
-            } else if was_recorded && app.current_api_usage_recorded {
-                app.total_input_tokens = app
-                    .total_input_tokens
+            } else if was_recorded && app.kv_cache.current_api_usage_recorded {
+                app.token_accounting.total_input_tokens = app
+                    .token_accounting.total_input_tokens
                     .saturating_add(input.saturating_sub(previous_input));
-                app.total_output_tokens = app
-                    .total_output_tokens
+                app.token_accounting.total_output_tokens = app
+                    .token_accounting.total_output_tokens
                     .saturating_add(output.saturating_sub(previous_output));
                 // Bill only the new tokens since the previous snapshot for this
                 // same call, so a call that reports usage multiple times while
@@ -424,53 +460,53 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.accrue_remote_call_cost(
                     input.saturating_sub(previous_input),
                     output.saturating_sub(previous_output),
-                    app.streaming_cache_read_tokens
+                    app.streaming.streaming_cache_read_tokens
                         .unwrap_or(0)
                         .saturating_sub(previous_cache_read.unwrap_or(0)),
-                    app.streaming_cache_creation_tokens
+                    app.streaming.streaming_cache_creation_tokens
                         .unwrap_or(0)
                         .saturating_sub(previous_cache_creation.unwrap_or(0)),
                 );
 
                 let had_cache_telemetry =
                     previous_cache_read.is_some() || previous_cache_creation.is_some();
-                let has_cache_telemetry = app.streaming_cache_read_tokens.is_some()
-                    || app.streaming_cache_creation_tokens.is_some();
+                let has_cache_telemetry = app.streaming.streaming_cache_read_tokens.is_some()
+                    || app.streaming.streaming_cache_creation_tokens.is_some();
                 if has_cache_telemetry {
                     let reported_delta = if had_cache_telemetry {
                         input.saturating_sub(previous_input)
                     } else {
                         input
                     };
-                    app.total_cache_reported_input_tokens = app
-                        .total_cache_reported_input_tokens
+                    app.token_accounting.total_cache_reported_input_tokens = app
+                        .token_accounting.total_cache_reported_input_tokens
                         .saturating_add(reported_delta);
-                    app.total_cache_read_tokens = app.total_cache_read_tokens.saturating_add(
-                        app.streaming_cache_read_tokens
+                    app.token_accounting.total_cache_read_tokens = app.token_accounting.total_cache_read_tokens.saturating_add(
+                        app.streaming.streaming_cache_read_tokens
                             .unwrap_or(0)
                             .saturating_sub(previous_cache_read.unwrap_or(0)),
                     );
-                    app.total_cache_creation_tokens =
-                        app.total_cache_creation_tokens.saturating_add(
-                            app.streaming_cache_creation_tokens
+                    app.token_accounting.total_cache_creation_tokens =
+                        app.token_accounting.total_cache_creation_tokens.saturating_add(
+                            app.streaming.streaming_cache_creation_tokens
                                 .unwrap_or(0)
                                 .saturating_sub(previous_cache_creation.unwrap_or(0)),
                         );
-                    app.last_cache_reported_input_tokens = Some(input);
-                    app.last_cache_read_tokens = Some(app.streaming_cache_read_tokens.unwrap_or(0));
-                    app.last_cache_creation_tokens =
-                        Some(app.streaming_cache_creation_tokens.unwrap_or(0));
+                    app.token_accounting.last_cache_reported_input_tokens = Some(input);
+                    app.token_accounting.last_cache_read_tokens = Some(app.streaming.streaming_cache_read_tokens.unwrap_or(0));
+                    app.token_accounting.last_cache_creation_tokens =
+                        Some(app.streaming.streaming_cache_creation_tokens.unwrap_or(0));
                 }
 
-                if let Some(baseline) = app.kv_cache_baseline.as_mut() {
+                if let Some(baseline) = app.kv_cache.kv_cache_baseline.as_mut() {
                     baseline.input_tokens = input;
                     baseline.completed_at = Instant::now();
                 }
-                app.cache_next_optimal_input_tokens =
+                app.token_accounting.cache_next_optimal_input_tokens =
                     Some(crate::tui::info_widget::effective_prompt_tokens(
                         input,
-                        app.streaming_cache_read_tokens.unwrap_or(0),
-                        app.streaming_cache_creation_tokens.unwrap_or(0),
+                        app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+                        app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
                     ));
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
@@ -564,7 +600,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.current_message_id,
                 app.is_processing,
                 app.status,
-                app.streaming_text.len(),
+                app.streaming.streaming_text.len(),
                 app.pending_soft_interrupts.len(),
                 app.queued_messages.len()
             ));
@@ -579,18 +615,18 @@ pub(in crate::tui::app) fn handle_server_event(
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.append_streaming_text(&chunk);
             }
-            if !app.streaming_text.is_empty() {
+            if !app.streaming.streaming_text.is_empty() {
                 let content = app.take_streaming_text();
                 let content = app.collapse_reasoning_for_commit(content);
                 if !content.trim().is_empty() {
-                app.push_display_message(DisplayMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    tool_calls: Vec::new(),
-                    duration_secs: app.display_turn_duration_secs(),
-                    title: None,
-                    tool_data: None,
-                });
+                    app.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls: Vec::new(),
+                        duration_secs: app.display_turn_duration_secs(),
+                        title: None,
+                        tool_data: None,
+                    });
                 }
             }
             app.clear_streaming_render_state();
@@ -632,7 +668,7 @@ pub(in crate::tui::app) fn handle_server_event(
             let has_resumed_turn_evidence = had_remote_resume_activity
                 || app.stream_message_ended
                 || app.has_streaming_footer_stats()
-                || !app.streaming_text.is_empty()
+                || !app.streaming.streaming_text.is_empty()
                 || !app.streaming_tool_calls.is_empty()
                 || matches!(
                     app.status,
@@ -653,19 +689,19 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.append_streaming_text(&chunk);
                 }
                 app.pause_streaming_tps(false);
-                if !app.streaming_text.is_empty() {
+                if !app.streaming.streaming_text.is_empty() {
                     let duration = app.display_turn_duration_secs();
                     let content = app.take_streaming_text();
                     let content = app.collapse_reasoning_for_commit(content);
                     if !content.trim().is_empty() {
-                    app.push_display_message(DisplayMessage {
-                        role: "assistant".to_string(),
-                        content,
-                        tool_calls: vec![],
-                        duration_secs: duration,
-                        title: None,
-                        tool_data: None,
-                    });
+                        app.push_display_message(DisplayMessage {
+                            role: "assistant".to_string(),
+                            content,
+                            tool_calls: vec![],
+                            duration_secs: duration,
+                            title: None,
+                            tool_data: None,
+                        });
                     }
                     app.push_turn_footer(duration);
                 } else if app.has_streaming_footer_stats() {
@@ -946,7 +982,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 server_has_update,
                 server_version.as_deref(),
             ) {
-                let client_detected_stale = server_has_update.is_none();
+                let client_detected_stale = server_release_is_older_than_client(
+                    server_version.as_deref(),
+                    &client_release_version(),
+                );
                 app.remote_server_version = server_version;
                 app.remote_server_short_name = server_name.clone();
                 app.remote_server_icon = server_icon.clone();
@@ -954,11 +993,29 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pending_server_reload = true;
                 app.clear_remote_startup_phase();
                 if client_detected_stale {
-                    // The server was too old to self-report an update
-                    // (server_has_update: None), but we independently measured
-                    // its release version as older than ours. This is the
-                    // issue #295 case: a pre-self-heal daemon that would
-                    // otherwise reject newer protocol requests (e.g. set_route).
+                    // The client independently measured the server's release as
+                    // older than its own. This covers both a pre-self-heal daemon
+                    // (server_has_update: None) AND a daemon that self-reports
+                    // "no update" because its own shared-server channel still
+                    // points at its old binary (the "current client, stale
+                    // server" report). Repair the channel client-side so the
+                    // forced reload below has a strictly-newer binary to exec
+                    // into instead of re-execing the same old build.
+                    match crate::build::repair_stale_shared_server_channel() {
+                        Ok(crate::build::SharedServerRepair::Repaired { repaired_to, .. }) => {
+                            crate::logging::info(&format!(
+                                "stale-server repair: repointed shared-server channel to {} before reloading older server",
+                                repaired_to
+                            ));
+                        }
+                        Ok(crate::build::SharedServerRepair::AlreadyCurrent) => {}
+                        Err(err) => {
+                            crate::logging::warn(&format!(
+                                "stale-server repair: failed to repoint shared-server channel: {}",
+                                err
+                            ));
+                        }
+                    }
                     app.set_status_notice(
                         "Connected server is an older release; reloading it before attach",
                     );
@@ -997,25 +1054,25 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.thought_line_inserted = false;
                 app.thinking_prefix_emitted = false;
                 app.thinking_buffer.clear();
-                app.streaming_input_tokens = 0;
-                app.streaming_output_tokens = 0;
-                app.streaming_cache_read_tokens = None;
-                app.streaming_cache_creation_tokens = None;
-                app.current_api_usage_recorded = false;
-                app.total_cache_reported_input_tokens = 0;
-                app.total_cache_read_tokens = 0;
-                app.total_cache_creation_tokens = 0;
-                app.total_cache_optimal_input_tokens = 0;
-                app.last_cache_reported_input_tokens = None;
-                app.last_cache_read_tokens = None;
-                app.last_cache_creation_tokens = None;
-                app.last_cache_optimal_input_tokens = None;
-                app.cache_next_optimal_input_tokens = None;
-                app.kv_cache_baseline = None;
-                app.pending_kv_cache_request = None;
-                app.kv_cache_turn_number = None;
-                app.kv_cache_turn_call_index = 0;
-                app.kv_cache_miss_samples.clear();
+                app.streaming.streaming_input_tokens = 0;
+                app.streaming.streaming_output_tokens = 0;
+                app.streaming.streaming_cache_read_tokens = None;
+                app.streaming.streaming_cache_creation_tokens = None;
+                app.kv_cache.current_api_usage_recorded = false;
+                app.token_accounting.total_cache_reported_input_tokens = 0;
+                app.token_accounting.total_cache_read_tokens = 0;
+                app.token_accounting.total_cache_creation_tokens = 0;
+                app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.last_cache_reported_input_tokens = None;
+                app.token_accounting.last_cache_read_tokens = None;
+                app.token_accounting.last_cache_creation_tokens = None;
+                app.token_accounting.last_cache_optimal_input_tokens = None;
+                app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.kv_cache.kv_cache_baseline = None;
+                app.kv_cache.pending_kv_cache_request = None;
+                app.kv_cache.kv_cache_turn_number = None;
+                app.kv_cache.kv_cache_turn_call_index = 0;
+                app.kv_cache.kv_cache_miss_samples.clear();
                 app.processing_started = None;
                 app.clear_visible_turn_started();
                 app.replay_processing_started_ms = None;
@@ -1093,12 +1150,12 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_token_usage_totals = token_usage_totals;
             }
             if token_usage_totals.is_some() {
-                app.total_input_tokens = 0;
-                app.total_output_tokens = 0;
-                app.total_cache_reported_input_tokens = 0;
-                app.total_cache_read_tokens = 0;
-                app.total_cache_creation_tokens = 0;
-                app.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_input_tokens = 0;
+                app.token_accounting.total_output_tokens = 0;
+                app.token_accounting.total_cache_reported_input_tokens = 0;
+                app.token_accounting.total_cache_read_tokens = 0;
+                app.token_accounting.total_cache_creation_tokens = 0;
+                app.token_accounting.total_cache_optimal_input_tokens = 0;
             }
             if let Some(totals) = token_usage_totals {
                 crate::logging::info(&format!(
@@ -1112,7 +1169,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     totals.cache_creation_input_tokens
                 ));
             }
-            crate::tui::workspace_client::sync_after_history(&session_id, &app.remote_sessions);
+            app.workspace_client.sync_after_history(&session_id, &app.remote_sessions);
 
             if server_has_update == Some(true) && !app.pending_server_reload {
                 app.pending_server_reload = true;
@@ -1622,19 +1679,19 @@ pub(in crate::tui::app) fn handle_server_event(
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.append_streaming_text(&chunk);
             }
-            if !app.streaming_text.is_empty() {
+            if !app.streaming.streaming_text.is_empty() {
                 let duration = app.display_turn_duration_secs();
                 let flushed = app.take_streaming_text();
                 let flushed = app.collapse_reasoning_for_commit(flushed);
                 if !flushed.trim().is_empty() {
-                app.push_display_message(DisplayMessage {
-                    role: "assistant".to_string(),
-                    content: flushed,
-                    tool_calls: vec![],
-                    duration_secs: duration,
-                    title: None,
-                    tool_data: None,
-                });
+                    app.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: flushed,
+                        tool_calls: vec![],
+                        duration_secs: duration,
+                        title: None,
+                        tool_data: None,
+                    });
                 }
                 app.push_turn_footer(duration);
             }
@@ -1816,7 +1873,7 @@ pub(in crate::tui::app) fn handle_server_event(
             new_session_name,
             ..
         } => {
-            if crate::tui::workspace_client::handle_split_response(&new_session_id) {
+            if app.workspace_client.handle_split_response(&new_session_id) {
                 finish_remote_split_launch(app);
                 app.pending_split_request = false;
                 app.pending_split_startup_message = None;

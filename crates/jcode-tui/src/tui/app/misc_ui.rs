@@ -84,39 +84,39 @@ impl ResolvedTokenPricing {
 /// Update cost calculation based on token usage (for API-key providers)
 impl App {
     pub(super) fn current_streaming_tps_elapsed(&self) -> Duration {
-        let mut elapsed = self.streaming_tps_elapsed;
-        if let Some(start) = self.streaming_tps_start {
+        let mut elapsed = self.streaming.streaming_tps_elapsed;
+        if let Some(start) = self.streaming.streaming_tps_start {
             elapsed += start.elapsed();
         }
         elapsed
     }
 
     pub(super) fn snapshot_streaming_tps(&mut self) {
-        self.streaming_tps_observed_output_tokens = self.streaming_total_output_tokens;
-        self.streaming_tps_observed_elapsed = self.current_streaming_tps_elapsed();
+        self.streaming.streaming_tps_observed_output_tokens = self.streaming.streaming_total_output_tokens;
+        self.streaming.streaming_tps_observed_elapsed = self.current_streaming_tps_elapsed();
     }
 
     pub(super) fn resume_streaming_tps(&mut self) {
-        self.streaming_tps_collect_output = true;
-        if self.streaming_tps_start.is_none() {
-            self.streaming_tps_start = Some(Instant::now());
+        self.streaming.streaming_tps_collect_output = true;
+        if self.streaming.streaming_tps_start.is_none() {
+            self.streaming.streaming_tps_start = Some(Instant::now());
         }
     }
 
     pub(super) fn pause_streaming_tps(&mut self, keep_collecting_output: bool) {
-        if let Some(start) = self.streaming_tps_start.take() {
-            self.streaming_tps_elapsed += start.elapsed();
+        if let Some(start) = self.streaming.streaming_tps_start.take() {
+            self.streaming.streaming_tps_elapsed += start.elapsed();
         }
-        self.streaming_tps_collect_output = keep_collecting_output;
+        self.streaming.streaming_tps_collect_output = keep_collecting_output;
     }
 
     pub(super) fn reset_streaming_tps(&mut self) {
-        self.streaming_tps_start = None;
-        self.streaming_tps_elapsed = Duration::ZERO;
-        self.streaming_tps_collect_output = false;
-        self.streaming_total_output_tokens = 0;
-        self.streaming_tps_observed_output_tokens = 0;
-        self.streaming_tps_observed_elapsed = Duration::ZERO;
+        self.streaming.streaming_tps_start = None;
+        self.streaming.streaming_tps_elapsed = Duration::ZERO;
+        self.streaming.streaming_tps_collect_output = false;
+        self.streaming.streaming_total_output_tokens = 0;
+        self.streaming.streaming_tps_observed_output_tokens = 0;
+        self.streaming.streaming_tps_observed_elapsed = Duration::ZERO;
     }
 
     pub(super) fn open_usage_inline_loading(&mut self) {
@@ -160,14 +160,22 @@ impl App {
         let runtime_provider = active_runtime_provider_key();
         let auth_status = crate::auth::AuthStatus::check_fast();
 
-        let is_explicit_anthropic_api = matches!(
+        let pinned_anthropic = jcode_provider_core::pinned_mode_for(
+            jcode_provider_core::DualAuthProvider::Anthropic,
             runtime_provider.as_deref(),
-            Some("claude-api" | "anthropic-api")
         );
+        let pinned_openai = jcode_provider_core::pinned_mode_for(
+            jcode_provider_core::DualAuthProvider::OpenAI,
+            runtime_provider.as_deref(),
+        );
+        let is_explicit_anthropic_api =
+            matches!(pinned_anthropic, Some(jcode_provider_core::AuthMode::ApiKey));
         let is_explicit_anthropic_oauth =
-            matches!(runtime_provider.as_deref(), Some("claude" | "anthropic"));
-        let is_explicit_openai_api = matches!(runtime_provider.as_deref(), Some("openai-api"));
-        let is_explicit_openai_oauth = matches!(runtime_provider.as_deref(), Some("openai"));
+            matches!(pinned_anthropic, Some(jcode_provider_core::AuthMode::Oauth));
+        let is_explicit_openai_api =
+            matches!(pinned_openai, Some(jcode_provider_core::AuthMode::ApiKey));
+        let is_explicit_openai_oauth =
+            matches!(pinned_openai, Some(jcode_provider_core::AuthMode::Oauth));
 
         let is_anthropic = provider_name.contains("anthropic") || provider_name.contains("claude");
         let is_openai = provider_name.contains("openai");
@@ -211,9 +219,9 @@ impl App {
         // Pricing in $/1M tokens. Anthropic resolves real per-model pricing in
         // refresh_cached_pricing; other providers fall back to the generic
         // defaults cached here.
-        let prompt_price = *self.cached_prompt_price.get_or_insert(15.0);
-        let completion_price = *self.cached_completion_price.get_or_insert(60.0);
-        let cache_read_price = self.cached_cache_read_price;
+        let prompt_price = *self.cost.cached_prompt_price.get_or_insert(15.0);
+        let completion_price = *self.cost.cached_completion_price.get_or_insert(60.0);
+        let cache_read_price = self.cost.cached_cache_read_price;
 
         let pricing = ResolvedTokenPricing {
             prompt_price,
@@ -222,11 +230,11 @@ impl App {
             is_anthropic,
         };
 
-        self.total_cost += pricing.cost_for_usage(
-            self.streaming_input_tokens,
-            self.streaming_output_tokens,
-            self.streaming_cache_read_tokens.unwrap_or(0),
-            self.streaming_cache_creation_tokens.unwrap_or(0),
+        self.cost.total_cost += pricing.cost_for_usage(
+            self.streaming.streaming_input_tokens,
+            self.streaming.streaming_output_tokens,
+            self.streaming.streaming_cache_read_tokens.unwrap_or(0),
+            self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
     }
 
@@ -258,7 +266,7 @@ impl App {
         let Some(pricing) = self.resolve_remote_cost_pricing() else {
             return;
         };
-        self.total_cost += pricing.cost_for_usage(
+        self.cost.total_cost += pricing.cost_for_usage(
             input_delta,
             output_delta,
             cache_read_delta,
@@ -308,9 +316,9 @@ impl App {
 
         self.refresh_cached_pricing(&model, is_anthropic, is_openai);
         Some(ResolvedTokenPricing {
-            prompt_price: *self.cached_prompt_price.get_or_insert(15.0),
-            completion_price: *self.cached_completion_price.get_or_insert(60.0),
-            cache_read_price: self.cached_cache_read_price,
+            prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
+            completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
+            cache_read_price: self.cost.cached_cache_read_price,
             is_anthropic,
         })
     }
@@ -320,7 +328,7 @@ impl App {
     /// (input, output and cache-read) so the API-key cost figure is accurate per
     /// model. Re-resolves when the active model changes.
     fn refresh_cached_pricing(&mut self, model: &str, is_anthropic: bool, is_openai: bool) {
-        if self.cached_price_model.as_deref() == Some(model) {
+        if self.cost.cached_price_model.as_deref() == Some(model) {
             return;
         }
 
@@ -334,21 +342,21 @@ impl App {
         };
 
         if let Some(estimate) = estimate {
-            self.cached_prompt_price = per_mtok(estimate.input_price_per_mtok_micros);
-            self.cached_completion_price = per_mtok(estimate.output_price_per_mtok_micros);
-            self.cached_cache_read_price = per_mtok(estimate.cache_read_price_per_mtok_micros);
-            self.cached_price_model = Some(model.to_string());
+            self.cost.cached_prompt_price = per_mtok(estimate.input_price_per_mtok_micros);
+            self.cost.cached_completion_price = per_mtok(estimate.output_price_per_mtok_micros);
+            self.cost.cached_cache_read_price = per_mtok(estimate.cache_read_price_per_mtok_micros);
+            self.cost.cached_price_model = Some(model.to_string());
             return;
         }
 
         // Unknown model: leave existing defaults in place but remember the model
         // so we do not repeatedly attempt resolution for it.
-        self.cached_price_model = Some(model.to_string());
+        self.cost.cached_price_model = Some(model.to_string());
     }
 
     pub(super) fn compute_streaming_tps(&self) -> Option<f32> {
-        let elapsed_secs = self.streaming_tps_observed_elapsed.as_secs_f32();
-        let total_tokens = self.streaming_tps_observed_output_tokens;
+        let elapsed_secs = self.streaming.streaming_tps_observed_elapsed.as_secs_f32();
+        let total_tokens = self.streaming.streaming_tps_observed_output_tokens;
         if elapsed_secs > 0.1 && total_tokens > 0 {
             Some(total_tokens as f32 / elapsed_secs)
         } else {

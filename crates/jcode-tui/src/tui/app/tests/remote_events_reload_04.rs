@@ -645,8 +645,8 @@ fn test_info_widget_remote_opencode_shows_cost_based_usage() {
     app.is_remote = true;
     app.remote_provider_name = Some("opencode".to_string());
     app.remote_provider_model = Some("qwen3-coder".to_string());
-    app.total_input_tokens = 12_000;
-    app.total_output_tokens = 3_400;
+    app.token_accounting.total_input_tokens = 12_000;
+    app.token_accounting.total_output_tokens = 3_400;
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -673,8 +673,8 @@ fn test_info_widget_remote_anthropic_api_key_shows_cost_based_usage() {
     app.remote_provider_name = Some("Claude".to_string());
     app.remote_provider_model = Some("claude-sonnet-4-20250514".to_string());
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
-    app.total_input_tokens = 12_000;
-    app.total_output_tokens = 3_400;
+    app.token_accounting.total_input_tokens = 12_000;
+    app.token_accounting.total_output_tokens = 3_400;
 
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
@@ -773,14 +773,14 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         crate::auth::AuthStatus::invalidate_cache();
 
         let mut app = create_named_provider_test_app(provider_name, model);
-        app.streaming_input_tokens = 1_000;
-        app.streaming_output_tokens = 1_000;
-        app.total_input_tokens = 12_000;
-        app.total_output_tokens = 3_400;
+        app.streaming.streaming_input_tokens = 1_000;
+        app.streaming.streaming_output_tokens = 1_000;
+        app.token_accounting.total_input_tokens = 12_000;
+        app.token_accounting.total_output_tokens = 3_400;
         app.update_cost_impl();
 
         assert!(
-            app.total_cost > 0.0,
+            app.cost.total_cost > 0.0,
             "{runtime_provider} should accrue token cost"
         );
 
@@ -802,12 +802,12 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "jcode");
     crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
     let mut app = create_named_provider_test_app("openrouter", "subscription-model");
-    app.streaming_input_tokens = 1_000;
-    app.streaming_output_tokens = 1_000;
-    app.total_input_tokens = 12_000;
-    app.total_output_tokens = 3_400;
+    app.streaming.streaming_input_tokens = 1_000;
+    app.streaming.streaming_output_tokens = 1_000;
+    app.token_accounting.total_input_tokens = 12_000;
+    app.token_accounting.total_output_tokens = 3_400;
     app.update_cost_impl();
-    assert_eq!(app.total_cost, 0.0);
+    assert_eq!(app.cost.total_cost, 0.0);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
@@ -819,12 +819,12 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-compatible");
     crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
     let mut app = create_named_provider_test_app("openrouter", "local-model");
-    app.streaming_input_tokens = 1_000;
-    app.streaming_output_tokens = 1_000;
-    app.total_input_tokens = 12_000;
-    app.total_output_tokens = 3_400;
+    app.streaming.streaming_input_tokens = 1_000;
+    app.streaming.streaming_output_tokens = 1_000;
+    app.token_accounting.total_input_tokens = 12_000;
+    app.token_accounting.total_output_tokens = 3_400;
     app.update_cost_impl();
-    assert_eq!(app.total_cost, 0.0);
+    assert_eq!(app.cost.total_cost, 0.0);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
@@ -864,10 +864,10 @@ fn test_anthropic_api_cost_accounts_for_split_cache_tokens() {
 
     // A representative cold turn: most of the prompt is freshly written to cache,
     // a little is read back, and only a small uncached remainder is fresh input.
-    app.streaming_input_tokens = 1_000; // uncached fresh input
-    app.streaming_cache_read_tokens = Some(40_000); // served from cache
-    app.streaming_cache_creation_tokens = Some(100_000); // written to cache (premium)
-    app.streaming_output_tokens = 2_000;
+    app.streaming.streaming_input_tokens = 1_000; // uncached fresh input
+    app.streaming.streaming_cache_read_tokens = Some(40_000); // served from cache
+    app.streaming.streaming_cache_creation_tokens = Some(100_000); // written to cache (premium)
+    app.streaming.streaming_output_tokens = 2_000;
     app.update_cost_impl();
 
     // Expected:
@@ -878,9 +878,9 @@ fn test_anthropic_api_cost_accounts_for_split_cache_tokens() {
     //   total                                = $0.645
     let expected = 0.003 + 0.030 + 0.012 + 0.600;
     assert!(
-        (app.total_cost - expected).abs() < 1e-4,
+        (app.cost.total_cost - expected).abs() < 1e-4,
         "anthropic split-accounting cost should be ~${expected:.4}, got ${:.4}",
-        app.total_cost
+        app.cost.total_cost
     );
 
     if let Some(value) = saved_runtime {
@@ -925,12 +925,12 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
     //   + write 100_000 * ($3 * 2x) = $0.645
     let expected = 0.003 + 0.030 + 0.012 + 0.600;
     assert!(
-        (app.total_cost - expected).abs() < 1e-4,
+        (app.cost.total_cost - expected).abs() < 1e-4,
         "remote anthropic api-key cost should be ~${expected:.4}, got ${:.4}",
-        app.total_cost
+        app.cost.total_cost
     );
-    assert_eq!(app.total_input_tokens, 1_000);
-    assert_eq!(app.total_output_tokens, 2_000);
+    assert_eq!(app.token_accounting.total_input_tokens, 1_000);
+    assert_eq!(app.token_accounting.total_output_tokens, 2_000);
 
     // OAuth subscription sessions are not metered per token; cost stays $0.
     let mut oauth_app = create_test_app();
@@ -948,8 +948,8 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
         },
         &mut remote,
     );
-    assert_eq!(oauth_app.total_cost, 0.0);
-    assert_eq!(oauth_app.total_input_tokens, 1_000);
+    assert_eq!(oauth_app.cost.total_cost, 0.0);
+    assert_eq!(oauth_app.token_accounting.total_input_tokens, 1_000);
 }
 
 #[test]

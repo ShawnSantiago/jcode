@@ -80,9 +80,17 @@ pub(super) fn single_session_styled_text_buffer_with_opacity(
     buffer.set_size(font_system, width, height);
     buffer.set_wrap(font_system, wrap);
     let segments = single_session_styled_text_segments_with_opacity(lines, opacity);
-    // Inline span geometry uses glyphon cursors with byte offsets. Basic shaping
-    // reports glyph clusters relative to each styled run, so spans after a
-    // multi-byte marker or a style boundary can shift their pills into prose.
+    // Inline span geometry uses glyphon cursors with byte offsets, and the
+    // glyphon `highlight()` API used to position inline-code/math pills only
+    // works on Advanced-shaped buffers. So any line carrying inline spans must be
+    // Advanced-shaped regardless of script. Advanced shaping is also required for
+    // text containing complex scripts, combining marks, or joiner sequences.
+    //
+    // The expensive case on real transcripts was emoji-rich *prose* lines (no
+    // inline spans): standalone pictographic emoji render identically under Basic
+    // and Advanced shaping, so `char_needs_advanced_shaping` no longer escalates
+    // for them. That keeps the visible-window reshape on every scroll frame cheap
+    // while preserving correct pill geometry for code/math spans.
     let shaping = if lines.iter().any(|line| !line.inline_spans.is_empty())
         || segments
             .iter()
@@ -125,9 +133,16 @@ pub(super) fn char_needs_advanced_shaping(ch: char) -> bool {
             | 0x0590..=0x08FF
             | 0x0900..=0x0DFF
             | 0x1780..=0x18AF
-            // Emoji and symbol sequences often depend on variation selectors / ZWJ.
-            | 0x1F000..=0x1FAFF
+            // Regional indicators combine into flag emoji (pairs need shaping).
+            | 0x1F1E6..=0x1F1FF
     )
+    // Note: standalone pictographic emoji and symbols (e.g. 🔄 ⬜ → ✓) render
+    // identically under Basic and Advanced shaping (single fallback glyph each),
+    // so they intentionally do NOT force Advanced shaping here. Advanced shaping
+    // is several times more expensive and is the dominant per-frame cost when
+    // scrolling emoji-rich transcripts. Only sequences that actually depend on
+    // ligature/joiner shaping (variation selectors, ZWJ, regional-indicator flag
+    // pairs) escalate, which the ranges above already cover.
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

@@ -590,8 +590,13 @@ fn test_submit_input_commits_pending_streaming_assistant_text_before_user_messag
             intent: None, thought_signature: None, },
     ));
     app.bump_display_messages_version();
-    app.streaming_text = "Here is the final paragraph".to_string();
-    assert_eq!(app.stream_buffer.push(" that was still buffered."), None);
+    app.streaming.streaming_text = "Here is the final paragraph".to_string();
+    // Mirror the real streaming caller: append any paced chunk the buffer reveals.
+    // The paced StreamBuffer may reveal part of the text immediately, so commit
+    // (below) must still flush the remainder.
+    if let Some(chunk) = app.stream_buffer.push(" that was still buffered.") {
+        app.append_streaming_text(&chunk);
+    }
 
     app.input = "follow up".to_string();
     app.cursor_pos = app.input.len();
@@ -731,6 +736,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                group: None,
                 id: "todo-1".to_string(),
                 content: "Carry this forward".to_string(),
                 status: "pending".to_string(),
@@ -866,6 +872,7 @@ fn test_escape_interrupt_disables_auto_poke_while_processing() {
     app.queued_messages
         .push(super::commands::build_poke_message(&[
             crate::todo::TodoItem {
+                group: None,
                 id: "todo-1".to_string(),
                 content: "keep going".to_string(),
                 status: "pending".to_string(),

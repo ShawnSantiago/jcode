@@ -201,6 +201,46 @@ fn is_error_copy_content(content: &str) -> bool {
     trimmed.starts_with("Error:") || trimmed.starts_with("error:") || trimmed.starts_with("Failed:")
 }
 
+/// Build the image regions for an image/mermaid placeholder in `wrapped_lines`,
+/// where each placeholder "owns" the run of blank lines that follow it.
+///
+/// Done in a single reverse pass that precomputes, for every line, the length
+/// of the blank run starting at that line. The previous implementation scanned
+/// forward through the trailing blanks for every placeholder, which is O(L^2)
+/// when a message has many placeholders each followed by long blank runs.
+fn compute_image_regions(wrapped_lines: &[ratatui::text::Line<'static>]) -> Vec<ImageRegion> {
+    fn is_blank_line(line: &ratatui::text::Line<'static>) -> bool {
+        line.spans.is_empty()
+            || (line.spans.len() == 1 && line.spans[0].content.is_empty())
+    }
+
+    let len = wrapped_lines.len();
+    // blank_run[i] = number of consecutive blank lines starting at index i.
+    let mut blank_run = vec![0usize; len + 1];
+    for idx in (0..len).rev() {
+        blank_run[idx] = if is_blank_line(&wrapped_lines[idx]) {
+            blank_run[idx + 1] + 1
+        } else {
+            0
+        };
+    }
+
+    let mut image_regions = Vec::new();
+    for (idx, line) in wrapped_lines.iter().enumerate() {
+        if let Some(hash) = super::super::mermaid::parse_image_placeholder(line) {
+            // The placeholder line plus the blank run immediately after it.
+            let height = (1 + blank_run[idx + 1]).min(u16::MAX as usize) as u16;
+            image_regions.push(ImageRegion {
+                abs_line_idx: idx,
+                end_line: idx + height as usize,
+                hash,
+                height,
+            });
+        }
+    }
+    image_regions
+}
+
 fn error_copy_target(content: &str, rendered_line_count: usize) -> Option<RawCopyTarget> {
     copy_target_for_kind(CopyTargetKind::Error, content, rendered_line_count)
 }
@@ -751,10 +791,13 @@ pub(super) fn prepare_body_incremental(
     let pending_count = input_ui::pending_prompt_count(app);
     let prompt_number_offset = app.compacted_hidden_user_prompts();
 
-    let mut prompt_num = messages[..prev_msg_count]
-        .iter()
-        .filter(|m| m.effective_role() == "user")
-        .count();
+    // The number of user prompts already rendered equals the number of cached
+    // user prompt texts. Re-counting `messages[..prev_msg_count]` here on every
+    // incremental append rescans the whole prior transcript, making a session
+    // that grows one message at a time O(n^2). `prev.user_prompt_texts` is
+    // extended in lockstep with each rendered user message, so its length is the
+    // exact prior prompt count.
+    let mut prompt_num = prev.user_prompt_texts.len();
 
     let mut new_lines: Vec<Line> = Vec::new();
     let mut new_user_line_indices: Vec<usize> = Vec::new();
@@ -908,6 +951,20 @@ pub(super) fn prepare_body_incremental(
                     content_width,
                     app.diff_mode(),
                     render_system_message,
+                );
+                for line in cached {
+                    new_lines.push(align_if_unset(line, align));
+                    new_line_raw_overrides.push(None);
+                    new_line_copy_offsets.push(0);
+                }
+            }
+            "reasoning" => {
+                let content_width = width.saturating_sub(4);
+                let cached = get_cached_message_lines(
+                    msg,
+                    content_width,
+                    app.diff_mode(),
+                    render_reasoning_message,
                 );
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
@@ -1385,6 +1442,20 @@ pub(super) fn prepare_body(
                     line_copy_offsets.push(0);
                 }
             }
+            "reasoning" => {
+                let content_width = width.saturating_sub(4);
+                let cached = get_cached_message_lines(
+                    msg,
+                    content_width,
+                    app.diff_mode(),
+                    render_reasoning_message,
+                );
+                for line in cached {
+                    lines.push(align_if_unset(line, align));
+                    line_raw_overrides.push(None);
+                    line_copy_offsets.push(0);
+                }
+            }
             "background_task" => {
                 let content_width = width.saturating_sub(4);
                 let cached = get_cached_message_lines(
@@ -1613,27 +1684,7 @@ fn wrap_lines(
         wrapped_idx += count;
     }
 
-    let mut image_regions = Vec::new();
-    for (idx, line) in wrapped_lines.iter().enumerate() {
-        if let Some(hash) = super::super::mermaid::parse_image_placeholder(line) {
-            let mut height = 1u16;
-            for subsequent in wrapped_lines.iter().skip(idx + 1) {
-                if subsequent.spans.is_empty()
-                    || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
-                {
-                    height += 1;
-                } else {
-                    break;
-                }
-            }
-            image_regions.push(ImageRegion {
-                abs_line_idx: idx,
-                end_line: idx + height as usize,
-                hash,
-                height,
-            });
-        }
-    }
+    let image_regions = compute_image_regions(&wrapped_lines);
 
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
@@ -1732,27 +1783,7 @@ fn wrap_lines_with_map(
     }
     raw_to_wrapped.push(wrapped_idx);
 
-    let mut image_regions = Vec::new();
-    for (idx, line) in wrapped_lines.iter().enumerate() {
-        if let Some(hash) = super::super::mermaid::parse_image_placeholder(line) {
-            let mut height = 1u16;
-            for subsequent in wrapped_lines.iter().skip(idx + 1) {
-                if subsequent.spans.is_empty()
-                    || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
-                {
-                    height += 1;
-                } else {
-                    break;
-                }
-            }
-            image_regions.push(ImageRegion {
-                abs_line_idx: idx,
-                end_line: idx + height as usize,
-                hash,
-                height,
-            });
-        }
-    }
+    let image_regions = compute_image_regions(&wrapped_lines);
 
     let mut edit_tool_ranges = Vec::new();
     for (msg_idx, file_path, raw_start, raw_end, expandable) in edit_ranges {

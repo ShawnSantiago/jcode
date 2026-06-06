@@ -116,6 +116,39 @@ fn test_copy_selection_select_all_uses_rendered_chat_text_without_copy_badges() 
 }
 
 #[test]
+fn test_copy_selection_metrics_match_built_selection_text() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_copy_test_app();
+
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+    assert!(app.select_all_in_copy_mode());
+
+    // The allocation-free metrics path used by the status line must agree with
+    // the char/line counts of the actually-built selection text.
+    let range = app
+        .normalized_copy_selection()
+        .expect("normalized selection range");
+    let text = app
+        .current_copy_selection_text()
+        .expect("selection text for full transcript");
+    let (chars, lines) =
+        crate::tui::ui::copy_selection_metrics(range).expect("selection metrics");
+
+    assert_eq!(
+        chars,
+        text.chars().count(),
+        "metrics char count should match built selection text"
+    );
+    assert_eq!(
+        lines,
+        text.lines().count().max(1),
+        "metrics line count should match built selection text"
+    );
+}
+
+#[test]
 fn test_copy_selection_full_user_prompt_line_skips_prompt_chrome() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_copy_test_app();
@@ -780,7 +813,7 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming_text.clear();
+    app.streaming.streaming_text.clear();
     app.status = ProcessingStatus::Idle;
 
     let backend = ratatui::backend::TestBackend::new(60, 12);
@@ -904,7 +937,7 @@ fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming_text.clear();
+    app.streaming.streaming_text.clear();
     app.status = ProcessingStatus::Idle;
 
     let backend = ratatui::backend::TestBackend::new(60, 16);
@@ -976,6 +1009,242 @@ fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
     assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(
         &app
     ));
+}
+
+#[test]
+fn test_copy_selection_drag_to_bottom_edge_when_pinned_does_not_snap_or_autoscroll() {
+    // Regression: when the transcript is already pinned to the bottom (the common
+    // case), dragging a selection into the bottom edge "hot zone" used to always
+    // snap the cursor to the very last visible line and arm a downward autoscroll,
+    // even though there is nothing more below to scroll into. That made it
+    // impossible to precisely highlight the bottom rows: the selection kept
+    // jumping to the end. With nothing to scroll, the edge band must stay inert so
+    // the selection lands on the exact line under the cursor.
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    // Tall transcript pinned to the bottom: the bottom rows of the pane are
+    // filled with real content, and there is nothing below to scroll into.
+    let lines = (1..=200)
+        .map(|idx| format!("line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+
+    let backend = ratatui::backend::TestBackend::new(60, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+    let line_count = crate::tui::ui::copy_viewport_line_count().expect("line count");
+    assert_eq!(
+        visible_end, line_count,
+        "test precondition: view must be pinned to the bottom with no content below"
+    );
+    assert!(
+        visible_start > 0,
+        "test precondition: tall transcript must have content scrolled above the view"
+    );
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let area = layout.messages_area;
+    let col = area.x + 1;
+
+    // Pick a real content line near (but not at) the bottom to target.
+    let target_line = visible_end.saturating_sub(2);
+    assert!(target_line >= visible_start, "need a visible target line");
+    let target_row = area.y + (target_line - visible_start) as u16;
+    // The bottom edge band covers the last few rows; target_row must sit inside
+    // it for this regression to be meaningful.
+    let last_row = area.y + area.height - 1;
+    assert!(
+        target_row >= last_row.saturating_sub(2),
+        "target line must fall within the bottom edge hot zone"
+    );
+
+    // Anchor higher up in the viewport.
+    let anchor_row = area.y + 1;
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row: anchor_row,
+        modifiers: KeyModifiers::empty(),
+    });
+    let before_scroll = app.scroll_offset();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: col,
+        row: target_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    // No autoscroll should be armed: there is nothing below to pull in.
+    assert!(
+        !crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app),
+        "edge autoscroll must not arm when pinned to the bottom with no content below"
+    );
+    assert_eq!(
+        app.scroll_offset(),
+        before_scroll,
+        "dragging into the bottom band while pinned must not scroll"
+    );
+
+    // The selection end should land on the exact line under the cursor, not snap
+    // to the very last line of the transcript.
+    let range = app.normalized_copy_selection().expect("normalized range");
+    assert_eq!(
+        range.end.abs_line, target_line,
+        "selection should extend to the line under the cursor, not snap to the last line"
+    );
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col,
+        row: target_row,
+        modifiers: KeyModifiers::empty(),
+    });
+}
+
+#[test]
+fn test_copy_selection_drag_below_last_line_fully_selects_last_line() {
+    // Dragging *past* the last content line (into the empty area below the
+    // chat pane) should fully select that last line through its end, just like
+    // native terminal and browser selection. The chat pane is sized to its
+    // content, so a downward drag that overshoots reports a row at/below the
+    // bottom boundary that maps to no line at all; that used to silently drop
+    // the extension so the bottom line could never be fully highlighted.
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    let lines = (1..=6)
+        .map(|idx| format!("line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+
+    // Tall terminal so there is empty space below the content-sized chat pane.
+    let backend = ratatui::backend::TestBackend::new(60, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+    let line_count = crate::tui::ui::copy_viewport_line_count().expect("line count");
+    assert_eq!(visible_end, line_count, "view must be pinned to the bottom");
+
+    // The last line that maps to a real screen point.
+    let last_line = (visible_start..visible_end)
+        .rev()
+        .find(|&ln| {
+            crate::tui::ui::copy_viewport_line_text(ln)
+                .map(|t| unicode_width::UnicodeWidthStr::width(t.as_str()) > 0)
+                .unwrap_or(false)
+        })
+        .expect("a non-empty visible content line");
+    let last_text = crate::tui::ui::copy_viewport_line_text(last_line).unwrap_or_default();
+    let last_width = unicode_width::UnicodeWidthStr::width(last_text.as_str());
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let area = layout.messages_area;
+
+    // Anchor on a valid cell at the START of the last content line.
+    let last_content_row = area.y + (last_line - visible_start) as u16;
+    let anchor_x = (area.x..area.x + area.width)
+        .find(|&x| {
+            crate::tui::ui::copy_viewport_point_from_screen(x, last_content_row)
+                .map(|p| p.abs_line == last_line)
+                .unwrap_or(false)
+        })
+        .expect("a screen column mapping to the last content line");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: anchor_x,
+        row: last_content_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    // Drag straight down, past the bottom of the pane, with the cursor x landing
+    // partway through (not at the end of) the last line. Even so the whole last
+    // line should be selected, because we have overshot it vertically.
+    let mid_x = anchor_x + 1;
+    let below_row = (area.y + area.height + 2).min(terminal.backend().size().unwrap().height - 1);
+    assert!(
+        below_row > last_content_row,
+        "test must drag strictly below the last content row"
+    );
+    let before_scroll = app.scroll_offset();
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: mid_x,
+        row: below_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    // No autoscroll (nothing below), and no scroll movement.
+    assert!(
+        !crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app),
+        "edge autoscroll must not arm dragging past the last line"
+    );
+    assert_eq!(app.scroll_offset(), before_scroll, "must not scroll");
+
+    // The selection should now extend through the END of the last line.
+    let range = app.normalized_copy_selection().expect("normalized range");
+    assert_eq!(
+        range.end.abs_line, last_line,
+        "selection should extend to the last content line"
+    );
+    assert_eq!(
+        range.end.column, last_width,
+        "selection should cover the full last line (through its end)"
+    );
+    let selected = app
+        .current_copy_selection_text()
+        .expect("expected selection text");
+    assert!(
+        selected.contains(last_text.trim_end()),
+        "selection should include the full last line text: got {selected:?}"
+    );
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: mid_x,
+        row: below_row,
+        modifiers: KeyModifiers::empty(),
+    });
 }
 
 #[test]

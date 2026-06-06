@@ -716,3 +716,140 @@ fn selfdev_reload_target_diverges_from_update_probe_when_shared_server_pinned() 
         );
     });
 }
+
+/// Write a distinct, real binary into `versions/<version>/jcode` with an
+/// explicit mtime so channel-repair mtime comparisons are deterministic
+/// (install_binary_at_version hard-links and would share an mtime).
+fn write_versioned_binary(version: &str, mtime: std::time::SystemTime) -> PathBuf {
+    let dir = builds_dir().unwrap().join("versions").join(version);
+    std::fs::create_dir_all(&dir).expect("create version dir");
+    let path = dir.join(binary_name());
+    std::fs::write(&path, format!("bin {version}")).expect("write binary");
+    std::fs::File::open(&path)
+        .expect("open binary")
+        .set_modified(mtime)
+        .expect("set mtime");
+    path
+}
+
+#[test]
+fn repair_repoints_stale_shared_server_to_newer_stable() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let old = "0.14.6";
+        let new = "0.22.0";
+        // shared-server pinned to the OLD build; stable advanced to the NEW
+        // release (the "current client, no-op /update, stale server" state).
+        write_versioned_binary(old, base);
+        write_versioned_binary(new, base + Duration::from_secs(60));
+        update_shared_server_symlink(old).expect("pin shared-server old");
+        update_stable_symlink(new).expect("stable new");
+
+        let outcome = repair_stale_shared_server_channel().expect("repair");
+        assert_eq!(
+            outcome,
+            SharedServerRepair::Repaired {
+                previous: Some(old.to_string()),
+                repaired_to: new.to_string(),
+            },
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(new),
+            "shared-server should be dragged forward to stable"
+        );
+    });
+}
+
+#[test]
+fn repair_is_noop_when_shared_server_already_matches_stable() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let v = "0.22.0";
+        write_versioned_binary(v, base);
+        update_shared_server_symlink(v).expect("shared");
+        update_stable_symlink(v).expect("stable");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+        );
+        assert_eq!(read_shared_server_version().unwrap().as_deref(), Some(v));
+    });
+}
+
+#[test]
+fn repair_preserves_fresher_selfdev_pin() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let stable_old = "0.14.3";
+        let selfdev_new = "56f43c3d-dirty-deadbeef";
+        // Deliberately-promoted self-dev build that is NEWER than stable must be
+        // preserved (the whole point of pinning shared-server).
+        write_versioned_binary(stable_old, base);
+        write_versioned_binary(selfdev_new, base + Duration::from_secs(120));
+        update_stable_symlink(stable_old).expect("stable");
+        update_shared_server_symlink(selfdev_new).expect("pin newer self-dev");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "must not downgrade a fresher self-dev pin to an older stable"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev_new),
+        );
+    });
+}
+
+#[test]
+fn repair_preserves_older_selfdev_pin() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let selfdev_old = "56f43c3d-dirty-deadbeef";
+        let stable_new = "0.22.0";
+        write_versioned_binary(selfdev_old, base);
+        write_versioned_binary(stable_new, base + Duration::from_secs(120));
+        update_shared_server_symlink(selfdev_old).expect("pin older self-dev");
+        update_stable_symlink(stable_new).expect("stable new");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "repair must not overwrite a deliberately-pinned self-dev build"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev_old),
+        );
+    });
+}
+
+#[test]
+fn repair_never_downgrades_when_stable_is_older() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let shared_new = "0.22.0";
+        let stable_old = "0.14.3";
+        write_versioned_binary(stable_old, base);
+        write_versioned_binary(shared_new, base + Duration::from_secs(90));
+        update_shared_server_symlink(shared_new).expect("shared new");
+        update_stable_symlink(stable_old).expect("stable old");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "repair must never move shared-server backward to an older stable"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(shared_new),
+        );
+    });
+}

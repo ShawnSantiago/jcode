@@ -7209,6 +7209,24 @@ fn push_single_session_inline_code_cards(
     );
 }
 
+/// A thread-local, lazily-initialized `FontSystem` used purely for measuring
+/// glyph layout (inline-code/math pill bounds) during geometry building.
+///
+/// Building a `FontSystem` rescans every system font from disk, costing several
+/// milliseconds per call. The inline-code/math card builder runs on every frame
+/// whose visible window contains inline code or math, so constructing a fresh
+/// `FontSystem` there made scrolling over code blocks janky (multi-ms spikes per
+/// frame). Caching one per render thread keeps repeated measurement cheap. The
+/// system is only used for transient measurement buffers, never for the glyphs
+/// actually uploaded to the GPU, so reuse is safe.
+fn with_measurement_font_system<R>(f: impl FnOnce(&mut FontSystem) -> R) -> R {
+    thread_local! {
+        static MEASUREMENT_FONT_SYSTEM: std::cell::RefCell<FontSystem> =
+            std::cell::RefCell::new(FontSystem::new());
+    }
+    MEASUREMENT_FONT_SYSTEM.with(|cell| f(&mut cell.borrow_mut()))
+}
+
 fn push_single_session_inline_code_cards_from_viewport(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
@@ -7245,13 +7263,9 @@ fn push_single_session_inline_code_cards_from_viewport(
         horizontal_pad,
         top_offset_pixels: viewport.top_offset_pixels,
     };
-    let mut font_system = FontSystem::new();
-    let body_buffer = single_session_body_text_buffer_from_lines(
-        &mut font_system,
-        &viewport.lines,
-        size,
-        text_scale,
-    );
+    let body_buffer = with_measurement_font_system(|font_system| {
+        single_session_body_text_buffer_from_lines(font_system, &viewport.lines, size, text_scale)
+    });
     let layout_runs = body_buffer.layout_runs().collect::<Vec<_>>();
 
     let mut occurrences = HashMap::new();
@@ -9073,7 +9087,11 @@ pub(crate) fn single_session_body_viewport_for_tick(
     tick: u64,
     smooth_scroll_lines: f32,
 ) -> SingleSessionBodyViewport {
-    let lines = single_session_rendered_body_lines_for_tick(app, size, tick);
+    // Borrow the memoized full body lines and only clone the visible slice via
+    // `single_session_body_viewport_from_lines`, instead of cloning the whole
+    // transcript. This keeps input-side callers (selection hit-testing on every
+    // mouse-move) O(visible) rather than O(transcript).
+    let lines = single_session_rendered_body_lines_for_tick_shared(app, size, tick);
     single_session_body_viewport_from_lines(app, size, smooth_scroll_lines, &lines)
 }
 
@@ -9117,7 +9135,55 @@ pub(crate) fn single_session_rendered_body_lines_for_tick(
     size: PhysicalSize<u32>,
     tick: u64,
 ) -> Vec<SingleSessionStyledLine> {
-    single_session_rendered_body_lines_from_raw(app, size, app.body_styled_lines_for_tick(tick))
+    (*single_session_rendered_body_lines_for_tick_shared(app, size, tick)).clone()
+}
+
+/// Shared, memoized rendered body lines for the current transcript+layout.
+///
+/// This re-parses markdown and re-wraps the ENTIRE transcript (O(transcript)),
+/// and is called from input handling (every selection mouse-move during a
+/// drag), scroll-metric probing, and several geometry builders. Returning a
+/// shared `Rc` lets callers that only need a slice (the viewport) avoid cloning
+/// the whole transcript on every pointer event. The render hot path uses a
+/// separate Canvas-side cache (`cached_single_session_body_lines`); this
+/// thread-local single-entry memo accelerates the remaining callers. The key is
+/// the body cache key, which already captures the message fingerprint, size,
+/// text scale, and welcome/streaming state, so the cache invalidates whenever
+/// any of those change.
+pub(crate) fn single_session_rendered_body_lines_for_tick_shared(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    tick: u64,
+) -> std::rc::Rc<Vec<SingleSessionStyledLine>> {
+    let layout_size = single_session_body_layout_cache_size(app, size);
+    let key = app.rendered_body_cache_key(layout_size);
+    thread_local! {
+        static RENDERED_BODY_LINES_MEMO: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<SingleSessionStyledLine>>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    // Allow disabling the memo for A/B perf measurement in debug builds only;
+    // the production memo can never be turned off by an env var.
+    let memo_disabled = cfg!(debug_assertions)
+        && std::env::var_os("JCODE_DESKTOP_DISABLE_BODY_MEMO").is_some();
+    if !memo_disabled
+        && let Some(cached) = RENDERED_BODY_LINES_MEMO.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .filter(|(cached_key, _)| *cached_key == key)
+                .map(|(_, lines)| lines.clone())
+        })
+    {
+        return cached;
+    }
+    let lines =
+        single_session_rendered_body_lines_from_raw(app, size, app.body_styled_lines_for_tick(tick));
+    let shared = std::rc::Rc::new(lines);
+    if !memo_disabled {
+        RENDERED_BODY_LINES_MEMO.with(|cell| {
+            *cell.borrow_mut() = Some((key, shared.clone()));
+        });
+    }
+    shared
 }
 
 pub(crate) fn single_session_rendered_body_lines_from_raw(

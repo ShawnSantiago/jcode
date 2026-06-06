@@ -415,21 +415,44 @@ pub(crate) enum AnthropicCredentialMode {
 
 impl AnthropicCredentialMode {
     fn from_runtime_env() -> Self {
-        match std::env::var("JCODE_RUNTIME_PROVIDER")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("claude-api" | "anthropic-api") => Self::ApiKey,
-            Some("claude" | "anthropic") => Self::OAuth,
-            _ => Self::Auto,
+        // Canonical parse: recognizes every runtime/route/CLI/prefix alias for
+        // the Anthropic OAuth-vs-API decision in one place, so this can never
+        // drift from the other vocabularies (see jcode_provider_core::auth_mode).
+        match jcode_provider_core::runtime_env_pinned_mode(
+            jcode_provider_core::DualAuthProvider::Anthropic,
+        ) {
+            Some(jcode_provider_core::AuthMode::ApiKey) => Self::ApiKey,
+            Some(jcode_provider_core::AuthMode::Oauth) => Self::OAuth,
+            None => Self::Auto,
+        }
+    }
+
+    /// The canonical dual-auth route this explicit mode pins, if any.
+    /// `Auto` has no explicit pin and returns `None`.
+    pub(crate) fn auth_route(self) -> Option<jcode_provider_core::AuthRoute> {
+        use jcode_provider_core::{AuthMode, AuthRoute};
+        match self {
+            Self::Auto => None,
+            Self::OAuth => Some(AuthRoute::anthropic(AuthMode::Oauth)),
+            Self::ApiKey => Some(AuthRoute::anthropic(AuthMode::ApiKey)),
         }
     }
 }
 
 pub(crate) fn load_anthropic_api_key() -> Result<String> {
-    crate::provider_catalog::load_api_key_from_env_or_config("ANTHROPIC_API_KEY", "anthropic.env")
-        .context("No Anthropic API key found")
+    let key = crate::provider_catalog::load_api_key_from_env_or_config(
+        "ANTHROPIC_API_KEY",
+        "anthropic.env",
+    )
+    .context("No Anthropic API key found")?;
+    if std::env::var("JCODE_LOG_SERVICE_TIER").is_ok() {
+        let prefix: String = key.chars().take(14).collect();
+        eprintln!(
+            "[anthropic] resolved API key prefix={prefix}... (len={})",
+            key.len()
+        );
+    }
+    Ok(key)
 }
 
 pub(crate) fn has_anthropic_api_key() -> bool {
@@ -844,14 +867,8 @@ impl AnthropicProvider {
         // choice so UI surfaces (model picker, header widget) report the auth
         // method that requests will actually use, instead of inferring it from
         // credential presence. `Auto` leaves the existing identity untouched.
-        match mode {
-            AnthropicCredentialMode::OAuth => {
-                crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
-            }
-            AnthropicCredentialMode::ApiKey => {
-                crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
-            }
-            AnthropicCredentialMode::Auto => {}
+        if let Some(route) = mode.auth_route() {
+            crate::env::set_var("JCODE_RUNTIME_PROVIDER", route.runtime_provider_key());
         }
         Ok(())
     }
@@ -1067,7 +1084,9 @@ impl AnthropicProvider {
                         signature: signature.clone(),
                     });
                 }
-                ContentBlock::ToolUse { id, name, input, .. } => {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     result.push(ApiContentBlock::ToolUse {
                         id: crate::message::sanitize_tool_id(id),
                         name: if is_oauth {
@@ -2094,6 +2113,12 @@ fn process_sse_event(
                 *input_tokens = usage.input_tokens.map(|t| t as u64);
                 *cache_read_input_tokens = usage.cache_read_input_tokens.map(|t| t as u64);
                 *cache_creation_input_tokens = usage.cache_creation_input_tokens.map(|t| t as u64);
+                if let Some(tier) = usage.service_tier.as_deref() {
+                    crate::logging::info(&format!("Anthropic granted service_tier={}", tier));
+                    if std::env::var("JCODE_LOG_SERVICE_TIER").is_ok() {
+                        eprintln!("[anthropic] granted service_tier={tier}");
+                    }
+                }
             }
         }
         "content_block_start" => {
@@ -2591,6 +2616,7 @@ struct UsageInfo {
     output_tokens: Option<u32>,
     cache_read_input_tokens: Option<u32>,
     cache_creation_input_tokens: Option<u32>,
+    service_tier: Option<String>,
 }
 
 #[cfg(test)]
