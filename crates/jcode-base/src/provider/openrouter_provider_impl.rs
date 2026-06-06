@@ -14,6 +14,15 @@ impl Provider for OpenRouterProvider {
         let model = self.model.read().await.clone();
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
+        // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
+        // by default and rejects any assistant tool-call message that lacks
+        // `reasoning_content`, even though its model id (`kimi-for-coding`) is
+        // not a moonshotai/kimi-k2 model and the profile runs without OpenRouter
+        // provider features (issue #322). We must attach `reasoning_content` to
+        // those messages, but must NOT add the OpenRouter-specific top-level
+        // `thinking` field (the endpoint already manages thinking itself), so
+        // this is kept separate from `thinking_enabled`.
+        let kimi_coding_endpoint = self.is_kimi_coding_endpoint(&model);
         let thinking_enabled = thinking_override.or_else(|| {
             if Self::is_kimi_model(&model) {
                 Some(true)
@@ -21,9 +30,11 @@ impl Provider for OpenRouterProvider {
                 None
             }
         });
-        let allow_reasoning = self.supports_provider_features && thinking_enabled != Some(false);
-        let include_reasoning_content =
-            thinking_enabled == Some(true) || (allow_reasoning && Self::is_kimi_model(&model));
+        let allow_reasoning = (self.supports_provider_features || kimi_coding_endpoint)
+            && thinking_enabled != Some(false);
+        let include_reasoning_content = thinking_enabled == Some(true)
+            || (allow_reasoning && Self::is_kimi_model(&model))
+            || kimi_coding_endpoint;
 
         // Some OpenAI-compatible providers (e.g. Mistral) strictly enforce the
         // OpenAI schema and reject the non-standard `reasoning_content` message
@@ -192,7 +203,9 @@ impl Provider for OpenRouterProvider {
                             ContentBlock::Reasoning { text } => {
                                 reasoning_content.push_str(text);
                             }
-                            ContentBlock::ToolUse { id, name, input, .. } => {
+                            ContentBlock::ToolUse {
+                                id, name, input, ..
+                            } => {
                                 let args = if input.is_object() {
                                     serde_json::to_string(input).unwrap_or_default()
                                 } else {
@@ -250,7 +263,35 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["reasoning_content"] = serde_json::json!(reasoning_payload);
                     }
 
-                    if !text_content.is_empty() || !tool_calls.is_empty() || has_reasoning_content {
+                    let has_text_content = !text_content.is_empty();
+                    let has_tool_calls = !tool_calls.is_empty();
+
+                    // OpenAI-compatible providers require every assistant
+                    // message to carry `content` or `tool_calls`. An
+                    // interrupted turn can persist only a reasoning block; if
+                    // the provider does not accept a standalone
+                    // `reasoning_content` field (so it was not set above), this
+                    // would serialize to a bare `{"role":"assistant"}` and make
+                    // providers like DeepSeek reject the entire request with
+                    // 400 "Invalid assistant message: content or tool_calls
+                    // must be set", permanently wedging the session (issue
+                    // #321). Guarantee validity: when there is no text/tool
+                    // payload, only keep the turn if a provider-accepted
+                    // `reasoning_content` field is present, and in that case add
+                    // an explicit empty `content` so strict validators still
+                    // accept it. Otherwise drop the empty interrupted-thinking
+                    // artifact entirely (no tool outputs are possible without
+                    // tool calls).
+                    let keep_assistant_message = if has_text_content || has_tool_calls {
+                        true
+                    } else if assistant_msg.get("reasoning_content").is_some() {
+                        assistant_msg["content"] = serde_json::json!("");
+                        true
+                    } else {
+                        false
+                    };
+
+                    if keep_assistant_message {
                         api_messages.push(assistant_msg);
 
                         for (tool_call_id, output) in post_tool_outputs {
@@ -700,6 +741,10 @@ impl Provider for OpenRouterProvider {
 
     fn name(&self) -> &str {
         "openrouter"
+    }
+
+    fn display_name(&self) -> String {
+        self.runtime_display_name()
     }
 
     fn model(&self) -> String {

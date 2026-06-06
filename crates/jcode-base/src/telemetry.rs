@@ -502,7 +502,7 @@ fn detect_project_profile() -> ProjectProfile {
     let Some(root) = cwd.as_deref() else {
         return profile;
     };
-    profile.repo_present = root.join(".git").exists() || crate::build::is_jcode_repo(root);
+    profile.repo_present = root.join(".git").exists() || is_jcode_repo_dir(root);
     let mut scanned_files = 0usize;
     for entry in walkdir::WalkDir::new(root)
         .max_depth(3)
@@ -1188,6 +1188,17 @@ fn emit_session_start_for_state(id: String, state: &SessionTelemetry, mode: Deli
 
 pub fn record_install_if_first_run() {
     if !is_enabled() {
+        return;
+    }
+    // Skip install/onboarding emission under CI. Ephemeral runners start with a
+    // fresh ~/.jcode (so a new telemetry_id) on every job, which would otherwise
+    // look like a brand-new install and user, inflating install/active counts,
+    // the onboarding funnel, and depressing retention. Session/turn/lifecycle
+    // events are still emitted (tagged is_ci) so CI crash/error signal stays
+    // queryable; product dashboards filter is_ci out of the headline metrics.
+    if is_ci() {
+        logging::debug("skipping telemetry install/onboarding under CI");
+        mark_current_version_recorded();
         return;
     }
     let first_run = is_first_run();

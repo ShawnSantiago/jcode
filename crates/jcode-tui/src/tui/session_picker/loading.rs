@@ -53,6 +53,77 @@ const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
 const MESSAGE_SEARCH_EXCERPT_BYTES: usize = 8 * 1024;
 
+/// Upper bound on worker threads used to parse/stat session files in parallel.
+/// The session picker load is dominated by per-file IO + JSON parsing across
+/// hundreds of snapshots; fanning that work out across cores turns the cold
+/// `/resume` load from a serial slog into a roughly core-count-bounded scan.
+const SESSION_LOAD_MAX_THREADS: usize = 8;
+
+/// Number of worker threads to use for a parallel pass over `item_count` items.
+/// Returns 1 for tiny batches so we never pay thread-spawn overhead when there
+/// is barely any work to do.
+fn session_load_thread_count(item_count: usize) -> usize {
+    if item_count <= 1 {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    cores.clamp(1, SESSION_LOAD_MAX_THREADS).min(item_count)
+}
+
+/// Map `f` over `items` across a bounded scoped thread pool, preserving input
+/// order in the returned vector. Falls back to a plain serial map when only one
+/// worker is warranted. `f` must be `Sync` because every worker shares it.
+fn parallel_map<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync,
+{
+    let thread_count = session_load_thread_count(items.len());
+    if thread_count <= 1 {
+        return items.into_iter().map(f).collect();
+    }
+
+    // Partition the work into `thread_count` owned chunks so each worker can
+    // take its inputs by value (no clone, no shared mutation). We remember the
+    // starting offset of each chunk to stitch results back into input order.
+    let chunk_size = items.len().div_ceil(thread_count);
+    let mut chunks: Vec<(usize, Vec<T>)> = Vec::with_capacity(thread_count);
+    let mut offset = 0usize;
+    let mut remaining = items;
+    while !remaining.is_empty() {
+        let take = chunk_size.min(remaining.len());
+        let rest = remaining.split_off(take);
+        chunks.push((offset, remaining));
+        offset += take;
+        remaining = rest;
+    }
+
+    let f = &f;
+    let mut results: Vec<(usize, Vec<R>)> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(chunks.len());
+        for (start, chunk) in chunks {
+            handles.push(scope.spawn(move || {
+                (start, chunk.into_iter().map(f).collect::<Vec<R>>())
+            }));
+        }
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect()
+    });
+
+    results.sort_by_key(|(start, _)| *start);
+    let total: usize = results.iter().map(|(_, chunk)| chunk.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for (_, chunk) in results {
+        out.extend(chunk);
+    }
+    out
+}
+
 #[derive(Clone)]
 struct SessionListCacheEntry {
     loaded_at: Instant,
@@ -419,9 +490,8 @@ fn session_sort_key(stem: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn entry_modified_sort_key(entry: &std::fs::DirEntry) -> u128 {
-    entry
-        .metadata()
+fn path_modified_sort_key(path: &Path) -> u128 {
+    path.metadata()
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
@@ -570,6 +640,37 @@ fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) ->
     let mut files: Vec<(u64, PathBuf)> = heap.into_iter().map(|entry| entry.0).collect();
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     files.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Maximum number of bytes we read from the *tail* of an external transcript
+/// (Codex / Claude Code) when building its preview. These JSONL transcripts can
+/// be tens of MB, but the preview only ever shows the last ~20 messages, so
+/// parsing the whole file on every selection change made arrow-key navigation
+/// in the resume / onboarding picker lag badly (each load reparsed the entire
+/// file on a fresh thread). Reading a bounded tail keeps each preview load to a
+/// sub-millisecond seek + parse regardless of transcript size.
+///
+/// 512 KiB comfortably covers far more than 20 messages for normal transcripts
+/// while bounding the worst case.
+const EXTERNAL_PREVIEW_TAIL_BYTES: u64 = 512 * 1024;
+
+/// Read the trailing portion of a file as UTF-8 text, capped at
+/// [`EXTERNAL_PREVIEW_TAIL_BYTES`]. When the file is larger than the cap we seek
+/// to the tail and drop the (possibly partial) first line so we only ever parse
+/// complete JSONL records. Returns `(text, truncated_from_head)` where
+/// `truncated_from_head` indicates the head of the file was skipped.
+fn read_file_tail_text(path: &Path, max_bytes: u64) -> Option<(String, bool)> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let truncated = len > max_bytes;
+    if truncated {
+        file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut bytes = Vec::with_capacity(max_bytes.min(len) as usize);
+    file.take(max_bytes).read_to_end(&mut bytes).ok()?;
+    // Lossily decode: transcripts are UTF-8, but a tail seek can land mid
+    // multi-byte sequence, and replacement chars are harmless for a preview.
+    Some((String::from_utf8_lossy(&bytes).into_owned(), truncated))
 }
 
 fn push_preview_message(preview: &mut Vec<PreviewMessage>, role: &str, content: String) {
@@ -805,8 +906,10 @@ fn collect_recent_session_candidates(
     sessions_dir: &Path,
     candidate_limit: usize,
 ) -> Result<Vec<String>> {
-    let mut by_stem: HashMap<String, SessionCandidateMeta> = HashMap::new();
-
+    // Phase 1: a single cheap `readdir` pass to enumerate candidate files. We
+    // defer the per-file `stat` (the expensive part on directories with 100k+
+    // session files) to a parallel pass so it does not serialize startup.
+    let mut raw: Vec<(String, bool, PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
         let file_name = entry.file_name();
@@ -819,11 +922,20 @@ fn collect_recent_session_candidates(
         if stem.starts_with("imported_") {
             continue;
         }
+        raw.push((stem.to_string(), has_snapshot, entry.path()));
+    }
 
-        let modified = entry_modified_sort_key(&entry);
+    // Phase 2: stat each file's modification time in parallel.
+    let stamped = parallel_map(raw, |(stem, has_snapshot, path)| {
+        (stem, has_snapshot, path_modified_sort_key(&path))
+    });
+
+    // Phase 3: merge per-stem metadata (snapshot + newest journal/snapshot mtime).
+    let mut by_stem: HashMap<String, SessionCandidateMeta> = HashMap::new();
+    for (stem, has_snapshot, modified) in stamped {
         by_stem
-            .entry(stem.to_string())
-            .or_insert_with(|| SessionCandidateMeta::new(stem))
+            .entry(stem.clone())
+            .or_insert_with(|| SessionCandidateMeta::new(&stem))
             .update(modified, has_snapshot);
     }
 
@@ -1424,6 +1536,99 @@ pub(super) fn crashed_sessions_from_all_sessions(
     })
 }
 
+/// Parse a single jcode session snapshot (+ journal) into a [`SessionInfo`],
+/// returning `None` for empty/imported sessions or read/parse errors. Pulled out
+/// of `load_sessions` so the summary pass can run across a scoped thread pool.
+fn parse_jcode_session_info(
+    sessions_dir: &Path,
+    stem: &str,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+) -> Option<SessionInfo> {
+    // Imported stems are filtered out by `collect_recent_session_candidates`, but
+    // keep the cheap defensive check so this helper is safe to call directly.
+    if stem.starts_with("imported_cc_")
+        || stem.starts_with("imported_codex_")
+        || stem.starts_with("imported_pi_")
+        || stem.starts_with("imported_opencode_")
+    {
+        return None;
+    }
+
+    let path = sessions_dir.join(format!("{stem}.json"));
+    let session = load_session_summary(&path).ok()?;
+
+    let visible_message_count = session.messages.visible_message_count;
+    if visible_message_count == 0 {
+        return None;
+    }
+
+    let short_name = session
+        .short_name
+        .clone()
+        .or_else(|| extract_session_name(stem).map(|s| s.to_string()))
+        .unwrap_or_else(|| stem.to_string());
+    let icon = session_icon(&short_name);
+
+    let user_message_count = session.messages.user_message_count;
+    let assistant_message_count = session.messages.assistant_message_count;
+    let estimated_tokens = session.messages.estimated_tokens;
+
+    let status = session.status.clone();
+    let needs_catchup = catchup_seen.needs_catchup(stem, session.updated_at, &status);
+    let source = classify_session_source(
+        stem,
+        session.provider_key.as_deref(),
+        session.model.as_deref(),
+    );
+
+    let title = session
+        .custom_title
+        .or(session.title)
+        .unwrap_or_else(|| short_name.clone());
+    let search_index = build_search_index_from_summary(
+        stem,
+        &short_name,
+        &title,
+        session.working_dir.as_deref(),
+        session.save_label.as_deref(),
+        &session.messages.search_text,
+    );
+
+    Some(SessionInfo {
+        id: stem.to_string(),
+        parent_id: session.parent_id,
+        short_name,
+        icon: icon.to_string(),
+        title,
+        message_count: visible_message_count,
+        user_message_count,
+        assistant_message_count,
+        created_at: session.created_at,
+        last_message_time: session.updated_at,
+        last_active_at: session.last_active_at,
+        working_dir: session.working_dir,
+        model: session.model,
+        provider_key: session.provider_key,
+        is_canary: session.is_canary,
+        is_debug: session.is_debug,
+        saved: session.saved,
+        save_label: session.save_label,
+        status,
+        needs_catchup,
+        estimated_tokens,
+        first_user_prompt: session.messages.first_user_prompt,
+        messages_preview: Vec::new(),
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source,
+        resume_target: ResumeTarget::JcodeSession {
+            session_id: stem.to_string(),
+        },
+        external_path: None,
+    })
+}
+
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
@@ -1436,8 +1641,6 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     {
         return Ok(entry.sessions.clone());
     }
-
-    let mut sessions: Vec<SessionInfo> = Vec::new();
 
     let candidates = if sessions_dir.exists() {
         // Keep startup responsive by avoiding `session_has_history` here. That helper parses
@@ -1459,100 +1662,65 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         Vec::new()
     };
 
-    let external_sessions = std::thread::scope(|scope| {
+    // Loading the catch-up "seen" state once (instead of per session) avoids
+    // re-reading and re-parsing `catchup_seen.json` for every candidate.
+    let catchup_seen = crate::catchup::CatchupSeenSnapshot::load();
+    let sessions_dir_ref = &sessions_dir;
+    let catchup_ref = &catchup_seen;
+
+    let (mut sessions, external_sessions) = std::thread::scope(|scope| {
         let claude_handle = scope.spawn(|| load_external_claude_code_sessions(scan_limit));
         let codex_handle = scope.spawn(|| load_external_codex_sessions(scan_limit));
         let pi_handle = scope.spawn(|| load_external_pi_sessions(scan_limit));
         let opencode_handle = scope.spawn(|| load_external_opencode_sessions(scan_limit));
 
-        for stem in candidates {
-            if sessions.len() >= scan_limit {
-                let saved = sessions_dir.join(format!("{stem}.json"));
-                if !session_snapshot_or_journal_has_saved_metadata(&saved) {
-                    continue;
+        // Phase 1: walk the recency-ordered candidates in parallel windows until
+        // we have collected `scan_limit` non-empty sessions. `boundary` marks the
+        // candidate index where the serial fill would start applying the saved
+        // gate, so beyond it we only keep saved sessions (Phase 2). Parsing each
+        // window in parallel keeps the per-file JSON cost off the critical path.
+        //
+        // Windows are sized to `scan_limit`: only the final window (the one that
+        // crosses `scan_limit`) can over-parse, so wasted work is bounded to a
+        // single window's worth of candidates while still parallelizing widely.
+        let mut sessions: Vec<SessionInfo> = Vec::new();
+        let mut boundary = candidates.len();
+        let window = scan_limit.max(1);
+        let mut start = 0;
+        'fill: while start < candidates.len() {
+            let end = (start + window).min(candidates.len());
+            let batch = candidates[start..end].to_vec();
+            let parsed = parallel_map(batch, move |stem| {
+                parse_jcode_session_info(sessions_dir_ref, &stem, catchup_ref)
+            });
+            for (offset, parsed_session) in parsed.into_iter().enumerate() {
+                if let Some(info) = parsed_session {
+                    sessions.push(info);
+                    if sessions.len() >= scan_limit {
+                        boundary = start + offset + 1;
+                        break 'fill;
+                    }
                 }
             }
-            if stem.starts_with("imported_cc_")
-                || stem.starts_with("imported_codex_")
-                || stem.starts_with("imported_pi_")
-                || stem.starts_with("imported_opencode_")
-            {
-                continue;
-            }
-            let path = sessions_dir.join(format!("{stem}.json"));
-            if let Ok(session) = load_session_summary(&path) {
-                let short_name = session
-                    .short_name
-                    .clone()
-                    .or_else(|| extract_session_name(&stem).map(|s| s.to_string()))
-                    .unwrap_or_else(|| stem.clone());
-                let icon = session_icon(&short_name);
+            start = end;
+        }
 
-                let visible_message_count = session.messages.visible_message_count;
-                if visible_message_count == 0 {
-                    continue;
-                }
-                let user_message_count = session.messages.user_message_count;
-                let assistant_message_count = session.messages.assistant_message_count;
-                let estimated_tokens = session.messages.estimated_tokens;
-
-                let status = session.status.clone();
-                let needs_catchup =
-                    crate::catchup::needs_catchup(&stem, session.updated_at, &status);
-                let source = classify_session_source(
-                    &stem,
-                    session.provider_key.as_deref(),
-                    session.model.as_deref(),
-                );
-
-                let title = session
-                    .custom_title
-                    .or(session.title)
-                    .unwrap_or_else(|| short_name.clone());
-                let messages_preview: Vec<PreviewMessage> = Vec::new();
-                let search_index = build_search_index_from_summary(
-                    &stem,
-                    &short_name,
-                    &title,
-                    session.working_dir.as_deref(),
-                    session.save_label.as_deref(),
-                    &session.messages.search_text,
-                );
-
-                sessions.push(SessionInfo {
-                    id: stem.to_string(),
-                    parent_id: session.parent_id,
-                    short_name,
-                    icon: icon.to_string(),
-                    title,
-                    message_count: visible_message_count,
-                    user_message_count,
-                    assistant_message_count,
-                    created_at: session.created_at,
-                    last_message_time: session.updated_at,
-                    last_active_at: session.last_active_at,
-                    working_dir: session.working_dir,
-                    model: session.model,
-                    provider_key: session.provider_key,
-                    is_canary: session.is_canary,
-                    is_debug: session.is_debug,
-                    saved: session.saved,
-                    save_label: session.save_label,
-                    status,
-                    needs_catchup,
-                    estimated_tokens,
-                    first_user_prompt: session.messages.first_user_prompt,
-                    messages_preview,
-                    search_index,
-                    server_name: None,
-                    server_icon: None,
-                    source,
-                    resume_target: ResumeTarget::JcodeSession {
-                        session_id: stem.to_string(),
-                    },
-                    external_path: None,
-                });
-            }
+        // Phase 2: beyond the fill boundary the serial loader only keeps saved
+        // sessions. Compute the cheap saved tail-gate across the remaining
+        // candidates in parallel, then fully parse just the gate-passers.
+        if boundary < candidates.len() {
+            let tail: Vec<String> = candidates[boundary..].to_vec();
+            let gate_passers: Vec<String> = parallel_map(tail, move |stem| {
+                let path = sessions_dir_ref.join(format!("{stem}.json"));
+                session_snapshot_or_journal_has_saved_metadata(&path).then_some(stem)
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+            let saved_sessions = parallel_map(gate_passers, move |stem| {
+                parse_jcode_session_info(sessions_dir_ref, &stem, catchup_ref)
+            });
+            sessions.extend(saved_sessions.into_iter().flatten());
         }
 
         let mut external = Vec::new();
@@ -1560,7 +1728,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         external.extend(codex_handle.join().unwrap_or_default());
         external.extend(pi_handle.join().unwrap_or_default());
         external.extend(opencode_handle.join().unwrap_or_default());
-        external
+        (sessions, external)
     });
     sessions.extend(external_sessions);
 
@@ -1653,17 +1821,26 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
 }
 
 pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
+    // Only parse the tail of the transcript (see `load_codex_preview_from_path`):
+    // the preview shows the last ~20 messages, so reparsing multi-MB transcripts
+    // on every selection change made picker navigation lag.
+    let (text, truncated) = read_file_tail_text(path, EXTERNAL_PREVIEW_TAIL_BYTES)?;
     let mut preview = Vec::new();
 
-    for line in reader.lines() {
-        let line = line.ok()?;
+    // If we seeked into the middle of the file, the first line is a partial
+    // record; drop it. When we read the whole file the first line is a real
+    // record we must keep.
+    let skip = usize::from(truncated);
+    for line in text.lines().skip(skip) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        // Boundary lines from a tail slice may be malformed; skip rather than
+        // abandon the whole preview.
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
         let entry_type = value
             .get("type")
             .and_then(|v| v.as_str())
@@ -1706,9 +1883,10 @@ fn load_external_codex_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         return Vec::new();
     }
 
-    collect_recent_files_recursive(&root, "jsonl", scan_limit)
+    let paths = collect_recent_files_recursive(&root, "jsonl", scan_limit);
+    parallel_map(paths, |path| load_codex_session_stub(&path).ok().flatten())
         .into_iter()
-        .filter_map(|path| load_codex_session_stub(&path).ok().flatten())
+        .flatten()
         .collect()
 }
 
@@ -1847,17 +2025,25 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
 }
 
 pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
+    // Only parse the tail of the transcript: the preview shows the last ~20
+    // messages, and these rollout files can be tens of MB, so reading the whole
+    // file on every selection change made picker navigation lag.
+    let (text, _truncated) = read_file_tail_text(path, EXTERNAL_PREVIEW_TAIL_BYTES)?;
     let mut preview = Vec::new();
 
-    for line in reader.lines().skip(1) {
-        let line = line.ok()?;
+    // When we read from the start we skip the first line (the `session_meta`
+    // record). When we read a tail slice the first line is almost certainly a
+    // partial record, so we drop it either way.
+    for line in text.lines().skip(1) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        // A tail slice can yield malformed JSON on its boundary lines; skip
+        // those instead of bailing out of the whole preview.
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
         let line_type = value
             .get("type")
             .and_then(|v| v.as_str())
@@ -1915,9 +2101,10 @@ fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         return Vec::new();
     }
 
-    collect_recent_files_recursive(&root, "jsonl", scan_limit)
+    let paths = collect_recent_files_recursive(&root, "jsonl", scan_limit);
+    parallel_map(paths, |path| load_pi_session_stub(&path).ok().flatten())
         .into_iter()
-        .filter_map(|path| load_pi_session_stub(&path).ok().flatten())
+        .flatten()
         .collect()
 }
 
@@ -2169,9 +2356,10 @@ fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         return Vec::new();
     }
 
-    collect_recent_files_recursive(&root, "json", scan_limit)
+    let paths = collect_recent_files_recursive(&root, "json", scan_limit);
+    parallel_map(paths, |path| load_opencode_session_stub(&path).ok().flatten())
         .into_iter()
-        .filter_map(|path| load_opencode_session_stub(&path).ok().flatten())
+        .flatten()
         .collect()
 }
 
@@ -2471,6 +2659,65 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     write_grouped_session_list_disk_cache(&sessions_dir, scan_limit, &groups, &orphan_sessions);
 
     Ok((groups, orphan_sessions))
+}
+
+/// Load only the sessions for a single external CLI (Codex or Claude Code),
+/// returned as orphan [`SessionInfo`] grouped output compatible with
+/// `SessionPicker::new_grouped`.
+///
+/// First-run onboarding's "continue where you left off" picker is filtered to a
+/// single external CLI, so the full `load_sessions_grouped` work (parsing every
+/// jcode snapshot, the other CLIs, and listing servers) is wasted there. This
+/// scoped loader keeps onboarding responsive by touching only the relevant
+/// transcripts.
+///
+/// The live onboarding flow now uses [`load_external_cli_sessions_grouped_multi`]
+/// (it shows every logged-in CLI together), so this single-CLI variant is kept
+/// only as a focused test helper.
+#[cfg(test)]
+pub(crate) fn load_external_cli_sessions_grouped(
+    cli: crate::tui::app::onboarding_flow::ExternalCli,
+) -> (Vec<ServerGroup>, Vec<SessionInfo>) {
+    use crate::tui::app::onboarding_flow::ExternalCli;
+    let scan_limit = session_scan_limit();
+    let sessions = match cli {
+        ExternalCli::Codex => load_external_codex_sessions(scan_limit),
+        ExternalCli::ClaudeCode => load_external_claude_code_sessions(scan_limit),
+    };
+    (Vec::new(), sessions)
+}
+
+/// Load sessions for several external CLIs at once (Codex and/or Claude Code),
+/// returned as a single combined orphan list compatible with
+/// `SessionPicker::new_grouped`.
+///
+/// First-run onboarding's "continue where you left off" picker shows every
+/// external CLI the user is logged into, not just one, so it loads all of them
+/// here. Each CLI is still scoped to its own transcripts (no jcode snapshots /
+/// servers), keeping onboarding responsive. The picker sorts the merged result
+/// by recency, so the newest session across all CLIs floats to the top.
+pub(crate) fn load_external_cli_sessions_grouped_multi(
+    clis: &[crate::tui::app::onboarding_flow::ExternalCli],
+) -> (Vec<ServerGroup>, Vec<SessionInfo>) {
+    use crate::tui::app::onboarding_flow::ExternalCli;
+    let scan_limit = session_scan_limit();
+    let mut sessions = Vec::new();
+    let mut seen_codex = false;
+    let mut seen_claude = false;
+    for cli in clis {
+        match cli {
+            ExternalCli::Codex if !seen_codex => {
+                seen_codex = true;
+                sessions.extend(load_external_codex_sessions(scan_limit));
+            }
+            ExternalCli::ClaudeCode if !seen_claude => {
+                seen_claude = true;
+                sessions.extend(load_external_claude_code_sessions(scan_limit));
+            }
+            _ => {}
+        }
+    }
+    (Vec::new(), sessions)
 }
 
 #[cfg(test)]

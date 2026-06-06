@@ -69,7 +69,8 @@ async fn test_available_models() {
     let provider = AnthropicProvider::new();
     let models = provider.available_models();
     assert!(models.contains(&"claude-opus-4-8"));
-    assert!(models.contains(&"claude-opus-4-8[1m]"));
+    // Opus 4.8 is native-1M, so there is no redundant `[1m]` alias.
+    assert!(!models.contains(&"claude-opus-4-8[1m]"));
     assert!(models.contains(&"claude-opus-4-6"));
     assert!(models.contains(&"claude-opus-4-6[1m]"));
     assert!(models.contains(&"claude-sonnet-4-6"));
@@ -245,7 +246,9 @@ fn test_anthropic_fast_mode_is_limited_to_opus_48() {
     assert!(provider.set_service_tier("priority").is_err());
     assert_eq!(provider.service_tier(), None);
 
+    // A stale `[1m]` alias for a native-1M model is migrated to canonical form.
     provider.set_model("claude-opus-4-8[1m]").unwrap();
+    assert_eq!(provider.model(), "claude-opus-4-8");
     provider.set_service_tier("priority").unwrap();
     assert_eq!(provider.service_tier().as_deref(), Some("priority"));
 

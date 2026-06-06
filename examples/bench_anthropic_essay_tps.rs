@@ -5,6 +5,34 @@ use jcode::provider::Provider;
 use jcode::provider::anthropic::AnthropicProvider;
 use std::time::Instant;
 
+async fn run_one_with_retry(
+    provider: &AnthropicProvider,
+    label: &str,
+    words: usize,
+    retries: usize,
+) -> Result<()> {
+    let mut attempt = 0;
+    loop {
+        match run_one(provider, label, words).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                let is_rate_limit = msg.contains("429") || msg.contains("rate_limit");
+                if is_rate_limit && attempt < retries {
+                    attempt += 1;
+                    let backoff = 30u64 * attempt as u64;
+                    eprintln!(
+                        "[{label}] rate limited (attempt {attempt}/{retries}); waiting {backoff}s..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
 async fn run_one(provider: &AnthropicProvider, label: &str, words: usize) -> Result<()> {
     let prompt = format!(
         "Write a very long essay of at least {words} words about the architecture, maintainability, reliability, performance, testing strategy, provider abstraction, TUI complexity, security model, and long-term engineering risks of a Rust terminal AI coding agent codebase like jcode. Be specific and detailed. Do not use tools. Do not stop early."
@@ -81,6 +109,15 @@ async fn main() -> Result<()> {
         .nth(1)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(3000);
+
+    // Force the direct Anthropic API-key path when requested (or when an API
+    // key is present and OAuth is not), so fast mode is exercised on the
+    // Console API rather than the subscription OAuth route. Fast mode / priority
+    // tier is gated by usage credits on the API account.
+    let force_api_key = std::env::var("BENCH_ANTHROPIC_API_KEY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     println!(
         "tier,first_ms,last_text_ms,total_ms,generation_ms,chars,input_tokens,output_tokens,cache_read,cache_write,gen_output_tok_s,total_output_tok_s"
     );
@@ -90,7 +127,17 @@ async fn main() -> Result<()> {
     let fast = AnthropicProvider::new();
     fast.set_model("claude-opus-4-8")?;
     fast.set_service_tier("priority")?;
-    run_one(&standard, "standard_only", words).await?;
-    run_one(&fast, "auto", words).await?;
+
+    if force_api_key {
+        // false = API key (not OAuth)
+        standard.pin_credential_mode_for_doctor(false)?;
+        fast.pin_credential_mode_for_doctor(false)?;
+        eprintln!("[bench] forcing direct Anthropic API-key credential mode");
+    }
+
+    run_one_with_retry(&standard, "standard_only", words, 4).await?;
+    // Cool-down gap to avoid back-to-back rate limiting between the two runs.
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    run_one_with_retry(&fast, "auto", words, 4).await?;
     Ok(())
 }

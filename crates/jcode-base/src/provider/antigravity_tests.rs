@@ -202,6 +202,36 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("claude-sonnet-4-6"),
         "claude-sonnet-4-6"
     );
+
+    // ...except the catalog-advertised-but-unserviceable `gemini-3.1-pro-high`,
+    // which is remapped to the equivalent working "Gemini 3.1 Pro (High)" id.
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-3.1-pro-high"),
+        "gemini-pro-agent"
+    );
+    // Its sibling `-low` works as-is and must not be remapped.
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-3.1-pro-low"),
+        "gemini-3.1-pro-low"
+    );
+}
+
+#[test]
+fn remap_unsupported_model_only_touches_broken_pro_high() {
+    assert_eq!(
+        remap_unsupported_model("gemini-3.1-pro-high"),
+        "gemini-pro-agent"
+    );
+    for model in [
+        "gemini-3.1-pro-low",
+        "gemini-pro-agent",
+        "gemini-3-flash",
+        "claude-sonnet-4-6",
+        "gpt-oss-120b-medium",
+        "default",
+    ] {
+        assert_eq!(remap_unsupported_model(model), model);
+    }
 }
 
 #[test]
@@ -515,4 +545,57 @@ fn antigravity_compatible_schema_strips_bounds_and_combiners_for_gpt_oss() {
     assert!(out["properties"]["tool_calls"].get("minItems").is_none());
     assert!(out["properties"]["tool_calls"].get("maxItems").is_none());
     assert_eq!(out["properties"]["tool_calls"]["type"], serde_json::json!("array"));
+}
+
+#[test]
+fn is_retryable_empty_turn_detects_malformed_function_call() {
+    // Empty content + MALFORMED_FUNCTION_CALL is the transient Gemini-3 failure we
+    // retry transparently.
+    let response: CodeAssistGenerateResponse = serde_json::from_value(serde_json::json!({
+        "response": {
+            "candidates": [{
+                "content": {},
+                "finishReason": "MALFORMED_FUNCTION_CALL",
+                "finishMessage": "Malformed function call: print(default_api.read(...))"
+            }]
+        }
+    }))
+    .expect("decode malformed response");
+    assert!(is_retryable_empty_turn(&response));
+}
+
+#[test]
+fn is_retryable_empty_turn_ignores_normal_and_productive_turns() {
+    // A normal STOP turn with text is never retried.
+    let with_text: CodeAssistGenerateResponse = serde_json::from_value(serde_json::json!({
+        "response": {
+            "candidates": [{
+                "content": {"parts": [{"text": "hello"}]},
+                "finishReason": "STOP"
+            }]
+        }
+    }))
+    .expect("decode text response");
+    assert!(!is_retryable_empty_turn(&with_text));
+
+    // A turn with a function call is productive even with no text.
+    let with_call: CodeAssistGenerateResponse = serde_json::from_value(serde_json::json!({
+        "response": {
+            "candidates": [{
+                "content": {"parts": [{"functionCall": {"name": "read", "args": {}}}]},
+                "finishReason": "STOP"
+            }]
+        }
+    }))
+    .expect("decode function call response");
+    assert!(!is_retryable_empty_turn(&with_call));
+
+    // An empty STOP turn (legitimately empty answer) is not retried in a loop.
+    let empty_stop: CodeAssistGenerateResponse = serde_json::from_value(serde_json::json!({
+        "response": {
+            "candidates": [{ "content": {}, "finishReason": "STOP" }]
+        }
+    }))
+    .expect("decode empty stop response");
+    assert!(!is_retryable_empty_turn(&empty_stop));
 }

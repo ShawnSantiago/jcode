@@ -50,6 +50,7 @@ pub(super) fn strip_reasoning_lines(content: &str) -> String {
     result.trim_end().to_string()
 }
 
+
 pub(super) fn edit_input_in_external_editor(app: &mut App) {
     match edit_text_in_external_editor(&app.input) {
         Ok(edited) => {
@@ -2374,10 +2375,10 @@ impl App {
             prefix.push('\n');
         }
         prefix.push('\n');
-        if self.streaming_text.is_empty() {
+        if self.streaming.streaming_text.is_empty() {
             self.replace_streaming_text(prefix);
         } else {
-            self.replace_streaming_text(format!("{}{}", prefix, self.streaming_text));
+            self.replace_streaming_text(format!("{}{}", prefix, self.streaming.streaming_text));
         }
     }
 
@@ -2388,10 +2389,10 @@ impl App {
             return;
         }
         // Separate the reasoning block from any prior content with a blank line.
-        if !self.streaming_text.is_empty() {
-            if self.streaming_text.ends_with("\n\n") {
+        if !self.streaming.streaming_text.is_empty() {
+            if self.streaming.streaming_text.ends_with("\n\n") {
                 // already separated
-            } else if self.streaming_text.ends_with('\n') {
+            } else if self.streaming.streaming_text.ends_with('\n') {
                 self.append_streaming_text("\n");
             } else {
                 self.append_streaming_text("\n\n");
@@ -2399,67 +2400,128 @@ impl App {
         }
         self.reasoning_streaming = true;
         self.reasoning_pending_line.clear();
+        self.reasoning_partial_len = 0;
+        // Remember where this reasoning block starts in the stream so `current`
+        // mode can later slice it back out in place (without disturbing any
+        // preceding answer text) once the model starts answering.
+        self.reasoning_block_start = Some(self.streaming.streaming_text.len());
     }
 
-    /// Wrap one complete reasoning line as dim+italic markdown: an invisible
-    /// sentinel inside `*…*` that the renderer strips and styles dim, with no
-    /// gutter. Embedded markdown is escaped so the styling covers the whole line.
-    /// Empty lines are emitted as a bare newline (no empty emphasis run). Shared
-    /// with the server formatter via `jcode-tui-markdown`.
-    fn reasoning_line_markup(line: &str) -> String {
-        jcode_tui_markdown::reasoning_line_markup(line)
+    /// Remove the live partial-reasoning tail (the rendered, not-yet-committed
+    /// in-progress line) from the streaming buffer so it can be rebuilt. No-op
+    /// when there is no live partial.
+    fn strip_reasoning_partial_tail(&mut self) {
+        if self.reasoning_partial_len > 0 {
+            let new_len = self
+                .streaming.streaming_text
+                .len()
+                .saturating_sub(self.reasoning_partial_len);
+            self.streaming.streaming_text.truncate(new_len);
+            self.reasoning_partial_len = 0;
+        }
     }
 
-    /// Append streamed reasoning text. Complete lines are emitted immediately as
-    /// dim+italic markdown; a trailing partial line is buffered until its newline
-    /// arrives so emphasis markers always wrap a whole line.
+    /// Append streamed reasoning text, rendering the in-progress line live so
+    /// reasoning trickles in token-by-token (like normal output) rather than one
+    /// whole line at a time. Complete lines (terminated by `\n`) are committed as
+    /// dim+italic markdown; the trailing partial line is rendered as a live tail
+    /// that is re-emitted in place on each delta. The whole-line emphasis run is
+    /// preserved (each line is its own `*…*`) so styling never breaks mid-line.
     pub(super) fn append_reasoning_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let mut out = String::new();
+        if !self.reasoning_streaming {
+            self.open_reasoning_region();
+        }
+        // Drop the previous live tail; we rebuild committed lines + a fresh tail.
+        self.strip_reasoning_partial_tail();
+        let mut committed = String::new();
         for ch in text.chars() {
             if ch == '\n' {
                 let line = std::mem::take(&mut self.reasoning_pending_line);
-                out.push_str(&Self::reasoning_line_markup(&line));
+                committed.push_str(&jcode_tui_markdown::reasoning_line_markup(&line));
             } else {
                 self.reasoning_pending_line.push(ch);
             }
         }
-        if !out.is_empty() {
-            self.append_streaming_text(&out);
+        if !committed.is_empty() {
+            self.streaming.streaming_text.push_str(&committed);
         }
+        // Re-append the live tail for the in-progress (partial) line.
+        let partial = jcode_tui_markdown::reasoning_partial_markup(&self.reasoning_pending_line);
+        self.reasoning_partial_len = partial.len();
+        self.streaming.streaming_text.push_str(&partial);
+        self.refresh_split_view_if_needed();
     }
 
-    /// Flush any buffered partial reasoning line, then end the region. The
+    /// Promote the live partial line to a committed line and end the region. The
     /// `_footer` argument is ignored (the "Thought for Xs" footer was removed);
     /// it is kept for call-site compatibility.
     pub(super) fn close_reasoning_region(&mut self, _footer: Option<String>) {
         if !self.reasoning_streaming {
             return;
         }
+        // Replace the live tail with the committed (newline-terminated) line.
+        self.strip_reasoning_partial_tail();
         let pending = std::mem::take(&mut self.reasoning_pending_line);
         if !pending.is_empty() {
-            let markup = Self::reasoning_line_markup(&pending);
-            self.append_streaming_text(&markup);
+            self.streaming.streaming_text
+                .push_str(&jcode_tui_markdown::reasoning_line_markup(&pending));
         }
         self.reasoning_streaming = false;
+
+        // In `current` mode, reasoning is ephemeral: only the *current* (live)
+        // block is ever shown. Once it closes (the model starts answering or runs
+        // a tool), slice it straight back out of the stream in place. This keeps
+        // any answer text that preceded it in order and never accumulates a
+        // separate trace message for past reasoning.
+        if matches!(
+            crate::config::config().display.reasoning_display(),
+            crate::config::ReasoningDisplayMode::Current
+        ) {
+            self.discard_current_reasoning_block();
+            return;
+        }
+
         // Terminate the reasoning block with a blank line so following output
         // renders as a normal paragraph.
-        if !self.streaming_text.ends_with("\n\n") {
-            if self.streaming_text.ends_with('\n') {
-                self.append_streaming_text("\n");
+        if !self.streaming.streaming_text.ends_with("\n\n") {
+            if self.streaming.streaming_text.ends_with('\n') {
+                self.streaming.streaming_text.push('\n');
             } else {
-                self.append_streaming_text("\n\n");
+                self.streaming.streaming_text.push_str("\n\n");
             }
         }
+        self.refresh_split_view_if_needed();
+    }
+
+    /// Slice the just-closed reasoning block out of `streaming_text` in place,
+    /// leaving any answer text that streamed *before* it untouched and in order.
+    /// Used in `current` mode so only the live reasoning block is ever visible and
+    /// no per-block trace is left behind.
+    pub(super) fn discard_current_reasoning_block(&mut self) {
+        let block_start = self
+            .reasoning_block_start
+            .take()
+            .unwrap_or(0)
+            .min(self.streaming.streaming_text.len());
+        // Everything from the block start onward is reasoning markup (plus the
+        // separators inserted by open/close). Drop it from the live stream.
+        self.streaming.streaming_text.truncate(block_start);
+        // Drop the separator the open path added before the reasoning block so the
+        // surrounding answer text rejoins cleanly.
+        while self.streaming.streaming_text.ends_with('\n') {
+            self.streaming.streaming_text.pop();
+        }
+        self.refresh_split_view_if_needed();
     }
 
     pub(super) fn append_streaming_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        self.streaming_text.push_str(text);
+        self.streaming.streaming_text.push_str(text);
         self.refresh_split_view_if_needed();
     }
 
@@ -2478,25 +2540,30 @@ impl App {
     }
 
     pub(super) fn replace_streaming_text(&mut self, text: String) {
-        self.streaming_text = text;
+        self.streaming.streaming_text = text;
         self.refresh_split_view_if_needed();
     }
 
     pub(super) fn clear_streaming_render_state(&mut self) {
-        self.streaming_text.clear();
+        self.streaming.streaming_text.clear();
         self.stream_message_ended = false;
         self.reasoning_streaming = false;
         self.reasoning_pending_line.clear();
+        self.reasoning_partial_len = 0;
+        // The stream (and any block offset into it) is gone.
+        self.reasoning_block_start = None;
         self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
     }
 
     pub(super) fn take_streaming_text(&mut self) -> String {
-        let content = std::mem::take(&mut self.streaming_text);
+        let content = std::mem::take(&mut self.streaming.streaming_text);
         self.stream_message_ended = false;
         self.reasoning_streaming = false;
         self.reasoning_pending_line.clear();
+        self.reasoning_partial_len = 0;
+        self.reasoning_block_start = None;
         self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
@@ -2508,7 +2575,7 @@ impl App {
             self.append_streaming_text(&chunk);
         }
 
-        if self.streaming_text.is_empty() {
+        if self.streaming.streaming_text.is_empty() {
             self.stream_buffer.clear();
             return false;
         }
@@ -2537,8 +2604,8 @@ impl App {
             // treat this as a reset and count the full value once.
             output_tokens
         };
-        if self.streaming_tps_collect_output {
-            self.streaming_total_output_tokens += delta;
+        if self.streaming.streaming_tps_collect_output {
+            self.streaming.streaming_total_output_tokens += delta;
             if delta > 0 {
                 self.snapshot_streaming_tps();
             }
@@ -2753,19 +2820,19 @@ impl App {
         self.thinking_prefix_emitted = false;
         self.thinking_buffer.clear();
         self.streaming_tool_calls.clear();
-        self.streaming_input_tokens = 0;
-        self.streaming_output_tokens = 0;
-        self.streaming_cache_read_tokens = None;
-        self.streaming_cache_creation_tokens = None;
-        self.current_api_usage_recorded = false;
+        self.streaming.streaming_input_tokens = 0;
+        self.streaming.streaming_output_tokens = 0;
+        self.streaming.streaming_cache_read_tokens = None;
+        self.streaming.streaming_cache_creation_tokens = None;
+        self.kv_cache.current_api_usage_recorded = false;
         self.upstream_provider = None;
         self.status_detail = None;
-        self.streaming_tps_start = None;
-        self.streaming_tps_elapsed = Duration::ZERO;
-        self.streaming_tps_collect_output = false;
-        self.streaming_total_output_tokens = 0;
-        self.streaming_tps_observed_output_tokens = 0;
-        self.streaming_tps_observed_elapsed = Duration::ZERO;
+        self.streaming.streaming_tps_start = None;
+        self.streaming.streaming_tps_elapsed = Duration::ZERO;
+        self.streaming.streaming_tps_collect_output = false;
+        self.streaming.streaming_total_output_tokens = 0;
+        self.streaming.streaming_tps_observed_output_tokens = 0;
+        self.streaming.streaming_tps_observed_elapsed = Duration::ZERO;
         self.processing_started = Some(Instant::now());
         self.visible_turn_started = Some(Instant::now());
         self.pending_turn = true;
@@ -2821,19 +2888,19 @@ impl App {
             self.thinking_prefix_emitted = false;
             self.thinking_buffer.clear();
             self.streaming_tool_calls.clear();
-            self.streaming_input_tokens = 0;
-            self.streaming_output_tokens = 0;
-            self.streaming_cache_read_tokens = None;
-            self.streaming_cache_creation_tokens = None;
-            self.current_api_usage_recorded = false;
+            self.streaming.streaming_input_tokens = 0;
+            self.streaming.streaming_output_tokens = 0;
+            self.streaming.streaming_cache_read_tokens = None;
+            self.streaming.streaming_cache_creation_tokens = None;
+            self.kv_cache.current_api_usage_recorded = false;
             self.upstream_provider = None;
             self.status_detail = None;
-            self.streaming_tps_start = None;
-            self.streaming_tps_elapsed = Duration::ZERO;
-            self.streaming_tps_collect_output = false;
-            self.streaming_total_output_tokens = 0;
-            self.streaming_tps_observed_output_tokens = 0;
-            self.streaming_tps_observed_elapsed = Duration::ZERO;
+            self.streaming.streaming_tps_start = None;
+            self.streaming.streaming_tps_elapsed = Duration::ZERO;
+            self.streaming.streaming_tps_collect_output = false;
+            self.streaming.streaming_total_output_tokens = 0;
+            self.streaming.streaming_tps_observed_output_tokens = 0;
+            self.streaming.streaming_tps_observed_elapsed = Duration::ZERO;
             self.processing_started = Some(Instant::now());
             if has_combined {
                 if preserve_visible_turn {

@@ -1,22 +1,30 @@
 pub mod anthropic;
+pub mod auth_mode;
 pub mod catalog_refresh;
 pub mod failover;
+pub mod fingerprint;
 pub mod models;
 pub mod openai_schema;
 pub mod pricing;
 pub mod selection;
 
 pub use anthropic::{
-    ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, anthropic_effectively_1m,
-    anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
+    ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
+    anthropic_context_mode, anthropic_effectively_1m, anthropic_is_1m_model,
+    anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
     anthropic_oauth_beta_headers, anthropic_stainless_arch, anthropic_stainless_os,
     anthropic_strip_1m_suffix,
+};
+pub use auth_mode::{
+    AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
+    runtime_env_pinned_mode,
 };
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
     parse_failover_prompt_message,
 };
+pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_hash_str};
 pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, DEFAULT_CONTEXT_LIMIT, ModelCapabilities,
     context_limit_for_model, context_limit_for_model_with_provider,
@@ -25,9 +33,10 @@ pub use models::{
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
 };
 pub use selection::{
-    ActiveProvider, ProviderAvailability, auto_default_provider, dedupe_model_routes,
-    explicit_model_provider_prefix, fallback_sequence, model_name_for_provider,
-    parse_provider_hint, provider_from_model_key, provider_key, provider_label,
+    ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
+    dedupe_model_routes, explicit_model_provider_prefix, fallback_sequence,
+    model_name_for_provider, parse_provider_hint, provider_from_model_key, provider_key,
+    provider_label,
 };
 
 use anyhow::Result;
@@ -72,7 +81,24 @@ pub trait Provider: Send + Sync {
     }
 
     /// Get the provider name.
+    ///
+    /// This is the stable, machine-facing identifier (e.g. `"openrouter"`,
+    /// `"claude"`). Several surfaces key billing and routing decisions off this
+    /// value, so it must stay constant for a given provider class even when the
+    /// underlying runtime is a specific OpenAI-compatible profile. Use
+    /// [`Provider::display_name`] for anything shown to the user.
     fn name(&self) -> &str;
+
+    /// Human-facing provider label for the *current runtime selection*.
+    ///
+    /// Defaults to [`Provider::name`]. Provider orchestrators that multiplex
+    /// several backends behind one `name()` (notably the OpenRouter slot, which
+    /// also serves direct OpenAI-compatible profiles such as NVIDIA NIM or
+    /// DeepSeek) override this so the UI reflects the profile the user actually
+    /// selected at runtime instead of a fixed aggregator label.
+    fn display_name(&self) -> String {
+        self.name().to_string()
+    }
 
     /// Get the model identifier being used.
     fn model(&self) -> String {
@@ -592,14 +618,27 @@ pub enum ModelRouteApiMethod {
 }
 
 impl ModelRouteApiMethod {
+    /// The route-vocabulary api_method for a canonical dual-auth route.
+    pub fn from_auth_route(route: crate::auth_mode::AuthRoute) -> Self {
+        use crate::auth_mode::{AuthMode, DualAuthProvider};
+        match (route.provider, route.mode) {
+            (DualAuthProvider::Anthropic, AuthMode::Oauth) => Self::ClaudeOAuth,
+            (DualAuthProvider::Anthropic, AuthMode::ApiKey) => Self::AnthropicApiKey,
+            (DualAuthProvider::OpenAI, AuthMode::Oauth) => Self::OpenAIOAuth,
+            (DualAuthProvider::OpenAI, AuthMode::ApiKey) => Self::OpenAIApiKey,
+        }
+    }
+
     pub fn parse(value: &str) -> Self {
         let trimmed = value.trim();
         let lower = trimmed.to_ascii_lowercase();
+        // Dual-auth (Anthropic/OpenAI OAuth-vs-API) tokens share one canonical
+        // alias table so the route vocabulary never drifts from the runtime/CLI
+        // vocabularies. Anything else falls through to the route-only methods.
+        if let Some(route) = crate::auth_mode::AuthRoute::parse(&lower) {
+            return Self::from_auth_route(route);
+        }
         match lower.as_str() {
-            "claude" | "claude-oauth" => Self::ClaudeOAuth,
-            "api-key" | "claude-api" | "anthropic-api-key" => Self::AnthropicApiKey,
-            "openai" | "openai-oauth" => Self::OpenAIOAuth,
-            "openai-api" | "openai-api-key" => Self::OpenAIApiKey,
             "openrouter" => Self::OpenRouter,
             "openai-compatible" => Self::OpenAiCompatible { profile_id: None },
             "copilot" => Self::Copilot,
@@ -821,7 +860,7 @@ impl ModelCatalogSnapshot {
 
     pub fn from_provider(provider: &dyn Provider) -> Self {
         Self::new(
-            Some(provider.name().to_string()),
+            Some(provider.display_name()),
             Some(provider.model()),
             provider.available_models_display(),
             provider.model_routes(),

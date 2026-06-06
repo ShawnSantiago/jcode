@@ -319,6 +319,88 @@ fn load_codex_preview_preserves_blank_line_between_tool_transcript_and_followup_
 }
 
 #[test]
+fn load_codex_preview_reads_only_tail_of_large_transcript() {
+    // A transcript far larger than the tail cap should still produce a preview
+    // of the most-recent messages, parsed from only the tail slice. This is the
+    // regression guard for the picker-navigation lag: previews must not depend
+    // on parsing the whole (multi-MB) file.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let transcript_path = temp.path().join("rollout-big.jsonl");
+
+    let mut contents = String::new();
+    // session_meta header line (always skipped).
+    contents.push_str(
+        "{\"timestamp\":\"2026-04-10T19:05:54.536Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019d-big\"}}\n",
+    );
+    // Padding messages near the head that must NOT appear in the preview once
+    // the file exceeds the tail cap.
+    for i in 0..50_000 {
+        contents.push_str(&format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"old padding message {i} aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}]}}}}\n",
+        ));
+    }
+    assert!(
+        contents.len() as u64 > EXTERNAL_PREVIEW_TAIL_BYTES,
+        "test transcript must exceed the tail cap"
+    );
+    // Distinctive recent messages at the very end.
+    contents.push_str(
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"RECENT_USER_MARKER\"}]}}\n",
+    );
+    contents.push_str(
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"RECENT_ASSISTANT_MARKER\"}]}}\n",
+    );
+    std::fs::write(&transcript_path, &contents).expect("write big transcript");
+
+    let preview = load_codex_preview_from_path(&transcript_path).expect("preview");
+    // Preview is capped at 20 messages.
+    assert!(preview.len() <= 20, "preview should be capped, got {}", preview.len());
+    // The most-recent markers must be present.
+    let last_two = &preview[preview.len().saturating_sub(2)..];
+    assert!(last_two.iter().any(|m| m.content.contains("RECENT_USER_MARKER")));
+    assert!(last_two.iter().any(|m| m.content.contains("RECENT_ASSISTANT_MARKER")));
+    // The head padding must have been skipped (not parsed from the tail slice).
+    assert!(
+        !preview.iter().any(|m| m.content.contains("old padding message 0 ")),
+        "head messages should not appear when only the tail is read"
+    );
+}
+
+#[test]
+fn load_claude_code_preview_reads_only_tail_of_large_transcript() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let transcript_path = temp.path().join("claude-big.jsonl");
+
+    let mut contents = String::new();
+    for i in 0..50_000 {
+        contents.push_str(&format!(
+            "{{\"type\":\"assistant\",\"uuid\":\"a{i}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"old padding message {i} bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}}}\n",
+        ));
+    }
+    assert!(
+        contents.len() as u64 > EXTERNAL_PREVIEW_TAIL_BYTES,
+        "test transcript must exceed the tail cap"
+    );
+    contents.push_str(
+        "{\"type\":\"user\",\"uuid\":\"u_last\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"RECENT_USER_MARKER\"}]}}\n",
+    );
+    contents.push_str(
+        "{\"type\":\"assistant\",\"uuid\":\"a_last\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"RECENT_ASSISTANT_MARKER\"}]}}\n",
+    );
+    std::fs::write(&transcript_path, &contents).expect("write big transcript");
+
+    let preview = load_claude_code_preview_from_path(&transcript_path).expect("preview");
+    assert!(preview.len() <= 20, "preview should be capped, got {}", preview.len());
+    let last_two = &preview[preview.len().saturating_sub(2)..];
+    assert!(last_two.iter().any(|m| m.content.contains("RECENT_USER_MARKER")));
+    assert!(last_two.iter().any(|m| m.content.contains("RECENT_ASSISTANT_MARKER")));
+    assert!(
+        !preview.iter().any(|m| m.content.contains("old padding message 0 ")),
+        "head messages should not appear when only the tail is read"
+    );
+}
+
+#[test]
 fn load_sessions_prefers_custom_title_over_generated_title() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
@@ -781,5 +863,124 @@ fn benchmark_resume_loading_reports_timings() {
         load_elapsed.as_millis(),
         group_elapsed.as_millis(),
         sessions.len()
+    );
+}
+
+#[test]
+fn onboarding_scoped_loader_returns_only_codex_sessions() {
+    use crate::tui::app::onboarding_flow::ExternalCli;
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    // A Codex transcript that the onboarding picker should surface.
+    let codex_dir = temp.path().join("external/.codex/sessions/2026/05/01");
+    std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+    std::fs::write(
+        codex_dir.join("rollout-2026-05-01T10-00-00-test.jsonl"),
+        "{\"timestamp\":\"2026-05-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-onboarding-test\",\"timestamp\":\"2026-05-01T09:59:00Z\",\"cwd\":\"/tmp/codex-onboard\"}}\n",
+    )
+    .expect("write codex transcript");
+
+    // A jcode session that must NOT appear in the scoped Codex view (the whole
+    // point of the scoped loader is to skip parsing these on onboarding).
+    let mut jcode_session = Session::create_with_id(
+        "session_onboarding_jcode_1780000000000".to_string(),
+        Some("/tmp/jcode-onboard".to_string()),
+        Some("Jcode Onboarding".to_string()),
+    );
+    jcode_session.append_stored_message(crate::session::StoredMessage {
+        id: "msg-1".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "should not show in codex onboarding view".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    jcode_session.save().expect("save jcode session");
+
+    let (groups, orphans) = load_external_cli_sessions_grouped(ExternalCli::Codex);
+    assert!(groups.is_empty(), "scoped loader produces only orphans");
+    assert!(
+        orphans
+            .iter()
+            .any(|s| s.id == "codex:codex-onboarding-test"),
+        "expected codex transcript in scoped onboarding load: {:?}",
+        orphans.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+    assert!(
+        orphans
+            .iter()
+            .all(|s| matches!(s.resume_target, ResumeTarget::CodexSession { .. })),
+        "scoped Codex load must not include jcode/other-CLI sessions"
+    );
+}
+
+#[test]
+fn parallel_fill_skips_many_recent_empty_sessions_to_reach_scan_limit() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _scan_limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let push_message = |session: &mut Session, text: &str| {
+        session.append_stored_message(crate::session::StoredMessage {
+            id: format!("msg-{text}"),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+    };
+
+    // Many recent but empty sessions (no visible messages) that the parallel
+    // two-phase fill must skip while still collecting `scan_limit` real ones.
+    for idx in 0..200 {
+        let mut session = Session::create_with_id(
+            format!("session_empty_{}", 1_790_000_000_000u64 + idx as u64),
+            Some(format!("/tmp/empty-{idx:03}")),
+            Some(format!("Empty {idx:03}")),
+        );
+        session.save().expect("save empty session");
+    }
+    // Older but non-empty sessions that should fill the list despite being less
+    // recent than the empty stubs above.
+    for idx in 0..60 {
+        let mut session = Session::create_with_id(
+            format!("session_full_{}", 1_780_000_000_000u64 + idx as u64),
+            Some(format!("/tmp/full-{idx:03}")),
+            Some(format!("Full {idx:03}")),
+        );
+        push_message(&mut session, &format!("real content {idx:03}"));
+        session.save().expect("save full session");
+    }
+
+    invalidate_session_list_cache();
+    let sessions = load_sessions().expect("load sessions");
+    let visible: Vec<&SessionInfo> = sessions
+        .iter()
+        .filter(|s| s.id.starts_with("session_full_"))
+        .collect();
+    assert_eq!(
+        visible.len(),
+        50,
+        "expected exactly scan_limit non-empty sessions, got {}",
+        visible.len()
+    );
+    assert!(
+        !sessions.iter().any(|s| s.id.starts_with("session_empty_")),
+        "empty sessions must be filtered out of the loaded list"
     );
 }

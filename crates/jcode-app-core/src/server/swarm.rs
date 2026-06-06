@@ -1,5 +1,5 @@
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
-use super::{FileAccess, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
+use super::{SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
 use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids};
@@ -497,37 +497,6 @@ pub(super) async fn remove_plan_participant(
     }
 }
 
-pub(super) async fn remove_session_file_touches(
-    session_id: &str,
-    file_touches: &Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
-    files_touched_by_session: &Arc<RwLock<HashMap<String, HashSet<PathBuf>>>>,
-) {
-    let touched_paths = {
-        let mut reverse = files_touched_by_session.write().await;
-        reverse.remove(session_id)
-    };
-
-    let mut touches = file_touches.write().await;
-    if let Some(paths) = touched_paths {
-        for path in paths {
-            let mut remove_path = false;
-            if let Some(accesses) = touches.get_mut(&path) {
-                accesses.retain(|access| access.session_id != session_id);
-                remove_path = accesses.is_empty();
-            }
-            if remove_path {
-                touches.remove(&path);
-            }
-        }
-        return;
-    }
-
-    touches.retain(|_, accesses| {
-        accesses.retain(|access| access.session_id != session_id);
-        !accesses.is_empty()
-    });
-}
-
 pub(super) async fn remove_session_from_swarm(
     session_id: &str,
     swarm_id: &str,
@@ -909,7 +878,7 @@ pub(super) async fn run_swarm_task(
     prompt: &str,
 ) -> Result<String> {
     let started = Instant::now();
-    let (provider, registry, session_id, working_dir, coordinator_model) = {
+    let (provider, registry, session_id, working_dir, coordinator_model, provider_key, route) = {
         let agent = agent.lock().await;
         (
             agent.provider_fork(),
@@ -917,6 +886,8 @@ pub(super) async fn run_swarm_task(
             agent.session_id().to_string(),
             agent.working_dir().map(PathBuf::from),
             agent.provider_model(),
+            agent.session_provider_key(),
+            agent.session_route_api_method(),
         )
     };
     let parent_session_id = session_id.clone();
@@ -926,6 +897,11 @@ pub(super) async fn run_swarm_task(
     );
     let child_session_id = session.id.clone();
     session.model = Some(coordinator_model);
+    // Inherit the coordinator's exact auth identity so the forked worker keeps
+    // the same provider/auth route (OAuth vs API, openai-compatible profile)
+    // instead of silently falling back to the config default on persistence.
+    session.provider_key = provider_key;
+    session.route_api_method = route;
     if let Some(dir) = working_dir {
         session.working_dir = Some(dir.display().to_string());
     }

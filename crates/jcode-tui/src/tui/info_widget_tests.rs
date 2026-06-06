@@ -2,13 +2,39 @@ use super::{
     BackgroundInfo, CacheHitInfo, CacheMissAttribution, GraphEdge, GraphNode, InfoWidgetData,
     Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
-    occasional_status_tip, render_kv_cache_widget, render_memory_compact, render_memory_widget,
-    render_model_widget, render_todos_compact, render_todos_expanded, render_todos_widget,
-    render_usage_compact, render_usage_widget, truncate_smart,
+    effective_prompt_tokens, occasional_status_tip, render_kv_cache_widget, render_memory_compact,
+    render_memory_widget, render_model_widget, render_todos_compact, render_todos_expanded,
+    render_todos_widget, render_usage_compact, render_usage_widget, truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
+
+#[test]
+fn effective_prompt_tokens_handles_split_and_subset_accounting() {
+    // Anthropic-style split accounting: `input` is only the uncached remainder,
+    // so cache_read pushed beyond input means the true prompt is the sum.
+    assert_eq!(effective_prompt_tokens(2449, 19499, 684), 22632);
+    // OpenAI-style subset accounting: cached tokens are inside `input`.
+    assert_eq!(effective_prompt_tokens(10000, 6000, 0), 10000);
+    // No cache telemetry at all behaves like a plain input count.
+    assert_eq!(effective_prompt_tokens(5000, 0, 0), 5000);
+}
+
+#[test]
+fn cache_hit_ratio_uses_effective_prompt_for_split_providers() {
+    // Mirrors a real Anthropic log line where read >> input and the old code
+    // clamped the ratio to 100%.
+    let cache = CacheHitInfo {
+        reported_input_tokens: 2449,
+        read_tokens: 19499,
+        creation_tokens: 684,
+        ..Default::default()
+    };
+    // 19499 / (2449 + 19499 + 684) = 0.8616...
+    let ratio = cache.hit_ratio().expect("ratio");
+    assert!((ratio - 0.8616).abs() < 0.01, "ratio was {ratio}");
+}
 
 #[test]
 fn truncate_smart_handles_unicode() {
@@ -37,6 +63,7 @@ fn kv_cache_widget_shows_session_hit_ratio() {
             optimal_input_tokens: 16_667,
             last_reported_input_tokens: Some(10_000),
             last_read_tokens: Some(9_400),
+            last_creation_tokens: Some(0),
             last_optimal_input_tokens: Some(9_895),
             miss_attributions: vec![CacheMissAttribution {
                 turn_number: 20,
@@ -59,7 +86,7 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     assert!(text.contains("last "));
     assert!(text.contains("94%"));
     assert!(text.contains("session "));
-    assert!(text.contains("75%"));
+    assert!(text.contains("39%"));
     assert!(text.contains("miss attribution"));
     assert!(text.contains("69k missed total"));
     assert!(text.contains("20>"));
@@ -72,6 +99,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
     let data = InfoWidgetData {
         todos: vec![
             crate::todo::TodoItem {
+                group: None,
                 id: "todo-1".to_string(),
                 content: "Validate confidence UI".to_string(),
                 status: "in_progress".to_string(),
@@ -82,6 +110,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 assigned_to: None,
             },
             crate::todo::TodoItem {
+                group: None,
                 id: "todo-2".to_string(),
                 content: "Ship completed item".to_string(),
                 status: "completed".to_string(),
@@ -110,8 +139,67 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
 }
 
 #[test]
+fn todos_widgets_render_group_headers_when_groups_present() {
+    let mk = |group: Option<&str>, id: &str, status: &str| crate::todo::TodoItem {
+        group: group.map(|g| g.to_string()),
+        id: id.to_string(),
+        content: format!("task {id}"),
+        status: status.to_string(),
+        priority: "medium".to_string(),
+        confidence: Some(80),
+        completion_confidence: None,
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    };
+    let data = InfoWidgetData {
+        todos: vec![
+            mk(Some("optimize rendering"), "a", "completed"),
+            mk(Some("optimize rendering"), "b", "in_progress"),
+            mk(Some("fix scrollback"), "c", "pending"),
+            mk(None, "d", "pending"),
+        ],
+        ..Default::default()
+    };
+
+    let expanded = lines_text(&render_todos_expanded(&data, Rect::new(0, 0, 80, 14)));
+    // Group headers appear with per-group progress counters, first-seen order,
+    // and the ungrouped bucket renders under "Other".
+    assert!(expanded.contains("optimize rendering"), "{expanded}");
+    assert!(expanded.contains("1/2"), "{expanded}");
+    assert!(expanded.contains("fix scrollback"), "{expanded}");
+    assert!(expanded.contains("Other"), "{expanded}");
+    let opt_idx = expanded.find("optimize rendering").unwrap();
+    let fix_idx = expanded.find("fix scrollback").unwrap();
+    let other_idx = expanded.find("Other").unwrap();
+    assert!(opt_idx < fix_idx, "first-seen group order: {expanded}");
+    assert!(fix_idx < other_idx, "ungrouped bucket last: {expanded}");
+}
+
+#[test]
+fn todos_widgets_stay_flat_without_groups() {
+    let mk = |id: &str, status: &str| crate::todo::TodoItem {
+        group: None,
+        id: id.to_string(),
+        content: format!("task {id}"),
+        status: status.to_string(),
+        priority: "medium".to_string(),
+        confidence: Some(80),
+        completion_confidence: None,
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    };
+    let data = InfoWidgetData {
+        todos: vec![mk("a", "completed"), mk("b", "pending")],
+        ..Default::default()
+    };
+    let expanded = lines_text(&render_todos_expanded(&data, Rect::new(0, 0, 80, 14)));
+    assert!(!expanded.contains("Other"), "no group bucket: {expanded}");
+}
+
+#[test]
 fn todos_widget_renders_exact_pips_for_small_lists() {
     let mk = |status: &str| crate::todo::TodoItem {
+        group: None,
         id: status.to_string(),
         content: format!("item {status}"),
         status: status.to_string(),
@@ -964,6 +1052,7 @@ fn placements_never_include_border_only_widgets() {
             ..Default::default()
         }),
         todos: vec![crate::todo::TodoItem {
+            group: None,
             content: "ship patch".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),

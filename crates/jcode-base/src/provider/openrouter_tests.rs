@@ -355,6 +355,297 @@ fn direct_deepseek_profile_omits_image_url_parts() {
     );
 }
 
+/// Extract the JSON request body from a captured raw HTTP request.
+fn parse_captured_request_body(request: &str) -> serde_json::Value {
+    let body = request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or(request);
+    serde_json::from_str(body)
+        .unwrap_or_else(|err| panic!("captured request body should be JSON ({err}): {body}"))
+}
+
+/// Regression for issue #321: when an assistant turn is interrupted mid-thinking
+/// on a direct OpenAI-compatible provider that does not support reasoning replay
+/// (e.g. DeepSeek), the persisted assistant message contains only a `Reasoning`
+/// block. The request builder must not emit an assistant message that has
+/// neither `content` nor `tool_calls`, otherwise the provider rejects the whole
+/// request with 400 "Invalid assistant message: content or tool_calls must be
+/// set" and the session can never recover.
+#[test]
+fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
+    let _lock = ENV_LOCK.lock();
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "do a thing".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        // Assistant turn that was interrupted while only reasoning had streamed,
+        // so it carries a Reasoning block but no text or tool calls.
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning {
+                text: "thinking about the request".to_string(),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "actually do this instead".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    let body = parse_captured_request_body(&request);
+    let api_messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .expect("request should contain messages array");
+
+    for msg in api_messages {
+        if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let has_content = msg
+            .get("content")
+            .map(|v| !v.is_null() && v.as_str().map(|s| !s.is_empty()).unwrap_or(true))
+            .unwrap_or(false);
+        let has_tool_calls = msg
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false);
+        assert!(
+            has_content || has_tool_calls,
+            "assistant message must carry content or tool_calls (issue #321); got: {msg}"
+        );
+    }
+}
+
+/// Companion to issue #321: when the provider *does* support reasoning replay
+/// (e.g. a generic OpenRouter-style endpoint with provider features enabled and
+/// thinking on), an interrupted reasoning-only assistant turn should be sent
+/// with both a `reasoning_content` field and a valid (empty) `content`, so the
+/// turn is preserved without violating the "content or tool_calls" requirement.
+#[test]
+fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
+    let _lock = ENV_LOCK.lock();
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        profile_id: None,
+        supports_provider_features: true,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "do a thing".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning {
+                text: "thinking about the request".to_string(),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "actually do this instead".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    let body = parse_captured_request_body(&request);
+    let api_messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .expect("request should contain messages array");
+
+    let assistant = api_messages
+        .iter()
+        .find(|msg| msg.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+        .expect("request should retain the interrupted assistant turn");
+
+    assert!(
+        assistant.get("reasoning_content").is_some(),
+        "reasoning-capable provider should keep reasoning_content; got: {assistant}"
+    );
+    assert!(
+        assistant.get("content").is_some(),
+        "interrupted reasoning-only assistant turn must still carry content (issue #321); got: {assistant}"
+    );
+}
+
+/// Regression for issue #322: the dedicated Kimi coding endpoint
+/// (`https://api.kimi.com/coding/v1`, model `kimi-for-coding`) enables thinking
+/// server-side and rejects any assistant tool-call message that lacks
+/// `reasoning_content` with 400 "thinking is enabled but reasoning_content is
+/// missing in assistant tool call message". When an assistant turn produced a
+/// tool call without an accompanying reasoning block (the common case once the
+/// thinking stream is not persisted), the request builder must still attach a
+/// `reasoning_content` field to that assistant message so the endpoint accepts
+/// the request.
+#[test]
+fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
+    let _lock = ENV_LOCK.lock();
+    let _thinking = EnvVarGuard::remove("JCODE_OPENROUTER_THINKING");
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        // The dedicated Kimi coding endpoint is a direct OpenAI-compatible
+        // profile (no OpenRouter provider routing features).
+        profile_id: Some("kimi".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        model: Arc::new(RwLock::new("kimi-for-coding".to_string())),
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "list the files".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        // Assistant turn that emitted a tool call but whose hidden reasoning was
+        // not persisted (so there is no Reasoning block to replay).
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "a.txt\nb.txt".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    let body = parse_captured_request_body(&request);
+    let api_messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .expect("request should contain messages array");
+
+    let assistant = api_messages
+        .iter()
+        .find(|msg| {
+            msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                && msg.get("tool_calls").is_some()
+        })
+        .expect("request should retain the assistant tool-call turn");
+
+    let reasoning = assistant.get("reasoning_content");
+    assert!(
+        reasoning.is_some_and(|value| value.as_str().is_some_and(|s| !s.is_empty())),
+        "Kimi coding endpoint requires reasoning_content on assistant tool-call messages (issue #322); got: {assistant}"
+    );
+}
+
 #[test]
 fn default_named_openai_compatible_provider_uses_direct_compatible_request_path() {
     let _lock = ENV_LOCK.lock();
@@ -453,12 +744,104 @@ model_catalog = false
     );
 }
 
+/// Regression for issue #304: a `default_provider` pointing at an
+/// `openai-compatible` profile must build requests with the direct
+/// OpenAI-compatible request shape, NOT the OpenRouter request builder, even
+/// when `model_catalog` is left enabled (the default). Using the OpenRouter
+/// builder leaks the `provider` routing object / OpenRouter-only headers and
+/// causes strict third-party gateways to reject the request with
+/// 400 "Unrecognized chat message".
+#[test]
+fn default_named_openai_compatible_with_catalog_uses_direct_compatible_request_path() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("TEST_DEFAULT_COMPAT_KEY", "test-key");
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+
+    std::fs::create_dir_all(&jcode_home).expect("create test config dir");
+    std::fs::write(
+        jcode_home.join("config.toml"),
+        format!(
+            r#"
+[provider]
+default_provider = "my-gateway"
+
+[providers.my-gateway]
+type = "openai-compatible"
+base_url = "{api_base}"
+api_key_env = "TEST_DEFAULT_COMPAT_KEY"
+default_model = "opaque/model@id"
+"#
+        ),
+    )
+    .expect("write test config");
+    crate::config::invalidate_config_cache();
+
+    let provider =
+        crate::provider::MultiProvider::new_with_auth_status(crate::auth::AuthStatus::default());
+    assert_eq!(
+        provider.active_provider(),
+        crate::provider::ActiveProvider::OpenRouter
+    );
+    let openrouter = provider
+        .openrouter_provider()
+        .expect("openrouter execution slot");
+    assert!(
+        !openrouter.supports_provider_routing_features(),
+        "named openai-compatible defaults must not use OpenRouter provider routing features even with catalog enabled"
+    );
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = openrouter
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should parse");
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("POST /v1/chat/completions "),
+        "unexpected chat request: {request}"
+    );
+    assert!(
+        !request.contains(r#""provider":"#),
+        "direct OpenAI-compatible request must not include OpenRouter provider routing object: {request}"
+    );
+    assert!(
+        !request.contains("HTTP-Referer") && !request.contains("X-Title"),
+        "direct OpenAI-compatible request must not include OpenRouter-only headers: {request}"
+    );
+}
+
 #[test]
 fn minimax_profile_exposes_static_models_before_catalog_refresh() {
     let models = crate::provider_catalog::openai_compatible_profile_static_models(
         jcode_provider_metadata::MINIMAX_PROFILE,
     );
-
     assert!(models.iter().any(|model| model == "MiniMax-M2.7"));
     assert!(models.iter().any(|model| model == "MiniMax-M2.7-highspeed"));
     assert!(models.iter().any(|model| model == "MiniMax-M2"));
@@ -1809,4 +2192,72 @@ fn strict_openai_schema_endpoint_allows_other_providers() {
         Some("openai"),
         "https://api.openai.com/v1"
     ));
+}
+
+#[test]
+fn runtime_display_name_tracks_active_openai_compatible_profile() {
+    // Regression for issue #329: switching to a direct OpenAI-compatible
+    // profile (NVIDIA NIM) at runtime must surface that profile's display
+    // name, not the fixed "OpenRouter" aggregator label. The machine-facing
+    // `name()` stays "openrouter" because billing/routing logic keys off it.
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+
+    // Configure both the OpenRouter aggregator and NVIDIA NIM credentials so
+    // the slot can host either runtime. Set after the isolate guard, which
+    // clears every profile api-key env var.
+    let _or_key = EnvVarGuard::set("OPENROUTER_API_KEY", "or-test-key");
+    let _nim_key = EnvVarGuard::set("NVIDIA_API_KEY", "nim-test-key");
+    crate::config::invalidate_config_cache();
+
+    let provider =
+        crate::provider::MultiProvider::new_with_auth_status(crate::auth::AuthStatus::default());
+
+    // Switch to a NVIDIA NIM model via the profile-prefixed model request.
+    provider
+        .set_model("nvidia-nim:nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        .expect("switch to nvidia-nim profile");
+
+    assert_eq!(
+        Provider::name(&provider),
+        "OpenRouter",
+        "machine-facing name must stay stable for billing/routing"
+    );
+    assert_eq!(
+        Provider::display_name(&provider),
+        "NVIDIA NIM",
+        "header/UI display name must reflect the active runtime profile"
+    );
+
+    // Switching back to the plain OpenRouter aggregator restores the label.
+    provider
+        .set_model("anthropic/claude-sonnet-4")
+        .expect("switch back to openrouter aggregator");
+    assert_eq!(Provider::display_name(&provider), "OpenRouter");
+}
+
+#[test]
+fn runtime_display_name_for_profile_runtime_instance() {
+    // Direct unit coverage of the per-instance resolver used by
+    // `Provider::display_name`.
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("NVIDIA_API_KEY", "nim-test-key");
+
+    let nim = OpenRouterProvider::new_openai_compatible_profile_runtime(
+        crate::provider_catalog::NVIDIA_NIM_PROFILE,
+    )
+    .expect("build nvidia-nim runtime");
+    assert_eq!(nim.runtime_display_name(), "NVIDIA NIM");
+    assert_eq!(Provider::name(&nim), "openrouter");
 }

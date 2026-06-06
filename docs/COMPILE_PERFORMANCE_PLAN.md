@@ -5,6 +5,7 @@ without sacrificing full-feature builds.
 
 See also:
 
+- [`COMPILE_TIME_ISOLATION_REFACTOR.md`](./COMPILE_TIME_ISOLATION_REFACTOR.md)
 - [`REFACTORING.md`](./REFACTORING.md)
 - [`MODULAR_ARCHITECTURE_RFC.md`](./MODULAR_ARCHITECTURE_RFC.md)
 

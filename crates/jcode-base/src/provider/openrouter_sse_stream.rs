@@ -453,8 +453,13 @@ impl OpenRouterStream {
         }
 
         while let Some(pos) = self.buffer.find("\n\n") {
+            // Extract this event and remove it (plus the "\n\n" separator) in
+            // place. Reassigning `self.buffer = self.buffer[pos + 2..].to_string()`
+            // copied and reallocated the entire remaining buffer on every event,
+            // which is O(buffer^2) when one network chunk batches many SSE
+            // events. `drain` removes the consumed prefix without reallocating.
             let event_str = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + 2..].to_string();
+            self.buffer.drain(..pos + 2);
 
             // Parse SSE event
             let mut data = None;

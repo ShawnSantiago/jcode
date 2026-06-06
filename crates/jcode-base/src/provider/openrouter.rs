@@ -1046,6 +1046,45 @@ impl OpenRouterProvider {
         self.supports_provider_features
     }
 
+    /// Human-facing label for the runtime backing this provider instance.
+    ///
+    /// Unlike the env-var based [`crate::provider_catalog::runtime_provider_display_name`],
+    /// this reads the instance's own `profile_id`/`api_base`, so it stays correct
+    /// after a runtime `/model` switch to a different OpenAI-compatible profile
+    /// (e.g. NVIDIA NIM) even though `name()` is fixed at `"openrouter"`.
+    pub(crate) fn runtime_display_name(&self) -> String {
+        // Direct OpenAI-compatible profile (NVIDIA NIM, DeepSeek, Z.AI, ...).
+        if let Some(profile_id) = self.profile_id.as_deref() {
+            if let Some(profile) = openai_compatible_profile_by_id(profile_id) {
+                return profile.display_name.to_string();
+            }
+            return profile_id.to_string();
+        }
+
+        // Non-aggregator endpoint without a known profile id: classify by base
+        // URL so custom OpenAI-compatible endpoints don't masquerade as the
+        // public OpenRouter aggregator.
+        if !self.supports_provider_features {
+            if let Some(profile_id) =
+                crate::provider_catalog::openai_compatible_profile_id_for_api_base(&self.api_base)
+                && let Some(profile) = openai_compatible_profile_by_id(profile_id)
+            {
+                return profile.display_name.to_string();
+            }
+            if std::env::var("JCODE_RUNTIME_PROVIDER")
+                .ok()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("azure-openai"))
+            {
+                return "Azure OpenAI".to_string();
+            }
+            if !self.api_base.contains("openrouter.ai") {
+                return "OpenAI-compatible".to_string();
+            }
+        }
+
+        "OpenRouter".to_string()
+    }
+
     pub(crate) fn direct_openai_compatible_route_parts(&self) -> Option<(String, String, String)> {
         if self.supports_provider_features {
             return None;
@@ -1170,6 +1209,20 @@ impl OpenRouterProvider {
     /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
     fn is_kimi_model(model: &str) -> bool {
         jcode_provider_openrouter::is_kimi_model(model)
+    }
+
+    /// Return true when this request targets Moonshot's dedicated Kimi coding
+    /// endpoint (`https://api.kimi.com/coding/v1`, default model
+    /// `kimi-for-coding`). That endpoint enables thinking server-side and
+    /// rejects any assistant tool-call message that lacks `reasoning_content`
+    /// (issue #322). The endpoint's own model id (`kimi-for-coding`) is not
+    /// caught by `is_kimi_model`, so detect it by profile/api-base/model.
+    fn is_kimi_coding_endpoint(&self, model: &str) -> bool {
+        self.profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("kimi"))
+            || is_kimi_coding_api_base(&self.api_base)
+            || is_kimi_model_name(model)
     }
 
     /// Parse thinking override from env. Values: "enabled"/"disabled"/"auto".

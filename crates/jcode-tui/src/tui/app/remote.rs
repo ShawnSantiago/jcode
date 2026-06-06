@@ -81,7 +81,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.update_chat_overscroll();
     needs_redraw |= app.update_pinned_images_auto_hide();
     needs_redraw |= dispatch_compacted_history_load(app, remote).await;
-    if let Some(chunk) = app.stream_buffer.flush() {
+    // Reveal buffered streaming text at the smooth paced rate on each tick, the
+    // same as the local turn loop. Finalization paths still call flush().
+    if let Some(chunk) = app.stream_buffer.flush_smooth_frame() {
         app.append_streaming_text(&chunk);
         needs_redraw = true;
     }
@@ -121,7 +123,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             }
         }
 
-        if let Some(target_session) = crate::tui::workspace_client::take_pending_resume_session() {
+        if let Some(target_session) = app.workspace_client.take_pending_resume_session() {
             match remote.resume_session(&target_session).await {
                 Ok(()) => {
                     let label = crate::id::extract_session_name(&target_session)
@@ -739,7 +741,7 @@ pub(super) fn handle_disconnect(
     if let Some(chunk) = app.stream_buffer.flush() {
         app.append_streaming_text(&chunk);
     }
-    if !app.streaming_text.is_empty() {
+    if !app.streaming.streaming_text.is_empty() {
         let content = app.take_streaming_text();
         let content = app.collapse_reasoning_for_commit(content);
         if !content.trim().is_empty() {
@@ -1252,7 +1254,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
             app.current_message_id = None;
             app.processing_started = None;
             app.last_stream_activity = None;
-            if !app.streaming_text.is_empty() {
+            if !app.streaming.streaming_text.is_empty() {
                 let content = app.take_streaming_text();
                 let content = app.collapse_reasoning_for_commit(content);
                 if !content.trim().is_empty() {

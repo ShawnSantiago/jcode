@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth::google;
 use crate::gmail::{self, GmailClient, MessageFormat};
 
 pub struct GmailTool {
@@ -68,8 +67,8 @@ impl Tool for GmailTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["search", "read", "list", "draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
-                    "description": "Action."
+                    "enum": ["connect", "search", "read", "list", "draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
+                    "description": "Action. Use 'connect' to set up Gmail access via the Composio managed backend (opens a browser OAuth screen for the user to approve)."
                 },
                 "query": { "type": "string" },
                 "message_id": { "type": "string" },
@@ -92,14 +91,48 @@ impl Tool for GmailTool {
     }
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        if !google::has_tokens() {
-            return Ok(ToolOutput::new(
-                "Gmail is not configured. Run `jcode login google` to set up Gmail access.",
-            ));
-        }
-
         let params: GmailInput = serde_json::from_value(input)?;
         let max = params.max_results.unwrap_or(10).min(50);
+
+        // The connect action sets up the Composio managed backend by opening a
+        // browser OAuth screen for the user to approve. It runs before the
+        // is_configured gate so it can establish the very first connection.
+        if params.action == "connect" {
+            if !self.client.supports_connect() {
+                return Ok(ToolOutput::new(
+                    "The 'connect' action is only available with the Composio Gmail backend. \
+                     Set JCODE_GMAIL_BACKEND=composio and COMPOSIO_API_KEY, then retry. \
+                     For the default backend, run `jcode login google` instead.",
+                ));
+            }
+            let no_browser = crate::auth::browser_suppressed(false);
+            match self.client.connect(!no_browser).await {
+                Ok(conn) => {
+                    let who = conn
+                        .email
+                        .clone()
+                        .unwrap_or_else(|| "your Gmail account".to_string());
+                    return Ok(ToolOutput::new(format!(
+                        "Gmail connected via Composio for {}. You can now search, read, draft, and send email.",
+                        who
+                    )));
+                }
+                Err(e) => {
+                    return Ok(ToolOutput::new(format!("Gmail connect failed: {}", e)));
+                }
+            }
+        }
+
+        if !self.client.is_configured() {
+            return Ok(ToolOutput::new(self.client.not_configured_message()));
+        }
+
+        if self.client.needs_connection() {
+            return Ok(ToolOutput::new(
+                "Gmail (Composio backend) has no connected account yet. Run the gmail tool with \
+                 action 'connect' to authorize your Gmail account, then retry.",
+            ));
+        }
 
         match params.action.as_str() {
             "search" | "list" => {
@@ -278,8 +311,7 @@ impl Tool for GmailTool {
             }
 
             "send" => {
-                let tokens = google::load_tokens()?;
-                if !tokens.tier.can_send() {
+                if !self.client.can_send() {
                     return Ok(ToolOutput::new(
                         "Send is not available. Your Gmail access is configured as Read & Draft Only (API-level restriction).\n\
                          The draft has been created - open Gmail to send it manually.\n\
@@ -323,8 +355,7 @@ impl Tool for GmailTool {
             }
 
             "send_draft" => {
-                let tokens = google::load_tokens()?;
-                if !tokens.tier.can_send() {
+                if !self.client.can_send() {
                     return Ok(ToolOutput::new(
                         "Send is not available. Your Gmail access is configured as Read & Draft Only (API-level restriction).\n\
                          Open Gmail to send the draft manually.\n\
@@ -352,8 +383,7 @@ impl Tool for GmailTool {
             }
 
             "trash" => {
-                let tokens = google::load_tokens()?;
-                if !tokens.tier.can_delete() {
+                if !self.client.can_delete() {
                     return Ok(ToolOutput::new(
                         "Trash is not available. Your Gmail access is configured as Read & Draft Only (API-level restriction).\n\
                          To enable delete, rerun `jcode login google --google-access-tier full`.",

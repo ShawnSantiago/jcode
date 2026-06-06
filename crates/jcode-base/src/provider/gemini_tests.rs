@@ -232,6 +232,55 @@ fn build_contents_replays_thought_signature_on_function_call() {
 }
 
 #[test]
+fn build_contents_replays_every_signature_across_multi_tool_history() {
+    // Regression guard for the Antigravity/Cloud Code 400
+    // ("Function call is missing a thought_signature ... position 5"): the
+    // backend validates *every* functionCall in the replayed history, not just
+    // the latest one. A multi-turn transcript where an earlier tool_use drops
+    // its signature is exactly what triggers the field failure, so assert that
+    // each captured signature survives serialization onto its matching part.
+    let signatures = ["SIG_A", "SIG_B", "SIG_C"];
+    let mut messages = Vec::new();
+    for (idx, sig) in signatures.iter().enumerate() {
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: format!("call_{idx}"),
+                name: "bash".to_string(),
+                input: json!({ "command": format!("echo {idx}") }),
+                thought_signature: Some(sig.to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: format!("call_{idx}"),
+                content: format!("out {idx}"),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+    }
+
+    let contents = build_contents(&messages);
+    let replayed: Vec<Option<&str>> = contents
+        .iter()
+        .flat_map(|content| content.parts.iter())
+        .filter(|part| part.function_call.is_some())
+        .map(|part| part.thought_signature.as_deref())
+        .collect();
+    assert_eq!(
+        replayed,
+        vec![Some("SIG_A"), Some("SIG_B"), Some("SIG_C")],
+        "every functionCall in the history must carry its captured thought_signature, \
+         not just the most recent one"
+    );
+}
+
+#[test]
 fn build_contents_preserves_tool_calls_and_results() {
     let messages = vec![
         Message {
@@ -350,6 +399,44 @@ fn build_tools_rewrites_const_for_gemini_schema_compatibility() {
         parameters["properties"]["tool_calls"]["items"]["oneOf"][0]["properties"]["tool"]["enum"],
         json!(["read"])
     );
+}
+
+#[test]
+fn build_tools_strips_additional_properties_for_gemini_schema_compatibility() {
+    // The Gemini Code Assist generateContent endpoint rejects `additionalProperties`
+    // (and other draft-JSON-Schema keywords) with HTTP 400, so build_tools must
+    // strip them recursively while preserving the rest of the schema.
+    let defs = vec![ToolDefinition {
+        name: "read".to_string(),
+        description: "Reads a file".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "properties": {
+                "file_path": { "type": "string" },
+                "opts": {
+                    "type": "object",
+                    "properties": { "limit": { "type": "integer" } },
+                    "additionalProperties": false
+                }
+            },
+            "required": ["file_path"],
+            "additionalProperties": false
+        }),
+    }];
+
+    let built = build_tools(&defs).expect("gemini tools");
+    let parameters = &built[0].function_declarations[0].parameters;
+
+    assert!(!schema_contains_key(parameters, "additionalProperties"));
+    assert!(!schema_contains_key(parameters, "$schema"));
+    // Real schema content is preserved.
+    assert_eq!(parameters["properties"]["file_path"]["type"], json!("string"));
+    assert_eq!(
+        parameters["properties"]["opts"]["properties"]["limit"]["type"],
+        json!("integer")
+    );
+    assert_eq!(parameters["required"], json!(["file_path"]));
 }
 
 #[tokio::test]
@@ -507,4 +594,36 @@ fn developer_api_response_parses_without_code_assist_envelope() {
         .and_then(|part| part.text)
         .expect("missing text");
     assert_eq!(text, "hello from developer api");
+}
+
+#[test]
+fn system_instruction_tool_guard_only_applies_with_tools() {
+    // Without tools, the system instruction is passed through unchanged.
+    let plain = super::build_system_instruction_with_tool_guard("You are helpful.", false)
+        .expect("system instruction present");
+    let plain_text = plain.parts[0].text.clone().unwrap();
+    assert_eq!(plain_text, "You are helpful.");
+    assert!(!plain_text.contains("Function calling"));
+
+    // With tools, the MALFORMED_FUNCTION_CALL prevention guidance is appended.
+    let guarded = super::build_system_instruction_with_tool_guard("You are helpful.", true)
+        .expect("system instruction present");
+    let guarded_text = guarded.parts[0].text.clone().unwrap();
+    assert!(guarded_text.starts_with("You are helpful."));
+    assert!(guarded_text.contains("Function calling"));
+    assert!(guarded_text.contains("native function call, not code"));
+    assert!(guarded_text.contains("default_api."));
+}
+
+#[test]
+fn system_instruction_tool_guard_with_empty_system_still_emits_guidance() {
+    // An empty base system prompt plus tools must still carry the guard so the
+    // model is steered away from pseudo-code tool calls.
+    let guarded = super::build_system_instruction_with_tool_guard("", true)
+        .expect("guard-only instruction present");
+    let text = guarded.parts[0].text.clone().unwrap();
+    assert!(text.contains("Function calling"));
+
+    // Empty system and no tools yields no instruction at all.
+    assert!(super::build_system_instruction_with_tool_guard("", false).is_none());
 }

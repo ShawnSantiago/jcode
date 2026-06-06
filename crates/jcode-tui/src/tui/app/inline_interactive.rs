@@ -1636,6 +1636,34 @@ impl App {
         });
     }
 
+    /// Rebuild the picker overlay from a freshly loaded session list, applying
+    /// the filter for the active picker mode. Returns true when the overlay was
+    /// (re)built so the caller can request a redraw.
+    fn apply_loaded_session_picker(
+        &mut self,
+        server_groups: Vec<session_picker::ServerGroup>,
+        orphan_sessions: Vec<session_picker::SessionInfo>,
+    ) -> bool {
+        match self.session_picker_mode {
+            SessionPickerMode::Resume => {
+                let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+                self.session_picker_overlay = Some(RefCell::new(picker));
+                self.set_status_notice("Sessions loaded");
+                true
+            }
+            SessionPickerMode::CatchUp => {
+                let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+                picker.activate_catchup_filter();
+                self.session_picker_overlay = Some(RefCell::new(picker));
+                self.set_status_notice("Catch Up sessions loaded");
+                true
+            }
+            // Onboarding loads its scoped transcript list synchronously, so it
+            // never flows through this async path.
+            SessionPickerMode::Onboarding { .. } => false,
+        }
+    }
+
     pub(super) fn poll_session_picker_load(&mut self) -> bool {
         let recv_result = {
             let Some(pending) = self.pending_session_picker_load.as_ref() else {
@@ -1644,24 +1672,23 @@ impl App {
             pending.receiver.try_recv()
         };
 
+        let picker_active = self.session_picker_overlay.is_some()
+            && matches!(
+                self.session_picker_mode,
+                SessionPickerMode::Resume | SessionPickerMode::CatchUp
+            );
+
         match recv_result {
             Ok(Ok((server_groups, orphan_sessions))) => {
                 self.pending_session_picker_load = None;
-                if self.session_picker_overlay.is_some()
-                    && self.session_picker_mode == SessionPickerMode::Resume
-                {
-                    let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-                    self.session_picker_overlay = Some(RefCell::new(picker));
-                    self.set_status_notice("Sessions loaded");
-                    return true;
+                if picker_active {
+                    return self.apply_loaded_session_picker(server_groups, orphan_sessions);
                 }
                 false
             }
             Ok(Err(e)) => {
                 self.pending_session_picker_load = None;
-                if self.session_picker_overlay.is_some()
-                    && self.session_picker_mode == SessionPickerMode::Resume
-                {
+                if picker_active {
                     self.session_picker_overlay = None;
                     self.push_display_message(DisplayMessage::error(format!(
                         "Failed to load sessions: {}",
@@ -1675,9 +1702,7 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.pending_session_picker_load = None;
-                if self.session_picker_overlay.is_some()
-                    && self.session_picker_mode == SessionPickerMode::Resume
-                {
+                if picker_active {
                     self.session_picker_overlay = None;
                     self.push_display_message(DisplayMessage::error(
                         "Session loading stopped before returning a result.".to_string(),
@@ -1700,20 +1725,26 @@ impl App {
             return;
         }
 
-        match session_picker::load_sessions_grouped() {
-            Ok((server_groups, orphan_sessions)) => {
-                let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-                picker.activate_catchup_filter();
-                self.session_picker_overlay = Some(RefCell::new(picker));
-                self.session_picker_mode = SessionPickerMode::CatchUp;
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to load catch-up sessions: {}",
-                    e
-                )));
-            }
-        }
+        // Show the picker overlay immediately (using the cached list when
+        // available) and load the full session list off-thread. This keeps the
+        // live TUI responsive instead of blocking on a multi-hundred-ms scan of
+        // every historical session.
+        let mut picker = if let Some((server_groups, orphan_sessions)) =
+            session_picker::load_cached_sessions_grouped()
+        {
+            let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+            picker.activate_catchup_filter();
+            picker
+        } else {
+            SessionPicker::loading()
+        };
+        // Ensure the filter is applied even on the loading placeholder so the
+        // refreshed list lands in the catch-up view.
+        picker.activate_catchup_filter();
+        self.session_picker_overlay = Some(RefCell::new(picker));
+        self.session_picker_mode = SessionPickerMode::CatchUp;
+        self.set_status_notice("Loading Catch Up sessions...");
+        self.start_session_picker_load();
     }
 
     pub(super) fn handle_session_picker_selection(&mut self, targets: &[ResumeTarget]) {
@@ -1924,7 +1955,7 @@ impl App {
                 name
             )));
         }
-        crate::tui::workspace_client::queue_resume_session(session_id);
+        self.workspace_client.queue_resume_session(session_id);
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(format!("Switching → {}", name));
@@ -2669,11 +2700,22 @@ impl App {
     }
 
     pub(super) fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
-        let pat: Vec<char> = pattern
+        let pat = Self::picker_fuzzy_pattern(pattern);
+        Self::picker_fuzzy_score_with_pattern(&pat, text)
+    }
+
+    /// Normalize a fuzzy-match pattern (lowercase, drop whitespace) into chars.
+    /// Hoist this out of per-entry scoring so a filter pass over N entries
+    /// normalizes the pattern once instead of N times per keystroke.
+    pub(super) fn picker_fuzzy_pattern(pattern: &str) -> Vec<char> {
+        pattern
             .to_lowercase()
             .chars()
             .filter(|c| !c.is_whitespace())
-            .collect();
+            .collect()
+    }
+
+    pub(super) fn picker_fuzzy_score_with_pattern(pat: &[char], text: &str) -> Option<i32> {
         let txt: Vec<char> = text.to_lowercase().chars().collect();
         if pat.is_empty() {
             return Some(0);
@@ -2719,13 +2761,16 @@ impl App {
         if picker.filter.is_empty() {
             picker.filtered = (0..picker.entries.len()).collect();
         } else {
+            // Normalize the filter pattern once per keystroke instead of once per
+            // entry inside picker_fuzzy_score.
+            let pat = Self::picker_fuzzy_pattern(&picker.filter);
             let mut scored: Vec<(usize, i32)> = picker
                 .entries
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
                     let filter_text = picker.filter_text(m);
-                    Self::picker_fuzzy_score(&picker.filter, &filter_text).map(|s| {
+                    Self::picker_fuzzy_score_with_pattern(&pat, &filter_text).map(|s| {
                         let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;
                         let bonus = usage_bonus + if m.recommended { 5 } else { 0 };
                         (i, s + bonus)

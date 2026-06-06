@@ -1157,6 +1157,7 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             }
         }
         Ok(None) => {
+            repair_stale_shared_server_after_no_update();
             Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
             let mut metadata = UpdateMetadata::load().unwrap_or_default();
             metadata.last_check = SystemTime::now();
@@ -1167,6 +1168,27 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             let msg = format!("Check failed: {}", e);
             Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(msg.clone())));
             UpdateCheckResult::Error(msg)
+        }
+    }
+}
+
+fn repair_stale_shared_server_after_no_update() {
+    match build::repair_stale_shared_server_channel() {
+        Ok(build::SharedServerRepair::Repaired {
+            previous,
+            repaired_to,
+        }) => {
+            crate::logging::info(&format!(
+                "update: repaired stale shared-server channel {:?} -> {} after no-op update check",
+                previous, repaired_to
+            ));
+        }
+        Ok(build::SharedServerRepair::AlreadyCurrent) => {}
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "update: failed to repair stale shared-server channel after no-op update check: {}",
+                error
+            ));
         }
     }
 }
