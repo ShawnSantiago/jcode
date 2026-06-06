@@ -289,6 +289,14 @@ fn apply_policy_fields(policy: &mut WritePolicy, params: &PrWatchInput) {
     }
 }
 
+fn has_policy_field_override(params: &PrWatchInput) -> bool {
+    params.local_fix.is_some()
+        || params.commit.is_some()
+        || params.push.is_some()
+        || params.comment.is_some()
+        || params.resolve_threads.is_some()
+}
+
 fn policy_mode_label(policy: &WritePolicy) -> &'static str {
     if policy.local_fix && policy.commit && policy.push && policy.comment && policy.resolve_threads
     {
@@ -417,6 +425,9 @@ fn maybe_schedule_next(
         }
         return Ok(None);
     }
+    if has_policy_field_override(params) {
+        let _ = cancel_queued_watch_items(state)?;
+    }
     if !params.schedule_next {
         return Ok(None);
     }
@@ -428,7 +439,7 @@ fn maybe_schedule_next(
             || find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline"),
         )
     {
-        if existing.scheduled_for > Utc::now() {
+        if existing.scheduled_for > Utc::now() && !has_policy_field_override(params) {
             return Ok(Some(format!(
                 "{} at {} (already scheduled)",
                 existing.id,
@@ -477,6 +488,9 @@ fn maybe_schedule_next_monitor(
         }
         return Ok(None);
     }
+    if has_policy_field_override(params) {
+        let _ = cancel_queued_watch_items(state)?;
+    }
     if !params.schedule_next {
         return Ok(None);
     }
@@ -486,7 +500,7 @@ fn maybe_schedule_next_monitor(
     if let Some(existing) =
         find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
     {
-        if existing.scheduled_for > Utc::now() {
+        if existing.scheduled_for > Utc::now() && !has_policy_field_override(params) {
             return Ok(Some(format!(
                 "{} at {} (already scheduled)",
                 existing.id,
@@ -587,27 +601,74 @@ fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> S
     )
 }
 
-fn scheduled_policy_suffix(state: &PrWatchState) -> &'static str {
-    if state.policy.resolve_threads {
-        "Read PR feedback, implement local fixes for actionable comments, validate, push needed fixes when authorized by the user/session, and resolve addressed review threads. Do not merge unless separately authorized."
-    } else {
-        "Read PR feedback only. Do not push, comment, resolve threads, or merge. This read-only mode is opt-out and should be used only when explicitly requested."
-    }
+fn scheduled_policy_suffix(state: &PrWatchState) -> String {
+    format!(
+        "Policy: {} {} Do not merge unless separately authorized.",
+        policy_allow_sentence(&state.policy),
+        policy_deny_sentence(&state.policy)
+    )
 }
 
 fn scheduled_policy_context(state: &PrWatchState) -> String {
-    if state.policy.resolve_threads {
-        "Scheduled by pr_watch schedule_next; read feedback, fix actionable comments, validate, push authorized fixes, and resolve addressed threads.".to_string()
-    } else {
-        "Scheduled by pr_watch schedule_next; read-only poll only because resolve_threads=false was explicitly set.".to_string()
-    }
+    format!(
+        "Scheduled by pr_watch schedule_next. {} {}",
+        policy_allow_sentence(&state.policy),
+        policy_deny_sentence(&state.policy)
+    )
 }
 
 fn scheduled_monitor_policy_context(state: &PrWatchState) -> String {
-    if state.policy.resolve_threads {
-        "Scheduled by pr_watch monitor; structured monitor should fix actionable comments, validate, push authorized fixes, and resolve addressed threads.".to_string()
+    format!(
+        "Scheduled by pr_watch monitor. {} {}",
+        policy_allow_sentence(&state.policy),
+        policy_deny_sentence(&state.policy)
+    )
+}
+
+fn policy_allow_sentence(policy: &WritePolicy) -> String {
+    let mut allowed = vec![
+        "read PR feedback".to_string(),
+        "validate changes".to_string(),
+    ];
+    if policy.local_fix {
+        allowed.push("implement local fixes".to_string());
+    }
+    if policy.commit {
+        allowed.push("commit validated fixes".to_string());
+    }
+    if policy.push {
+        allowed.push("push validated fixes".to_string());
+    }
+    if policy.comment {
+        allowed.push("post PR comments after validation".to_string());
+    }
+    if policy.resolve_threads {
+        allowed.push("resolve addressed review threads".to_string());
+    }
+    format!("Allowed actions: {}.", allowed.join(", "))
+}
+
+fn policy_deny_sentence(policy: &WritePolicy) -> String {
+    let mut denied = Vec::new();
+    if !policy.local_fix {
+        denied.push("implement local fixes");
+    }
+    if !policy.commit {
+        denied.push("commit changes");
+    }
+    if !policy.push {
+        denied.push("push changes");
+    }
+    if !policy.comment {
+        denied.push("post PR comments");
+    }
+    if !policy.resolve_threads {
+        denied.push("resolve review threads");
+    }
+    if denied.is_empty() {
+        "Denied actions: none except merge.".to_string()
     } else {
-        "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string()
+        format!("Denied actions: {}.", denied.join(", "))
     }
 }
 
@@ -1122,6 +1183,9 @@ async fn monitor_once(
             .with_metadata(json!({"watch_id": watch_id, "monitor_status": "stale", "written": false, "stale_monitor": true})));
         }
         write_state_atomic(&path, &state)?;
+    }
+    if would_write && has_policy_field_override(&params) {
+        let _ = cancel_queued_watch_items(&state)?;
     }
     let status = monitor_status_for_state(&state, partial_failure);
     let scheduled = if monitor_should_schedule_followup(status) {
@@ -2264,6 +2328,15 @@ mod tests {
     }
 
     #[test]
+    fn policy_field_override_is_detected_for_rescheduling() {
+        let mut params = monitor_params(None);
+        assert!(!has_policy_field_override(&params));
+
+        params.push = Some(false);
+        assert!(has_policy_field_override(&params));
+    }
+
+    #[test]
     fn schedule_target_defaults_to_spawn_for_detached_watchers() {
         let params = monitor_params(None);
         let ctx = ToolContext {
@@ -2576,11 +2649,26 @@ mod tests {
         assert!(prompt.contains("quiet_cycles_required=2"));
         assert!(prompt.contains("max_runtime_seconds=540"));
         assert!(prompt.contains("resolve addressed review threads"));
+        assert!(prompt.contains("Denied actions: none except merge."));
 
+        state.policy.local_fix = false;
+        state.policy.commit = false;
+        state.policy.push = false;
+        state.policy.comment = false;
         state.policy.resolve_threads = false;
         let read_only_prompt = scheduled_monitor_prompt(&state, 540);
-        assert!(read_only_prompt.contains("Read PR feedback only"));
-        assert!(read_only_prompt.contains("resolve threads"));
+        assert!(read_only_prompt.contains("Allowed actions: read PR feedback, validate changes."));
+        assert!(read_only_prompt.contains("Denied actions: implement local fixes, commit changes, push changes, post PR comments, resolve review threads."));
+
+        state.policy.local_fix = true;
+        state.policy.resolve_threads = true;
+        let partial_context = scheduled_monitor_policy_context(&state);
+        assert!(partial_context.contains("implement local fixes"));
+        assert!(partial_context.contains("resolve addressed review threads"));
+        assert!(
+            partial_context
+                .contains("Denied actions: commit changes, push changes, post PR comments.")
+        );
     }
 
     #[test]
@@ -2773,7 +2861,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_prompt_honors_resolve_threads_policy_and_is_specific() {
+    fn scheduled_prompt_honors_full_write_policy_and_is_specific() {
         let state = PrWatchState::new(PrTarget {
             repo: "owner/repo".into(),
             number: 13,
@@ -2782,8 +2870,9 @@ mod tests {
         assert!(prompt.contains("action=ack_baseline"));
         assert!(prompt.contains("repo=owner/repo"));
         assert!(prompt.contains("pr=13"));
+        assert!(prompt.contains("Allowed actions: read PR feedback, validate changes, implement local fixes, commit validated fixes, push validated fixes, post PR comments after validation, resolve addressed review threads."));
+        assert!(prompt.contains("Denied actions: none except merge."));
         assert!(prompt.contains("resolve addressed review threads"));
-        assert!(prompt.contains("push needed fixes when authorized"));
         assert!(prompt.contains("Do not merge unless separately authorized"));
 
         let mut baselined = state;
@@ -2792,11 +2881,24 @@ mod tests {
             .insert("metadata".to_string(), "2026-05-13T21:00:00Z".to_string());
         assert!(scheduled_poll_prompt(&baselined).contains("action=poll_now"));
 
+        baselined.policy.local_fix = false;
+        baselined.policy.commit = false;
+        baselined.policy.push = false;
+        baselined.policy.comment = false;
         baselined.policy.resolve_threads = false;
         let read_only_prompt = scheduled_poll_prompt(&baselined);
-        assert!(read_only_prompt.contains("Read PR feedback only"));
-        assert!(read_only_prompt.contains("read-only mode is opt-out"));
-        assert!(read_only_prompt.contains("Do not push, comment, resolve threads, or merge"));
+        assert!(read_only_prompt.contains("Allowed actions: read PR feedback, validate changes."));
+        assert!(read_only_prompt.contains("Denied actions: implement local fixes, commit changes, push changes, post PR comments, resolve review threads."));
+
+        baselined.policy.local_fix = true;
+        baselined.policy.resolve_threads = true;
+        let partial_prompt = scheduled_poll_prompt(&baselined);
+        assert!(partial_prompt.contains("implement local fixes"));
+        assert!(partial_prompt.contains("resolve addressed review threads"));
+        assert!(
+            partial_prompt
+                .contains("Denied actions: commit changes, push changes, post PR comments.")
+        );
     }
     #[test]
     fn ack_baseline_marks_current_feedback_seen_without_actionable() {
