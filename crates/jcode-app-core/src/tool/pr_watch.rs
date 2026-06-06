@@ -221,12 +221,18 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
         file.write_all(&serde_json::to_vec_pretty(&state)?)?;
     }
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
+    if let Some(scheduled) = &scheduled {
+        state.polling.next_poll_at = Some(scheduled.wake_at_iso());
+        if would_write {
+            write_state_atomic(&path, &state)?;
+        }
+    }
     Ok(ToolOutput::new(format!(
         "PR watch initialized: {}\nPath: {}\nMode: {}. Use poll_now to refresh feedback state; scheduled cycles follow the stored policy{}{}",
         state.watch_id,
         path.display(),
         policy_mode_label(&state.policy),
-        scheduled.as_deref().map(|s| format!("\nScheduled: {s}")).unwrap_or_default(),
+        scheduled.as_ref().map(|s| format!("\nScheduled: {}", s.summary)).unwrap_or_default(),
         if would_write {
             ""
         } else {
@@ -265,10 +271,6 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     if let Some(required) = params.quiet_cycles_required {
         state.polling.required_quiet_cycles = required.max(1);
     }
-    if params.schedule_next {
-        let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
-        state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
-    }
 }
 
 fn apply_policy_fields(policy: &mut WritePolicy, params: &PrWatchInput) {
@@ -299,6 +301,188 @@ fn has_policy_field_override(params: &PrWatchInput) -> bool {
 
 fn should_schedule_after_existing_check(params: &PrWatchInput, existing_future: bool) -> bool {
     params.schedule_next || (has_policy_field_override(params) && existing_future)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchScheduleHealth {
+    HealthyFutureSpawn,
+    HealthyFutureResumeLegacy,
+    StalePastDue,
+    Missing,
+    MismatchedPolicyOrTarget,
+}
+
+impl WatchScheduleHealth {
+    fn label(self) -> &'static str {
+        match self {
+            Self::HealthyFutureSpawn => "healthy_spawn",
+            Self::HealthyFutureResumeLegacy => "legacy_resume",
+            Self::StalePastDue => "stale_past_due",
+            Self::Missing => "missing",
+            Self::MismatchedPolicyOrTarget => "mismatched_policy",
+        }
+    }
+
+    fn should_replace(self) -> bool {
+        matches!(
+            self,
+            Self::HealthyFutureResumeLegacy | Self::StalePastDue | Self::MismatchedPolicyOrTarget
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WatchScheduleSnapshot {
+    id: String,
+    scheduled_for: chrono::DateTime<Utc>,
+    health: WatchScheduleHealth,
+    target_label: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledFollowup {
+    summary: String,
+    wake_at: chrono::DateTime<Utc>,
+}
+
+impl ScheduledFollowup {
+    fn new(id: String, wake_at: chrono::DateTime<Utc>) -> Self {
+        Self {
+            summary: format!("{} at {}", id, wake_at.format("%Y-%m-%dT%H:%M:%SZ")),
+            wake_at,
+        }
+    }
+
+    fn already_scheduled(id: String, wake_at: chrono::DateTime<Utc>) -> Self {
+        Self {
+            summary: format!(
+                "{} at {} (already scheduled)",
+                id,
+                wake_at.format("%Y-%m-%dT%H:%M:%SZ")
+            ),
+            wake_at,
+        }
+    }
+
+    fn wake_at_iso(&self) -> String {
+        self.wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    }
+}
+
+fn schedule_target_label(target: &ScheduleTarget) -> &'static str {
+    match target {
+        ScheduleTarget::Ambient => "ambient",
+        ScheduleTarget::Session { .. } => "resume",
+        ScheduleTarget::Spawn { .. } => "spawn",
+    }
+}
+
+fn schedule_policy_matches(item: &ScheduledItem, expected_context: &str) -> bool {
+    item.additional_context.as_deref() == Some(expected_context)
+}
+
+fn schedule_target_matches(item: &ScheduledItem, expected_target: &ScheduleTarget) -> bool {
+    match (&item.target, expected_target) {
+        (
+            ScheduleTarget::Spawn { parent_session_id },
+            ScheduleTarget::Spawn {
+                parent_session_id: expected_parent,
+            },
+        ) => parent_session_id == expected_parent,
+        (
+            ScheduleTarget::Session { session_id },
+            ScheduleTarget::Session {
+                session_id: expected,
+            },
+        ) => session_id == expected,
+        (ScheduleTarget::Ambient, ScheduleTarget::Ambient) => true,
+        _ => false,
+    }
+}
+
+fn schedule_health_for_item(
+    item: &ScheduledItem,
+    expected_context: &str,
+    expected_target: &ScheduleTarget,
+    now: chrono::DateTime<Utc>,
+) -> WatchScheduleHealth {
+    if item.scheduled_for <= now {
+        return WatchScheduleHealth::StalePastDue;
+    }
+    match item.target {
+        ScheduleTarget::Spawn { .. }
+            if schedule_policy_matches(item, expected_context)
+                && schedule_target_matches(item, expected_target) =>
+        {
+            WatchScheduleHealth::HealthyFutureSpawn
+        }
+        ScheduleTarget::Session { .. } => WatchScheduleHealth::HealthyFutureResumeLegacy,
+        _ => WatchScheduleHealth::MismatchedPolicyOrTarget,
+    }
+}
+
+fn watch_schedule_snapshot(
+    items: &[ScheduledItem],
+    state: &PrWatchState,
+    actions: &[&str],
+    expected_context: &str,
+    expected_target: &ScheduleTarget,
+) -> Option<WatchScheduleSnapshot> {
+    let now = Utc::now();
+    actions.iter().find_map(|action| {
+        find_existing_scheduled_watch_item(items, state, action).map(|item| WatchScheduleSnapshot {
+            id: item.id.clone(),
+            scheduled_for: item.scheduled_for,
+            health: schedule_health_for_item(item, expected_context, expected_target, now),
+            target_label: schedule_target_label(&item.target),
+        })
+    })
+}
+
+fn watch_schedule_snapshot_for_status(
+    items: &[ScheduledItem],
+    state: &PrWatchState,
+    actions: &[&str],
+    expected_context: &str,
+) -> Option<WatchScheduleSnapshot> {
+    let now = Utc::now();
+    actions.iter().find_map(|action| {
+        find_existing_scheduled_watch_item(items, state, action).map(|item| WatchScheduleSnapshot {
+            id: item.id.clone(),
+            scheduled_for: item.scheduled_for,
+            health: if item.scheduled_for <= now {
+                WatchScheduleHealth::StalePastDue
+            } else if matches!(item.target, ScheduleTarget::Spawn { .. }) {
+                if schedule_policy_matches(item, expected_context) {
+                    // Status is read-only and has no current ToolContext, so it
+                    // cannot verify the expected parent_session_id. Report a
+                    // conservative mismatch instead of claiming healthy.
+                    WatchScheduleHealth::MismatchedPolicyOrTarget
+                } else {
+                    WatchScheduleHealth::MismatchedPolicyOrTarget
+                }
+            } else if matches!(item.target, ScheduleTarget::Session { .. }) {
+                WatchScheduleHealth::HealthyFutureResumeLegacy
+            } else {
+                WatchScheduleHealth::MismatchedPolicyOrTarget
+            },
+            target_label: schedule_target_label(&item.target),
+        })
+    })
+}
+
+fn rollback_replacement_and_bail(
+    manager: &mut AmbientManager,
+    replacement_id: &str,
+    existing_id: &str,
+    err: anyhow::Error,
+) -> Result<()> {
+    let _ = manager.cancel_schedule(replacement_id);
+    Err(err).with_context(|| {
+        format!(
+            "failed to cancel stale PR watch schedule {existing_id}; rolled back replacement {replacement_id}"
+        )
+    })
 }
 
 fn policy_mode_label(policy: &WritePolicy) -> &'static str {
@@ -395,6 +579,26 @@ fn monitor_should_schedule_followup(status: MonitorStatus) -> bool {
     )
 }
 
+fn pr_is_confirmed_closed(state: &PrWatchState) -> bool {
+    matches!(state.pr.state.as_deref(), Some(value) if !value.eq_ignore_ascii_case("OPEN"))
+}
+
+fn terminalize_closed_pr(state: &mut PrWatchState) {
+    if pr_is_confirmed_closed(state) {
+        state.terminal = true;
+        state.stop_reason = Some(format!(
+            "pr_state_{}",
+            state
+                .pr
+                .state
+                .as_deref()
+                .unwrap_or("closed")
+                .to_ascii_lowercase()
+        ));
+        state.polling.next_poll_at = None;
+    }
+}
+
 fn watch_state_changed_since_load(
     current_state: &PrWatchState,
     loaded_existing_state: bool,
@@ -422,7 +626,7 @@ fn maybe_schedule_next(
     ctx: &ToolContext,
     state: &PrWatchState,
     params: &PrWatchInput,
-) -> Result<Option<String>> {
+) -> Result<Option<ScheduledFollowup>> {
     if params.dry_run.unwrap_or(false) || state.terminal {
         if state.terminal {
             let _ = cancel_queued_watch_items(state);
@@ -434,31 +638,36 @@ fn maybe_schedule_next(
         return Ok(None);
     }
     let mut manager = AmbientManager::new()?;
-    let existing = find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now")
-        .or_else(|| {
-            find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline")
-        })
-        .map(|item| (item.id.clone(), item.scheduled_for));
+    let expected_context = scheduled_policy_context(state);
+    let target = schedule_target_from_params(params, ctx)?;
+    let existing = watch_schedule_snapshot(
+        manager.queue().items(),
+        state,
+        &["poll_now", "ack_baseline"],
+        &expected_context,
+        &target,
+    );
     let existing_future = existing
         .as_ref()
-        .map(|(_, scheduled_for)| *scheduled_for > Utc::now())
+        .map(|snapshot| snapshot.scheduled_for > Utc::now())
         .unwrap_or(false);
-    if !should_schedule_after_existing_check(params, existing_future) {
+    let should_replace = existing
+        .as_ref()
+        .map(|snapshot| snapshot.health.should_replace())
+        .unwrap_or(false);
+    if !should_replace && !should_schedule_after_existing_check(params, existing_future) {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_poll_prompt(state);
-    if let Some((existing_id, scheduled_for)) = existing {
-        if scheduled_for > Utc::now() && !policy_override {
-            return Ok(Some(format!(
-                "{} at {} (already scheduled)",
-                existing_id,
-                scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+    if let Some(snapshot) = existing.as_ref() {
+        if snapshot.health == WatchScheduleHealth::HealthyFutureSpawn && !policy_override {
+            return Ok(Some(ScheduledFollowup::already_scheduled(
+                snapshot.id.clone(),
+                snapshot.scheduled_for,
             )));
         }
-        manager.cancel_schedule(&existing_id)?;
     }
-    let target = schedule_target_from_params(params, ctx)?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -476,21 +685,31 @@ fn maybe_schedule_next(
             state.watch_id
         )],
         git_branch: None,
-        additional_context: Some(scheduled_policy_context(state)),
+        additional_context: Some(expected_context),
     })?;
+    if let Some(snapshot) = existing {
+        match manager.cancel_schedule(&snapshot.id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let _ = manager.cancel_schedule(&id);
+                bail!(
+                    "failed to cancel stale PR watch schedule {}; rolled back replacement {}",
+                    snapshot.id,
+                    id
+                );
+            }
+            Err(err) => rollback_replacement_and_bail(&mut manager, &id, &snapshot.id, err)?,
+        }
+    }
     super::ambient::nudge_schedule_runner();
-    Ok(Some(format!(
-        "{} at {}",
-        id,
-        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
-    )))
+    Ok(Some(ScheduledFollowup::new(id, wake_at)))
 }
 
 fn maybe_schedule_next_monitor(
     ctx: &ToolContext,
     state: &PrWatchState,
     params: &PrWatchInput,
-) -> Result<Option<String>> {
+) -> Result<Option<ScheduledFollowup>> {
     if params.dry_run.unwrap_or(false) || state.terminal {
         if state.terminal {
             let _ = cancel_queued_watch_items(state);
@@ -502,28 +721,36 @@ fn maybe_schedule_next_monitor(
         return Ok(None);
     }
     let mut manager = AmbientManager::new()?;
-    let existing = find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
-        .map(|item| (item.id.clone(), item.scheduled_for));
+    let expected_context = scheduled_monitor_policy_context(state);
+    let target = schedule_target_from_params(params, ctx)?;
+    let existing = watch_schedule_snapshot(
+        manager.queue().items(),
+        state,
+        &["monitor"],
+        &expected_context,
+        &target,
+    );
     let existing_future = existing
         .as_ref()
-        .map(|(_, scheduled_for)| *scheduled_for > Utc::now())
+        .map(|snapshot| snapshot.scheduled_for > Utc::now())
         .unwrap_or(false);
-    if !should_schedule_after_existing_check(params, existing_future) {
+    let should_replace = existing
+        .as_ref()
+        .map(|snapshot| snapshot.health.should_replace())
+        .unwrap_or(false);
+    if !should_replace && !should_schedule_after_existing_check(params, existing_future) {
         return Ok(None);
     }
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
-    if let Some((existing_id, scheduled_for)) = existing {
-        if scheduled_for > Utc::now() && !policy_override {
-            return Ok(Some(format!(
-                "{} at {} (already scheduled)",
-                existing_id,
-                scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+    if let Some(snapshot) = existing.as_ref() {
+        if snapshot.health == WatchScheduleHealth::HealthyFutureSpawn && !policy_override {
+            return Ok(Some(ScheduledFollowup::already_scheduled(
+                snapshot.id.clone(),
+                snapshot.scheduled_for,
             )));
         }
-        manager.cancel_schedule(&existing_id)?;
     }
-    let target = schedule_target_from_params(params, ctx)?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -541,14 +768,24 @@ fn maybe_schedule_next_monitor(
             state.watch_id
         )],
         git_branch: None,
-        additional_context: Some(scheduled_monitor_policy_context(state)),
+        additional_context: Some(expected_context),
     })?;
+    if let Some(snapshot) = existing {
+        match manager.cancel_schedule(&snapshot.id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let _ = manager.cancel_schedule(&id);
+                bail!(
+                    "failed to cancel stale PR watch schedule {}; rolled back replacement {}",
+                    snapshot.id,
+                    id
+                );
+            }
+            Err(err) => rollback_replacement_and_bail(&mut manager, &id, &snapshot.id, err)?,
+        }
+    }
     super::ambient::nudge_schedule_runner();
-    Ok(Some(format!(
-        "{} at {}",
-        id,
-        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
-    )))
+    Ok(Some(ScheduledFollowup::new(id, wake_at)))
 }
 
 fn cancel_queued_watch_items(state: &PrWatchState) -> Result<usize> {
@@ -745,9 +982,14 @@ async fn ack_baseline(
             .with_title(format!("{} stale poll", current_state.watch_id))
             .with_metadata(json!({"watch": current_state, "readiness": readiness, "written": false, "stale_poll": true})));
         }
-        write_state_atomic(&path, &state)?;
     }
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
+    if let Some(scheduled) = &scheduled {
+        state.polling.next_poll_at = Some(scheduled.wake_at_iso());
+    }
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
     let text = format!(
         "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}{}",
         state.watch_id,
@@ -759,8 +1001,8 @@ async fn ack_baseline(
         state.last_seen.reviews.len(),
         partial_failure,
         scheduled
-            .as_deref()
-            .map(|s| format!("\nScheduled: {s}"))
+            .as_ref()
+            .map(|s| format!("\nScheduled: {}", s.summary))
             .unwrap_or_default(),
         if would_write {
             ""
@@ -1007,11 +1249,13 @@ async fn poll_now(
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_policy_fields(&mut state.policy, &params);
     apply_schedule_fields(&mut state, &params);
+    terminalize_closed_pr(&mut state);
     if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
         && state.pending_actionable.is_empty()
         && state.last_cycle.pending_check_count == 0
         && state.last_cycle.failed_check_count == 0
         && !outcome.partial_failure
+        && !state.terminal
     {
         state.terminal = true;
         state.stop_reason = Some("quiet_cycles_satisfied".to_string());
@@ -1041,9 +1285,14 @@ async fn poll_now(
             .with_title(format!("{} stale poll", current_state.watch_id))
             .with_metadata(json!({"watch": current_state, "readiness": readiness, "written": false, "stale_poll": true})));
         }
-        write_state_atomic(&path, &state)?;
     }
     let scheduled = maybe_schedule_next(ctx, &state, &params)?;
+    if let Some(scheduled) = &scheduled {
+        state.polling.next_poll_at = Some(scheduled.wake_at_iso());
+    }
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
     let readiness = state.readiness();
     let text = format!(
         "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}",
@@ -1060,8 +1309,8 @@ async fn poll_now(
         outcome.partial_failure,
         failed_surface_names(&state).join(", "),
         scheduled
-            .as_deref()
-            .map(|s| format!("\nScheduled: {s}"))
+            .as_ref()
+            .map(|s| format!("\nScheduled: {}", s.summary))
             .unwrap_or_default(),
         if would_write {
             ""
@@ -1137,11 +1386,13 @@ async fn monitor_once(
         }
         apply_policy_fields(&mut state.policy, &params);
         apply_schedule_fields(&mut state, &params);
+        terminalize_closed_pr(&mut state);
         if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
             && state.pending_actionable.is_empty()
             && state.last_cycle.pending_check_count == 0
             && state.last_cycle.failed_check_count == 0
             && !partial_failure
+            && !state.terminal
         {
             state.terminal = true;
             state.stop_reason = Some("quiet_cycles_satisfied".to_string());
@@ -1195,7 +1446,6 @@ async fn monitor_once(
             .with_title(format!("{} stale monitor", watch_id))
             .with_metadata(json!({"watch_id": watch_id, "monitor_status": "stale", "written": false, "stale_monitor": true})));
         }
-        write_state_atomic(&path, &state)?;
     }
     let status = monitor_status_for_state(&state, partial_failure);
     let scheduled = if monitor_should_schedule_followup(status) {
@@ -1206,6 +1456,12 @@ async fn monitor_once(
         }
         None
     };
+    if let Some(scheduled) = &scheduled {
+        state.polling.next_poll_at = Some(scheduled.wake_at_iso());
+    }
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
     let readiness = state.readiness();
     let text = format!(
         "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
@@ -1225,8 +1481,8 @@ async fn monitor_once(
         max_runtime_seconds,
         path.display(),
         scheduled
-            .as_deref()
-            .map(|s| format!("\nScheduled: {s}"))
+            .as_ref()
+            .map(|s| format!("\nScheduled: {}", s.summary))
             .unwrap_or_default(),
         if would_write {
             ""
@@ -1242,7 +1498,7 @@ async fn monitor_once(
             "monitor_status": status.as_str(),
             "monitor_mode": mode,
             "max_runtime_seconds": max_runtime_seconds,
-            "scheduled": scheduled,
+            "scheduled": scheduled.as_ref().map(|s| &s.summary),
             "written": would_write,
         })))
 }
@@ -1564,6 +1820,9 @@ fn update_state_from_collection(
     let mut pending_check_count = 0;
     let mut failed_check_count = 0;
     let mut any_surface_success = false;
+    let mut feedback_baseline_or_seen_count = 0usize;
+    let mut feedback_automation_count = 0usize;
+    let mut feedback_new_actionable_count = 0usize;
     let review_threads_cover_comments = collection
         .review_threads
         .as_ref()
@@ -1658,10 +1917,15 @@ fn update_state_from_collection(
                         url: comment.url.clone(),
                     },
                 );
-                if !review_threads_cover_comments
-                    && (is_new || is_edited)
-                    && !is_automation_chatter(comment.author.as_deref(), comment.body.as_deref())
-                {
+                let automation =
+                    is_automation_chatter(comment.author.as_deref(), comment.body.as_deref());
+                if automation {
+                    feedback_automation_count += 1;
+                } else if !is_new && !is_edited {
+                    feedback_baseline_or_seen_count += 1;
+                }
+                if !review_threads_cover_comments && (is_new || is_edited) && !automation {
+                    feedback_new_actionable_count += 1;
                     pending_actionable.push(ActionableItem {
                         id: comment.id,
                         surface: "review_comments".to_string(),
@@ -1710,9 +1974,15 @@ fn update_state_from_collection(
                         url: comment.url.clone(),
                     },
                 );
-                if (is_new || is_edited)
-                    && !is_automation_chatter(comment.author.as_deref(), comment.body.as_deref())
-                {
+                let automation =
+                    is_automation_chatter(comment.author.as_deref(), comment.body.as_deref());
+                if automation {
+                    feedback_automation_count += 1;
+                } else if !is_new && !is_edited {
+                    feedback_baseline_or_seen_count += 1;
+                }
+                if (is_new || is_edited) && !automation {
+                    feedback_new_actionable_count += 1;
                     pending_actionable.push(ActionableItem {
                         id: comment.id,
                         surface: "issue_comments".to_string(),
@@ -1732,6 +2002,7 @@ fn update_state_from_collection(
         }
     }
 
+    let baseline_established = state.baseline.established_at.is_some();
     match collection.review_threads {
         Ok(threads) => {
             any_surface_success = true;
@@ -1749,6 +2020,7 @@ fn update_state_from_collection(
                 .collect();
             for thread in threads {
                 let previous = state.last_seen.review_threads.get(&thread.id);
+                let was_seen = previous.is_some();
                 let body_hash = thread.body.as_ref().map(|body| stable_body_hash(body));
                 let has_new_reply = previous
                     .and_then(|marker| marker.body_hash.as_ref())
@@ -1767,6 +2039,11 @@ fn update_state_from_collection(
                     },
                 );
                 if !thread.is_resolved && !thread.is_outdated {
+                    if (was_seen && !has_new_reply) || (!was_seen && !baseline_established) {
+                        feedback_baseline_or_seen_count += 1;
+                    } else {
+                        feedback_new_actionable_count += 1;
+                    }
                     pending_actionable.push(ActionableItem {
                         id: thread.id,
                         surface: "review_threads".to_string(),
@@ -1816,6 +2093,7 @@ fn update_state_from_collection(
                     },
                 );
                 if is_new && review.state.as_deref() == Some("CHANGES_REQUESTED") {
+                    feedback_new_actionable_count += 1;
                     pending_actionable.push(ActionableItem {
                         id: review.id,
                         surface: "reviews".to_string(),
@@ -1857,6 +2135,9 @@ fn update_state_from_collection(
             "pending_check_count": state.last_cycle.pending_check_count,
             "failed_check_count": state.last_cycle.failed_check_count,
             "partial_failure": partial_failure,
+            "baseline_or_seen_count": feedback_baseline_or_seen_count,
+            "automation_count": feedback_automation_count,
+            "new_actionable_count": feedback_new_actionable_count,
         }),
     });
     outcome
@@ -2034,8 +2315,24 @@ fn handoff_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
 }
 
 fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
+    let schedule_snapshot = current_watch_schedule_snapshot(state);
+    let schedule_health = schedule_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.health)
+        .unwrap_or(WatchScheduleHealth::Missing);
+    let queued_schedule = schedule_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            format!(
+                "{} at {} target={}",
+                snapshot.id,
+                snapshot.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ"),
+                snapshot.target_label
+            )
+        })
+        .unwrap_or_else(|| "not queued".to_string());
     let mut text = format!(
-        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={}",
+        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\nQueued schedule: {}\nSchedule health: {}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -2052,6 +2349,8 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
             .next_poll_at
             .as_deref()
             .unwrap_or("not scheduled"),
+        queued_schedule,
+        schedule_health.label(),
         state.policy.local_fix,
         state.policy.commit,
         state.policy.push,
@@ -2065,6 +2364,26 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
         }
     }
     text
+}
+
+fn current_watch_schedule_snapshot(state: &PrWatchState) -> Option<WatchScheduleSnapshot> {
+    let manager = AmbientManager::new().ok()?;
+    let monitor_context = scheduled_monitor_policy_context(state);
+    watch_schedule_snapshot_for_status(
+        manager.queue().items(),
+        state,
+        &["monitor"],
+        &monitor_context,
+    )
+    .or_else(|| {
+        let policy_context = scheduled_policy_context(state);
+        watch_schedule_snapshot_for_status(
+            manager.queue().items(),
+            state,
+            &["poll_now", "ack_baseline"],
+            &policy_context,
+        )
+    })
 }
 
 fn readiness_label(readiness: &jcode_pr_watch_core::Readiness) -> &'static str {
@@ -2400,22 +2719,171 @@ mod tests {
     }
 
     fn scheduled_item(id: &str, description: &str, relevant_files: Vec<String>) -> ScheduledItem {
-        ScheduledItem {
-            id: id.to_string(),
-            scheduled_for: Utc::now() + Duration::minutes(5),
-            context: description.to_string(),
-            priority: Priority::Normal,
-            target: ScheduleTarget::Spawn {
+        scheduled_item_with(
+            id,
+            description,
+            relevant_files,
+            Utc::now() + Duration::minutes(5),
+            ScheduleTarget::Spawn {
                 parent_session_id: "parent".to_string(),
             },
+            Some("Scheduled by pr_watch schedule_next".to_string()),
+        )
+    }
+
+    fn scheduled_item_with(
+        id: &str,
+        description: &str,
+        relevant_files: Vec<String>,
+        scheduled_for: chrono::DateTime<Utc>,
+        target: ScheduleTarget,
+        additional_context: Option<String>,
+    ) -> ScheduledItem {
+        ScheduledItem {
+            id: id.to_string(),
+            scheduled_for,
+            context: description.to_string(),
+            priority: Priority::Normal,
+            target,
             created_by_session: "parent".to_string(),
             created_at: Utc::now(),
             working_dir: None,
             task_description: Some(description.to_string()),
             relevant_files,
             git_branch: None,
-            additional_context: Some("Scheduled by pr_watch schedule_next".to_string()),
+            additional_context,
         }
+    }
+
+    #[test]
+    fn schedule_health_detects_legacy_stale_and_policy_mismatch() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let description = scheduled_monitor_prompt(&state, 60);
+        let expected_context = scheduled_monitor_policy_context(&state);
+        let state_file = vec![format!(
+            ".jcode/pr-feedback-watch/{}-state.json",
+            state.watch_id
+        )];
+        let now = Utc::now();
+        let expected_target = ScheduleTarget::Spawn {
+            parent_session_id: "parent".into(),
+        };
+
+        let healthy = scheduled_item_with(
+            "healthy",
+            &description,
+            state_file.clone(),
+            now + Duration::minutes(5),
+            ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            Some(expected_context.clone()),
+        );
+        assert_eq!(
+            schedule_health_for_item(&healthy, &expected_context, &expected_target, now),
+            WatchScheduleHealth::HealthyFutureSpawn
+        );
+
+        let wrong_parent = scheduled_item_with(
+            "wrong_parent",
+            &description,
+            state_file.clone(),
+            now + Duration::minutes(5),
+            ScheduleTarget::Spawn {
+                parent_session_id: "other-parent".into(),
+            },
+            Some(expected_context.clone()),
+        );
+        assert_eq!(
+            schedule_health_for_item(&wrong_parent, &expected_context, &expected_target, now),
+            WatchScheduleHealth::MismatchedPolicyOrTarget
+        );
+
+        let legacy = scheduled_item_with(
+            "legacy",
+            &description,
+            state_file.clone(),
+            now + Duration::minutes(5),
+            ScheduleTarget::Session {
+                session_id: "old-session".into(),
+            },
+            Some(expected_context.clone()),
+        );
+        assert_eq!(
+            schedule_health_for_item(&legacy, &expected_context, &expected_target, now),
+            WatchScheduleHealth::HealthyFutureResumeLegacy
+        );
+
+        let stale = scheduled_item_with(
+            "stale",
+            &description,
+            state_file.clone(),
+            now - Duration::minutes(1),
+            ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            Some(expected_context.clone()),
+        );
+        assert_eq!(
+            schedule_health_for_item(&stale, &expected_context, &expected_target, now),
+            WatchScheduleHealth::StalePastDue
+        );
+
+        let mismatched_policy = scheduled_item_with(
+            "mismatch",
+            &description,
+            state_file,
+            now + Duration::minutes(5),
+            ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            Some("old policy".into()),
+        );
+        assert_eq!(
+            schedule_health_for_item(&mismatched_policy, &expected_context, &expected_target, now),
+            WatchScheduleHealth::MismatchedPolicyOrTarget
+        );
+    }
+
+    #[test]
+    fn watch_schedule_snapshot_exposes_legacy_resume_for_repair() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let description = scheduled_monitor_prompt(&state, 60);
+        let context = scheduled_monitor_policy_context(&state);
+        let item = scheduled_item_with(
+            "legacy_resume",
+            &description,
+            vec![format!(
+                ".jcode/pr-feedback-watch/{}-state.json",
+                state.watch_id
+            )],
+            Utc::now() + Duration::minutes(5),
+            ScheduleTarget::Session {
+                session_id: "old-session".into(),
+            },
+            Some(context.clone()),
+        );
+
+        let expected_target = ScheduleTarget::Spawn {
+            parent_session_id: "parent".into(),
+        };
+        let snapshot =
+            watch_schedule_snapshot(&[item], &state, &["monitor"], &context, &expected_target)
+                .expect("legacy schedule should be found");
+
+        assert_eq!(snapshot.id, "legacy_resume");
+        assert_eq!(snapshot.target_label, "resume");
+        assert_eq!(
+            snapshot.health,
+            WatchScheduleHealth::HealthyFutureResumeLegacy
+        );
+        assert!(snapshot.health.should_replace());
     }
 
     #[test]
@@ -2543,6 +3011,22 @@ mod tests {
             monitor_status_for_state(&state, false),
             MonitorStatus::QuietSatisfied
         );
+    }
+
+    #[test]
+    fn closed_pr_terminalization_clears_next_poll() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pr.state = Some("CLOSED".into());
+        state.polling.next_poll_at = Some("2026-05-13T20:00:00Z".into());
+
+        terminalize_closed_pr(&mut state);
+
+        assert!(state.terminal);
+        assert_eq!(state.stop_reason.as_deref(), Some("pr_state_closed"));
+        assert!(state.polling.next_poll_at.is_none());
     }
 
     #[test]
@@ -2820,6 +3304,72 @@ mod tests {
     }
 
     #[test]
+    fn poll_event_distinguishes_seen_automation_and_new_actionable_feedback() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 17,
+        });
+        state.last_seen.issue_comments.insert(
+            "IC_SEEN".into(),
+            Marker {
+                id: "IC_SEEN".into(),
+                updated_at: Some("2026-05-13T17:00:00Z".into()),
+                author: Some("reviewer".into()),
+                body_hash: Some(stable_body_hash("Already saw this")),
+                url: Some("https://seen".into()),
+            },
+        );
+        let collection = GhCollection {
+            metadata: Err(SurfaceError::transient("metadata", "skip")),
+            checks: Ok(Vec::new()),
+            review_comments: Ok(Vec::new()),
+            issue_comments: Ok(vec![
+                jcode_pr_watch_core::IssueComment {
+                    id: "IC_SEEN".into(),
+                    url: Some("https://seen".into()),
+                    updated_at: Some("2026-05-13T17:00:00Z".into()),
+                    author: Some("reviewer".into()),
+                    body: Some("Already saw this".into()),
+                },
+                jcode_pr_watch_core::IssueComment {
+                    id: "IC_AUTO".into(),
+                    url: Some("https://auto".into()),
+                    updated_at: Some("2026-05-13T17:01:00Z".into()),
+                    author: Some("ShawnSantiago".into()),
+                    body: Some("Addressed review feedback in c84d324: validation passed".into()),
+                },
+                jcode_pr_watch_core::IssueComment {
+                    id: "IC_NEW".into(),
+                    url: Some("https://new".into()),
+                    updated_at: Some("2026-05-13T17:02:00Z".into()),
+                    author: Some("reviewer".into()),
+                    body: Some("Please fix this new issue".into()),
+                },
+            ]),
+            reviews: Ok(Vec::new()),
+            review_threads: Ok(Vec::new()),
+        };
+
+        let outcome = update_state_from_collection(&mut state, collection, "2026-05-13T17:03:00Z");
+
+        assert!(outcome.partial_failure);
+        assert_eq!(state.pending_actionable.len(), 1);
+        assert_eq!(state.pending_actionable[0].id, "IC_NEW");
+        let event = state
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "poll_completed")
+            .expect("poll_completed event");
+        assert_eq!(
+            event.data.pointer("/baseline_or_seen_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(event.data.pointer("/automation_count"), Some(&json!(1)));
+        assert_eq!(event.data.pointer("/new_actionable_count"), Some(&json!(1)));
+    }
+
+    #[test]
     fn readiness_reasons_explain_actionable_items() {
         let mut state = PrWatchState::new(PrTarget {
             repo: "owner/repo".into(),
@@ -2861,7 +3411,7 @@ mod tests {
         );
     }
     #[test]
-    fn schedule_fields_set_interval_and_next_poll() {
+    fn schedule_fields_set_interval_without_claiming_queued_poll() {
         let mut state = PrWatchState::new(PrTarget {
             repo: "owner/repo".into(),
             number: 12,
@@ -2885,7 +3435,7 @@ mod tests {
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
-        assert!(state.polling.next_poll_at.is_some());
+        assert!(state.polling.next_poll_at.is_none());
     }
 
     #[test]
