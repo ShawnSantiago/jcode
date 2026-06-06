@@ -585,6 +585,13 @@ impl App {
                     return;
                 }
             };
+            // Auto-import bypasses the manual `pending_login` path, so record
+            // `auth_success` here for each imported provider. Without this the
+            // onboarding activation funnel undercounts every imported login
+            // (the happy path of the guided first-run flow).
+            for (provider, method) in &outcome.imported_auth_labels {
+                crate::telemetry::record_auth_success(provider, method);
+            }
             crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
                 crate::bus::LoginCompleted {
                     provider: "auto-import".to_string(),
@@ -603,17 +610,12 @@ impl App {
             ExternalCli::ClaudeCode => SessionFilterMode::ClaudeCode,
         };
 
-        let (server_groups, orphan_sessions) = match session_picker::load_sessions_grouped() {
-            Ok(loaded) => loaded,
-            Err(err) => {
-                crate::logging::error(&format!(
-                    "onboarding: failed to load {} sessions: {err}",
-                    cli.label()
-                ));
-                self.onboarding_fallback_to_session_search(cli);
-                return;
-            }
-        };
+        // The onboarding picker only ever shows this one external CLI's
+        // transcripts, so load just those instead of paying the full
+        // `load_sessions_grouped` cost (parsing every jcode snapshot, the other
+        // CLIs, and listing servers). This keeps first-run onboarding snappy.
+        let (server_groups, orphan_sessions) =
+            session_picker::load_external_cli_sessions_grouped(cli);
 
         let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
         picker.activate_external_cli_filter(filter);

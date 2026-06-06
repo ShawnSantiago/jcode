@@ -2,6 +2,38 @@
 
 Cloudflare Worker that receives anonymous telemetry events from jcode.
 
+## Dashboard
+
+The worker also serves a visual dashboard so you do not have to run SQL by hand:
+
+- `GET /` (or `/dashboard`) - the HTML dashboard. Public page, no data until a
+  token is entered.
+- `GET /v1/stats` - JSON aggregates (counts only, never raw event rows), gated
+  behind `DASHBOARD_TOKEN`. Accepts `Authorization: Bearer <token>`,
+  `?token=<token>`, or `X-Dashboard-Token`.
+- `POST /v1/event` - unchanged event ingest.
+
+The headline number is **Total users**: distinct, non-CI `telemetry_id`s that
+ever installed jcode OR did meaningful work in it. The page shows every metric
+the API returns, organized into tiers (hero / key cards / diagnostic tables) so
+the important numbers stand out while nothing is hidden. Each user tier (reached
+> total > core) is broader than the one below it, and CI / raw figures are shown
+alongside for transparency.
+
+Set the token once (it is a Worker secret, not in source):
+
+```bash
+wrangler secret put DASHBOARD_TOKEN
+# then open https://<your-worker-domain>/ and paste the token
+```
+
+If `DASHBOARD_TOKEN` is unset the stats endpoint stays locked (deny by default).
+The CLI equivalent of the headline number:
+
+```bash
+wrangler d1 execute jcode-telemetry --remote --file=users.sql
+```
+
 ## Setup
 
 1. Install wrangler: `npm install`

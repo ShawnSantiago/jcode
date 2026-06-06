@@ -283,6 +283,28 @@ fn label_for(checkpoint: &str) -> &'static str {
         .unwrap_or("Checkpoint")
 }
 
+/// Human-readable detail for a passed tool-smoke stage, surfacing whether the
+/// multi-call thought-signature replay phase was exercised. The native tool
+/// smoke records `multi_tool_replay` as `verified` (a two-`functionCall`
+/// history was replayed and accepted, the shape that reproduces the
+/// "missing a thought_signature ... position N" 400) or `skipped` (the model
+/// declined a second tool call). Surfacing it keeps the coverage observable in
+/// the doctor report instead of collapsing to a generic pass string.
+fn tool_stage_detail(stage: &crate::live_tests::LiveVerificationStage) -> String {
+    match stage
+        .evidence
+        .get("multi_tool_replay")
+        .and_then(|value| value.as_str())
+    {
+        Some("verified") => "tool call parsed and executed; multi-call signature replay verified".to_string(),
+        Some("skipped") => {
+            "tool call parsed and executed; multi-call signature replay skipped (no 2nd tool call)"
+                .to_string()
+        }
+        _ => "tool call parsed and executed".to_string(),
+    }
+}
+
 /// Checkpoints that require a real API response and are therefore skipped on the
 /// offline/catalog tiers.
 const API_DEPENDENT_CHECKPOINTS: &[&str] = &[
@@ -1139,6 +1161,7 @@ async fn run_native_antigravity_api_checks(
     match run_live_antigravity_native_tool_smoke(selected).await {
         Ok(stage) => {
             spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            let detail = tool_stage_detail(&stage);
             for checkpoint in [
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
@@ -1148,7 +1171,7 @@ async fn run_native_antigravity_api_checks(
                 checks.push(DoctorCheck::passed(
                     checkpoint,
                     label_for(checkpoint),
-                    "tool call parsed and executed".to_string(),
+                    detail.clone(),
                 ));
             }
         }
@@ -1773,6 +1796,7 @@ async fn run_generic_native_api_checks(
     match run_live_native_provider_tool_smoke(provider, selected, label).await {
         Ok(stage) => {
             spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            let detail = tool_stage_detail(&stage);
             for checkpoint in [
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
@@ -1782,7 +1806,7 @@ async fn run_generic_native_api_checks(
                 checks.push(DoctorCheck::passed(
                     checkpoint,
                     label_for(checkpoint),
-                    "tool call parsed and executed".to_string(),
+                    detail.clone(),
                 ));
             }
         }

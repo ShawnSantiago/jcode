@@ -232,6 +232,55 @@ fn build_contents_replays_thought_signature_on_function_call() {
 }
 
 #[test]
+fn build_contents_replays_every_signature_across_multi_tool_history() {
+    // Regression guard for the Antigravity/Cloud Code 400
+    // ("Function call is missing a thought_signature ... position 5"): the
+    // backend validates *every* functionCall in the replayed history, not just
+    // the latest one. A multi-turn transcript where an earlier tool_use drops
+    // its signature is exactly what triggers the field failure, so assert that
+    // each captured signature survives serialization onto its matching part.
+    let signatures = ["SIG_A", "SIG_B", "SIG_C"];
+    let mut messages = Vec::new();
+    for (idx, sig) in signatures.iter().enumerate() {
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: format!("call_{idx}"),
+                name: "bash".to_string(),
+                input: json!({ "command": format!("echo {idx}") }),
+                thought_signature: Some(sig.to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: format!("call_{idx}"),
+                content: format!("out {idx}"),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+    }
+
+    let contents = build_contents(&messages);
+    let replayed: Vec<Option<&str>> = contents
+        .iter()
+        .flat_map(|content| content.parts.iter())
+        .filter(|part| part.function_call.is_some())
+        .map(|part| part.thought_signature.as_deref())
+        .collect();
+    assert_eq!(
+        replayed,
+        vec![Some("SIG_A"), Some("SIG_B"), Some("SIG_C")],
+        "every functionCall in the history must carry its captured thought_signature, \
+         not just the most recent one"
+    );
+}
+
+#[test]
 fn build_contents_preserves_tool_calls_and_results() {
     let messages = vec![
         Message {

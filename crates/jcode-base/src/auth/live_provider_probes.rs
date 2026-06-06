@@ -1145,143 +1145,21 @@ pub async fn run_live_antigravity_native_stream_smoke(
 
 /// Stage: tool-call parse + execution loop + result follow-up.
 ///
-/// Full two-turn round-trip: ask the model to call a tool (assert a parseable
-/// tool_use), then feed a synthetic tool_result back (assert the model consumes
-/// it). Gemini-3 attaches a `thought_signature` to its function call that the
-/// Cloud Code backend requires replayed on the follow-up turn, so we carry it
-/// onto the assistant tool_use block. Evidence for the `tool_call_parse`,
-/// `tool_execution_loop`, `tool_result_followup`, and `real_jcode_tool_smoke`
-/// checkpoints.
+/// Delegates to the shared native tool smoke ([`run_live_native_provider_tool_smoke`])
+/// so Antigravity exercises the same two phases as every other native runtime:
+/// a single round-trip plus a **multi-call signature replay** that rebuilds a
+/// history of two assistant `tool_use` blocks. Gemini-3 attaches a
+/// `thought_signature` to each function call that the Cloud Code backend
+/// requires replayed on later turns; the multi-call phase is what actually
+/// reproduces the `400 ... "Function call is missing a thought_signature ...
+/// position N"` field failure (a single round-trip cannot). Evidence for the
+/// `tool_call_parse`, `tool_execution_loop`, `tool_result_followup`, and
+/// `real_jcode_tool_smoke` checkpoints.
 pub async fn run_live_antigravity_native_tool_smoke(
     model: &str,
 ) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
-    let started = std::time::Instant::now();
     let provider = build_native_antigravity_provider(model)?;
-
-    let tool_name = "read";
-    let tools = vec![ToolDefinition {
-        name: tool_name.to_string(),
-        description: "Reads a file from the local filesystem.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {"file_path": {"type": "string"}},
-            "required": ["file_path"],
-            "additionalProperties": false
-        }),
-    }];
-    let system = "You are a live provider tool smoke test. When asked to read a file, you MUST \
-                  call the read tool with the given path. Do not answer in text first.";
-
-    let first_turn = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: "Read the file at /tmp/auth_tool_probe.txt using the read tool. \
-                   Call the tool now; do not answer in text."
-                .to_string(),
-            cache_control: None,
-        }],
-        timestamp: None,
-        tool_duration_ms: None,
-    }];
-
-    let first = consume_native_stream(
-        &provider,
-        &first_turn,
-        &tools,
-        system,
-        std::time::Duration::from_secs(120),
-    )
-    .await?;
-
-    ensure!(
-        !first.tool_calls.is_empty(),
-        "native Antigravity tool smoke produced no tool call (stop_reason={:?}, text={:?})",
-        first.stop_reason,
-        crate::util::truncate_str(first.text.trim(), 200)
-    );
-    let tool_call = first.tool_calls[0].clone();
-    ensure!(
-        tool_call.name == tool_name,
-        "native Antigravity tool smoke called unexpected tool {:?} (expected {tool_name})",
-        tool_call.name
-    );
-    let parsed_arguments = crate::message::ToolCall::parse_streamed_input_to_object(
-        if tool_call.input_json.trim().is_empty() {
-            "{}"
-        } else {
-            tool_call.input_json.trim()
-        },
-    );
-    ensure!(
-        parsed_arguments.is_object(),
-        "native Antigravity tool smoke produced non-object tool arguments: {:?}",
-        tool_call.input_json
-    );
-
-    // Second turn: replay the assistant's tool_use (carrying the Gemini-3
-    // thought signature, required by the Cloud Code backend) and answer it with
-    // a synthetic tool_result, then assert the model consumes the result.
-    let mut followup = first_turn.clone();
-    followup.push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            input: parsed_arguments.clone(),
-            thought_signature: tool_call.thought_signature.clone(),
-        }],
-        timestamp: None,
-        tool_duration_ms: None,
-    });
-    followup.push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: tool_call.id.clone(),
-            content: "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it."
-                .to_string(),
-            is_error: Some(false),
-        }],
-        timestamp: None,
-        tool_duration_ms: None,
-    });
-
-    let second = consume_native_stream(
-        &provider,
-        &followup,
-        &tools,
-        system,
-        std::time::Duration::from_secs(120),
-    )
-    .await?;
-
-    ensure!(
-        second.saw_message_end,
-        "native Antigravity tool follow-up ended without a message_end event"
-    );
-    ensure!(
-        second.text.contains("42"),
-        "native Antigravity tool follow-up did not reflect the tool result token: {:?}",
-        crate::util::truncate_str(second.text.trim(), 200)
-    );
-
-    let total_input = first.input_tokens + second.input_tokens;
-    let total_output = first.output_tokens + second.output_tokens;
-    let mut stage = crate::live_tests::LiveVerificationStage::passed(
-        crate::live_tests::checkpoints::TOOL_CALL_PARSE,
-    )
-    .with_duration_ms(started.elapsed().as_millis() as u64)
-    .with_evidence("model", serde_json::json!(model))
-    .with_evidence("tool_name", serde_json::json!(tool_call.name))
-    .with_evidence("tool_arguments", parsed_arguments)
-    .with_evidence(
-        "thought_signature_present",
-        serde_json::json!(tool_call.thought_signature.is_some()),
-    )
-    .with_evidence("followup_consumed_result", serde_json::json!(true));
-    if total_input != 0 || total_output != 0 {
-        stage = stage.with_evidence("usage", usage_evidence(total_input, total_output, 0, 0));
-    }
-    Ok(stage)
+    run_live_native_provider_tool_smoke(&provider, model, "Antigravity").await
 }
 
 // === Generic native-runtime probes ========================================
@@ -1442,11 +1320,24 @@ pub async fn run_live_native_provider_stream_smoke(
 /// Stage: tool-call parse + execution loop + result follow-up against an
 /// arbitrary native provider.
 ///
-/// Full two-turn round-trip: ask the model to call a tool (assert a parseable
-/// tool_use), then feed a synthetic tool_result back (assert the model consumes
-/// it). Any provider-emitted `thought_signature` (e.g. Gemini-3 via the Cloud
-/// Code backend) is carried onto the replayed assistant tool_use block, since
-/// some backends reject a follow-up turn that omits it.
+/// Two phases:
+///
+/// 1. **Single round-trip (gating):** ask the model to call a tool (assert a
+///    parseable tool_use), then feed a synthetic tool_result back (assert the
+///    model consumes it). This mirrors the historical assertion so providers
+///    that already passed keep passing.
+/// 2. **Multi-call signature replay (best-effort):** chain a *second* tool call
+///    and replay a history that now contains **two** assistant `tool_use`
+///    blocks, each carrying its own provider-emitted `thought_signature`. The
+///    Antigravity/Cloud Code backend validates every `functionCall` in the
+///    replayed history (not just the latest), so a transcript that drops an
+///    earlier signature is rejected with `400 ... "Function call is missing a
+///    thought_signature ... position N"`. A single round-trip can never
+///    reproduce that, so we exercise the multi-call shape here. If the model
+///    declines the second tool call (common for providers that do not emit
+///    signatures at all), the phase records `multi_tool_replay: "skipped"`
+///    rather than failing, so it never turns a previously-green provider red
+///    for a non-signature reason.
 pub async fn run_live_native_provider_tool_smoke(
     provider: &dyn Provider,
     model: &str,
@@ -1501,49 +1392,26 @@ pub async fn run_live_native_provider_tool_smoke(
         "native {label} tool smoke called unexpected tool {:?} (expected {tool_name})",
         tool_call.name
     );
-    let parsed_arguments = crate::message::ToolCall::parse_streamed_input_to_object(
-        if tool_call.input_json.trim().is_empty() {
-            "{}"
-        } else {
-            tool_call.input_json.trim()
-        },
-    );
+    let parsed_arguments = parse_tool_arguments(&tool_call.input_json);
     ensure!(
         parsed_arguments.is_object(),
         "native {label} tool smoke produced non-object tool arguments: {:?}",
         tool_call.input_json
     );
 
-    // Second turn: replay the assistant's tool_use (carrying any thought
+    // Phase 1 (gating): replay the assistant's tool_use (carrying any thought
     // signature the backend requires) and answer it with a synthetic
     // tool_result, then assert the model consumes the result.
-    let mut followup = first_turn.clone();
-    followup.push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: tool_call.id.clone(),
-            name: tool_call.name.clone(),
-            input: parsed_arguments.clone(),
-            thought_signature: tool_call.thought_signature.clone(),
-        }],
-        timestamp: None,
-        tool_duration_ms: None,
-    });
-    followup.push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: tool_call.id.clone(),
-            content: "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it."
-                .to_string(),
-            is_error: Some(false),
-        }],
-        timestamp: None,
-        tool_duration_ms: None,
-    });
+    let mut history = first_turn.clone();
+    history.push(assistant_tool_use(&tool_call, &parsed_arguments));
+    history.push(tool_result_then_text(
+        &tool_call.id,
+        "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it.",
+    ));
 
     let second = consume_native_stream(
         provider,
-        &followup,
+        &history,
         &tools,
         system,
         std::time::Duration::from_secs(120),
@@ -1560,8 +1428,99 @@ pub async fn run_live_native_provider_tool_smoke(
         crate::util::truncate_str(second.text.trim(), 200)
     );
 
-    let total_input = first.input_tokens + second.input_tokens;
-    let total_output = first.output_tokens + second.output_tokens;
+    // Phase 2 (best-effort): drive an agentic loop that requires reading TWO
+    // files so the model emits a *sequence* of tool calls. Each call is replayed
+    // (carrying its captured signature) and answered with a synthetic result, so
+    // by the final turn the request we send carries two assistant `functionCall`
+    // blocks. That multi-call history is the only shape that reproduces the
+    // Antigravity/Cloud Code `400 ... "Function call is missing a
+    // thought_signature ... position N"`: a backend that validates *every*
+    // signature rejects the request here if an earlier one was dropped, so the
+    // `consume_native_stream` below surfaces the regression. If the model never
+    // makes a second tool call (common for providers that emit no signatures at
+    // all), the phase records `multi_tool_replay: "skipped"` rather than failing.
+    let mut total_input = first.input_tokens + second.input_tokens;
+    let mut total_output = first.output_tokens + second.output_tokens;
+    let mut multi_tool_replay = "skipped";
+    let mut signatures_present: Vec<bool> = Vec::new();
+
+    let mut convo = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Read two files using the read tool, one tool call at a time: first read \
+                   /tmp/auth_tool_probe.txt, then read /tmp/auth_tool_probe_2.txt. After both \
+                   reads, reply with the single word DONE. Call the tool now; do not answer \
+                   in text first."
+                .to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let synthetic_results = [
+        "Contents of /tmp/auth_tool_probe.txt: alpha.",
+        "Contents of /tmp/auth_tool_probe_2.txt: bravo.",
+    ];
+    // Cap the loop so a model that keeps calling tools cannot run forever.
+    const MAX_TOOL_ROUNDS: usize = 4;
+    let mut tool_round = 0usize;
+
+    loop {
+        // Number of assistant function calls already in the history we are about
+        // to replay. Once this reaches two, a successful response proves the
+        // backend accepted a multi-`functionCall` transcript with every
+        // signature intact.
+        let prior_calls = convo
+            .iter()
+            .filter(|message| {
+                matches!(message.role, Role::Assistant)
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            })
+            .count();
+
+        let turn = consume_native_stream(
+            provider,
+            &convo,
+            &tools,
+            system,
+            std::time::Duration::from_secs(120),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "native {label} multi-tool signature replay was rejected (replayed history \
+                 carried {prior_calls} function call(s); a backend that validates every \
+                 functionCall signature fails here when an earlier thought_signature is dropped)"
+            )
+        })?;
+        total_input += turn.input_tokens;
+        total_output += turn.output_tokens;
+        if prior_calls >= 2 {
+            multi_tool_replay = "verified";
+        }
+
+        let Some(call) = turn.tool_calls.first().cloned() else {
+            // Model produced a final (text) answer; the loop is done.
+            break;
+        };
+        signatures_present.push(call.thought_signature.is_some());
+        let args = parse_tool_arguments(&call.input_json);
+        convo.push(assistant_tool_use(&call, &args));
+        let result = synthetic_results
+            .get(tool_round)
+            .copied()
+            .unwrap_or("Contents: omega.");
+        convo.push(tool_result_then_text(&call.id, result));
+
+        tool_round += 1;
+        if tool_round >= MAX_TOOL_ROUNDS {
+            break;
+        }
+    }
+
     let mut stage = crate::live_tests::LiveVerificationStage::passed(
         crate::live_tests::checkpoints::TOOL_CALL_PARSE,
     )
@@ -1573,9 +1532,57 @@ pub async fn run_live_native_provider_tool_smoke(
         "thought_signature_present",
         serde_json::json!(tool_call.thought_signature.is_some()),
     )
+    .with_evidence("multi_tool_replay", serde_json::json!(multi_tool_replay))
+    .with_evidence("multi_tool_call_count", serde_json::json!(tool_round))
+    .with_evidence(
+        "tool_call_signatures_present",
+        serde_json::json!(signatures_present),
+    )
     .with_evidence("followup_consumed_result", serde_json::json!(true));
     if total_input != 0 || total_output != 0 {
         stage = stage.with_evidence("usage", usage_evidence(total_input, total_output, 0, 0));
     }
     Ok(stage)
+}
+
+/// Parse a streamed tool-call argument blob into a JSON object (empty object for
+/// a blank payload), shared by the native tool smoke probes.
+fn parse_tool_arguments(input_json: &str) -> serde_json::Value {
+    crate::message::ToolCall::parse_streamed_input_to_object(if input_json.trim().is_empty() {
+        "{}"
+    } else {
+        input_json.trim()
+    })
+}
+
+/// Build the assistant `tool_use` replay block for a captured native tool call,
+/// preserving any provider-emitted `thought_signature` so backends that require
+/// it (Gemini-3 via the Cloud Code/Antigravity runtime) accept the follow-up.
+fn assistant_tool_use(call: &NativeClaudeToolCall, arguments: &serde_json::Value) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            input: arguments.clone(),
+            thought_signature: call.thought_signature.clone(),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }
+}
+
+/// Build a user turn carrying a synthetic `tool_result` for a captured native
+/// tool call, used to answer each step of the multi-call replay loop.
+fn tool_result_then_text(tool_use_id: &str, result: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: result.to_string(),
+            is_error: Some(false),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }
 }
