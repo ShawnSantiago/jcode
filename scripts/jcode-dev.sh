@@ -158,6 +158,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 if [[ "${JCODE_DEV_USE_SELFDEV:-0}" == "1" ]] && command -v selfdev >/dev/null 2>&1; then
+  cd "$caller_pwd"
   exec selfdev enter "$@"
 fi
 
@@ -173,7 +174,12 @@ export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 "$repo_root/scripts/dev_cargo.sh" build "${profile_args[@]}" -p jcode --bin jcode
 
-binary="$repo_root/target/$profile_dir/jcode"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$repo_root/$target_dir"
+fi
+
+binary="$target_dir/$profile_dir/jcode"
 if [[ ! -x "$binary" ]]; then
   log "built jcode binary is missing or not executable: $binary"
   exit 1
