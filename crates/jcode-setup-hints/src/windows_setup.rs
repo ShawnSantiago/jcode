@@ -1,5 +1,5 @@
 use super::{SetupHintsState, StartupHints, read_choice};
-use crate::storage;
+use jcode_storage as storage;
 use anyhow::Result;
 use std::io::{self, Write};
 
@@ -588,7 +588,7 @@ Write-Output "OK"
         if stdout.contains("OK") {
             state.desktop_shortcut_created = true;
             let _ = state.save();
-            crate::logging::info(&format!("Created desktop shortcut: {}", shortcut_path));
+            jcode_logging::info(&format!("Created desktop shortcut: {}", shortcut_path));
         }
     }
 

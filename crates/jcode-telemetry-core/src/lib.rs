@@ -1,5 +1,5 @@
-use crate::logging;
-use crate::storage;
+use jcode_logging as logging;
+use jcode_storage as storage;
 mod lifecycle;
 mod state_support;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -1276,7 +1276,7 @@ pub fn record_provider_selected(provider: &str) {
 }
 
 pub fn record_auth_started(provider: &str, method: &str) {
-    crate::logging::auth_event("auth_started", provider, &[("method", method)]);
+    jcode_logging::auth_event("auth_started", provider, &[("method", method)]);
     emit_onboarding_step("auth_started", Some(provider), Some(method), None);
 }
 
@@ -1285,7 +1285,7 @@ pub fn record_auth_failed(provider: &str, method: &str) {
 }
 
 pub fn record_auth_failed_reason(provider: &str, method: &str, reason: &str) {
-    crate::logging::auth_event(
+    jcode_logging::auth_event(
         "auth_failed",
         provider,
         &[("method", method), ("reason", reason)],
@@ -1294,17 +1294,17 @@ pub fn record_auth_failed_reason(provider: &str, method: &str, reason: &str) {
 }
 
 pub fn record_auth_cancelled(provider: &str, method: &str) {
-    crate::logging::auth_event("auth_cancelled", provider, &[("method", method)]);
+    jcode_logging::auth_event("auth_cancelled", provider, &[("method", method)]);
     emit_onboarding_step("auth_cancelled", Some(provider), Some(method), None);
 }
 
 pub fn record_auth_surface_blocked(provider: &str, method: &str) {
-    crate::logging::auth_event("auth_surface_blocked", provider, &[("method", method)]);
+    jcode_logging::auth_event("auth_surface_blocked", provider, &[("method", method)]);
     emit_onboarding_step("auth_surface_blocked", Some(provider), Some(method), None);
 }
 
 pub fn record_auth_surface_blocked_reason(provider: &str, method: &str, reason: &str) {
-    crate::logging::auth_event(
+    jcode_logging::auth_event(
         "auth_surface_blocked",
         provider,
         &[("method", method), ("reason", reason)],
@@ -1318,7 +1318,7 @@ pub fn record_auth_surface_blocked_reason(provider: &str, method: &str, reason: 
 }
 
 pub fn record_auth_success(provider: &str, method: &str) {
-    crate::logging::auth_event("auth_success", provider, &[("method", method)]);
+    jcode_logging::auth_event("auth_success", provider, &[("method", method)]);
     if !is_enabled() {
         return;
     }

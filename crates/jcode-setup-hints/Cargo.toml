@@ -1,0 +1,20 @@
+[package]
+name = "jcode-setup-hints"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "jcode_setup_hints"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+dirs = "5"
+jcode-build-meta = { path = "../jcode-build-meta" }
+jcode-logging = { path = "../jcode-logging" }
+jcode-storage = { path = "../jcode-storage" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

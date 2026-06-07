@@ -62,7 +62,10 @@ impl App {
                 let opened = open::that_detached(&payload.png_path).is_ok();
 
                 let mut md = payload.markdown;
-                let mut footer = format!("\n\n🖼️ Dashboard saved to `{}`.", payload.png_path.display());
+                let mut footer = format!(
+                    "\n\n🖼️ Dashboard saved to `{}`.",
+                    payload.png_path.display()
+                );
                 if copied {
                     footer.push_str(" Copied to your clipboard - paste it anywhere to share.");
                 } else {
@@ -97,9 +100,7 @@ impl App {
 /// then arboard (which expects raw RGBA, so we decode the PNG for it).
 fn copy_image_to_clipboard(path: &Path, png: &[u8]) -> bool {
     // Wayland: wl-copy from a file is most reliable.
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && copy_image_wl(png)
-    {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && copy_image_wl(png) {
         return true;
     }
 

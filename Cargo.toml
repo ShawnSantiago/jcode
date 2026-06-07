@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.23.0"
+version = "0.24.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -36,6 +36,7 @@ members = [
     "crates/jcode-protocol",
     "crates/jcode-selfdev-types",
     "crates/jcode-session-types",
+    "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
     "crates/jcode-azure-auth",
@@ -44,6 +45,9 @@ members = [
     "crates/jcode-provider-env",
     "crates/jcode-provider-core",
     "crates/jcode-provider-bedrock",
+    "crates/jcode-provider-anthropic",
+    "crates/jcode-provider-antigravity",
+    "crates/jcode-provider-copilot",
     "crates/jcode-provider-openrouter",
     "crates/jcode-provider-openai",
     "crates/jcode-provider-gemini",
@@ -62,11 +66,13 @@ members = [
     "crates/jcode-tui-visual-debug",
     "crates/jcode-tui-session-picker",
     "crates/jcode-tui-style",
+    "crates/jcode-tui-permissions",
     "crates/jcode-tui-tool-display",
     "crates/jcode-tui-usage-overlay",
     "crates/jcode-update-core",
     "crates/jcode-terminal-launch",
     "crates/jcode-terminal-image",
+    "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-mobile-core",
     "crates/jcode-mobile-sim",
@@ -224,6 +230,7 @@ jcode-swarm-core = { path = "crates/jcode-swarm-core" }
 jcode-protocol = { path = "crates/jcode-protocol" }
 jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }
 jcode-session-types = { path = "crates/jcode-session-types" }
+jcode-setup-hints = { path = "crates/jcode-setup-hints" }
 jcode-storage = { path = "crates/jcode-storage" }
 jcode-task-types = { path = "crates/jcode-task-types" }
 jcode-tool-core = { path = "crates/jcode-tool-core" }

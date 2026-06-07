@@ -402,7 +402,9 @@ impl BenchState {
                         "old_string": format!("target line {}", idx),
                         "new_string": format!("target line {} updated", idx),
                     }),
-                    intent: None, thought_signature: None, };
+                    intent: None,
+                    thought_signature: None,
+                };
                 let tool_output = format!(
                     "{line}- target line {idx}\n{line}+ target line {idx} updated",
                     line = idx + 1,

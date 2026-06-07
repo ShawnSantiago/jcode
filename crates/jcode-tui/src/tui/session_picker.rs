@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph},
 };
 use std::collections::HashSet;
 use std::io::IsTerminal;
@@ -348,6 +348,96 @@ impl SessionPicker {
         self.rebuild_items();
     }
 
+    /// Replace the backing session data in place while preserving the user's
+    /// current view state: the highlighted session (by id), preview scroll, list
+    /// scroll, search query/mode, filter, focused pane, test-session visibility,
+    /// and multi-select set. Used by the background `/resume` refresh so the
+    /// freshly loaded list does not yank the picker out from under the user
+    /// (which previously reset their selection, scroll, and search every time the
+    /// async load completed a second or two after opening).
+    pub fn reseed_grouped(
+        &mut self,
+        server_groups: Vec<ServerGroup>,
+        orphan_sessions: Vec<SessionInfo>,
+    ) {
+        // Remember what the user was looking at so we can restore it after the
+        // data swap + item rebuild.
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        let preview_scroll = self.scroll_offset;
+        let list_offset = self.list_state.offset();
+
+        let hidden_test_count: usize = server_groups
+            .iter()
+            .flat_map(|g| g.sessions.iter())
+            .chain(orphan_sessions.iter())
+            .filter(|s| s.is_debug)
+            .count();
+
+        let all_for_crash: Vec<SessionInfo> = server_groups
+            .iter()
+            .flat_map(|g| g.sessions.iter())
+            .chain(orphan_sessions.iter())
+            .cloned()
+            .collect();
+        self.crashed_sessions = crashed_sessions_from_all_sessions(&all_for_crash);
+        self.crashed_session_ids = self
+            .crashed_sessions
+            .as_ref()
+            .map(|info| info.session_ids.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let (all_sessions, all_orphan_sessions) = if server_groups.is_empty() {
+            (orphan_sessions, Vec::new())
+        } else {
+            (Vec::new(), orphan_sessions)
+        };
+        self.all_sessions = all_sessions;
+        self.all_server_groups = server_groups;
+        self.all_orphan_sessions = all_orphan_sessions;
+        self.hidden_test_count = hidden_test_count;
+        self.loading_message = None;
+        // Invalidate the cached search pass so the rebuild re-evaluates matches
+        // against the new data instead of stale session refs.
+        self.cached_search_query.clear();
+        self.cached_search_refs.clear();
+        // Clear the stale selection/items before rebuilding: the old
+        // `visible_sessions` refs index into the just-replaced backing arrays, so
+        // `rebuild_items`' own "preserve selection" lookup would resolve them
+        // against mismatched data (causing index drift when the refreshed list is
+        // reordered). We restore the selection explicitly, by id, afterwards.
+        self.list_state.select(None);
+        self.items.clear();
+        self.visible_sessions.clear();
+        self.item_to_session.clear();
+
+        self.rebuild_items();
+
+        // Restore the highlighted session by id (not index) so it follows the
+        // session across a reordered/extended refresh.
+        let restored = selected_id
+            .as_deref()
+            .and_then(|id| self.find_item_index_for_session_id(id));
+        if let Some(idx) = restored {
+            self.list_state.select(Some(idx));
+        } else {
+            self.list_state
+                .select(self.item_to_session.iter().position(|x| x.is_some()));
+        }
+
+        // Restore the user's scroll position only when their selection survived
+        // the refresh so the view feels stable; otherwise fall back to the
+        // rebuild's defaults.
+        let still_selected = selected_id
+            .as_deref()
+            .and_then(|id| self.selected_session().map(|s| s.id == id))
+            .unwrap_or(false);
+        if still_selected {
+            self.scroll_offset = preview_scroll;
+            self.auto_scroll_preview = false;
+            *self.list_state.offset_mut() = list_offset;
+        }
+    }
+
     /// Restrict the picker to a single external CLI source (onboarding flow:
     /// "continue where you left off" in Codex or Claude Code).
     pub fn activate_external_cli_filter(&mut self, mode: SessionFilterMode) {
@@ -529,9 +619,7 @@ impl SessionPicker {
     /// session. Used by onboarding tests to assert the combined external-CLI
     /// picker surfaces both Codex and Claude Code transcripts.
     #[cfg(test)]
-    pub(crate) fn visible_session_iter_for_test(
-        &self,
-    ) -> impl Iterator<Item = &SessionInfo> + '_ {
+    pub(crate) fn visible_session_iter_for_test(&self) -> impl Iterator<Item = &SessionInfo> + '_ {
         self.visible_session_iter()
     }
 
@@ -1028,6 +1116,10 @@ impl SessionPicker {
         // Messages preview - styled like the actual TUI
         let mut prompt_num = 0;
         let mut rendered_messages = 0usize;
+        // Track the pre-wrap line index + display number + text of every user
+        // prompt so we can render a sticky "previous prompt" header (matching the
+        // main TUI's `prompt_preview`) once it scrolls out of view.
+        let mut user_prompt_markers: Vec<(usize, usize, String)> = Vec::new();
         for msg in &session.messages_preview {
             if msg.content.trim().is_empty() {
                 continue;
@@ -1049,6 +1141,11 @@ impl SessionPicker {
             match msg.role.as_str() {
                 "user" => {
                     prompt_num += 1;
+                    user_prompt_markers.push((
+                        lines.len(),
+                        prompt_num,
+                        display_msg.content.clone(),
+                    ));
                     lines.push(
                         Line::from(vec![
                             Span::styled(
@@ -1226,29 +1323,191 @@ impl SessionPicker {
             .border_type(BorderType::Rounded)
             .title(" Preview ")
             .border_style(Style::default().fg(preview_border_color));
+        let inner = block.inner(area);
+        // Render the block first, then draw content/scrollbar/header into its
+        // inner rect so we control the scrollbar column and sticky header rows.
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
 
         // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
-        let preview_width = preview_inner_width as usize;
-        let lines = if preview_width > 0 {
-            markdown::wrap_lines(lines, preview_width)
-        } else {
-            lines
+        // Two-pass so the content reserves the scrollbar column before wrapping
+        // (matching the main chat viewport): wrap at the full inner width, and if
+        // that overflows the viewport we re-wrap one column narrower to leave room
+        // for the scrollbar. Narrowing only ever adds lines, so the decision is
+        // stable. We also record, for each pre-wrap line, its first wrapped-line
+        // index so we can locate user prompts for the sticky header.
+        let visible_height = inner.height as usize;
+        let source_lines = lines;
+        let wrap_lines_tracked = |width: usize| -> (Vec<Line<'static>>, Vec<usize>) {
+            let mut mapped = Vec::with_capacity(source_lines.len() + 1);
+            let mut wrapped: Vec<Line> = Vec::new();
+            for line in source_lines.iter().cloned() {
+                mapped.push(wrapped.len());
+                if width > 0 {
+                    wrapped.extend(markdown::wrap_lines(vec![line], width));
+                } else {
+                    wrapped.push(line);
+                }
+            }
+            mapped.push(wrapped.len());
+            (wrapped, mapped)
         };
 
-        let visible_height = area.height.saturating_sub(2) as usize;
-        let max_scroll = lines.len().saturating_sub(visible_height) as u16;
+        let full_width = inner.width as usize;
+        let (full_lines, _) = wrap_lines_tracked(full_width);
+        let show_scrollbar =
+            super::ui::native_scrollbar_visible(true, full_lines.len(), visible_height);
+        let (content_area, scrollbar_area) =
+            super::ui::split_native_scrollbar_area(inner, show_scrollbar);
+
+        let (lines, prewrap_to_wrapped) = if show_scrollbar {
+            wrap_lines_tracked(content_area.width as usize)
+        } else {
+            // Reuse the full-width wrap; recompute the map to match.
+            wrap_lines_tracked(full_width)
+        };
+
+        let total_lines = lines.len();
+
+        let max_scroll = total_lines.saturating_sub(visible_height) as u16;
         if self.auto_scroll_preview {
             self.scroll_offset = max_scroll;
             self.auto_scroll_preview = false;
         } else {
             self.scroll_offset = self.scroll_offset.min(max_scroll);
         }
+        let scroll = self.scroll_offset as usize;
 
-        let paragraph = Paragraph::new(lines)
-            .block(block)
-            .scroll((self.scroll_offset, 0));
+        let paragraph = Paragraph::new(lines).scroll((self.scroll_offset, 0));
+        frame.render_widget(paragraph, content_area);
 
-        frame.render_widget(paragraph, area);
+        // Sticky "previous prompt" header: when the view is scrolled past a user
+        // prompt, pin a dimmed `N› …` line at the top of the content area, just
+        // like the main TUI's `prompt_preview`.
+        if scroll > 0 {
+            self.render_preview_prompt_header(
+                frame,
+                content_area,
+                &user_prompt_markers,
+                &prewrap_to_wrapped,
+                scroll,
+                user_color,
+                user_text,
+                align,
+            );
+        }
+
+        if let Some(scrollbar_area) = scrollbar_area {
+            super::ui::render_native_scrollbar(
+                frame,
+                scrollbar_area,
+                scroll,
+                total_lines,
+                visible_height,
+                self.focus == PaneFocus::Preview,
+            );
+        }
+    }
+
+    /// Render the pinned "previous prompt" header for the preview pane. Mirrors
+    /// the main chat viewport's `prompt_preview`: find the last user prompt whose
+    /// wrapped start has scrolled above the viewport and draw it dimmed at the top.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Header rendering needs the prompt markers, wrap map, and styling context"
+    )]
+    fn render_preview_prompt_header(
+        &self,
+        frame: &mut Frame,
+        content_area: Rect,
+        user_prompt_markers: &[(usize, usize, String)],
+        prewrap_to_wrapped: &[usize],
+        scroll: usize,
+        user_color: Color,
+        user_text: Color,
+        align: Alignment,
+    ) {
+        // The last prompt whose wrapped start index is above the current scroll.
+        let Some((_, prompt_num, text)) =
+            user_prompt_markers
+                .iter()
+                .rev()
+                .find(|(prewrap_idx, _, _)| {
+                    prewrap_to_wrapped
+                        .get(*prewrap_idx)
+                        .is_some_and(|wrapped_start| *wrapped_start < scroll)
+                })
+        else {
+            return;
+        };
+
+        let text_flat = text.replace('\n', " ");
+        let text_flat = text_flat.trim();
+        if text_flat.is_empty() {
+            return;
+        }
+
+        let num_str = format!("{}", prompt_num);
+        let prefix_len = num_str.len() + 2;
+        let content_width = (content_area.width as usize).saturating_sub(prefix_len + 1);
+        if content_width == 0 {
+            return;
+        }
+        let dim_style = Style::default().dim();
+        let dim_num = rgb(80, 80, 80);
+        let user_bg = rgb(30, 34, 42);
+
+        let text_chars: Vec<char> = text_flat.chars().collect();
+        let is_long = text_chars.len() > content_width;
+        let preview_lines: Vec<Line<'static>> = if !is_long {
+            vec![
+                Line::from(vec![
+                    Span::styled(num_str.clone(), dim_style.fg(dim_num).bg(user_bg)),
+                    Span::styled("› ", dim_style.fg(user_color).bg(user_bg)),
+                    Span::styled(text_flat.to_string(), dim_style.fg(user_text).bg(user_bg)),
+                ])
+                .alignment(align),
+            ]
+        } else {
+            let half = content_width.max(4);
+            let head: String = text_chars[..half.min(text_chars.len())].iter().collect();
+            let tail_start = text_chars.len().saturating_sub(half);
+            let tail: String = text_chars[tail_start..].iter().collect();
+            let first = Line::from(vec![
+                Span::styled(num_str.clone(), dim_style.fg(dim_num).bg(user_bg)),
+                Span::styled("› ", dim_style.fg(user_color).bg(user_bg)),
+                Span::styled(
+                    format!("{} ...", head.trim_end()),
+                    dim_style.fg(user_text).bg(user_bg),
+                ),
+            ])
+            .alignment(align);
+            let padding: String = " ".repeat(prefix_len);
+            let second = Line::from(vec![
+                Span::styled(padding, dim_style.bg(user_bg)),
+                Span::styled(
+                    format!("... {}", tail.trim_start()),
+                    dim_style.fg(user_text).bg(user_bg),
+                ),
+            ])
+            .alignment(align);
+            vec![first, second]
+        };
+
+        let line_count = (preview_lines.len() as u16).min(content_area.height);
+        if line_count == 0 {
+            return;
+        }
+        let header_area = Rect {
+            x: content_area.x,
+            y: content_area.y,
+            width: content_area.width,
+            height: line_count,
+        };
+        frame.render_widget(Clear, header_area);
+        frame.render_widget(Paragraph::new(preview_lines), header_area);
     }
 
     /// Render the reserved top band for the first-run onboarding experience:

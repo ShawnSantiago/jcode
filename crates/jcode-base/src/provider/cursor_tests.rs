@@ -4,8 +4,8 @@ use super::*;
 fn available_models_include_composer_models() {
     let provider = CursorCliProvider::new();
     let models = provider.available_models();
-    assert!(models.contains(&"composer-1"));
-    assert!(models.contains(&"composer-1.5"));
+    assert!(models.contains(&"composer-2"));
+    assert!(models.contains(&"composer-2.5"));
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn available_models_display_prefers_fetched_cursor_models() {
         Some("claude-4-sonnet-thinking")
     );
     assert!(models.iter().any(|model| model == "gpt-5.2"));
-    assert!(models.iter().any(|model| model == "composer-1.5"));
+    assert!(models.iter().any(|model| model == "composer-2.5"));
 }
 
 #[test]
@@ -90,11 +90,11 @@ fn available_models_display_seeds_from_persisted_catalog() {
 fn set_model_accepts_composer_models() {
     let provider = CursorCliProvider::new();
 
-    provider.set_model("composer-1").unwrap();
-    assert_eq!(provider.model(), "composer-1");
+    provider.set_model("composer-2").unwrap();
+    assert_eq!(provider.model(), "composer-2");
 
-    provider.set_model("composer-1.5").unwrap();
-    assert_eq!(provider.model(), "composer-1.5");
+    provider.set_model("composer-2.5").unwrap();
+    assert_eq!(provider.model(), "composer-2.5");
 }
 
 #[test]

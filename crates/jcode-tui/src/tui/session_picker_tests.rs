@@ -246,7 +246,16 @@ fn test_session_item_uses_single_primary_title_line() {
     let rows = picker.render_session_item_lines(&session, false);
     let text_rows: Vec<String> = rows.iter().map(line_text).collect();
 
-    assert_eq!(text_rows.len(), 4);
+    // The title must appear on exactly one row (the primary line); other rows
+    // (stats, prompt preview, created/dir) must not repeat it.
+    assert_eq!(
+        text_rows
+            .iter()
+            .filter(|row| row.contains("Generated release planning"))
+            .count(),
+        1,
+        "title should render on exactly one row: {text_rows:?}"
+    );
     assert!(text_rows[0].contains("Generated release planning"));
     assert!(
         text_rows[1..]
@@ -1115,5 +1124,224 @@ fn test_keyboard_scroll_uses_preview_focus_for_paging() {
     assert_eq!(
         picker.selected_session().map(|s| s.id.as_str()),
         Some("session_2")
+    );
+}
+
+/// Build a session with many short user/assistant turns so the preview overflows
+/// a small viewport (used to exercise the preview scrollbar + sticky header).
+fn make_session_with_many_turns(id: &str, turns: usize) -> SessionInfo {
+    let mut session = make_session(id, id, false, SessionStatus::Closed);
+    let mut preview = Vec::new();
+    for i in 0..turns {
+        preview.push(PreviewMessage {
+            role: "user".to_string(),
+            content: format!("user prompt number {i}"),
+            tool_calls: Vec::new(),
+            tool_data: None,
+            timestamp: None,
+        });
+        preview.push(PreviewMessage {
+            role: "assistant".to_string(),
+            content: format!("assistant reply number {i}"),
+            tool_calls: Vec::new(),
+            tool_data: None,
+            timestamp: None,
+        });
+    }
+    session.first_user_prompt = preview.first().map(|m| m.content.clone());
+    session.messages_preview = preview;
+    session
+}
+
+fn buffer_text(picker: &mut SessionPicker, w: u16, h: u16) -> String {
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render picker");
+    let buffer = terminal.backend().buffer().clone();
+    buffer.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+/// Any of the native scrollbar thumb glyphs (see `render_native_scrollbar`).
+fn contains_scrollbar_glyph(text: &str) -> bool {
+    text.contains('•') || text.contains('╷') || text.contains('╵') || text.contains('│')
+}
+
+#[test]
+fn test_preview_pane_shows_scrollbar_when_overflowing() {
+    let session = make_session_with_many_turns("preview_scroll", 60);
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.focus = PaneFocus::Preview;
+
+    // Small height so the long preview overflows and needs a scrollbar.
+    let text = buffer_text(&mut picker, 100, 16);
+    assert!(
+        contains_scrollbar_glyph(&text),
+        "preview scrollbar glyph should render when content overflows:\n{text}"
+    );
+}
+
+#[test]
+fn test_session_list_shows_scrollbar_when_overflowing() {
+    // Many sessions so the left list overflows a short viewport.
+    let sessions: Vec<SessionInfo> = (0..40)
+        .map(|i| {
+            make_session(
+                &format!("list_scroll_{i}"),
+                &format!("s{i}"),
+                false,
+                SessionStatus::Closed,
+            )
+        })
+        .collect();
+    let mut picker = SessionPicker::new(sessions);
+    picker.focus = PaneFocus::Sessions;
+
+    let text = buffer_text(&mut picker, 100, 16);
+    assert!(
+        contains_scrollbar_glyph(&text),
+        "session list scrollbar glyph should render when list overflows:\n{text}"
+    );
+}
+
+#[test]
+fn test_preview_sticky_prompt_header_appears_after_scrolling() {
+    let session = make_session_with_many_turns("sticky_header", 60);
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.focus = PaneFocus::Preview;
+
+    // First render auto-scrolls to the bottom; the topmost prompts are off-screen,
+    // so a dimmed "N› ..." sticky header should pin a prior prompt at the top of
+    // the preview's content area.
+    let w = 100u16;
+    let h = 16u16;
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render picker");
+    let buffer = terminal.backend().buffer().clone();
+
+    // The preview pane occupies the right 60% of the width; its inner content
+    // starts just inside the rounded border. Read the first inner content row and
+    // confirm it carries the "N›" sticky-header marker.
+    let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
+    let header_row: String = (preview_inner_x..w.saturating_sub(1))
+        .map(|x| buffer[(x, 1)].symbol())
+        .collect();
+    assert!(
+        header_row.contains('›'),
+        "sticky prompt header should pin a numbered prompt at the top of the preview:\n\
+         row={header_row:?}"
+    );
+    // The header marker is a prompt number followed by the chevron.
+    assert!(
+        header_row
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit()),
+        "sticky header should begin with a prompt number:\nrow={header_row:?}"
+    );
+}
+
+#[test]
+fn test_reseed_grouped_preserves_selection_and_search() {
+    // Build a picker with several sessions, then simulate the user navigating to
+    // a specific session and typing a search. A background refresh that reseeds
+    // the same data must keep the highlighted session and the active search.
+    let sessions: Vec<SessionInfo> = (0..6)
+        .map(|i| {
+            make_session(
+                &format!("session_reseed_{i}"),
+                &format!("reseed{i}"),
+                false,
+                SessionStatus::Closed,
+            )
+        })
+        .collect();
+    let mut picker = SessionPicker::new(sessions.clone());
+
+    // Move selection to the third visible session.
+    picker.next();
+    picker.next();
+    let selected_before = picker
+        .selected_session()
+        .map(|s| s.id.clone())
+        .expect("a session should be selected");
+
+    // Activate a search that matches only one session id.
+    picker.search_query = "reseed4".to_string();
+    picker.search_active = true;
+    picker.focus = PaneFocus::Preview;
+    picker.rebuild_items();
+    let search_selected = picker
+        .selected_session()
+        .map(|s| s.id.clone())
+        .expect("search should leave a selection");
+
+    // Reseed with the same data (as the async refresh would).
+    picker.reseed_grouped(Vec::new(), sessions);
+
+    // Search query, search mode, focus, and the matched selection survive.
+    assert_eq!(picker.search_query, "reseed4");
+    assert!(picker.search_active);
+    assert_eq!(picker.focus, PaneFocus::Preview);
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.clone()),
+        Some(search_selected)
+    );
+
+    // Clearing the search restores the full list; the originally highlighted
+    // session is still resolvable in the reseeded data.
+    picker.search_query.clear();
+    picker.search_active = false;
+    picker.rebuild_items();
+    assert!(
+        picker
+            .visible_session_iter_for_test()
+            .any(|s| s.id == selected_before),
+        "previously selected session should still be present after reseed"
+    );
+}
+
+#[test]
+fn test_reseed_grouped_keeps_selection_when_list_changes() {
+    // The highlighted session must follow its id even when the refreshed list has
+    // a different order / additional sessions (the realistic refresh case).
+    let initial: Vec<SessionInfo> = (0..4)
+        .map(|i| {
+            make_session(
+                &format!("session_keep_{i}"),
+                &format!("keep{i}"),
+                false,
+                SessionStatus::Closed,
+            )
+        })
+        .collect();
+    let mut picker = SessionPicker::new(initial.clone());
+    picker.next(); // select session_keep_1
+    let target = picker
+        .selected_session()
+        .map(|s| s.id.clone())
+        .expect("selection");
+
+    // Refreshed list: prepend a brand-new session and keep the rest, changing
+    // indices so a naive index-based selection would drift.
+    let mut refreshed = vec![make_session(
+        "session_keep_new",
+        "keepnew",
+        false,
+        SessionStatus::Closed,
+    )];
+    refreshed.extend(initial);
+
+    picker.reseed_grouped(Vec::new(), refreshed);
+
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.clone()),
+        Some(target),
+        "selection should follow the session id across a reordered refresh"
     );
 }

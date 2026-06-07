@@ -9163,8 +9163,8 @@ pub(crate) fn single_session_rendered_body_lines_for_tick_shared(
     }
     // Allow disabling the memo for A/B perf measurement in debug builds only;
     // the production memo can never be turned off by an env var.
-    let memo_disabled = cfg!(debug_assertions)
-        && std::env::var_os("JCODE_DESKTOP_DISABLE_BODY_MEMO").is_some();
+    let memo_disabled =
+        cfg!(debug_assertions) && std::env::var_os("JCODE_DESKTOP_DISABLE_BODY_MEMO").is_some();
     if !memo_disabled
         && let Some(cached) = RENDERED_BODY_LINES_MEMO.with(|cell| {
             cell.borrow()
@@ -9175,8 +9175,11 @@ pub(crate) fn single_session_rendered_body_lines_for_tick_shared(
     {
         return cached;
     }
-    let lines =
-        single_session_rendered_body_lines_from_raw(app, size, app.body_styled_lines_for_tick(tick));
+    let lines = single_session_rendered_body_lines_from_raw(
+        app,
+        size,
+        app.body_styled_lines_for_tick(tick),
+    );
     let shared = std::rc::Rc::new(lines);
     if !memo_disabled {
         RENDERED_BODY_LINES_MEMO.with(|cell| {

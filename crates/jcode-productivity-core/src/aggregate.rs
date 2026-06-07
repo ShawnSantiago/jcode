@@ -129,9 +129,10 @@ pub fn build_report(scan: ScanResult) -> ProductivityReport {
     let (cur, longest) = streaks(&all_dates);
     r.current_streak = cur;
     r.longest_streak = longest;
-    if let Some((day, count)) = date_counts.iter().max_by(|a, b| {
-        a.1.cmp(b.1).then_with(|| b.0.cmp(a.0))
-    }) {
+    if let Some((day, count)) = date_counts
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+    {
         r.busiest_day = Some(Tally {
             name: day.clone(),
             count: *count,

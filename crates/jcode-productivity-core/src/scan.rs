@@ -35,7 +35,9 @@ struct Cache {
 const CACHE_VERSION: u32 = 1;
 
 fn cache_path() -> Result<PathBuf> {
-    let dir = jcode_storage::jcode_dir()?.join("cache").join("productivity");
+    let dir = jcode_storage::jcode_dir()?
+        .join("cache")
+        .join("productivity");
     std::fs::create_dir_all(&dir).ok();
     Ok(dir.join("summaries.json"))
 }
@@ -254,14 +256,15 @@ fn summarize(raw: RawSession) -> SessionSummary {
     };
 
     let mut active_dates = std::collections::BTreeSet::new();
-    let record_time = |ts: &str, s: &mut SessionSummary, dates: &mut std::collections::BTreeSet<String>| {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-            let local = dt.with_timezone(&Local);
-            s.hour_hist[local.hour() as usize] += 1;
-            s.weekday_hist[local.weekday().num_days_from_monday() as usize] += 1;
-            dates.insert(local.format("%Y-%m-%d").to_string());
-        }
-    };
+    let record_time =
+        |ts: &str, s: &mut SessionSummary, dates: &mut std::collections::BTreeSet<String>| {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+                let local = dt.with_timezone(&Local);
+                s.hour_hist[local.hour() as usize] += 1;
+                s.weekday_hist[local.weekday().num_days_from_monday() as usize] += 1;
+                dates.insert(local.format("%Y-%m-%d").to_string());
+            }
+        };
 
     for msg in &raw.messages {
         let role = msg.role.as_deref().unwrap_or("");

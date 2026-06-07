@@ -171,7 +171,9 @@ fn format_context_includes_roles_and_tools() {
             content: vec![ContentBlock::ToolUse {
                 id: "tool-1".to_string(),
                 name: "memory".to_string(),
-                input: json!({"action": "list"}), thought_signature: None, }],
+                input: json!({"action": "list"}),
+                thought_signature: None,
+            }],
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -204,7 +206,9 @@ fn extraction_context_keeps_tool_io_details() {
             content: vec![ContentBlock::ToolUse {
                 id: "tool-1".to_string(),
                 name: "memory".to_string(),
-                input: json!({"action": "list"}), thought_signature: None, }],
+                input: json!({"action": "list"}),
+                thought_signature: None,
+            }],
             timestamp: None,
             tool_duration_ms: None,
         },

@@ -199,7 +199,9 @@ fn build_messages_pairs_tool_use_with_tool_result() {
                 ContentBlock::ToolUse {
                     id: "call_1".into(),
                     name: "bash".into(),
-                    input: serde_json::json!({"command": "echo hi"}), thought_signature: None, },
+                    input: serde_json::json!({"command": "echo hi"}),
+                    thought_signature: None,
+                },
             ],
         ),
         make_msg(
@@ -241,7 +243,9 @@ fn build_messages_injects_missing_tool_output() {
             vec![ContentBlock::ToolUse {
                 id: "call_orphan".into(),
                 name: "bash".into(),
-                input: serde_json::json!({"command": "crash"}), thought_signature: None, }],
+                input: serde_json::json!({"command": "crash"}),
+                thought_signature: None,
+            }],
         ),
     ];
 
@@ -270,15 +274,21 @@ fn build_messages_handles_batch_multiple_tool_calls() {
                 ContentBlock::ToolUse {
                     id: "call_a".into(),
                     name: "bash".into(),
-                    input: serde_json::json!({"command": "a"}), thought_signature: None, },
+                    input: serde_json::json!({"command": "a"}),
+                    thought_signature: None,
+                },
                 ContentBlock::ToolUse {
                     id: "call_b".into(),
                     name: "bash".into(),
-                    input: serde_json::json!({"command": "b"}), thought_signature: None, },
+                    input: serde_json::json!({"command": "b"}),
+                    thought_signature: None,
+                },
                 ContentBlock::ToolUse {
                     id: "call_c".into(),
                     name: "bash".into(),
-                    input: serde_json::json!({"command": "c"}), thought_signature: None, },
+                    input: serde_json::json!({"command": "c"}),
+                    thought_signature: None,
+                },
             ],
         ),
         make_msg(
@@ -329,7 +339,9 @@ fn build_messages_skips_empty_user_text() {
             vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "read".into(),
-                input: serde_json::json!({"file": "x"}), thought_signature: None, }],
+                input: serde_json::json!({"file": "x"}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -382,7 +394,9 @@ fn is_user_initiated_tool_result_is_agent() {
             vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "file_read".into(),
-                input: json!({}), thought_signature: None, }],
+                input: json!({}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -432,7 +446,9 @@ fn is_user_initiated_tool_result_with_memory_injection() {
             vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "bash".into(),
-                input: json!({}), thought_signature: None, }],
+                input: json!({}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -468,7 +484,9 @@ fn is_user_initiated_user_text_after_tool_result_without_system_reminder() {
             vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "bash".into(),
-                input: json!({}), thought_signature: None, }],
+                input: json!({}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -497,7 +515,9 @@ fn is_user_initiated_multiple_memory_injections_after_tool_result() {
             vec![ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "bash".into(),
-                input: json!({}), thought_signature: None, }],
+                input: json!({}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -540,7 +560,9 @@ fn build_messages_sanitizes_tool_ids_with_dots() {
             vec![ContentBlock::ToolUse {
                 id: "chatcmpl-BF2xX.tool_call.0".into(),
                 name: "bash".into(),
-                input: serde_json::json!({"command": "echo hi"}), thought_signature: None, }],
+                input: serde_json::json!({"command": "echo hi"}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -574,7 +596,9 @@ fn build_messages_sanitizes_anthropic_style_ids() {
             vec![ContentBlock::ToolUse {
                 id: "toolu_01XFDUDYJgAACzvnptvVer6u".into(),
                 name: "read".into(),
-                input: serde_json::json!({"file_path": "foo.rs"}), thought_signature: None, }],
+                input: serde_json::json!({"file_path": "foo.rs"}),
+                thought_signature: None,
+            }],
         ),
         make_msg(
             Role::User,
@@ -610,7 +634,9 @@ fn build_messages_sanitizes_missing_tool_output_ids() {
             vec![ContentBlock::ToolUse {
                 id: "call.with.dots.orphan".into(),
                 name: "bash".into(),
-                input: serde_json::json!({"command": "crash"}), thought_signature: None, }],
+                input: serde_json::json!({"command": "crash"}),
+                thought_signature: None,
+            }],
         ),
     ];
 

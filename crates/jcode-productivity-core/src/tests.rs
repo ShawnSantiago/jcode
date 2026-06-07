@@ -81,7 +81,12 @@ fn streaks_and_active_days_dedup() {
 
 #[test]
 fn renders_markdown_and_png() {
-    let summaries = vec![summary("alpha", 4, 4, &[("read", 5), ("edit", 3), ("bash", 2)])];
+    let summaries = vec![summary(
+        "alpha",
+        4,
+        4,
+        &[("read", 5), ("edit", 3), ("bash", 2)],
+    )];
     let r = report_from_summaries(summaries);
 
     let md = render_markdown(&r);

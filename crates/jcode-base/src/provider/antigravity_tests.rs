@@ -382,7 +382,11 @@ fn flatten_schema_combiners_recurses_into_nested_properties() {
         flattened["properties"]["status_filter"]["type"],
         serde_json::json!("string")
     );
-    assert!(flattened["properties"]["status_filter"].get("oneOf").is_none());
+    assert!(
+        flattened["properties"]["status_filter"]
+            .get("oneOf")
+            .is_none()
+    );
     // Untouched branches are preserved verbatim.
     assert_eq!(
         flattened["properties"]["name"]["type"],
@@ -516,7 +520,10 @@ fn antigravity_compatible_schema_flattens_combiners_for_claude_but_keeps_bounds(
         serde_json::json!("string")
     );
     // ...but numeric bounds are retained for Claude (it accepts them).
-    assert_eq!(out["properties"]["tool_calls"]["maxItems"], serde_json::json!(10));
+    assert_eq!(
+        out["properties"]["tool_calls"]["maxItems"],
+        serde_json::json!(10)
+    );
 }
 
 #[test]
@@ -544,7 +551,10 @@ fn antigravity_compatible_schema_strips_bounds_and_combiners_for_gpt_oss() {
     );
     assert!(out["properties"]["tool_calls"].get("minItems").is_none());
     assert!(out["properties"]["tool_calls"].get("maxItems").is_none());
-    assert_eq!(out["properties"]["tool_calls"]["type"], serde_json::json!("array"));
+    assert_eq!(
+        out["properties"]["tool_calls"]["type"],
+        serde_json::json!("array")
+    );
 }
 
 #[test]

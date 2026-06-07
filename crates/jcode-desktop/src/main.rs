@@ -5332,13 +5332,10 @@ fn benchmark_real_transcript_scroll(
     let setup_full_relayout_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
     let total_body_lines = body_lines.len();
 
-    let max_scroll_lines = single_session_body_scroll_metrics_for_total_lines(
-        &app,
-        size,
-        total_body_lines,
-    )
-    .map(|metrics| metrics.max_scroll_lines)
-    .unwrap_or(0);
+    let max_scroll_lines =
+        single_session_body_scroll_metrics_for_total_lines(&app, size, total_body_lines)
+            .map(|metrics| metrics.max_scroll_lines)
+            .unwrap_or(0);
 
     // Prime the sliding text-buffer window at the bottom of the transcript, the
     // way the app does after hydrating a resumed session.
@@ -5390,7 +5387,11 @@ fn benchmark_real_transcript_scroll(
     let (frame_samples, _checksum) = benchmark_frame_samples(frames, |frame| {
         // Triangle-wave scroll position covering the full transcript height.
         let phase = frame % (span * 2);
-        let target = if phase <= span { phase } else { span * 2 - phase };
+        let target = if phase <= span {
+            phase
+        } else {
+            span * 2 - phase
+        };
         app.body_scroll_lines = target as f32;
         let tick = frame as u64;
 
@@ -5416,24 +5417,21 @@ fn benchmark_real_transcript_scroll(
                     worst_rebuild_us = rebuild_us;
                     let window = &body_lines[window_start..window_end];
                     worst_rebuild_window_lines = window.len();
-                    worst_rebuild_max_line_chars =
-                        window.iter().map(|l| l.text.chars().count()).max().unwrap_or(0);
-                    worst_rebuild_advanced_lines = window
+                    worst_rebuild_max_line_chars = window
                         .iter()
-                        .filter(|l| !l.text.is_ascii())
-                        .count();
-                    worst_rebuild_segments =
-                        window.iter().map(|l| l.inline_spans.len() + 1).sum();
+                        .map(|l| l.text.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    worst_rebuild_advanced_lines =
+                        window.iter().filter(|l| !l.text.is_ascii()).count();
+                    worst_rebuild_segments = window.iter().map(|l| l.inline_spans.len() + 1).sum();
                     if let Ok(path) = std::env::var("JCODE_DESKTOP_SCROLL_DIAG_DUMP") {
                         let text = window
                             .iter()
                             .map(|l| l.text.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let _ = std::fs::write(
-                            format!("{path}.{}", transcript.session_id),
-                            text,
-                        );
+                        let _ = std::fs::write(format!("{path}.{}", transcript.session_id), text);
                     }
                 }
             }
@@ -5476,7 +5474,13 @@ fn benchmark_real_transcript_scroll(
 
         let phase_started = Instant::now();
         let vertices = build_single_session_vertices_with_cached_body(
-            &app, size, 0.0, tick, 0.0, 1.0, &body_lines,
+            &app,
+            size,
+            0.0,
+            tick,
+            0.0,
+            1.0,
+            &body_lines,
         );
         vertices_us += phase_started.elapsed().as_secs_f64() * 1_000_000.0;
 
@@ -5630,10 +5634,11 @@ fn benchmark_real_transcript_actions(
     let base_app = real_transcript_scroll_app(transcript);
     let body_lines = single_session_rendered_body_lines_for_tick(&base_app, size, 0);
     let total_lines = body_lines.len();
-    let max_scroll = single_session_body_scroll_metrics_for_total_lines(&base_app, size, total_lines)
-        .map(|metrics| metrics.max_scroll_lines)
-        .unwrap_or(0)
-        .max(1);
+    let max_scroll =
+        single_session_body_scroll_metrics_for_total_lines(&base_app, size, total_lines)
+            .map(|metrics| metrics.max_scroll_lines)
+            .unwrap_or(0)
+            .max(1);
 
     let mut phases: Vec<(&'static str, Vec<f64>)> = Vec::new();
 
@@ -5676,7 +5681,8 @@ fn benchmark_real_transcript_actions(
         let mut app = base_app.clone();
         app.body_scroll_lines = (max_scroll / 2) as f32;
         let initial_visible = single_session_visible_body(&app, size);
-        if let Some(point) = single_session_body_point_at_position(size, 40.0, 80.0, &initial_visible)
+        if let Some(point) =
+            single_session_body_point_at_position(size, 40.0, 80.0, &initial_visible)
         {
             app.begin_selection(point);
         } else {
@@ -5844,7 +5850,13 @@ fn benchmark_real_transcript_actions(
                 &app, &buffers, resize, 0.0, viewport,
             );
             let vertices = build_single_session_vertices_with_cached_body(
-                &app, resize, 0.0, frame as u64, 0.0, 1.0, &lines,
+                &app,
+                resize,
+                0.0,
+                frame as u64,
+                0.0,
+                1.0,
+                &lines,
             );
             buffers.len() ^ areas.len() ^ vertices.len()
         });
@@ -5862,7 +5874,8 @@ fn benchmark_real_transcript_actions(
     {
         let mut app = base_app.clone();
         app.scroll_body_to_bottom();
-        app.streaming_response.push_str("Streaming response starting. ");
+        app.streaming_response
+            .push_str("Streaming response starting. ");
         let mut font_system = benchmark_font_system();
         let static_base = single_session_rendered_static_body_lines_for_streaming(&app, size, 0)
             .unwrap_or_else(|| single_session_rendered_body_lines_for_tick(&app, size, 0));
@@ -12795,8 +12808,15 @@ fn build_hero_reveal_texture(
     // and only reads `glyph_rgba`/`segments`, so split the rows across worker
     // threads. Output is bit-identical to the serial version; min/max are
     // reduced afterward from the filled buffer.
-    let (min_value, max_value) =
-        fill_hero_reveal_values(&mut values, width, height, glyph_rgba, alpha_bounds, &segments, brush_delay_px);
+    let (min_value, max_value) = fill_hero_reveal_values(
+        &mut values,
+        width,
+        height,
+        glyph_rgba,
+        alpha_bounds,
+        &segments,
+        brush_delay_px,
+    );
 
     if !min_value.is_finite() || max_value <= min_value {
         return None;

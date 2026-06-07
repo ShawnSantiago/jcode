@@ -100,6 +100,45 @@ impl App {
         }
     }
 
+    /// Whether the client terminal currently has focus. Used to pause decorative
+    /// animations and periodic idle redraws for backgrounded windows/tabs.
+    pub(crate) fn client_focused(&self) -> bool {
+        self.client_focused
+    }
+
+    /// Record a terminal focus-state change (from crossterm FocusGained/FocusLost).
+    /// Returns true when a redraw is warranted (focus regained, so we repaint at
+    /// full fidelity immediately).
+    pub(super) fn set_client_focused(&mut self, focused: bool) -> bool {
+        if self.client_focused == focused {
+            return false;
+        }
+        self.client_focused = focused;
+        if focused {
+            // Repaint immediately so a newly-focused window is not stuck on the
+            // last paused frame, and resume animation timing from "now".
+            self.request_full_redraw();
+            self.note_client_focus(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether a redraw is worth performing while the terminal is unfocused.
+    ///
+    /// In a tiling WM an unfocused window can still be visible, so sessions with
+    /// live output (streaming/processing, scroll/scroll-copy animations, an active
+    /// notification, a rate-limit countdown, or a transient remote startup phase)
+    /// keep painting. A purely idle unfocused session skips redraws triggered by
+    /// shared-server bus chatter from other sessions; it repaints fully on refocus.
+    ///
+    /// Reuses `periodic_redraw_required`, which already enumerates the live-activity
+    /// conditions, minus the purely decorative idle donut (gated off when unfocused).
+    pub(crate) fn unfocused_redraw_warranted(&self) -> bool {
+        crate::tui::periodic_redraw_required(self)
+    }
+
     pub fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }
@@ -984,7 +1023,8 @@ fn format_cache_stats(app: &App) -> String {
     let remote_cache_write = remote_usage
         .map(|usage| usage.cache_creation_input_tokens)
         .unwrap_or(0);
-    let reported = remote_cache_reported.saturating_add(app.token_accounting.total_cache_reported_input_tokens);
+    let reported = remote_cache_reported
+        .saturating_add(app.token_accounting.total_cache_reported_input_tokens);
     let read = remote_cache_read.saturating_add(app.token_accounting.total_cache_read_tokens);
     let write = remote_cache_write.saturating_add(app.token_accounting.total_cache_creation_tokens);
     let optimal = app.token_accounting.total_cache_optimal_input_tokens;
@@ -1132,7 +1172,9 @@ fn format_cache_stats(app: &App) -> String {
             (
                 input.saturating_add(app.token_accounting.total_input_tokens),
                 output.saturating_add(app.token_accounting.total_output_tokens),
-                if app.token_accounting.total_input_tokens > 0 || app.token_accounting.total_output_tokens > 0 {
+                if app.token_accounting.total_input_tokens > 0
+                    || app.token_accounting.total_output_tokens > 0
+                {
                     "remote_history+client_observed_api_calls"
                 } else {
                     "remote_history"
@@ -1220,13 +1262,15 @@ fn format_cache_stats(app: &App) -> String {
     lines.push(format!("- total_cost_usd: {:.6}", app.cost.total_cost));
     lines.push(format!(
         "- cached_prompt_price_per_1m: {}",
-        app.cost.cached_prompt_price
+        app.cost
+            .cached_prompt_price
             .map(|price| format!("{:.6}", price))
             .unwrap_or_else(|| "None".to_string())
     ));
     lines.push(format!(
         "- cached_completion_price_per_1m: {}",
-        app.cost.cached_completion_price
+        app.cost
+            .cached_completion_price
             .map(|price| format!("{:.6}", price))
             .unwrap_or_else(|| "None".to_string())
     ));
@@ -1391,7 +1435,11 @@ fn format_cache_stats(app: &App) -> String {
         "- kv_cache_miss_samples_len: {}",
         app.kv_cache.kv_cache_miss_samples.len()
     ));
-    push_cache_baseline(&mut lines, "baseline", app.kv_cache.kv_cache_baseline.as_ref());
+    push_cache_baseline(
+        &mut lines,
+        "baseline",
+        app.kv_cache.kv_cache_baseline.as_ref(),
+    );
     if let Some(request) = app.kv_cache.pending_kv_cache_request.as_ref() {
         lines.push("- pending_request: present".to_string());
         lines.push(format!(
@@ -1818,7 +1866,10 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     app.provider.reasoning_effort(),
                     app.provider.service_tier(),
                     app.provider.transport(),
-                    Some((app.token_accounting.total_input_tokens, app.token_accounting.total_output_tokens)),
+                    Some((
+                        app.token_accounting.total_input_tokens,
+                        app.token_accounting.total_output_tokens,
+                    )),
                 )
             };
 

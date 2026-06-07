@@ -55,8 +55,7 @@ fn clip(s: &str, max: usize) -> String {
 fn ascii_only(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        let keep = c.is_ascii()
-            || matches!(c, '…' | '·' | '–' | '—' | '’' | '“' | '”');
+        let keep = c.is_ascii() || matches!(c, '…' | '·' | '–' | '—' | '’' | '“' | '”');
         if keep {
             out.push(c);
         }
@@ -89,16 +88,7 @@ impl Svg {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn text(
-        &mut self,
-        x: f32,
-        y: f32,
-        s: &str,
-        size: f32,
-        fill: &str,
-        weight: u32,
-        anchor: &str,
-    ) {
+    fn text(&mut self, x: f32, y: f32, s: &str, size: f32, fill: &str, weight: u32, anchor: &str) {
         self.body.push_str(&format!(
             "<text x='{x:.1}' y='{y:.1}' font-family='Inter, \"Liberation Sans\", \"DejaVu Sans\", sans-serif' font-size='{size:.1}' font-weight='{weight}' fill='{fill}' text-anchor='{anchor}'>{}</text>",
             esc(s)
@@ -195,7 +185,12 @@ pub fn render_svg(r: &ProductivityReport) -> String {
     );
     // Lightning bolt to the left of the score number.
     let score_w = score.chars().count() as f32 * 22.0;
-    svg.bolt(pill_x + pill_w - 24.0 - score_w - 34.0, 154.0, 34.0, ACCENT3);
+    svg.bolt(
+        pill_x + pill_w - 24.0 - score_w - 34.0,
+        154.0,
+        34.0,
+        ACCENT3,
+    );
 
     // ---- Stat cards grid ----
     let grid_top = 240.0;
@@ -243,7 +238,15 @@ pub fn render_svg(r: &ProductivityReport) -> String {
     let hx = pad;
     let hy = after_grid;
     svg.rect(hx, hy, half_w, sec_h, 16.0, CARD);
-    svg.text(hx + 22.0, hy + 38.0, "Daily rhythm", 22.0, TEXT, 700, "start");
+    svg.text(
+        hx + 22.0,
+        hy + 38.0,
+        "Daily rhythm",
+        22.0,
+        TEXT,
+        700,
+        "start",
+    );
     svg.text(
         hx + half_w - 22.0,
         hy + 38.0,
@@ -253,7 +256,14 @@ pub fn render_svg(r: &ProductivityReport) -> String {
         500,
         "end",
     );
-    draw_hour_bars(&mut svg, hx + 22.0, hy + 62.0, half_w - 44.0, 150.0, &r.hour_hist);
+    draw_hour_bars(
+        &mut svg,
+        hx + 22.0,
+        hy + 62.0,
+        half_w - 44.0,
+        150.0,
+        &r.hour_hist,
+    );
 
     // Weekday chart.
     let wx = pad + half_w + gap;
@@ -276,14 +286,36 @@ pub fn render_svg(r: &ProductivityReport) -> String {
     let tx = pad;
     let ty = after_charts;
     svg.rect(tx, ty, half_w, list_h, 16.0, CARD);
-    svg.text(tx + 22.0, ty + 38.0, "Most-used tools", 22.0, TEXT, 700, "start");
+    svg.text(
+        tx + 22.0,
+        ty + 38.0,
+        "Most-used tools",
+        22.0,
+        TEXT,
+        700,
+        "start",
+    );
     draw_tool_list(&mut svg, tx + 22.0, ty + 64.0, half_w - 44.0, &r.top_tools);
 
     let px = pad + half_w + gap;
     let py = after_charts;
     svg.rect(px, py, half_w, list_h, 16.0, CARD);
-    svg.text(px + 22.0, py + 38.0, "Top projects", 22.0, TEXT, 700, "start");
-    draw_project_list(&mut svg, px + 22.0, py + 64.0, half_w - 44.0, &r.top_projects);
+    svg.text(
+        px + 22.0,
+        py + 38.0,
+        "Top projects",
+        22.0,
+        TEXT,
+        700,
+        "start",
+    );
+    draw_project_list(
+        &mut svg,
+        px + 22.0,
+        py + 64.0,
+        half_w - 44.0,
+        &r.top_projects,
+    );
 
     let after_lists = after_charts + list_h + gap;
 
@@ -354,7 +386,15 @@ fn draw_hour_bars(svg: &mut Svg, x: f32, y: f32, w: f32, h: f32, hist: &[u32; 24
     // hour ticks
     for &hh in &[0usize, 6, 12, 18, 23] {
         let bx = x + hh as f32 * (bar_w + gap) + bar_w / 2.0;
-        svg.text(bx, y + h + 22.0, &format!("{}h", hh), 13.0, MUTED, 400, "middle");
+        svg.text(
+            bx,
+            y + h + 22.0,
+            &format!("{}h", hh),
+            13.0,
+            MUTED,
+            400,
+            "middle",
+        );
     }
 }
 

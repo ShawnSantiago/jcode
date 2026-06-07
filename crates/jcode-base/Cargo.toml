@@ -72,6 +72,9 @@ jcode-provider-metadata = { path = "../jcode-provider-metadata" }
 jcode-provider-env = { path = "../jcode-provider-env" }
 jcode-provider-core = { path = "../jcode-provider-core" }
 jcode-provider-bedrock = { path = "../jcode-provider-bedrock" }
+jcode-provider-anthropic = { path = "../jcode-provider-anthropic" }
+jcode-provider-antigravity = { path = "../jcode-provider-antigravity" }
+jcode-provider-copilot = { path = "../jcode-provider-copilot" }
 jcode-provider-openai = { path = "../jcode-provider-openai" }
 jcode-provider-openrouter = { path = "../jcode-provider-openrouter" }
 jcode-provider-gemini = { path = "../jcode-provider-gemini" }
@@ -83,6 +86,7 @@ jcode-provider-gemini = { path = "../jcode-provider-gemini" }
 jcode-render-core = { path = "../jcode-render-core" }
 jcode-terminal-launch = { path = "../jcode-terminal-launch" }
 jcode-terminal-image = { path = "../jcode-terminal-image" }
+jcode-telemetry-core = { path = "../jcode-telemetry-core" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 
 # Streaming

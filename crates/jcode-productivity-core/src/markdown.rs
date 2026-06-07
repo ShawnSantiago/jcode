@@ -52,7 +52,10 @@ pub fn render_markdown(r: &ProductivityReport) -> String {
     o.push_str("## At a glance\n\n");
     o.push_str("| Metric | Value |\n|---|---|\n");
     o.push_str(&format!("| 💬 Sessions | {} |\n", human(r.total_sessions)));
-    o.push_str(&format!("| 🙋 Prompts sent | {} |\n", human(r.user_prompts)));
+    o.push_str(&format!(
+        "| 🙋 Prompts sent | {} |\n",
+        human(r.user_prompts)
+    ));
     o.push_str(&format!(
         "| 🛠️ Tool calls | {} |\n",
         human(r.total_tool_calls)
@@ -113,12 +116,7 @@ pub fn render_markdown(r: &ProductivityReport) -> String {
         let max = r.top_tools.first().map(|t| t.count).unwrap_or(1).max(1);
         for t in &r.top_tools {
             let bar = bar_for(t.count, max, 20);
-            o.push_str(&format!(
-                "- `{:<10}` {} {}\n",
-                t.name,
-                bar,
-                human(t.count)
-            ));
+            o.push_str(&format!("- `{:<10}` {} {}\n", t.name, bar, human(t.count)));
         }
         o.push('\n');
     }

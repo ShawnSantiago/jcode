@@ -1,5 +1,7 @@
-use super::openrouter_sse_stream::OpenRouterStream;
 use super::*;
+use bytes::Bytes;
+use futures::StreamExt;
+use jcode_provider_openrouter::stream::OpenRouterStream;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -2050,40 +2052,43 @@ fn test_openrouter_kimi_chat_request_includes_compat_user_agent() {
 
 #[test]
 fn test_parse_next_event_accepts_compact_sse_data_and_reasoning_content() {
+    let bytes = Bytes::from_static(
+        b"data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",
+    );
     let mut stream = OpenRouterStream::new(
-        futures::stream::empty::<Result<Bytes, reqwest::Error>>(),
+        futures::stream::once(async move { Ok::<Bytes, reqwest::Error>(bytes) }),
         "kimi-for-coding".to_string(),
         Arc::new(Mutex::new(None)),
     );
-    stream.buffer =
-        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n".to_string();
 
-    match stream.parse_next_event() {
-        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "thinking"),
+    match futures::executor::block_on(stream.next()) {
+        Some(Ok(StreamEvent::ThinkingDelta(text))) => assert_eq!(text, "thinking"),
         other => panic!("expected ThinkingDelta, got {:?}", other),
     }
 }
 
 #[test]
 fn test_parse_next_event_emits_only_incremental_reasoning_content() {
+    let chunks = vec![
+        Ok::<Bytes, reqwest::Error>(Bytes::from_static(
+            b"data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking\"}}]}\n\n",
+        )),
+        Ok::<Bytes, reqwest::Error>(Bytes::from_static(
+            b"data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking more\"}}]}\n\n",
+        )),
+    ];
     let mut stream = OpenRouterStream::new(
-        futures::stream::empty::<Result<Bytes, reqwest::Error>>(),
+        futures::stream::iter(chunks),
         "moonshotai/kimi-k2.5".to_string(),
         Arc::new(Mutex::new(None)),
     );
 
-    stream.buffer =
-        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking\"}}]}\n\n".to_string();
-    match stream.parse_next_event() {
-        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "Thinking"),
+    match futures::executor::block_on(stream.next()) {
+        Some(Ok(StreamEvent::ThinkingDelta(text))) => assert_eq!(text, "Thinking"),
         other => panic!("expected first ThinkingDelta, got {:?}", other),
     }
-
-    stream.buffer =
-        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking more\"}}]}\n\n"
-            .to_string();
-    match stream.parse_next_event() {
-        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, " more"),
+    match futures::executor::block_on(stream.next()) {
+        Some(Ok(StreamEvent::ThinkingDelta(text))) => assert_eq!(text, " more"),
         other => panic!("expected incremental ThinkingDelta, got {:?}", other),
     }
 }

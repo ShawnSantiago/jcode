@@ -1,8 +1,9 @@
-use super::color_support::rgb;
-use crate::safety::{self, PermissionRequest, Urgency};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use jcode_base::safety::{self, PermissionRequest, Urgency};
+use jcode_core::util::truncate_str;
+use jcode_tui_style::rgb;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -823,9 +824,9 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else if max_len > 3 {
-        format!("{}…", crate::util::truncate_str(s, max_len - 1))
+        format!("{}…", truncate_str(s, max_len - 1))
     } else {
-        crate::util::truncate_str(s, max_len).to_string()
+        truncate_str(s, max_len).to_string()
     }
 }
 

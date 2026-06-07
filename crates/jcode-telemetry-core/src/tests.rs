@@ -1,6 +1,13 @@
 use super::*;
-use crate::storage::lock_test_env;
 use std::sync::{Mutex, OnceLock};
+
+fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
     static TELEMETRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -13,17 +20,17 @@ fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn test_opt_out_env_var() {
     let _guard = lock_test_env();
-    crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
     assert!(!is_enabled());
-    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
 }
 
 #[test]
 fn test_do_not_track() {
     let _guard = lock_test_env();
-    crate::env::set_var("DO_NOT_TRACK", "1");
+    jcode_core::env::set_var("DO_NOT_TRACK", "1");
     assert!(!is_enabled());
-    crate::env::remove_var("DO_NOT_TRACK");
+    jcode_core::env::remove_var("DO_NOT_TRACK");
 }
 
 #[test]
@@ -38,18 +45,18 @@ fn test_is_ci_detects_ci_env() {
         "GITLAB_CI",
         "CIRCLECI",
     ] {
-        crate::env::remove_var(key);
+        jcode_core::env::remove_var(key);
     }
     assert!(
         !is_ci(),
         "expected non-CI baseline after clearing CI markers"
     );
-    crate::env::set_var("CI", "true");
+    jcode_core::env::set_var("CI", "true");
     assert!(
         is_ci(),
         "CI env var should mark the run as CI (gates install skip)"
     );
-    crate::env::remove_var("CI");
+    jcode_core::env::remove_var("CI");
     assert!(!is_ci());
 }
 
@@ -388,7 +395,7 @@ fn test_install_marker_tracks_current_telemetry_id() {
     let _guard = lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    jcode_core::env::set_var("JCODE_HOME", temp.path());
 
     assert!(!install_recorded_for_id("id-a"));
     mark_install_recorded("id-a");
@@ -396,8 +403,8 @@ fn test_install_marker_tracks_current_telemetry_id() {
     assert!(!install_recorded_for_id("id-b"));
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        jcode_core::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("JCODE_HOME");
     }
 }

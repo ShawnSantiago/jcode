@@ -273,7 +273,12 @@ pub(super) async fn handle_terminal_event(
     match event {
         Some(Ok(Event::FocusGained)) => {
             input_attribution.event = Some("focus_gained".to_string());
+            needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
+        }
+        Some(Ok(Event::FocusLost)) => {
+            input_attribution.event = Some("focus_lost".to_string());
+            app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
             input_attribution.event = Some(format!("key:{:?}:{:?}", key.code, key.kind));
@@ -609,7 +614,11 @@ fn handle_terminal_event_while_disconnected(
 
     match event {
         Some(Ok(Event::FocusGained)) => {
+            needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
+        }
+        Some(Ok(Event::FocusLost)) => {
+            app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
             app.note_client_interaction();
@@ -745,14 +754,14 @@ pub(super) fn handle_disconnect(
         let content = app.take_streaming_text();
         let content = app.collapse_reasoning_for_commit(content);
         if !content.trim().is_empty() {
-        app.push_display_message(DisplayMessage {
-            role: "assistant".to_string(),
-            content,
-            tool_calls: vec![],
-            duration_secs: None,
-            title: None,
-            tool_data: None,
-        });
+            app.push_display_message(DisplayMessage {
+                role: "assistant".to_string(),
+                content,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
         }
     }
     app.clear_streaming_render_state();
@@ -1258,14 +1267,14 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                 let content = app.take_streaming_text();
                 let content = app.collapse_reasoning_for_commit(content);
                 if !content.trim().is_empty() {
-                app.push_display_message(DisplayMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                    app.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
                 }
             }
             if !app.schedule_pending_remote_retry(

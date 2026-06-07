@@ -63,7 +63,9 @@ impl GmailBackend {
 
 impl ComposioConfig {
     fn from_env() -> Option<Self> {
-        let api_key = std::env::var("COMPOSIO_API_KEY").ok().filter(|s| !s.is_empty())?;
+        let api_key = std::env::var("COMPOSIO_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())?;
         let base_url = std::env::var("COMPOSIO_BASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -96,7 +98,9 @@ impl ComposioConfig {
     /// Effective user id, defaulting to "default" so a single-user CLI works
     /// without any extra configuration.
     pub fn effective_user_id(&self) -> String {
-        self.user_id.clone().unwrap_or_else(|| "default".to_string())
+        self.user_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string())
     }
 }
 
@@ -280,7 +284,10 @@ impl GmailClient {
         auth_config_id: &str,
         user_id: &str,
     ) -> Result<ComposioLink> {
-        let endpoint = format!("{}/connected_accounts/link", cfg.base_url.trim_end_matches('/'));
+        let endpoint = format!(
+            "{}/connected_accounts/link",
+            cfg.base_url.trim_end_matches('/')
+        );
         let payload = json!({
             "auth_config_id": auth_config_id,
             "user_id": user_id,
@@ -440,12 +447,20 @@ impl GmailClient {
                 return Err(anyhow::anyhow!(
                     "Gmail API error {} (via Composio): {}",
                     inner,
-                    truncate_error(&envelope.get("data").map(|d| d.to_string()).unwrap_or_default())
+                    truncate_error(
+                        &envelope
+                            .get("data")
+                            .map(|d| d.to_string())
+                            .unwrap_or_default()
+                    )
                 ));
             }
         }
         if let Some(err) = envelope.get("error").filter(|e| !e.is_null()) {
-            return Err(anyhow::anyhow!("Composio error: {}", truncate_error(&err.to_string())));
+            return Err(anyhow::anyhow!(
+                "Composio error: {}",
+                truncate_error(&err.to_string())
+            ));
         }
         Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
     }

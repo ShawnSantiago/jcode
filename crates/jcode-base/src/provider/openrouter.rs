@@ -10,10 +10,7 @@
 //! - Manual pinning: Set JCODE_OPENROUTER_PROVIDER or use model@Provider syntax
 
 use super::{EventStream, Provider};
-use crate::message::{
-    CacheControl, ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT,
-    ToolDefinition,
-};
+use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
     load_api_key_from_env_or_config, normalize_api_base, openai_compatible_profile_by_id,
@@ -23,8 +20,7 @@ use crate::provider_catalog::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 pub use jcode_provider_openrouter::{
     EndpointInfo, ModelInfo, ModelPricing, ModelTimestampIndex, ProviderRouting,
     all_model_timestamps, load_endpoints_disk_cache_public, load_model_pricing_disk_cache_public,
@@ -40,11 +36,8 @@ use reqwest::Client;
 use reqwest::header::HeaderName;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::pin::Pin;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context as TaskContext, Poll};
-use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 

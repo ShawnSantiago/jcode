@@ -813,7 +813,10 @@ fn fill_hero_reveal_values_matches_serial_reference() {
         brush_delay_px,
     );
 
-    assert_eq!(actual, expected, "parallel hero reveal fill must match serial");
+    assert_eq!(
+        actual, expected,
+        "parallel hero reveal fill must match serial"
+    );
     assert_eq!(actual_min.to_bits(), expected_min.to_bits());
     assert_eq!(actual_max.to_bits(), expected_max.to_bits());
 }

@@ -50,6 +50,7 @@ pub mod memory_types;
 pub mod message;
 pub mod plan;
 pub mod platform;
+pub mod power_inhibit;
 pub mod process_memory;
 pub mod process_title;
 pub mod prompt;
@@ -71,7 +72,9 @@ pub mod stdin_detect;
 pub mod storage;
 pub mod subscription_catalog;
 pub mod telegram;
-pub mod telemetry;
+pub mod telemetry {
+    pub use jcode_telemetry_core::*;
+}
 pub mod terminal_launch;
 pub mod todo;
 pub mod transport;

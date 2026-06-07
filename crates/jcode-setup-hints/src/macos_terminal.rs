@@ -1,4 +1,4 @@
-use crate::storage;
+use jcode_storage as storage;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt;
