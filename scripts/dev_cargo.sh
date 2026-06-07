@@ -514,7 +514,7 @@ configure_parallel_frontend() {
     return 0
   }
   local tc
-  tc=$(dev_nightly_toolchain)
+  tc=$(dev_nightly_toolchain || true)
   if [[ -z "$tc" ]]; then
     parallel_frontend_status="skipped-no-nightly"
     return 0
