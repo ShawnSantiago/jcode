@@ -267,6 +267,13 @@ fn test_openai_retryable_error_patterns() {
     assert!(is_retryable_error(
         "OpenAI HTTPS stream ended before message completion marker"
     ));
+    // TLS transport errors must be retryable (previously omitted from the
+    // OpenAI-specific list, causing immediate user-facing failures).
+    assert!(is_retryable_error(
+        "stream error: io error: received fatal alert: badrecordmac"
+    ));
+    assert!(is_retryable_error("io error: broken pipe (os error 32)"));
+    assert!(is_retryable_error("connection aborted"));
 }
 
 #[test]
