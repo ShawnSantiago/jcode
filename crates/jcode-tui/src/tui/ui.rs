@@ -115,6 +115,7 @@ use changelog::get_grouped_changelog;
 use changelog::{ChangelogEntry, group_changelog_entries, parse_changelog_from};
 use debug_capture::{
     build_info_widget_summary, capture_widget_placements, rect_within_bounds, rects_overlap,
+    widget_overlaps_content,
 };
 pub use diagram_pane::{
     PinnedDiagramLiveDebugSnapshot, PinnedDiagramProbeRect, debug_probe_pinned_diagram,
@@ -933,6 +934,7 @@ struct FullPrepCacheKey {
     streaming_text_len: usize,
     streaming_text_hash: u64,
     batch_progress_hash: u64,
+    reasoning_trace_hash: u64,
 }
 
 #[derive(Clone)]
@@ -2491,6 +2493,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             right_widths: Vec::new(),
             left_widths: Vec::new(),
             centered: app.centered_mode(),
+            ..Default::default()
         }
     } else {
         draw_messages(
@@ -2632,12 +2635,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 placements: placement_captures,
             });
 
-            // Detect overlaps with message area
+            // Detect overlaps with used content. Info widgets live inside the
+            // messages rectangle by design, so a whole-area overlap check is
+            // always true and useless; instead verify each placement still fits
+            // within the free margin the layout reported for the rows it covers.
             for placement in &placements {
-                if rects_overlap(placement.rect, widget_bounds) {
+                if widget_overlaps_content(placement, widget_bounds, &margins) {
                     capture.anomaly(format!(
-                        "Info widget {:?} overlaps messages area",
-                        placement.kind
+                        "Info widget {:?} intrudes into content (rect {:?})",
+                        placement.kind, placement.rect
                     ));
                 }
                 if !rect_within_bounds(placement.rect, area) {

@@ -1312,6 +1312,107 @@ fn transcript_card_motion_animates_card_exit() {
     assert!(settled.exiting().is_empty());
 }
 
+/// The scroll fast-path replaced a per-frame full-viewport reshape with a
+/// per-line cache. This guards the correctness assumption behind that change:
+/// shaping a line on its own must produce the same inline-code glyph bounds as
+/// shaping it inside a multi-line viewport buffer (true because the transcript
+/// body buffer uses `Wrap::None`, so logical lines are shaped independently).
+#[test]
+fn inline_code_span_bounds_match_full_viewport_shaping() {
+    let size = PhysicalSize::new(1200, 760);
+    let text_scale = 1.0;
+
+    let lines = vec![
+        SingleSessionStyledLine::new(
+            "plain assistant prose with no code at all",
+            SingleSessionLineStyle::Assistant,
+        ),
+        SingleSessionStyledLine::with_inline_spans(
+            "run cargo build then cargo test now".to_string(),
+            SingleSessionLineStyle::Assistant,
+            vec![
+                SingleSessionInlineSpan {
+                    start: 4,
+                    end: 15,
+                    kind: SingleSessionInlineSpanKind::Code,
+                },
+                SingleSessionInlineSpan {
+                    start: 21,
+                    end: 31,
+                    kind: SingleSessionInlineSpanKind::Code,
+                },
+            ],
+        ),
+        SingleSessionStyledLine::new("more prose in between", SingleSessionLineStyle::Assistant),
+        SingleSessionStyledLine::with_inline_spans(
+            "a single `inline` span here".to_string(),
+            SingleSessionLineStyle::Assistant,
+            vec![SingleSessionInlineSpan {
+                start: 9,
+                end: 17,
+                kind: SingleSessionInlineSpanKind::Code,
+            }],
+        ),
+    ];
+
+    // Reference: shape the whole slice in one buffer (the old behavior) and read
+    // each code span's bounds straight off the per-line layout run.
+    let reference: Vec<Vec<Option<(f32, f32)>>> = with_measurement_font_system(|font_system| {
+        let buffer =
+            single_session_body_text_buffer_from_lines(font_system, &lines, size, text_scale);
+        let layout_runs = buffer.layout_runs().collect::<Vec<_>>();
+        lines
+            .iter()
+            .enumerate()
+            .map(|(line_index, line)| {
+                let layout_run = layout_runs.get(line_index);
+                line.inline_spans
+                    .iter()
+                    .filter(|span| span.kind == SingleSessionInlineSpanKind::Code)
+                    .map(|span| {
+                        layout_run.and_then(|run| {
+                            run.highlight(
+                                glyphon::Cursor::new(run.line_i, span.start),
+                                glyphon::Cursor::new(run.line_i, span.end),
+                            )
+                            .and_then(|(left, width)| (width > 0.0).then_some((left, left + width)))
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    });
+
+    for (line, expected) in lines.iter().zip(reference.iter()) {
+        let cached = inline_code_span_bounds_for_line(line, size, text_scale);
+        // Cache hit must return identical data on a second call.
+        let cached_again = inline_code_span_bounds_for_line(line, size, text_scale);
+        assert_eq!(cached, cached_again, "cache must be deterministic");
+        assert_eq!(
+            cached.len(),
+            expected.len(),
+            "span count mismatch for line {:?}",
+            line.text
+        );
+        for (got, want) in cached.iter().zip(expected.iter()) {
+            match (got, want) {
+                (Some((gl, gr)), Some((wl, wr))) => {
+                    assert!(
+                        (gl - wl).abs() < 0.01 && (gr - wr).abs() < 0.01,
+                        "bounds mismatch for {:?}: got {got:?} want {want:?}",
+                        line.text
+                    );
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "presence mismatch for {:?}: got {got:?} want {want:?}",
+                    line.text
+                ),
+            }
+        }
+    }
+}
+
 #[test]
 fn inline_markdown_pill_motion_animates_entry_shift_and_exit() {
     let mut registry = InlineMarkdownPillMotionRegistry::default();

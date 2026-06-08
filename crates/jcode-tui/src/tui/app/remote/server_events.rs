@@ -1597,6 +1597,8 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             let provider_meta_changed =
                 app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            app.remote_model_catalog_generation =
+                app.remote_model_catalog_generation.saturating_add(1);
             app.persist_remote_model_catalog_cache();
             if provider_meta_changed {
                 app.update_terminal_title();
@@ -2005,6 +2007,19 @@ pub(in crate::tui::app) fn handle_server_event(
             } else {
                 app.push_display_message(DisplayMessage::system(message));
                 app.set_status_notice("Compaction failed");
+            }
+            false
+        }
+        ServerEvent::ResumeAllResult {
+            resumed, message, ..
+        } => {
+            app.push_display_message(DisplayMessage::system(message));
+            if resumed == 0 {
+                app.set_status_notice("No sessions to resume");
+            } else if resumed == 1 {
+                app.set_status_notice("Resuming 1 session");
+            } else {
+                app.set_status_notice(format!("Resuming {} sessions", resumed));
             }
             false
         }

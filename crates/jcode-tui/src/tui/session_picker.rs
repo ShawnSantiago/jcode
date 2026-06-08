@@ -75,6 +75,19 @@ fn safe_truncate(s: &str, max_chars: usize) -> &str {
         .unwrap_or(s)
 }
 
+/// Normalize a working directory string for equality comparison: trim trailing
+/// slashes (except root) and surrounding whitespace so `/foo/bar` and
+/// `/foo/bar/` match.
+fn normalize_dir(dir: &str) -> String {
+    let trimmed = dir.trim();
+    let stripped = trimmed.trim_end_matches('/');
+    if stripped.is_empty() {
+        trimmed.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
 /// Format duration since a time in a human-readable way
 fn format_time_ago(time: chrono::DateTime<chrono::Utc>) -> String {
     let now = chrono::Utc::now();
@@ -136,6 +149,40 @@ struct PendingSessionPreviewLoad {
     receiver: std::sync::mpsc::Receiver<Option<Vec<PreviewMessage>>>,
 }
 
+/// Fingerprint of every input that affects the *content* of the preview pane
+/// (before scrolling). When this matches the cached value, scrolling can reuse
+/// the already-wrapped lines instead of re-rendering markdown and re-wrapping
+/// every frame, mirroring the main chat viewport's prepared-frame cache.
+#[derive(Clone, PartialEq, Eq)]
+struct PreviewCacheKey {
+    /// Hash over the selected session id, its preview messages, and the
+    /// header-affecting fields (status label, saved/selection/batch flags, …).
+    content_hash: u64,
+    /// Inner geometry of the preview pane; width drives wrapping and height
+    /// drives the scrollbar decision (which can narrow the content one column).
+    inner_width: u16,
+    inner_height: u16,
+    centered: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+}
+
+/// Cached, fully-wrapped preview content. Built on a cache miss (selection
+/// change, resize, preview load, config change) and reused on every subsequent
+/// frame - notably while scrolling, which then only clamps the offset and
+/// materializes the visible window.
+struct PreviewRenderCache {
+    key: PreviewCacheKey,
+    /// Wrapped lines at the final (post-scrollbar-decision) width.
+    wrapped_lines: Vec<Line<'static>>,
+    /// For each pre-wrap source line, the index of its first wrapped line. Used
+    /// to locate user prompts for the sticky "previous prompt" header.
+    prewrap_to_wrapped: Vec<usize>,
+    /// (pre-wrap line index, display number, text) for every user prompt.
+    user_prompt_markers: Vec<(usize, usize, String)>,
+    /// Whether the content overflows and a scrollbar column is reserved.
+    show_scrollbar: bool,
+}
+
 pub struct SessionPicker {
     /// Flat list of items (headers and sessions)
     items: Vec<PickerItem>,
@@ -151,6 +198,10 @@ pub struct SessionPicker {
     item_to_session: Vec<Option<usize>>,
     list_state: ListState,
     scroll_offset: u16,
+    /// Last rendered maximum preview scroll offset (total wrapped lines minus
+    /// the visible height). Lets scroll handlers clamp without re-wrapping and
+    /// lets the shared mouse-momentum know when it has reached the bottom.
+    preview_max_scroll: u16,
     auto_scroll_preview: bool,
     /// Crashed sessions pending batch restore
     crashed_sessions: Option<CrashedSessionsInfo>,
@@ -190,6 +241,14 @@ pub struct SessionPicker {
     /// meaningful while `onboarding_banner` is set). Selecting it returns
     /// [`PickerResult::StartNewSession`].
     onboarding_start_new_highlighted: bool,
+    /// Cached, fully-wrapped preview content so scrolling does not re-render and
+    /// re-wrap the whole preview every frame. Invalidated by content hash and
+    /// pane geometry (see [`PreviewCacheKey`]).
+    preview_cache: Option<PreviewRenderCache>,
+    /// Working directory `/resume` was opened from. Sessions whose `working_dir`
+    /// matches this are highlighted so the user can quickly spot sessions from
+    /// the same project they are currently in.
+    current_dir: Option<String>,
 }
 
 impl SessionPicker {
@@ -211,6 +270,7 @@ impl SessionPicker {
             item_to_session: Vec::new(),
             list_state: ListState::default(),
             scroll_offset: 0,
+            preview_max_scroll: 0,
             auto_scroll_preview: true,
             crashed_sessions,
             crashed_session_ids,
@@ -231,6 +291,8 @@ impl SessionPicker {
             preview_load_failures: HashSet::new(),
             onboarding_banner: None,
             onboarding_start_new_highlighted: false,
+            preview_cache: None,
+            current_dir: None,
         };
         picker.rebuild_items();
         picker
@@ -248,6 +310,7 @@ impl SessionPicker {
             item_to_session: Vec::new(),
             list_state: ListState::default(),
             scroll_offset: 0,
+            preview_max_scroll: 0,
             auto_scroll_preview: true,
             crashed_sessions: None,
             crashed_session_ids: HashSet::new(),
@@ -268,6 +331,8 @@ impl SessionPicker {
             preview_load_failures: HashSet::new(),
             onboarding_banner: None,
             onboarding_start_new_highlighted: false,
+            preview_cache: None,
+            current_dir: None,
         }
     }
 
@@ -318,6 +383,7 @@ impl SessionPicker {
             item_to_session: Vec::new(),
             list_state: ListState::default(),
             scroll_offset: 0,
+            preview_max_scroll: 0,
             auto_scroll_preview: true,
             crashed_sessions,
             crashed_session_ids,
@@ -338,6 +404,8 @@ impl SessionPicker {
             preview_load_failures: HashSet::new(),
             onboarding_banner: None,
             onboarding_start_new_highlighted: false,
+            preview_cache: None,
+            current_dir: None,
         };
         picker.rebuild_items();
         picker
@@ -346,6 +414,21 @@ impl SessionPicker {
     pub fn activate_catchup_filter(&mut self) {
         self.filter_mode = SessionFilterMode::CatchUp;
         self.rebuild_items();
+    }
+
+    /// Record the working directory `/resume` was opened from so sessions that
+    /// share it can be visually highlighted in the list.
+    pub fn set_current_dir(&mut self, dir: Option<String>) {
+        self.current_dir = dir.map(|d| normalize_dir(&d));
+    }
+
+    /// Whether the given session's working directory matches the directory the
+    /// picker was opened from.
+    pub(super) fn session_in_current_dir(&self, session: &SessionInfo) -> bool {
+        match (self.current_dir.as_deref(), session.working_dir.as_deref()) {
+            (Some(current), Some(dir)) => normalize_dir(dir) == current,
+            _ => false,
+        }
     }
 
     /// Replace the backing session data in place while preserving the user's
@@ -774,6 +857,106 @@ impl SessionPicker {
         }
     }
 
+    /// Delete the word immediately before the (implicit) end-of-line cursor in
+    /// the search query. Used for Ctrl+W / Ctrl+Backspace inside the search bar.
+    fn delete_search_word_back(&mut self) {
+        let query = &self.search_query;
+        let mut end = query.len();
+        // Skip trailing whitespace.
+        while end > 0 {
+            let prev = super::core::prev_char_boundary(query, end);
+            let ch = query[prev..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            end = prev;
+        }
+        // Skip the word characters.
+        while end > 0 {
+            let prev = super::core::prev_char_boundary(query, end);
+            let ch = query[prev..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            end = prev;
+        }
+        self.search_query.truncate(end);
+    }
+
+    /// Shared handling for key events while the search bar is active. Used by
+    /// both the overlay (`handle_overlay_key`) and the standalone `run` loop so
+    /// the editing and navigation keybindings stay consistent.
+    fn handle_search_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<OverlayAction> {
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        match code {
+            KeyCode::Esc => {
+                self.search_active = false;
+                self.search_query.clear();
+                self.rebuild_items();
+            }
+            KeyCode::Enter => {
+                self.search_active = false;
+                if self.visible_sessions.is_empty() {
+                    self.search_query.clear();
+                    self.rebuild_items();
+                } else {
+                    let targets = self.selection_or_current_targets();
+                    if !targets.is_empty() {
+                        return Ok(OverlayAction::Selected(
+                            self.selection_result_for_enter(targets, modifiers),
+                        ));
+                    }
+                }
+            }
+            // Ctrl+W / Ctrl+Backspace (and the \u{8} BS alias some terminals
+            // send for Ctrl+Backspace) delete the previous word in the query.
+            KeyCode::Backspace if ctrl => {
+                self.delete_search_word_back();
+                self.rebuild_items();
+            }
+            KeyCode::Char('\u{8}') => {
+                self.delete_search_word_back();
+                self.rebuild_items();
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.rebuild_items();
+            }
+            // Ctrl+U clears the whole query (like readline's kill-to-start).
+            KeyCode::Char('u') if ctrl => {
+                self.search_query.clear();
+                self.rebuild_items();
+            }
+            // Vim-style / readline navigation that keeps working while typing.
+            KeyCode::Char('j') | KeyCode::Char('n') if ctrl => self.next(),
+            KeyCode::Char('k') | KeyCode::Char('p') if ctrl => self.previous(),
+            KeyCode::Char('w') if ctrl => {
+                self.delete_search_word_back();
+                self.rebuild_items();
+            }
+            KeyCode::Char(c) => {
+                if ctrl && c == 'c' {
+                    return Ok(OverlayAction::Close);
+                }
+                // Ignore other control-modified characters so they don't get
+                // inserted as literal text in the search bar.
+                if ctrl {
+                    return Ok(OverlayAction::Continue);
+                }
+                self.search_query.push(c);
+                self.rebuild_items();
+            }
+            KeyCode::Down => self.next(),
+            KeyCode::Up => self.previous(),
+            _ => {}
+        }
+        Ok(OverlayAction::Continue)
+    }
+
     /// Handle a key event when used as an overlay inside the main TUI.
     /// Returns:
     /// - `Some(PickerResult::Selected(targets))` if user selected one or more sessions
@@ -796,42 +979,7 @@ impl SessionPicker {
         }
 
         if self.search_active {
-            match code {
-                KeyCode::Esc => {
-                    self.search_active = false;
-                    self.search_query.clear();
-                    self.rebuild_items();
-                }
-                KeyCode::Enter => {
-                    self.search_active = false;
-                    if self.visible_sessions.is_empty() {
-                        self.search_query.clear();
-                        self.rebuild_items();
-                    } else {
-                        let targets = self.selection_or_current_targets();
-                        if !targets.is_empty() {
-                            return Ok(OverlayAction::Selected(
-                                self.selection_result_for_enter(targets, modifiers),
-                            ));
-                        }
-                    }
-                }
-                KeyCode::Backspace => {
-                    self.search_query.pop();
-                    self.rebuild_items();
-                }
-                KeyCode::Char(c) => {
-                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                        return Ok(OverlayAction::Close);
-                    }
-                    self.search_query.push(c);
-                    self.rebuild_items();
-                }
-                KeyCode::Down => self.next(),
-                KeyCode::Up => self.previous(),
-                _ => {}
-            }
-            return Ok(OverlayAction::Continue);
+            return self.handle_search_key(code, modifiers);
         }
 
         match code {
@@ -910,13 +1058,6 @@ impl SessionPicker {
     }
 
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
-        // Colors matching the actual TUI
-        let user_color: Color = rgb(138, 180, 248); // Soft blue
-        let user_text: Color = rgb(245, 245, 255); // Bright cool white
-        let dim_color: Color = rgb(80, 80, 80); // Dim gray
-        let header_icon_color: Color = rgb(120, 210, 230); // Teal
-        let header_session_color: Color = rgb(255, 255, 255); // White
-
         let empty_border_color = if self.focus == PaneFocus::Preview {
             rgb(130, 130, 160)
         } else {
@@ -973,11 +1114,194 @@ impl SessionPicker {
         } else {
             Alignment::Left
         };
+
+        // Draw the bordered block first so we know the inner rect (which drives
+        // wrapping width and the scrollbar decision) before building content.
+        let preview_border_color = if self.focus == PaneFocus::Preview {
+            rgb(130, 130, 160)
+        } else {
+            rgb(70, 70, 70)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Preview ")
+            .border_style(Style::default().fg(preview_border_color));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        // Build (or reuse) the fully-wrapped preview content. The expensive
+        // markdown render + wrap only runs on a cache miss; scrolling, focus
+        // changes, and idle redraws reuse the cached wrapped lines. This mirrors
+        // the main chat viewport, whose prepared frame is cached the same way.
+        let key = PreviewCacheKey {
+            content_hash: self.preview_content_hash(&session, centered, diff_mode),
+            inner_width: inner.width,
+            inner_height: inner.height,
+            centered,
+            diff_mode,
+        };
+        let cache_valid = self
+            .preview_cache
+            .as_ref()
+            .is_some_and(|cache| cache.key == key);
+        if !cache_valid {
+            let rebuilt = self.build_preview_cache(&session, area, inner, key, align, diff_mode);
+            self.preview_cache = Some(rebuilt);
+        }
+        // Read cache geometry through a short-lived borrow so the scroll-offset
+        // clamp below can take `&mut self` without conflict.
+        let (show_scrollbar, total_lines) = {
+            let cache = self
+                .preview_cache
+                .as_ref()
+                .expect("preview cache populated above");
+            (cache.show_scrollbar, cache.wrapped_lines.len())
+        };
+
+        let visible_height = inner.height as usize;
+        let (content_area, scrollbar_area) =
+            super::ui::split_native_scrollbar_area(inner, show_scrollbar);
+
+        let max_scroll = total_lines.saturating_sub(visible_height) as u16;
+        self.preview_max_scroll = max_scroll;
+        if self.auto_scroll_preview {
+            self.scroll_offset = max_scroll;
+            self.auto_scroll_preview = false;
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max_scroll);
+        }
+        let scroll = self.scroll_offset as usize;
+
+        // Materialize only the visible window of wrapped lines instead of cloning
+        // and `.scroll()`ing the whole preview every frame (the main chat
+        // viewport uses the same visible-slice strategy). This makes a scroll
+        // tick O(viewport height) rather than O(total wrapped lines).
+        let visible_end = (scroll + visible_height).min(total_lines);
+        let visible_lines: Vec<Line<'static>> = {
+            let cache = self
+                .preview_cache
+                .as_ref()
+                .expect("preview cache populated above");
+            if scroll < visible_end {
+                cache.wrapped_lines[scroll..visible_end].to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+        frame.render_widget(Paragraph::new(visible_lines), content_area);
+
+        // Sticky "previous prompt" header: when the view is scrolled past a user
+        // prompt, pin a dimmed `N› …` line at the top of the content area, just
+        // like the main TUI's `prompt_preview`.
+        if scroll > 0 {
+            let user_color: Color = rgb(138, 180, 248);
+            let user_text: Color = rgb(245, 245, 255);
+            self.render_preview_prompt_header(
+                frame,
+                content_area,
+                scroll,
+                user_color,
+                user_text,
+                align,
+            );
+        }
+
+        if let Some(scrollbar_area) = scrollbar_area {
+            super::ui::render_native_scrollbar(
+                frame,
+                scrollbar_area,
+                scroll,
+                total_lines,
+                visible_height,
+                self.focus == PaneFocus::Preview,
+            );
+        }
+    }
+
+    /// Fingerprint everything that affects the *content* of the preview pane so
+    /// the wrapped-line cache can be reused across frames (notably while
+    /// scrolling). Mirrors the main chat viewport's prepared-frame cache key.
+    fn preview_content_hash(
+        &self,
+        session: &SessionInfo,
+        centered: bool,
+        diff_mode: crate::config::DiffDisplayMode,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        session.id.hash(&mut h);
+        session.short_name.hash(&mut h);
+        session.icon.hash(&mut h);
+        session.title.hash(&mut h);
+        session.working_dir.hash(&mut h);
+        session.save_label.hash(&mut h);
+        session.saved.hash(&mut h);
+        std::mem::discriminant(&session.status).hash(&mut h);
+        match &session.status {
+            SessionStatus::Crashed { message } => message.hash(&mut h),
+            SessionStatus::Error { message } => message.hash(&mut h),
+            _ => {}
+        }
+        // The status line shows a relative "… 5m ago" label derived from real
+        // time, so bucket wall-clock into ~15s windows: fresh enough for the
+        // header without rebuilding the cache during a scroll burst.
+        session.last_message_time.timestamp().hash(&mut h);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        (now_secs / 15).hash(&mut h);
+        self.crashed_session_ids.contains(&session.id).hash(&mut h);
+        self.selected_session_ids.contains(&session.id).hash(&mut h);
+        let is_loading = session.messages_preview.is_empty()
+            && self
+                .pending_preview_load
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == session.id);
+        is_loading.hash(&mut h);
+        centered.hash(&mut h);
+        diff_mode.hash(&mut h);
+        for msg in &session.messages_preview {
+            msg.role.hash(&mut h);
+            msg.content.hash(&mut h);
+            msg.tool_calls.hash(&mut h);
+            if let Some(tool) = &msg.tool_data {
+                tool.id.hash(&mut h);
+                tool.name.hash(&mut h);
+                tool.input.to_string().hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// Build the fully-wrapped preview content for the current selection. This
+    /// is the expensive path (markdown render + wrap of every preview message);
+    /// it only runs on a cache miss (selection change, resize, preview load,
+    /// config change), after which scrolling reuses the wrapped lines.
+    fn build_preview_cache(
+        &self,
+        session: &SessionInfo,
+        area: Rect,
+        inner: Rect,
+        key: PreviewCacheKey,
+        align: Alignment,
+        diff_mode: crate::config::DiffDisplayMode,
+    ) -> PreviewRenderCache {
+        let user_color: Color = rgb(138, 180, 248);
+        let user_text: Color = rgb(245, 245, 255);
+        let dim_color: Color = rgb(80, 80, 80);
+        let header_icon_color: Color = rgb(120, 210, 230);
+        let header_session_color: Color = rgb(255, 255, 255);
+
         let preview_inner_width = area.width.saturating_sub(2);
         let assistant_width = preview_inner_width.saturating_sub(2);
 
         // Build preview content
-        let mut lines: Vec<Line> = Vec::new();
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Header matching TUI style
         lines.push(
@@ -1313,24 +1637,6 @@ impl SessionPicker {
             );
         }
 
-        let preview_border_color = if self.focus == PaneFocus::Preview {
-            rgb(130, 130, 160)
-        } else {
-            rgb(70, 70, 70)
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(" Preview ")
-            .border_style(Style::default().fg(preview_border_color));
-        let inner = block.inner(area);
-        // Render the block first, then draw content/scrollbar/header into its
-        // inner rect so we control the scrollbar column and sticky header rows.
-        frame.render_widget(block, area);
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
-
         // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
         // Two-pass so the content reserves the scrollbar column before wrapping
         // (matching the main chat viewport): wrap at the full inner width, and if
@@ -1356,82 +1662,49 @@ impl SessionPicker {
         };
 
         let full_width = inner.width as usize;
-        let (full_lines, _) = wrap_lines_tracked(full_width);
+        let (full_lines, full_map) = wrap_lines_tracked(full_width);
         let show_scrollbar =
             super::ui::native_scrollbar_visible(true, full_lines.len(), visible_height);
-        let (content_area, scrollbar_area) =
-            super::ui::split_native_scrollbar_area(inner, show_scrollbar);
 
-        let (lines, prewrap_to_wrapped) = if show_scrollbar {
-            wrap_lines_tracked(content_area.width as usize)
+        let (wrapped_lines, prewrap_to_wrapped) = if show_scrollbar {
+            let content_width = inner.width.saturating_sub(1) as usize;
+            wrap_lines_tracked(content_width)
         } else {
-            // Reuse the full-width wrap; recompute the map to match.
-            wrap_lines_tracked(full_width)
+            // Reuse the full-width wrap; the map already matches.
+            (full_lines, full_map)
         };
 
-        let total_lines = lines.len();
-
-        let max_scroll = total_lines.saturating_sub(visible_height) as u16;
-        if self.auto_scroll_preview {
-            self.scroll_offset = max_scroll;
-            self.auto_scroll_preview = false;
-        } else {
-            self.scroll_offset = self.scroll_offset.min(max_scroll);
-        }
-        let scroll = self.scroll_offset as usize;
-
-        let paragraph = Paragraph::new(lines).scroll((self.scroll_offset, 0));
-        frame.render_widget(paragraph, content_area);
-
-        // Sticky "previous prompt" header: when the view is scrolled past a user
-        // prompt, pin a dimmed `N› …` line at the top of the content area, just
-        // like the main TUI's `prompt_preview`.
-        if scroll > 0 {
-            self.render_preview_prompt_header(
-                frame,
-                content_area,
-                &user_prompt_markers,
-                &prewrap_to_wrapped,
-                scroll,
-                user_color,
-                user_text,
-                align,
-            );
-        }
-
-        if let Some(scrollbar_area) = scrollbar_area {
-            super::ui::render_native_scrollbar(
-                frame,
-                scrollbar_area,
-                scroll,
-                total_lines,
-                visible_height,
-                self.focus == PaneFocus::Preview,
-            );
+        PreviewRenderCache {
+            key,
+            wrapped_lines,
+            prewrap_to_wrapped,
+            user_prompt_markers,
+            show_scrollbar,
         }
     }
 
     /// Render the pinned "previous prompt" header for the preview pane. Mirrors
     /// the main chat viewport's `prompt_preview`: find the last user prompt whose
     /// wrapped start has scrolled above the viewport and draw it dimmed at the top.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Header rendering needs the prompt markers, wrap map, and styling context"
-    )]
     fn render_preview_prompt_header(
         &self,
         frame: &mut Frame,
         content_area: Rect,
-        user_prompt_markers: &[(usize, usize, String)],
-        prewrap_to_wrapped: &[usize],
         scroll: usize,
         user_color: Color,
         user_text: Color,
         align: Alignment,
     ) {
+        // Read the prompt markers + wrap map from the cached preview content so
+        // the header costs nothing extra during a scroll burst.
+        let Some(cache) = self.preview_cache.as_ref() else {
+            return;
+        };
+        let prewrap_to_wrapped = &cache.prewrap_to_wrapped;
         // The last prompt whose wrapped start index is above the current scroll.
         let Some((_, prompt_num, text)) =
-            user_prompt_markers
+            cache
+                .user_prompt_markers
                 .iter()
                 .rev()
                 .find(|(prewrap_idx, _, _)| {
@@ -1701,42 +1974,10 @@ impl SessionPicker {
 
                         // Search mode: capture typed characters
                         if self.search_active {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    self.search_active = false;
-                                    self.search_query.clear();
-                                    self.rebuild_items();
-                                }
-                                KeyCode::Enter => {
-                                    self.search_active = false;
-                                    if self.visible_sessions.is_empty() {
-                                        // No results - clear search and return to full list
-                                        self.search_query.clear();
-                                        self.rebuild_items();
-                                    } else {
-                                        let targets = self.selection_or_current_targets();
-                                        if targets.is_empty() {
-                                            break Ok(None);
-                                        }
-                                        break Ok(Some(
-                                            self.selection_result_for_enter(targets, key.modifiers),
-                                        ));
-                                    }
-                                }
-                                KeyCode::Backspace => {
-                                    self.search_query.pop();
-                                    self.rebuild_items();
-                                }
-                                KeyCode::Char(c) => {
-                                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                                        break Ok(None);
-                                    }
-                                    self.search_query.push(c);
-                                    self.rebuild_items();
-                                }
-                                KeyCode::Down => self.next(),
-                                KeyCode::Up => self.previous(),
-                                _ => {}
+                            match self.handle_search_key(key.code, key.modifiers)? {
+                                OverlayAction::Continue => {}
+                                OverlayAction::Close => break Ok(None),
+                                OverlayAction::Selected(result) => break Ok(Some(result)),
                             }
                             continue;
                         }

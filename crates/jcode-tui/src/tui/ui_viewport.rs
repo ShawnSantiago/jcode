@@ -176,23 +176,39 @@ pub(super) fn compute_visible_margins(
                 used = used.saturating_add(1).min(area.width);
             }
 
+            // Compute the true free space on each side from the line's *rendered*
+            // alignment. This matters even in left-aligned mode: the header lines
+            // (`server:`/`client:`/model/version, auth status, mcp list, changelog
+            // box, etc.) are always centered regardless of mode, so a centered line
+            // of width `used` leaves only ~half the slack on the right. Reporting
+            // the full `area.width - used` here would let a right-side info widget
+            // overlap the centered header text.
+            let total_margin = area.width.saturating_sub(used);
+            let default_alignment = if centered {
+                Alignment::Center
+            } else {
+                Alignment::Left
+            };
+            let effective_alignment = lines[row].alignment.unwrap_or(default_alignment);
+            let (left_margin, right_margin) = match effective_alignment {
+                Alignment::Left => (0, total_margin),
+                Alignment::Center => {
+                    let left = total_margin / 2;
+                    let right = total_margin.saturating_sub(left);
+                    (left, right)
+                }
+                Alignment::Right => (total_margin, 0),
+            };
+
             if centered {
-                let total_margin = area.width.saturating_sub(used);
-                let effective_alignment = lines[row].alignment.unwrap_or(Alignment::Center);
-                let (left_margin, right_margin) = match effective_alignment {
-                    Alignment::Left => (0, total_margin),
-                    Alignment::Center => {
-                        let left = total_margin / 2;
-                        let right = total_margin.saturating_sub(left);
-                        (left, right)
-                    }
-                    Alignment::Right => (total_margin, 0),
-                };
                 left_widths.push(left_margin);
                 right_widths.push(right_margin);
             } else {
+                // Left-aligned mode never places left-side widgets (content is
+                // flush-left), so the left gap is reported as 0; the right gap
+                // still respects per-line alignment so widgets clear the header.
                 left_widths.push(0);
-                right_widths.push(area.width.saturating_sub(used));
+                right_widths.push(right_margin);
             }
         } else if centered {
             let half = area.width / 2;
@@ -208,6 +224,7 @@ pub(super) fn compute_visible_margins(
         right_widths,
         left_widths,
         centered,
+        ..Default::default()
     }
 }
 
@@ -349,6 +366,7 @@ pub(super) fn draw_messages(
         right_widths: vec![0; prompt_preview_lines as usize],
         left_widths: vec![0; prompt_preview_lines as usize],
         centered: content_margins.centered,
+        ..Default::default()
     };
     margins
         .right_widths
@@ -883,7 +901,40 @@ pub(super) fn draw_messages(
         );
     }
 
+    // Derive the look-ahead "reliable" width profile that gates where *new* info
+    // widgets may dock, so a freshly placed widget won't be covered by a wide line
+    // one scroll line later. We use a small windowed minimum over the assembled
+    // per-row free widths (the rows already on screen above/below each candidate
+    // row), which keeps it cheap and needs no off-screen line materialization.
+    // Pinned widgets still size to the instantaneous widths for full coverage.
+    margins.right_reliable = windowed_min(&margins.right_widths, INFO_WIDGET_LOOKAHEAD_ROWS);
+    if margins.centered {
+        margins.left_reliable = windowed_min(&margins.left_widths, INFO_WIDGET_LOOKAHEAD_ROWS);
+    }
+
     margins
+}
+
+/// Look-ahead window (in rows) used to compute the "reliable" margin profile that
+/// gates where new info widgets may dock. Small by design: it only needs to cover
+/// the distance content travels in the few frames between a widget being placed and
+/// a nearby long line scrolling into its rows.
+const INFO_WIDGET_LOOKAHEAD_ROWS: usize = 2;
+
+/// Per-index minimum over `[i-window, i+window]`. Returns an empty vec for empty
+/// input (callers treat empty reliable profiles as "no look-ahead").
+fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
+    if widths.is_empty() {
+        return Vec::new();
+    }
+    let n = widths.len();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let lo = i.saturating_sub(window);
+        let hi = (i + window).min(n - 1);
+        out.push(widths[lo..=hi].iter().copied().min().unwrap_or(0));
+    }
+    out
 }
 
 fn compute_prompt_preview_line_count(

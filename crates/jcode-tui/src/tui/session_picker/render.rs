@@ -94,6 +94,8 @@ impl SessionPicker {
         let created_ago = format_time_ago(session.created_at);
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
         let is_marked = self.selected_session_ids.contains(&session.id);
+        let same_dir = self.session_in_current_dir(session);
+        let same_dir_clr: Color = rgb(120, 200, 140);
 
         let name_style = if is_selected {
             Style::default()
@@ -171,6 +173,14 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        if same_dir {
+            line1_spans.push(Span::styled(
+                "  ▸ here",
+                Style::default()
+                    .fg(same_dir_clr)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         let line1 = Line::from(line1_spans);
 
         let tokens_display = Self::format_estimated_tokens(session.estimated_tokens);
@@ -232,7 +242,10 @@ impl SessionPicker {
                 format!("created: {}", created_ago),
                 Style::default().fg(dimmer),
             ),
-            Span::styled(dir_part, Style::default().fg(dimmer)),
+            Span::styled(
+                dir_part,
+                Style::default().fg(if same_dir { same_dir_clr } else { dimmer }),
+            ),
         ]);
 
         let mut rows = vec![line1, line2];
@@ -426,7 +439,7 @@ impl SessionPicker {
         let help = if self.loading_message.is_some() {
             " Esc cancel "
         } else if self.search_active {
-            " type to filter, Esc cancel "
+            " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel "
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {

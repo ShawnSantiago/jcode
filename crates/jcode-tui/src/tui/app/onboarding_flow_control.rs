@@ -155,8 +155,8 @@ impl App {
     ///
     /// If we detect importable external logins (Codex/Claude/Cursor/etc.), we
     /// arm a per-candidate yes/no walkthrough so the user can step through each
-    /// detected login and choose whether to import it. Otherwise we prompt them
-    /// to pick a provider manually.
+    /// detected login and choose whether to import it. Otherwise we ask a simple
+    /// "Log in to OpenAI?" Yes/No.
     ///
     /// No-op if a flow is already running.
     pub(super) fn begin_onboarding_flow_at_login(&mut self) {
@@ -183,45 +183,37 @@ impl App {
                 "Welcome to jcode: review detected logins (arrows/hl to move, Enter to choose)",
             );
         } else {
-            self.set_status_notice("Welcome to jcode: press Enter to log in");
+            self.set_status_notice(
+                "Log in to OpenAI? Yes/No - hl to move, Enter to choose (No picks another provider)",
+            );
         }
     }
 
-    /// Advance out of the `Login` phase once credentials are available. We then
-    /// ask the user whether to share prompt/transcript content with telemetry
-    /// before moving on to model selection. No-op unless the flow is in `Login`.
+    /// Start the default first-run login when no external logins were detected.
+    /// We point brand-new users straight at OpenAI (ChatGPT) rather than the full
+    /// provider picker, since that is the most common first login. The provider
+    /// picker is still reachable via `/login`.
+    pub(super) fn onboarding_start_default_login(&mut self) {
+        crate::telemetry::record_setup_step_once("login_picker_opened");
+        self.start_login_provider(crate::provider_catalog::OPENAI_LOGIN_PROVIDER);
+        self.set_status_notice("Login: opening OpenAI sign-in (or type /login for others)");
+    }
+
+    /// Advance out of a login phase once credentials are available. We no longer
+    /// ask the user about prompt/transcript telemetry here: content sharing
+    /// stays off by default (the separate anonymous-usage telemetry is still
+    /// disclosed on the welcome screen). Advance straight to model selection.
+    /// No-op unless the flow is in a login phase.
     pub(super) fn onboarding_after_login(&mut self) {
-        if !matches!(self.onboarding_phase(), Some(OnboardingPhase::Login { .. })) {
-            return;
-        }
-        self.onboarding_enter_telemetry_consent();
-    }
-
-    /// Enter the telemetry content-sharing consent phase. Default highlight is
-    /// "No" (privacy-safe), and the prompt auto-declines after the decision
-    /// countdown so the user is never stuck on it.
-    fn onboarding_enter_telemetry_consent(&mut self) {
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::TelemetryConsent {
-                yes_highlighted: false,
-                shown_at: Instant::now(),
-            };
-        }
-        self.set_status_notice(
-            "Share prompts & transcripts to improve jcode? No/Yes - auto-declines in 60s",
-        );
-    }
-
-    /// Answer the telemetry consent prompt: persist the choice and advance to
-    /// the next onboarding step.
-    pub(super) fn onboarding_answer_telemetry_consent(&mut self, opt_in: bool) {
         if !matches!(
             self.onboarding_phase(),
-            Some(OnboardingPhase::TelemetryConsent { .. })
+            Some(OnboardingPhase::Login { .. }) | Some(OnboardingPhase::LoginOpenAi { .. })
         ) {
             return;
         }
-        crate::telemetry::set_content_sharing_enabled(opt_in);
+        // Prompt/transcript content sharing is opt-in and off by default; we
+        // intentionally don't prompt for it during onboarding.
+        crate::telemetry::set_content_sharing_enabled(false);
         if let Some(flow) = self.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::ModelSelect;
         }
@@ -299,16 +291,17 @@ impl App {
     ///   - `ModelSelect`: we tell the user to run /model; Enter is also a
     ///     shortcut that opens the model picker from the welcome screen.
     ///   - `ContinuePrompt`: Y/Enter continues, N/Esc declines.
-    ///   - `TelemetryConsent`: Left/h -> No, Right/l -> Yes, toggle with
+    ///   - `LoginOpenAi`: Left/h -> Yes, Right/l -> No, toggle with
     ///     Up/Down/k/j/Tab; y/n commit directly, Enter/Space commit the
-    ///     highlighted default.
+    ///     highlighted default (Yes -> OpenAI sign-in, No -> provider picker).
     /// Returns true if the key was consumed.
     pub(super) fn handle_onboarding_continue_prompt_key(&mut self, code: KeyCode) -> bool {
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
-                // No detected imports: fall back to "press Enter to choose a
-                // provider". Only intercept Enter from the welcome screen; if an
-                // overlay is already open let it commit.
+                // No detected imports remaining: this is the recovery fallback
+                // (an import failed or the user declined every detected login).
+                // Point them at the provider picker. Only intercept Enter from
+                // the welcome screen; if an overlay is already open let it commit.
                 if import.is_none() {
                     return match code {
                         KeyCode::Enter if self.inline_interactive_state.is_none() => {
@@ -326,8 +319,13 @@ impl App {
                 }
                 self.handle_onboarding_import_review_key(code)
             }
-            Some(OnboardingPhase::TelemetryConsent { .. }) => {
-                self.handle_onboarding_telemetry_consent_key(code)
+            Some(OnboardingPhase::LoginOpenAi { .. }) => {
+                // Don't intercept once an inline overlay (the OpenAI sign-in or
+                // the provider picker) is already open.
+                if self.inline_interactive_state.is_some() {
+                    return false;
+                }
+                self.handle_onboarding_login_openai_key(code)
             }
             Some(OnboardingPhase::ModelSelect) => match code {
                 // Enter opens the model picker, but only from the welcome
@@ -454,32 +452,29 @@ impl App {
         true
     }
 
-    /// Handle a key while the telemetry content-sharing consent prompt is up.
-    /// Yes/No sit side by side (default highlight is "No"):
-    ///   - Left / h  -> highlight "No"
-    ///   - Right / l -> highlight "Yes"
+    /// Handle a key while the "Log in to OpenAI?" prompt is up. Yes/No sit side
+    /// by side (default highlight is "Yes"):
+    ///   - Left / h  -> highlight "Yes"
+    ///   - Right / l -> highlight "No"
     ///   - Up / Down / k / j / Tab -> toggle
-    ///   - y / Y -> opt in;  n / N -> opt out (both commit)
+    ///   - y / Y -> log in to OpenAI;  n / N -> open the provider picker
     ///   - Enter / Space -> commit the highlighted choice
-    fn handle_onboarding_telemetry_consent_key(&mut self, code: KeyCode) -> bool {
+    fn handle_onboarding_login_openai_key(&mut self, code: KeyCode) -> bool {
         let Some(flow) = self.onboarding_flow.as_mut() else {
             return false;
         };
-        let OnboardingPhase::TelemetryConsent {
-            yes_highlighted, ..
-        } = &mut flow.phase
-        else {
+        let OnboardingPhase::LoginOpenAi { yes_highlighted } = &mut flow.phase else {
             return false;
         };
         match code {
             KeyCode::Left | KeyCode::Char('h') => {
-                *yes_highlighted = false;
-                self.update_onboarding_telemetry_consent_status();
+                *yes_highlighted = true;
+                self.update_onboarding_login_openai_status();
                 true
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                *yes_highlighted = true;
-                self.update_onboarding_telemetry_consent_status();
+                *yes_highlighted = false;
+                self.update_onboarding_login_openai_status();
                 true
             }
             KeyCode::Up
@@ -488,37 +483,54 @@ impl App {
             | KeyCode::Char('j')
             | KeyCode::Tab => {
                 *yes_highlighted = !*yes_highlighted;
-                self.update_onboarding_telemetry_consent_status();
+                self.update_onboarding_login_openai_status();
                 true
             }
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.onboarding_answer_telemetry_consent(true);
+                self.onboarding_answer_login_openai(true);
                 true
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                self.onboarding_answer_telemetry_consent(false);
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.onboarding_answer_login_openai(false);
                 true
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let opt_in = *yes_highlighted;
-                self.onboarding_answer_telemetry_consent(opt_in);
+                let wants_openai = *yes_highlighted;
+                self.onboarding_answer_login_openai(wants_openai);
                 true
             }
             _ => false,
         }
     }
 
-    /// Refresh the status notice with the telemetry consent countdown.
-    fn update_onboarding_telemetry_consent_status(&mut self) {
-        let remaining = self
-            .onboarding_flow
-            .as_ref()
-            .and_then(OnboardingFlow::decision_seconds_remaining);
-        if let Some(remaining) = remaining {
-            self.set_status_notice(format!(
-                "Share prompts & transcripts to improve jcode? No/Yes - auto-declines in {remaining}s"
-            ));
+    /// Answer the "Log in to OpenAI?" prompt. Yes starts the OpenAI sign-in;
+    /// No opens the full provider picker so the user can pick another provider.
+    pub(super) fn onboarding_answer_login_openai(&mut self, wants_openai: bool) {
+        if !matches!(
+            self.onboarding_phase(),
+            Some(OnboardingPhase::LoginOpenAi { .. })
+        ) {
+            return;
         }
+        if wants_openai {
+            self.onboarding_start_default_login();
+        } else {
+            self.show_interactive_login();
+        }
+    }
+
+    /// Refresh the status notice for the "Log in to OpenAI?" prompt.
+    fn update_onboarding_login_openai_status(&mut self) {
+        let yes = matches!(
+            self.onboarding_phase(),
+            Some(OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true
+            })
+        );
+        let choice = if yes { "Yes" } else { "No" };
+        self.set_status_notice(format!(
+            "Log in to OpenAI? [{choice}] - hl to move, Enter to choose (No picks another provider)"
+        ));
     }
 
     /// Mutable access to the active import walkthrough, if any.
@@ -798,6 +810,20 @@ impl App {
         if !crate::auth::AuthStatus::check_fast().has_any_available() {
             return;
         }
+        // Remote mode after a login: the server pushes a fresh model catalog a
+        // moment later (e.g. switching the route to gpt-5.5 after an OpenAI
+        // login). The pre-login default (e.g. Claude Opus) is already a concrete
+        // id, so validating immediately would report the *stale* model. Defer
+        // until the catalog generation advances (or a short timeout) so the
+        // readiness line names the freshly-selected model.
+        if self.is_remote && self.recent_authenticated_provider.is_some() {
+            self.onboarding_pending_model_validation =
+                Some(OnboardingPendingValidation::awaiting_catalog_refresh(
+                    self.session.id.clone(),
+                    self.remote_model_catalog_generation,
+                ));
+            return;
+        }
         // If we already know a concrete model (typically local mode), run it
         // right away; otherwise defer to the tick loop until the server reports
         // the live model id.
@@ -870,12 +896,34 @@ impl App {
             self.onboarding_pending_model_validation = None;
             return false;
         }
-        if self.onboarding_default_model_id_is_concrete() || pending.resolve_timed_out() {
-            self.onboarding_pending_model_validation = None;
-            self.onboarding_spawn_model_validation();
-            return true;
+        if !self.onboarding_pending_validation_ready_to_fire() {
+            return false;
         }
-        false
+        self.onboarding_pending_model_validation = None;
+        self.onboarding_spawn_model_validation();
+        true
+    }
+
+    /// Whether the currently-pending validation should fire this tick. Pure
+    /// decision logic (no side effects) so it can be unit-tested without the
+    /// `tokio::spawn` in `onboarding_spawn_model_validation`.
+    ///
+    /// When waiting for the post-login catalog refresh (remote mode), hold until
+    /// the catalog generation advances past the value captured at request time,
+    /// so we validate the freshly-selected model rather than the stale pre-login
+    /// default. The resolve timeout is always a backstop so the line eventually
+    /// appears even if no refresh arrives.
+    pub(super) fn onboarding_pending_validation_ready_to_fire(&self) -> bool {
+        let Some(pending) = self.onboarding_pending_model_validation.as_ref() else {
+            return false;
+        };
+        let timed_out = pending.resolve_timed_out();
+        if pending.await_catalog_refresh {
+            let refreshed =
+                self.remote_model_catalog_generation > pending.catalog_generation_at_request;
+            return refreshed || timed_out;
+        }
+        self.onboarding_default_model_id_is_concrete() || timed_out
     }
 
     /// Build the provider used for the onboarding model-validation ping.
@@ -1183,17 +1231,6 @@ impl App {
                 }
                 // Keep the per-candidate countdown notice fresh.
                 self.update_onboarding_import_review_status();
-                return true;
-            }
-            Some(OnboardingPhase::TelemetryConsent {
-                yes_highlighted, ..
-            }) => {
-                if decision_timed_out {
-                    // Timeout default is the highlighted option (No by default).
-                    self.onboarding_answer_telemetry_consent(yes_highlighted);
-                    return true;
-                }
-                self.update_onboarding_telemetry_consent_status();
                 return true;
             }
             Some(OnboardingPhase::ContinuePrompt {

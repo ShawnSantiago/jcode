@@ -34,7 +34,14 @@ pub(super) async fn process_turn_with_input(
         }
         Err(error) => {
             let err_str = crate::util::format_error_chain(&error);
-            if is_context_limit_error(&err_str) {
+            if super::is_request_payload_too_large_error(&err_str) {
+                if !app
+                    .try_recover_payload_too_large_and_retry(terminal, event_stream)
+                    .await
+                {
+                    app.handle_turn_error(err_str);
+                }
+            } else if is_context_limit_error(&err_str) {
                 if !app.try_auto_compact_and_retry(terminal, event_stream).await {
                     app.handle_turn_error(err_str);
                 }
@@ -59,6 +66,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.progress_copy_selection_edge_autoscroll();
     app.progress_mouse_scroll_animation();
     needs_redraw |= app.update_chat_overscroll();
+    needs_redraw |= app.tick_reasoning_collapse();
     needs_redraw |= app.update_pinned_images_auto_hide();
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;

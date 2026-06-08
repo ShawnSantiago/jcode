@@ -7227,6 +7227,105 @@ fn with_measurement_font_system<R>(f: impl FnOnce(&mut FontSystem) -> R) -> R {
     MEASUREMENT_FONT_SYSTEM.with(|cell| f(&mut cell.borrow_mut()))
 }
 
+/// Horizontal glyph bounds (left, right) for each inline-code span on a single
+/// styled line, in line-local pixel coordinates (i.e. before the panel's left
+/// padding is added). `None` entries mean the span could not be measured and the
+/// caller should fall back to the cheap column-width estimate.
+///
+/// These bounds depend only on the line's own text/spans and the text scale: the
+/// transcript body buffer is laid out with `Wrap::None`, so each logical line is
+/// shaped independently and its glyph positions never depend on neighbouring
+/// lines. That makes them perfectly cacheable per line, which is the whole point
+/// of this helper.
+type InlineCodeSpanBounds = Vec<Option<(f32, f32)>>;
+
+/// Shape exactly one line and read the horizontal bounds of each of its
+/// inline-code spans. This is the expensive step (cosmic-text Advanced shaping),
+/// so callers should go through `inline_code_span_bounds_for_line`, which caches
+/// the result per (line, scale).
+fn shape_inline_code_span_bounds(
+    line: &SingleSessionStyledLine,
+    size: PhysicalSize<u32>,
+    text_scale: f32,
+) -> InlineCodeSpanBounds {
+    let code_spans: Vec<&SingleSessionInlineSpan> = line
+        .inline_spans
+        .iter()
+        .filter(|span| span.kind == SingleSessionInlineSpanKind::Code)
+        .collect();
+    if code_spans.is_empty() {
+        return Vec::new();
+    }
+    with_measurement_font_system(|font_system| {
+        let buffer = single_session_body_text_buffer_from_lines(
+            font_system,
+            std::slice::from_ref(line),
+            size,
+            text_scale,
+        );
+        let Some(layout_run) = buffer.layout_runs().next() else {
+            return vec![None; code_spans.len()];
+        };
+        code_spans
+            .iter()
+            .map(|span| {
+                layout_run
+                    .highlight(
+                        glyphon::Cursor::new(layout_run.line_i, span.start),
+                        glyphon::Cursor::new(layout_run.line_i, span.end),
+                    )
+                    .and_then(|(left, width)| (width > 0.0).then_some((left, left + width)))
+            })
+            .collect()
+    })
+}
+
+/// Cached per-line inline-code span bounds.
+///
+/// The inline-code/math pill builder runs on every frame whose visible window
+/// contains inline code, and it previously re-shaped the ENTIRE visible viewport
+/// into a throwaway buffer every frame just to read these bounds. During a
+/// continuous scroll the viewport content barely changes frame-to-frame, so
+/// caching the bounds keyed by the line's content hash + text scale turns that
+/// full reshape into shaping only the one or two newly revealed lines. The cache
+/// is bounded: once it grows past `MAX` entries it is cleared wholesale (cheap
+/// and rare relative to the per-frame savings).
+fn inline_code_span_bounds_for_line(
+    line: &SingleSessionStyledLine,
+    size: PhysicalSize<u32>,
+    text_scale: f32,
+) -> InlineCodeSpanBounds {
+    const MAX_ENTRIES: usize = 8192;
+    thread_local! {
+        static INLINE_CODE_BOUNDS_CACHE: std::cell::RefCell<HashMap<u64, InlineCodeSpanBounds>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+
+    // Glyph layout is invariant to content width here (Wrap::None) but does
+    // depend on the rendered width bucket via font metrics rounding, so fold the
+    // body content width into the key alongside the scale.
+    let mut hasher = DefaultHasher::new();
+    line.hash(&mut hasher);
+    text_scale.to_bits().hash(&mut hasher);
+    single_session_content_width(size)
+        .to_bits()
+        .hash(&mut hasher);
+    let key = hasher.finish();
+
+    INLINE_CODE_BOUNDS_CACHE.with(|cell| {
+        if let Some(bounds) = cell.borrow().get(&key) {
+            return bounds.clone();
+        }
+        let bounds = shape_inline_code_span_bounds(line, size, text_scale);
+        let mut cache = cell.borrow_mut();
+        if cache.len() >= MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, bounds.clone());
+        bounds
+    })
+}
+
 fn push_single_session_inline_code_cards_from_viewport(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
@@ -7263,36 +7362,26 @@ fn push_single_session_inline_code_cards_from_viewport(
         horizontal_pad,
         top_offset_pixels: viewport.top_offset_pixels,
     };
-    let body_buffer = with_measurement_font_system(|font_system| {
-        single_session_body_text_buffer_from_lines(font_system, &viewport.lines, size, text_scale)
-    });
-    let layout_runs = body_buffer.layout_runs().collect::<Vec<_>>();
 
     let mut occurrences = HashMap::new();
     for (line_index, line) in viewport.lines.iter().enumerate() {
         if !single_session_line_style_supports_inline_code_cards(line.style) {
             continue;
         }
-        let line_y = layout_runs
-            .get(line_index)
-            .map(|run| body_top + viewport.top_offset_pixels + run.line_top)
-            .unwrap_or(body_top + viewport.top_offset_pixels + line_index as f32 * line_height);
+        // The transcript body buffer is laid out with `Wrap::None`, so each
+        // logical line occupies exactly one visual row: `line_top` is simply
+        // `line_index * line_height`. That lets us avoid shaping the entire
+        // viewport here and only (cache-)shape lines that actually carry inline
+        // code spans below.
+        let line_y = body_top + viewport.top_offset_pixels + line_index as f32 * line_height;
         let code_runs = single_session_inline_code_runs_for_line(line);
+        let code_span_bounds = if code_runs.is_empty() {
+            Vec::new()
+        } else {
+            inline_code_span_bounds_for_line(line, size, text_scale)
+        };
         for (run_index, run) in code_runs.iter().enumerate() {
-            let glyph_bounds = layout_runs.get(line_index).and_then(|layout_run| {
-                line.inline_spans
-                    .iter()
-                    .filter(|span| span.kind == SingleSessionInlineSpanKind::Code)
-                    .nth(run_index)
-                    .and_then(|span| {
-                        layout_run
-                            .highlight(
-                                glyphon::Cursor::new(layout_run.line_i, span.start),
-                                glyphon::Cursor::new(layout_run.line_i, span.end),
-                            )
-                            .and_then(|(left, width)| (width > 0.0).then_some((left, left + width)))
-                    })
-            });
+            let glyph_bounds = code_span_bounds.get(run_index).copied().flatten();
             let (x, width) = if let Some((glyph_left, glyph_right)) = glyph_bounds {
                 let x = PANEL_TITLE_LEFT_PADDING + glyph_left - horizontal_pad;
                 (x, glyph_right - glyph_left + horizontal_pad * 2.0)

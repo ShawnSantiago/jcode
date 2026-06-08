@@ -845,6 +845,23 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/continue" || trimmed == "/resumeall" || trimmed == "/resume-all" {
+                    app.push_display_message(DisplayMessage::system(
+                        "Continuing all interrupted sessions...".to_string(),
+                    ));
+                    match remote.resume_all_sessions().await {
+                        Ok(_) => app.set_status_notice("Continuing interrupted sessions..."),
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to continue sessions: {}",
+                                error
+                            )));
+                            app.set_status_notice("Continue all failed");
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if trimmed == "/rebuild" {
                     let session_id = app
                         .remote_session_id

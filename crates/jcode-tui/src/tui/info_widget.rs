@@ -812,6 +812,8 @@ struct WidgetsState {
     widget_states: HashMap<WidgetKind, SingleWidgetState>,
     /// Current placements (updated each frame)
     placements: Vec<WidgetPlacement>,
+    /// Persistent widget anchors (HUD slot memory, including hidden-in-place ones)
+    anchors: Vec<super::info_widget_layout::WidgetAnchor>,
 }
 
 impl Default for WidgetsState {
@@ -820,6 +822,7 @@ impl Default for WidgetsState {
             enabled: true,
             widget_states: HashMap::new(),
             placements: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 }
@@ -864,15 +867,16 @@ pub fn calculate_placements(
         None => return Vec::new(),
     };
 
-    let placements = super::info_widget_layout::calculate_placements(
+    let outcome = super::info_widget_layout::calculate_placements_anchored(
         messages_area,
         margins,
         data,
         state.enabled,
-        &state.placements,
+        &state.anchors,
     );
-    state.placements = placements.clone();
-    placements
+    state.anchors = outcome.anchors;
+    state.placements = outcome.visible.clone();
+    outcome.visible
 }
 
 /// Calculate the height needed for a specific widget type
@@ -1113,6 +1117,7 @@ pub fn calculate_layout(
         right_widths: free_widths.to_vec(),
         left_widths: Vec::new(),
         centered: false,
+        ..Default::default()
     };
     let placements = calculate_placements(messages_area, &margins, data);
     placements.first().map(|p| p.rect)

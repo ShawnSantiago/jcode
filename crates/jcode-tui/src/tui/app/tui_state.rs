@@ -162,8 +162,16 @@ impl App {
     ///
     /// * Remote sessions use [`App::remote_resolved_credential`], which the
     ///   server resolved authoritatively from its live credentials.
-    /// * Local sessions use [`resolve_dual_credential_auth`], shared with the
-    ///   header tag and model-switch line so all surfaces agree.
+    /// * Local sessions prefer the provider's *explicitly pinned* credential
+    ///   ([`Provider::active_explicit_credential`]) so the widget reflects the
+    ///   credential the next request will actually use the instant the user
+    ///   switches OAuth<->API (model picker, `/account`, header toggle). That
+    ///   read is in-memory and cache-free, so it never lingers on a stale
+    ///   [`AuthStatus`] snapshot (cached up to 60s) or a `JCODE_RUNTIME_PROVIDER`
+    ///   pin that drifted out of sync with the provider. When the provider is in
+    ///   auto mode (no explicit pin) it falls back to
+    ///   [`resolve_dual_credential_auth`] -- shared with the header tag and
+    ///   model-switch line -- which is cheap (cached probe, no per-frame I/O).
     ///
     /// Returns `None` when neither transport can determine the credential (e.g.
     /// the server didn't report one, or no credentials are configured locally).
@@ -174,6 +182,19 @@ impl App {
     ) -> Option<crate::auth::ActiveCredential> {
         if route.is_remote {
             return self.remote_resolved_credential.map(Into::into);
+        }
+
+        // Authoritative, cache-free answer from the live provider whenever the
+        // user has explicitly pinned a credential. This reflects exactly what the
+        // next request will use, so an explicit OAuth<->API switch is visible on
+        // the very next frame. For local sessions the requested `provider` always
+        // matches the live active provider (the widget route is derived from
+        // `self.provider.name()`), and remote sessions returned above, so the
+        // pin maps onto the right dual-auth provider. Explicit reads do no disk
+        // I/O, so the common per-frame path stays cheap; auto mode returns `None`
+        // here and falls through to the cached heuristic below.
+        if let Some(resolved) = self.provider.active_explicit_credential() {
+            return Some(resolved.into());
         }
 
         let auth_status = crate::auth::AuthStatus::check_fast();
@@ -1350,6 +1371,28 @@ impl crate::tui::TuiState for App {
         let mut renderer = self.streaming_md_renderer.borrow_mut();
         renderer.set_width(Some(width));
         renderer.update(&self.streaming.streaming_text)
+    }
+
+    fn reasoning_retained_markup(&self) -> Option<&str> {
+        self.reasoning_retained.as_deref()
+    }
+
+    fn reasoning_collapse_state(&self) -> Option<(&str, f32)> {
+        let collapse = self.reasoning_collapse.as_ref()?;
+        let elapsed = collapse.started.elapsed().as_secs_f32();
+        let dur = crate::tui::app::REASONING_COLLAPSE_DURATION.as_secs_f32();
+        let t = if dur <= 0.0 {
+            1.0
+        } else {
+            (elapsed / dur).clamp(0.0, 1.0)
+        };
+        // Ease-in-out so the shrink starts and ends gently.
+        let progress = t * t * (3.0 - 2.0 * t);
+        Some((collapse.markup.as_str(), progress))
+    }
+
+    fn reasoning_animation_active(&self) -> bool {
+        App::reasoning_animation_active(self)
     }
 
     fn centered_mode(&self) -> bool {

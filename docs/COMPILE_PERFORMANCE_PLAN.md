@@ -905,3 +905,246 @@ After each structural phase we should re-measure and ask:
 - Did we reduce rebuild scope for common self-dev edits?
 
 If not, we should avoid continuing high-churn refactors on compile-time grounds alone.
+
+## Results: front-end parallelism, linker, base-split, and test-build (2026-06-08)
+
+This round focused on the warm self-dev edit loop after the crate DAG was already
+in place. Every claim below is backed by a measurement; the negative results are
+documented as deliberately as the wins so we do not re-attempt them.
+
+### Profiling: where warm time actually goes
+
+`-Ztime-passes` on `jcode-base` (selfdev profile, single-threaded, clean unit):
+
+| pass | lib only | lib + tests |
+| --- | --- | --- |
+| macro_expand | 0.5s | 1.5s |
+| type_check | 5.3s | 6.5s |
+| MIR_borrow_check | 7.2s | 9.7s |
+| monomorphization collect | 5.1s | 6.8s |
+| codegen_crate | 2.9s | 8-12s |
+| LLVM_passes | 2.8s | 3-4s |
+| **total** | **~24s** | **~30-33s** |
+
+Takeaway: a normal `build`/`check` of a monolith is **~80% single-threaded
+front-end** (type-check + borrow-check + monomorphization collection). Codegen
+only dominates in the **test** build (all the `#[test]` bodies become real code).
+
+### WIN 1 — nightly parallel front-end (`-Zthreads`)
+
+Because the bottleneck is the front-end, `rustc -Zthreads` (nightly) is the single
+highest-leverage lever. Measured on this machine (Intel Ultra 7, 8 logical cores,
+selfdev profile):
+
+- `jcode-base` clean recompile: **25.3s -> 12.7s** (`-Zthreads=4`)
+- base-edit full-chain rebuild end-to-end: **~16s -> ~10s**
+- Diminishing returns past 4 threads on an 8-core box.
+
+Shipped in `scripts/dev_cargo.sh` (`configure_parallel_frontend`): auto-enabled
+for the `selfdev` profile when a nightly toolchain is installed, isolated to
+`target/selfdev` so it cannot thrash rust-analyzer's `target/debug` cache.
+Controls: `JCODE_PARALLEL_FRONTEND`, `JCODE_FRONTEND_THREADS`, `JCODE_DEV_TOOLCHAIN`.
+
+### WIN 2 — prefer mold over lld for the bin link
+
+The `jcode` binary is **~300 MB** of `.text` (statically links aws-sdk, `tract`
+ML, ratatui, syntect, multiple rustls copies, ...). On a warm rebuild that
+relinks the bin (which is nearly every incremental build):
+
+- lld: ~2.9s
+- **mold: ~2.0s**
+
+Flipped `dev_cargo.sh` auto-detection to mold-first (lld remains the fallback).
+~0.8s off every incremental build. Note: changing the linker changes RUSTFLAGS,
+so the first build after this lands does a one-time full recompile. (Only the
+dev/selfdev path; `release-lto` linking is left untouched — historically
+`clang + mold` had release-link issues on this machine.)
+
+### NEGATIVE — cranelift codegen backend
+
+Tried `-Zcodegen-backend=cranelift` on both lib and test builds. It was **slower**
+in both cases (lib 25.3s -> ... cranelift slower; base `--tests` 32.5s LLVM vs
+34.2s cranelift). The bottleneck is the front-end, not codegen, so cranelift's
+faster-codegen tradeoff loses here. **Do not enable cranelift.**
+
+### NEGATIVE — splitting provider/auth out of `jcode-base`
+
+Hypothesis: provider+auth account for ~70% of base churn; pulling them into a
+sibling crate should stop provider edits from recompiling base-core.
+
+Did the full analysis and the full execution:
+
+- Mapped the module dependency graph; the provider/auth cycle is a 6-module SCC
+  (`auth, provider, provider_catalog, subscription_catalog, usage, live_tests`).
+- Computed the exact transitive cut: **17 modules / 114 files / ~75k LOC** must
+  move up (provider, auth, usage, memory, memory_agent, compaction, sidecar,
+  skill, goal, gmail, catalogs), leaving a **~28k-LOC base-core** with **zero
+  remaining back-edges** (verified).
+- Executed it in a worktree: created `jcode-provider-stack`, moved all 114 files,
+  rewired `app-core` to re-export it. **Full build passed, binary ran, tests
+  passed.**
+
+Then measured, controlled, low load:
+
+| layout | provider-edit rebuild |
+| --- | --- |
+| unsplit (base 103k) | ~10.4s |
+| split (provider-stack 75k + base-core 28k) | ~10.1s |
+
+**No win.** The `--timings` breakdown shows why: thanks to rmeta pipelining,
+`app-core` already starts compiling **before** `base` finishes (base is on the
+critical path for only ~2s before app-core picks up). And `app-core + tui + bin`
+dominate the chain and are untouched by the split. Splitting an *intermediate*
+crate just moves work off a path that was already overlapped.
+
+**Decision: reverted.** Do not ship a 114-file move through auth/billing code for
+zero measured benefit. General rule learned: **further splitting the existing
+monoliths has diminishing-to-negative returns** once the parallel front-end and
+rmeta pipelining are in play. The lever is crate *content/weight*, not crate
+*count*.
+
+### NEGATIVE — moving inline `#[cfg(test)]` tests to separate targets
+
+Inline tests are large: base 1132 / app-core 830 / tui 1313 `#[test]`s,
+~49k LOC of test code. They add **+5.7s (+23%)** to a `cargo test -p jcode-base`
+front-end, concentrated in codegen (test bodies become real code).
+
+But moving them out does **not** help:
+
+1. On a normal `build`/`check` they are already `cfg`-gated out and cost **0s**.
+   They only cost time when you actually run `cargo test` on that crate.
+2. Converting unit tests to `tests/` integration targets is not viable: the 1132
+   base tests reach private internals; integration tests only see `pub` items, so
+   it would require either making huge swaths of the API public or adding
+   test-only accessors — large churn that breaks encapsulation.
+3. Even split out, `cargo test -p <crate>` compiles the whole test cfg unit; you
+   cannot cheaply compile just one test. That is a cargo limitation, not a
+   structure problem.
+
+**Decision: leave inline unit tests as-is.** They are the correct structure for
+white-box testing and impose no cost on the build loop.
+
+### State of play after this round
+
+For the plain `build` edit loop, the warm provider/base edit is ~10s, now a
+**balanced serial chain** with no single dominant stage:
+
+```
+provider/base front-end ~3s -> app-core ~3s -> tui ~2.7s -> bin link ~2s (mold)
+```
+
+The structural levers (crate splitting, test relocation) are tapped out. The
+remaining real levers are **product-level, not mechanical**:
+
+- **Dependency/binary weight** (untested here): the 300 MB binary statically
+  links the full aws-sdk, `tract` (ML, for embeddings), syntect, etc. Feature-
+  gating the heaviest stacks behind off-by-default flags would cut codegen *and*
+  link on every build. Highest-probability remaining win; measure before committing.
+- **Dead code**: the root bin/lib is large and carries dead-code warnings;
+  trimming genuinely-unused code is the one "free" structural win.
+
+### NEGATIVE — `-C prefer-dynamic` for the dev binary
+
+Hypothesis: the ~2s bin link is dominated by statically baking everything into a
+huge binary; `prefer-dynamic` should dynamize that and cut the link.
+
+Built the full bin with `-C prefer-dynamic` (selfdev + nightly threads + mold)
+and measured the incremental relink (touch `main.rs`), back-to-back vs
+static+mold under identical conditions:
+
+| link config | warm bin relink | binary size |
+| --- | --- | --- |
+| static + mold | ~1.8-2.7s | 414 MB |
+| prefer-dynamic + mold | ~1.8-3.0s | 413 MB |
+
+**No win, and the binary got no smaller.** `prefer-dynamic` only dynamizes crates
+that are built as dylibs (essentially Rust std); the workspace crates and the
+heavy deps (aws-sdk, tract, ratatui, ...) are still `rlib`s baked into the bin,
+so the link does the same work. The dynamic binary also needs its `.so` files on
+`LD_LIBRARY_PATH` to run, which would add fragility to the `selfdev reload` path
+(reload copies the binary to `~/.jcode/builds/current/`). Bad trade for zero gain.
+
+The only way dynamic linking would help is compiling the heavy *dependency*
+stacks as dylibs — which is the product-level "dependency weight" lever, not a
+mechanical config change.
+
+### Final verdict
+
+All non-product compile levers are now exhausted and documented. Shipped wins:
+the nightly parallel front-end and mold. Everything else (more crate splitting,
+test relocation, cranelift, prefer-dynamic) was measured and rejected. The warm
+edit loop is a balanced ~10s serial chain; the only remaining levers are
+product-level (trim the statically-linked dependency weight) and are explicitly
+out of scope.
+
+## Incremental cache audit (2026-06-08)
+
+Audited whether the incremental-build caching is configured optimally. It is —
+but a multi-agent workflow detail was found that silently destroys cache reuse.
+
+### Config: correct, nothing to change
+
+- `selfdev` / `dev` / `test` all set `incremental = true`. ✓
+- sccache is deliberately **skipped** for incremental builds (`maybe_enable_sccache`
+  in `dev_cargo.sh`): sccache cannot cache incremental compilation units, so on
+  our incremental profiles it would add wrapper overhead for 0% hits. Forcing it
+  on requires `JCODE_SCCACHE=on` (and a non-incremental profile to be useful). ✓
+- The nightly parallel front-end (`-Zthreads=4`) is incremental-compatible —
+  verified: a genuinely idle no-op rebuild is **0.4s** (pure fingerprint checks),
+  so `-Zthreads` does not defeat the dep-graph cache. ✓
+
+### The real issue: shared-worktree mtime invalidation
+
+A "no-op" rebuild (touch nothing) was observed taking **46s** instead of 0.4s.
+`CARGO_LOG=cargo::core::compiler::fingerprint=info` showed the cause:
+
+```
+stale: changed ".../jcode-provider-core/src/lib.rs"
+  source_mtime > fingerprint_mtime   -> StaleDepFingerprint cascades to the whole graph
+```
+
+The source content had not changed — only its **mtime** had, because **another
+agent was editing files in the same shared worktree** (`/home/jeremy/jcode`)
+between builds. Cargo keys freshness on mtime, so any concurrent edit to a low,
+high-fanout crate (e.g. `jcode-provider-core`, `jcode-base`) invalidates that
+crate and everything downstream, turning a 0.4s no-op into a full-chain rebuild.
+
+Proven back-to-back: build #2 (idle) = **0.4s**; build #3, after a sibling
+session touched `inline_interactive.rs` / `info_widget_stability.rs`, = **46.6s**.
+
+### Correction: the shared-worktree model is intended, and it works
+
+The 46s "no-op" above is **not a cache bug** — it is the shared-build model doing
+its job. When several agents work in the **same** worktree they share one
+`target/selfdev` dir, so:
+
+- Agent A edits a file and builds -> `target/selfdev` now contains A's change.
+- Agent B builds -> cargo correctly rebuilds only the crates A touched (B's binary
+  must include A's edit) and reuses everything else. B is *consuming A's
+  compilation*, which is the goal: "one agent compiles, everyone benefits."
+
+Putting agents in separate worktrees would be **worse** for that goal (no
+sharing at all). The selfdev build system reinforces sharing with cross-session
+**dedup**: `build_dedupe_key = worktree_scope : source_fingerprint : command`.
+If agent B requests a build while A is already building the same source state, B
+*attaches* to A's in-flight build instead of launching a second one.
+
+### The one real rule for keeping the shared cache efficient
+
+The `target/selfdev` fingerprint **includes RUSTFLAGS**, and both `-Zthreads` and
+`-fuse-ld=mold` are part of it (measured: changing either forces a full ~2.5 min
+rebuild and leaves a competing artifact set). So the shared cache only stays warm
+if **every** build of the selfdev profile uses **identical flags**:
+
+- `selfdev build` always routes through `scripts/dev_cargo.sh`, which injects the
+  standard `-Zthreads=4 + mold` flags. All agents using it share perfectly
+  (idle no-op ~1s). ✓
+- A bare `cargo build --profile selfdev` (bypassing `dev_cargo.sh`) uses
+  different flags -> triggers a full rebuild and poisons the shared cache for the
+  next `selfdev build`. **Avoid it.** Always build via `selfdev build` /
+  `dev_cargo.sh`.
+- rust-analyzer uses `target/debug` (a separate dir), so it does **not** poison
+  `target/selfdev`. ✓
+
+No config change is warranted; the caching itself is already optimal. The
+operational rule is simply: every agent builds the same way.

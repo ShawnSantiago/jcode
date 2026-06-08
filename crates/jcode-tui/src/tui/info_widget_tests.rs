@@ -706,6 +706,7 @@ fn overview_widget_is_placed_when_space_allows() {
         if let Some(state) = guard.as_mut() {
             state.enabled = true;
             state.placements.clear();
+            state.anchors.clear();
             state.widget_states.clear();
         }
     }
@@ -719,6 +720,7 @@ fn overview_widget_is_placed_when_space_allows() {
         right_widths: vec![40; 20],
         left_widths: Vec::new(),
         centered: false,
+        ..Default::default()
     };
     let placements = calculate_placements(Rect::new(0, 0, 80, 20), &margins, &data);
     assert!(
@@ -734,6 +736,7 @@ fn workspace_widget_has_high_priority_when_enabled() {
         if let Some(state) = guard.as_mut() {
             state.enabled = true;
             state.placements.clear();
+            state.anchors.clear();
             state.widget_states.clear();
         }
     }
@@ -757,6 +760,7 @@ fn workspace_widget_has_high_priority_when_enabled() {
         right_widths: vec![40; 20],
         left_widths: Vec::new(),
         centered: false,
+        ..Default::default()
     };
     let placements = calculate_placements(Rect::new(0, 0, 80, 20), &margins, &data);
     assert_eq!(
@@ -979,6 +983,7 @@ fn sticky_placement_clamps_width_to_current_margin() {
         if let Some(state) = guard.as_mut() {
             state.enabled = true;
             state.placements.clear();
+            state.anchors.clear();
             state.widget_states.clear();
         }
     }
@@ -997,6 +1002,7 @@ fn sticky_placement_clamps_width_to_current_margin() {
             right_widths: vec![30; 10],
             left_widths: Vec::new(),
             centered: false,
+            ..Default::default()
         },
         &data,
     );
@@ -1011,6 +1017,7 @@ fn sticky_placement_clamps_width_to_current_margin() {
             right_widths: second_margins.clone(),
             left_widths: Vec::new(),
             centered: false,
+            ..Default::default()
         },
         &data,
     );
@@ -1039,6 +1046,7 @@ fn placements_never_include_border_only_widgets() {
         if let Some(state) = guard.as_mut() {
             state.enabled = true;
             state.placements.clear();
+            state.anchors.clear();
             state.widget_states.clear();
         }
     }
@@ -1092,6 +1100,7 @@ fn placements_never_include_border_only_widgets() {
             right_widths: vec![40; 10],
             left_widths: Vec::new(),
             centered: false,
+            ..Default::default()
         },
         &data,
     );

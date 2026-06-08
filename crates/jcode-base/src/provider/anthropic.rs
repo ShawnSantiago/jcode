@@ -868,6 +868,11 @@ impl AnthropicProvider {
         if let Some(route) = mode.auth_route() {
             crate::env::set_var("JCODE_RUNTIME_PROVIDER", route.runtime_provider_key());
         }
+        // Drop any cached auth snapshot so surfaces that still consult the cheap
+        // cached probe (auto-mode resolution, usage availability, account labels)
+        // re-derive from the new credential choice on their next read instead of
+        // lingering on a snapshot taken before the switch.
+        crate::auth::AuthStatus::invalidate_cache();
         Ok(())
     }
 
@@ -1410,7 +1415,11 @@ async fn run_stream_with_retries(
         {
             Ok(()) => return, // Success
             Err(e) => {
-                let error_str = e.to_string().to_lowercase();
+                // Use the full anyhow source chain ({:#}) rather than just the top
+                // context. The underlying cause (e.g. the HTTP/2 "stream error" or
+                // a connection reset) lives deeper than "Failed to send request to
+                // Anthropic API", and the retry classifier needs to see it.
+                let error_str = format!("{e:#}").to_lowercase();
 
                 // OAuth auth failures: force refresh and retry once immediately.
                 if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {

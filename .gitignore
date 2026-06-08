@@ -19,3 +19,5 @@ ios_simulator_screenshot.png
 .omx/artifacts/
 
 /telemetry-worker/backups/
+target-ttest/
+target-ttest*/
