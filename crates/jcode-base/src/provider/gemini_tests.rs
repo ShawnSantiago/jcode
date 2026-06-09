@@ -193,7 +193,8 @@ fn build_contents_replays_thought_signature_on_function_call() {
     // Gemini 3 (Antigravity Cloud Code backend) rejects function calls that
     // omit the original thoughtSignature on later turns. Verify the signature
     // captured on the ToolUse block is replayed verbatim on the functionCall
-    // part, and that an absent/empty signature stays absent.
+    // part. A later unsigned call inherits the most recent real signature so the
+    // backend (which 400s a fully-unsigned turn) accepts it (issue #339).
     let messages = vec![
         Message {
             role: Role::Assistant,
@@ -226,8 +227,10 @@ fn build_contents_replays_thought_signature_on_function_call() {
         "signature must be replayed on the matching function call part"
     );
     assert_eq!(
-        contents[1].parts[0].thought_signature, None,
-        "missing signature must not be fabricated"
+        contents[1].parts[0].thought_signature.as_deref(),
+        Some("SIGNATURE_ABC"),
+        "an unsigned later call must inherit the most recent real signature so \
+         the backend does not reject a fully-unsigned turn"
     );
 }
 
@@ -277,6 +280,134 @@ fn build_contents_replays_every_signature_across_multi_tool_history() {
         vec![Some("SIG_A"), Some("SIG_B"), Some("SIG_C")],
         "every functionCall in the history must carry its captured thought_signature, \
          not just the most recent one"
+    );
+}
+
+#[test]
+fn build_contents_carries_first_signature_onto_unsigned_same_turn_siblings() {
+    // Issue #339: when Gemini-3 emits MULTIPLE function calls in ONE turn it
+    // signs only the first; the siblings persist without a signature. The
+    // Antigravity/Cloud Code backend then rejects the unsigned siblings with
+    // "Function call is missing a thought_signature ... position N". Verify the
+    // first call's signature is carried forward onto same-turn siblings that
+    // lack one (the backend accepts a replayed signature on sibling calls).
+    let messages = vec![Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::ToolUse {
+                id: "call_todo".to_string(),
+                name: "todo".to_string(),
+                input: json!({ "items": ["a", "b"] }),
+                thought_signature: Some("SIG_TURN_1".to_string()),
+            },
+            ContentBlock::ToolUse {
+                id: "call_bash".to_string(),
+                name: "bash".to_string(),
+                input: json!({ "command": "ls" }),
+                thought_signature: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call_write".to_string(),
+                name: "write".to_string(),
+                input: json!({ "path": "a.txt", "content": "hi" }),
+                thought_signature: None,
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let contents = build_contents(&messages);
+    let replayed: Vec<Option<&str>> = contents
+        .iter()
+        .flat_map(|content| content.parts.iter())
+        .filter(|part| part.function_call.is_some())
+        .map(|part| part.thought_signature.as_deref())
+        .collect();
+    assert_eq!(
+        replayed,
+        vec![Some("SIG_TURN_1"), Some("SIG_TURN_1"), Some("SIG_TURN_1")],
+        "every functionCall in a multi-call turn must carry a signature so the \
+         backend does not reject unsigned siblings"
+    );
+}
+
+#[test]
+fn build_contents_carries_signature_forward_across_turns_for_unsigned_calls() {
+    // Issue #339: the Antigravity/Cloud Code backend 400s an assistant turn
+    // whose function calls are ALL unsigned. A later turn made entirely of
+    // locally synthesized / unsigned tool calls (auto-poke continuation, batch,
+    // manual tool use, or an imported pre-signature session) must inherit the
+    // most recent real signature from earlier in the conversation so at least
+    // one call carries a signature and the backend accepts the turn.
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "turn1".to_string(),
+                name: "read".to_string(),
+                input: json!({ "path": "README.md" }),
+                thought_signature: Some("SIG_TURN_1".to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "turn1".to_string(),
+                content: "ok".to_string(),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "turn2".to_string(),
+                name: "bash".to_string(),
+                input: json!({ "command": "ls" }),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let contents = build_contents(&messages);
+    let last_turn_sig = contents
+        .last()
+        .and_then(|content| content.parts.first())
+        .and_then(|part| part.thought_signature.as_deref());
+    assert_eq!(
+        last_turn_sig,
+        Some("SIG_TURN_1"),
+        "a fully-unsigned later turn must inherit the most recent real signature \
+         so the backend does not reject it"
+    );
+}
+
+#[test]
+fn build_contents_leaves_unsigned_calls_unsigned_when_no_prior_signature_exists() {
+    // If the conversation has never produced a real signature there is nothing
+    // to carry; we must not fabricate one out of thin air.
+    let messages = vec![Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "call".to_string(),
+            name: "bash".to_string(),
+            input: json!({ "command": "ls" }),
+            thought_signature: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let contents = build_contents(&messages);
+    assert_eq!(
+        contents[0].parts[0].thought_signature, None,
+        "with no prior signature in the conversation, an unsigned call stays unsigned"
     );
 }
 

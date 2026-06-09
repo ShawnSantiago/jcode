@@ -284,12 +284,27 @@ pub(super) fn draw_messages(
     super::set_last_max_scroll(max_scroll);
     update_user_prompt_positions(wrapped_user_prompt_starts);
 
+    // When older compacted history is being loaded in, the app hands us the
+    // reader's distance-from-bottom instead of an absolute offset. Distance from
+    // the bottom is invariant under a top-side prepend, so resolving it against
+    // the *current* total keeps the same content under the reader and the load
+    // is seamless (no jump to the new absolute top).
+    let anchored_scroll = app
+        .pending_history_anchor_lines_from_bottom()
+        .map(|lines_from_bottom| total_lines.saturating_sub(lines_from_bottom).min(max_scroll));
     let user_scroll = app.scroll_offset().min(max_scroll);
-    let scroll = if app.auto_scroll_paused() {
+    let scroll = if let Some(anchored) = anchored_scroll {
+        anchored
+    } else if app.auto_scroll_paused() {
         user_scroll.min(max_scroll)
     } else {
         max_scroll
     };
+
+    // Publish the resolved geometry so scroll handlers and the anchor-reconcile
+    // tick can adopt the exact on-screen position after a prepend.
+    super::set_last_total_wrapped_lines(total_lines);
+    super::set_last_resolved_chat_scroll(scroll);
 
     let prompt_preview_lines = if crate::config::config().display.prompt_preview && scroll > 0 {
         compute_prompt_preview_line_count(
@@ -366,6 +381,14 @@ pub(super) fn draw_messages(
         right_widths: vec![0; prompt_preview_lines as usize],
         left_widths: vec![0; prompt_preview_lines as usize],
         centered: content_margins.centered,
+        // Bind row `r` of the margin to transcript line `scroll_top + r` so a
+        // content-anchored info widget rides the transcript while the user scrolls
+        // instead of churning against a fixed screen row. The prompt-preview band at
+        // the top is synthetic (not part of the scrolled transcript), so offset by it
+        // to keep the content rows aligned. While pinned at the bottom (auto-follow),
+        // widgets stay screen-anchored as before.
+        scroll_top: scroll.saturating_sub(prompt_preview_lines as usize),
+        content_anchored: app.auto_scroll_paused(),
         ..Default::default()
     };
     margins
@@ -706,6 +729,13 @@ pub(super) fn draw_messages(
             let hash = region.hash;
             let total_height = region.height;
             let image_end = region.end_line;
+            let is_fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+
+            // Inline raster images are materialized lazily: only decode + cache
+            // the ones actually on screen this frame.
+            if is_fit && image_end > scroll && abs_idx < visible_end {
+                super::inline_image_ui::materialize_visible(hash);
+            }
 
             if image_end > scroll && abs_idx < visible_end {
                 let marker_visible = abs_idx >= scroll && abs_idx < visible_end;
@@ -722,14 +752,26 @@ pub(super) fn draw_messages(
                             width: content_area.width,
                             height: render_height,
                         };
-                        let rows = crate::tui::mermaid::render_image_widget(
-                            hash,
-                            image_area,
-                            frame.buffer_mut(),
-                            centered,
-                            false,
-                        );
-                        if rows == 0 {
+                        let rows = if is_fit {
+                            // Scale-to-fit with a left border bar, so resizes and
+                            // font-metric mismatches never slice the image.
+                            crate::tui::mermaid::render_image_widget_fit(
+                                hash,
+                                image_area,
+                                frame.buffer_mut(),
+                                centered,
+                                true,
+                            )
+                        } else {
+                            crate::tui::mermaid::render_image_widget(
+                                hash,
+                                image_area,
+                                frame.buffer_mut(),
+                                centered,
+                                false,
+                            )
+                        };
+                        if rows == 0 && !is_fit {
                             frame.render_widget(
                                 Paragraph::new(Line::from(Span::styled(
                                     "↗ mermaid diagram unavailable",
@@ -752,13 +794,25 @@ pub(super) fn draw_messages(
                             width: content_area.width,
                             height: render_height,
                         };
-                        crate::tui::mermaid::render_image_widget(
-                            hash,
-                            image_area,
-                            frame.buffer_mut(),
-                            centered,
-                            true,
-                        );
+                        if is_fit {
+                            // Top scrolled off: scale-to-fit into the visible
+                            // portion rather than cropping arbitrarily.
+                            crate::tui::mermaid::render_image_widget_fit(
+                                hash,
+                                image_area,
+                                frame.buffer_mut(),
+                                centered,
+                                true,
+                            );
+                        } else {
+                            crate::tui::mermaid::render_image_widget(
+                                hash,
+                                image_area,
+                                frame.buffer_mut(),
+                                centered,
+                                true,
+                            );
+                        }
                     }
                 }
             }

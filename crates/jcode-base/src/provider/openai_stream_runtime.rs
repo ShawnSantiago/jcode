@@ -1516,18 +1516,16 @@ fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<St
 
 /// Check if an error is transient and should be retried
 pub(super) fn is_retryable_error(error_str: &str) -> bool {
-    // Network/connection errors
-    error_str.contains("connection reset")
-        || error_str.contains("connection closed")
-        || error_str.contains("connection refused")
-        || error_str.contains("broken pipe")
-        || error_str.contains("timed out")
-        || error_str.contains("timeout")
+    // Shared transport-layer classifier used by every other provider. This
+    // covers transient TLS/network faults (connection reset/closed/refused/
+    // aborted, broken pipe, timeouts, unexpected EOF, error decoding/reading,
+    // TLS BadRecordMac / fatal-alert, TLS handshake EOF, DNS/route failures,
+    // and HTTP/2 stream/protocol faults). Keeping the OpenAI path delegated
+    // here ensures retry behavior is unified across providers (issue #338).
+    crate::provider::is_transient_transport_error(error_str)
+        // OpenAI-specific transport wrapper.
         || error_str.contains("failed to send request to openai api")
-        // Stream/decode errors
-        || error_str.contains("error decoding")
-        || error_str.contains("error reading")
-        || error_str.contains("unexpected eof")
+        // Stream/decode errors specific to the OpenAI streaming runtime.
         || error_str.contains("incomplete message")
         || error_str.contains("stream disconnected before completion")
         || error_str.contains("ended before message completion marker")
@@ -1538,6 +1536,11 @@ pub(super) fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("503 service unavailable")
         || error_str.contains("504 gateway timeout")
         || error_str.contains("overloaded")
+        // Rate limiting (429): transient, recovers on retry. Unified with the
+        // other providers (Anthropic/Copilot) which already retry these.
+        || error_str.contains("429 too many requests")
+        || error_str.contains("rate limit")
+        || error_str.contains("rate_limit")
         // API-level server errors
         || error_str.contains("api_error")
         || error_str.contains("server_error")
@@ -1587,5 +1590,37 @@ mod stream_runtime_tests {
         assert!(!is_retryable_error(
             "openai token refresh failed; run /login to re-authenticate: network error"
         ));
+    }
+
+    #[test]
+    fn tls_transient_errors_are_retryable() {
+        // Regression for issue #338: transient TLS faults must be retried on
+        // the OpenAI path, matching every other provider. Callers pass the
+        // error string already lowercased.
+        assert!(is_retryable_error(
+            "stream error: io error: received fatal alert: badrecordmac"
+        ));
+        assert!(is_retryable_error("received fatal alert: badrecordmac"));
+        assert!(is_retryable_error("decryption failed or bad record mac"));
+        assert!(is_retryable_error("tls handshake eof"));
+        assert!(is_retryable_error("connection aborted"));
+        assert!(is_retryable_error("temporary failure in name resolution"));
+        assert!(is_retryable_error("no route to host"));
+        assert!(is_retryable_error("network is unreachable"));
+    }
+
+    #[test]
+    fn rate_limit_is_retryable() {
+        // Regression for issue #338 (gap #2): 429s should be retried, unifying
+        // behavior with Anthropic/Copilot.
+        assert!(is_retryable_error("429 too many requests"));
+        assert!(is_retryable_error("rate limit exceeded"));
+        assert!(is_retryable_error("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn auth_errors_remain_non_retryable() {
+        assert!(!is_retryable_error("401 unauthorized"));
+        assert!(!is_retryable_error("invalid api key"));
     }
 }

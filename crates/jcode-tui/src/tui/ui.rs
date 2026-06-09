@@ -80,6 +80,8 @@ mod header;
 mod inline_interactive_ui;
 #[path = "ui_inline.rs"]
 mod inline_ui;
+#[path = "ui_inline_image.rs"]
+pub(crate) mod inline_image_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
 #[path = "ui_memory_estimates.rs"]
@@ -189,6 +191,17 @@ static PINNED_PANE_TOTAL_LINES: AtomicUsize = AtomicUsize::new(0);
 /// Effective scroll position of the side pane after render-time clamping.
 #[cfg(not(test))]
 static LAST_DIFF_PANE_EFFECTIVE_SCROLL: AtomicUsize = AtomicUsize::new(0);
+/// Total wrapped line count of the chat transcript on the most recent frame.
+/// Used together with `LAST_RESOLVED_CHAT_SCROLL` to anchor the viewport when
+/// older compacted history is loaded in (so the content under the reader stays
+/// put instead of teleporting to the new absolute top).
+#[cfg(not(test))]
+static LAST_TOTAL_WRAPPED_LINES: AtomicUsize = AtomicUsize::new(0);
+/// The chat scroll offset the renderer actually used on the most recent frame
+/// (after clamping and after resolving any pending history anchor). Scroll
+/// handlers adopt this so manual scrolling resumes from the on-screen position.
+#[cfg(not(test))]
+static LAST_RESOLVED_CHAT_SCROLL: AtomicUsize = AtomicUsize::new(0);
 /// Wrapped line indices where each user prompt starts (updated each render frame).
 /// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
 #[cfg(not(test))]
@@ -200,6 +213,8 @@ thread_local! {
     static TEST_LAST_CHAT_SCROLLBAR_VISIBLE: Cell<bool> = const { Cell::new(false) };
     static TEST_PINNED_PANE_TOTAL_LINES: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL: Cell<usize> = const { Cell::new(0) };
+    static TEST_LAST_TOTAL_WRAPPED_LINES: Cell<usize> = const { Cell::new(0) };
+    static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -343,6 +358,56 @@ pub(crate) fn set_last_diff_pane_effective_scroll(value: usize) {
     #[cfg(not(test))]
     {
         LAST_DIFF_PANE_EFFECTIVE_SCROLL.store(value, Ordering::Relaxed);
+    }
+}
+
+/// Total wrapped line count of the chat transcript on the most recent frame.
+/// Returns 0 if no frame has been rendered yet.
+pub fn last_total_wrapped_lines() -> usize {
+    #[cfg(test)]
+    {
+        return TEST_LAST_TOTAL_WRAPPED_LINES.with(Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        LAST_TOTAL_WRAPPED_LINES.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn set_last_total_wrapped_lines(value: usize) {
+    #[cfg(test)]
+    {
+        TEST_LAST_TOTAL_WRAPPED_LINES.with(|cell| cell.set(value));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        LAST_TOTAL_WRAPPED_LINES.store(value, Ordering::Relaxed);
+    }
+}
+
+/// The chat scroll offset the renderer actually used on the most recent frame
+/// (after clamping and after resolving any pending history anchor).
+pub fn last_resolved_chat_scroll() -> usize {
+    #[cfg(test)]
+    {
+        return TEST_LAST_RESOLVED_CHAT_SCROLL.with(Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        LAST_RESOLVED_CHAT_SCROLL.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn set_last_resolved_chat_scroll(value: usize) {
+    #[cfg(test)]
+    {
+        TEST_LAST_RESOLVED_CHAT_SCROLL.with(|cell| cell.set(value));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        LAST_RESOLVED_CHAT_SCROLL.store(value, Ordering::Relaxed);
     }
 }
 
@@ -935,6 +1000,7 @@ struct FullPrepCacheKey {
     streaming_text_hash: u64,
     batch_progress_hash: u64,
     reasoning_trace_hash: u64,
+    inline_images_signature: (usize, u64),
 }
 
 #[derive(Clone)]
@@ -1169,6 +1235,8 @@ pub(crate) fn clear_test_render_state_for_tests() {
     set_last_max_scroll(0);
     set_pinned_pane_total_lines(0);
     set_last_diff_pane_effective_scroll(0);
+    set_last_total_wrapped_lines(0);
+    set_last_resolved_chat_scroll(0);
     update_user_prompt_positions(&[]);
     TEST_LAST_LAYOUT.with(|snapshot| {
         *snapshot.borrow_mut() = None;
@@ -2084,14 +2152,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = app.side_panel().focused_page().is_some();
     let diff_mode = app.diff_mode();
-    let pin_images = app.pin_images();
     let collect_diffs = diff_mode.is_pinned();
-    let has_pinned_content = if collect_diffs || pin_images {
+    // Images now render inline in the transcript, so the side panel only handles
+    // pinned file diffs. `pin_images` no longer feeds the side-panel surface.
+    let has_pinned_content = if collect_diffs {
         collect_pinned_content_cached(
             app.display_messages(),
             &app.side_pane_images(),
             collect_diffs,
-            pin_images,
+            false,
             app.display_messages_version(),
         )
     } else {

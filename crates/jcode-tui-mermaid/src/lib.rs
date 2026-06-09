@@ -218,6 +218,8 @@ pub use model::{
 mod cache_render;
 #[path = "mermaid_content.rs"]
 mod content_render;
+#[path = "mermaid_inline.rs"]
+mod inline_image;
 #[path = "mermaid_runtime.rs"]
 mod runtime;
 #[path = "mermaid_viewport.rs"]
@@ -241,6 +243,9 @@ pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
     is_video_export_mode, protocol_type, register_external_image, register_inline_image,
     set_video_export_mode,
+};
+pub use inline_image::{
+    inline_image_dims, inline_image_id, materialize_inline_image,
 };
 pub use viewport_render::{
     invalidate_render_state, render_image_widget_viewport, render_image_widget_viewport_precise,

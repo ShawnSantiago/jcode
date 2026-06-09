@@ -135,6 +135,10 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
     // Crucially, `output_config` must stay None so we do not force a stronger
     // (more expensive) reasoning level than the model's default.
     //
+    // We use a non-Opus model here because Opus now carries an implicit `xhigh`
+    // default (see `test_anthropic_opus_defaults_to_xhigh_effort`); Sonnet keeps
+    // the model's own default so this invariant stays meaningful.
+    //
     // `build_reasoning_request_parts_inner` takes the model directly, so we do
     // not depend on `set_model` accepting a particular catalog entry. With no
     // effort configured, `self.reasoning_effort()` resolves to None regardless
@@ -146,7 +150,7 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
 
     // show_thinking = false: nothing requested.
     let (thinking, output_config, _temp) =
-        provider.build_reasoning_request_parts_inner("claude-opus-4-8", true, false);
+        provider.build_reasoning_request_parts_inner("claude-sonnet-4-6", true, false);
     assert!(
         thinking.is_none(),
         "no thinking should be requested when both effort and show_thinking are off"
@@ -155,10 +159,10 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
 
     // show_thinking = true: adaptive thinking requested, no output_config.
     let (thinking, output_config, temperature) =
-        provider.build_reasoning_request_parts_inner("claude-opus-4-8", true, true);
+        provider.build_reasoning_request_parts_inner("claude-sonnet-4-6", true, true);
     match thinking.expect("show_thinking should enable adaptive thinking") {
         ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
-        ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
+        ApiThinking::Enabled { .. } => panic!("Sonnet 4.6 should use adaptive thinking"),
     }
     assert!(
         output_config.is_none(),
@@ -171,23 +175,80 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
 }
 
 #[test]
+fn test_anthropic_opus_defaults_to_xhigh_effort() {
+    // Opus is a reasoning-heavy flagship, so when the user has *not* configured
+    // an explicit effort it should default to its strongest supported level
+    // (`xhigh` on Opus 4.7/4.8). This drives both the request `output_config`
+    // and the surfaced `reasoning_effort()` status.
+    let provider = AnthropicProvider::new();
+    // Clear any ambient config-provided effort so we exercise the model default.
+    *provider.reasoning_effort.write().unwrap() = None;
+
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-4-8").as_deref(),
+        Some("xhigh"),
+    );
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-4-7").as_deref(),
+        Some("xhigh"),
+    );
+    // Older Opus does not support xhigh, so it clamps to high.
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-4-5").as_deref(),
+        Some("high"),
+    );
+    // Non-Opus models keep the model's own default (no forced effort).
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-sonnet-4-6"),
+        None,
+    );
+
+    // Even without show_thinking, Opus forces its strongest output effort.
+    let (thinking, output_config, _temp) =
+        provider.build_reasoning_request_parts_inner("claude-opus-4-8", true, false);
+    assert_eq!(
+        output_config
+            .expect("Opus should default to a forced output effort")
+            .effort,
+        "xhigh",
+    );
+    match thinking.expect("Opus default effort should enable adaptive thinking") {
+        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
+    }
+
+    // The surfaced status mirrors the effective default for the active model.
+    *provider
+        .model
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = "claude-opus-4-8".to_string();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
+
+    // An explicit user override still wins over the Opus default.
+    provider.set_reasoning_effort("low").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+}
+
+#[test]
 fn test_anthropic_show_thinking_enables_manual_thinking_without_effort() {
-    // Manual-thinking models (e.g. Opus 4.5) need a concrete budget; with only
-    // the display toggle on we fall back to the minimal budget. The model is
+    // Manual-thinking models (e.g. Claude 3.7 Sonnet) need a concrete budget;
+    // with only the display toggle on we fall back to the minimal budget. We use
+    // a non-Opus model here because Opus now carries an implicit strongest-effort
+    // default (see `test_anthropic_opus_defaults_to_xhigh_effort`). The model is
     // passed directly so this does not depend on `set_model` validation.
     let provider = AnthropicProvider::new();
     // Independent of ambient config: clear any configured effort.
     *provider.reasoning_effort.write().unwrap() = None;
 
     let (thinking, _output_config, _temp) =
-        provider.build_reasoning_request_parts_inner("claude-opus-4-5", false, false);
+        provider.build_reasoning_request_parts_inner("claude-3-7-sonnet", false, false);
     assert!(thinking.is_none());
 
     let (thinking, _output_config, _temperature) =
-        provider.build_reasoning_request_parts_inner("claude-opus-4-5", false, true);
+        provider.build_reasoning_request_parts_inner("claude-3-7-sonnet", false, true);
     match thinking.expect("show_thinking should enable manual thinking") {
         ApiThinking::Enabled { budget_tokens } => assert_eq!(budget_tokens, 1_024),
-        ApiThinking::Adaptive { .. } => panic!("Opus 4.5 should use manual thinking"),
+        ApiThinking::Adaptive { .. } => panic!("Claude 3.7 Sonnet should use manual thinking"),
     }
 }
 

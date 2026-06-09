@@ -263,3 +263,89 @@ fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
         "credential with an id token must be treated as ChatGPT/Codex mode"
     );
 }
+
+/// Issue #343: the native `openai-api` (Responses API) base URL must be
+/// overridable for API-key usage so local/proxied Responses endpoints work,
+/// while ChatGPT/Codex OAuth mode stays pinned to the Codex backend.
+#[test]
+fn responses_url_honors_api_base_override_in_api_key_mode() {
+    let _guard = crate::storage::lock_test_env();
+    let _b = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _c = EnvVarGuard::remove("OPENAI_BASE_URL");
+    let _d = EnvVarGuard::remove("OPENAI_API_BASE");
+
+    let api_key_creds = CodexCredentials {
+        access_token: "sk-platform-key".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+
+    // Default base when unset.
+    assert_eq!(
+        OpenAIProvider::responses_url(&api_key_creds),
+        format!("{}/responses", OPENAI_API_BASE),
+    );
+
+    // Override is applied (and a trailing slash is tolerated).
+    let _override = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "http://127.0.0.1:8317/v1/");
+    assert_eq!(
+        OpenAIProvider::responses_url(&api_key_creds),
+        "http://127.0.0.1:8317/v1/responses",
+    );
+    // WS URL derives from the same base.
+    assert_eq!(
+        OpenAIProvider::responses_ws_url(&api_key_creds),
+        "ws://127.0.0.1:8317/v1/responses",
+    );
+    // Compact endpoint too.
+    assert_eq!(
+        OpenAIProvider::responses_compact_url(&api_key_creds),
+        "http://127.0.0.1:8317/v1/responses/compact",
+    );
+}
+
+#[test]
+fn responses_url_ignores_override_in_chatgpt_mode() {
+    let _guard = crate::storage::lock_test_env();
+    let _override = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "http://127.0.0.1:8317/v1");
+
+    let oauth_creds = CodexCredentials {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+    // ChatGPT/Codex OAuth backend must stay fixed regardless of the override.
+    assert!(
+        OpenAIProvider::responses_url(&oauth_creds).starts_with(CHATGPT_API_BASE),
+        "ChatGPT/Codex mode must ignore the API base override"
+    );
+}
+
+#[test]
+fn resolve_api_base_precedence_and_validation() {
+    let _guard = crate::storage::lock_test_env();
+    let _a = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _b = EnvVarGuard::remove("OPENAI_BASE_URL");
+    let _c = EnvVarGuard::remove("OPENAI_API_BASE");
+
+    // Default.
+    assert_eq!(OpenAIProvider::resolve_api_base(), OPENAI_API_BASE);
+
+    // JCODE_OPENAI_API_BASE wins over OPENAI_BASE_URL / OPENAI_API_BASE.
+    let _p1 = EnvVarGuard::set("OPENAI_API_BASE", "https://c.example/v1");
+    let _p2 = EnvVarGuard::set("OPENAI_BASE_URL", "https://b.example/v1");
+    let _p3 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "https://a.example/v1");
+    assert_eq!(OpenAIProvider::resolve_api_base(), "https://a.example/v1");
+
+    // A trailing /responses is trimmed so callers don't double it.
+    let _p4 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "https://a.example/v1/responses");
+    assert_eq!(OpenAIProvider::resolve_api_base(), "https://a.example/v1");
+
+    // Non-URL values are ignored, falling through to the next candidate.
+    let _p5 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "not-a-url");
+    assert_eq!(OpenAIProvider::resolve_api_base(), "https://b.example/v1");
+}

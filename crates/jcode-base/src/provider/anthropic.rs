@@ -386,6 +386,7 @@ const DEFAULT_MAX_TOKENS: u32 = 32_768;
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-8",
+    "claude-fable-5",
     "claude-opus-4-6",
     "claude-opus-4-6[1m]",
     "claude-sonnet-4-6",
@@ -581,6 +582,7 @@ impl AnthropicProvider {
     fn model_supports_output_effort(model: &str) -> bool {
         let model = Self::normalized_model_key(model);
         model.contains("claude-mythos")
+            || model.contains("claude-fable-5")
             || model.contains("claude-opus-4-8")
             || model.contains("claude-opus-4-7")
             || model.contains("claude-opus-4-6")
@@ -591,6 +593,7 @@ impl AnthropicProvider {
     fn model_supports_adaptive_thinking(model: &str) -> bool {
         let model = Self::normalized_model_key(model);
         model.contains("claude-mythos")
+            || model.contains("claude-fable-5")
             || model.contains("claude-opus-4-8")
             || model.contains("claude-opus-4-7")
             || model.contains("claude-opus-4-6")
@@ -606,7 +609,9 @@ impl AnthropicProvider {
 
     fn model_supports_xhigh_effort(model: &str) -> bool {
         let model = Self::normalized_model_key(model);
-        model.contains("claude-opus-4-8") || model.contains("claude-opus-4-7")
+        model.contains("claude-fable-5")
+            || model.contains("claude-opus-4-8")
+            || model.contains("claude-opus-4-7")
     }
 
     fn model_supports_reasoning_effort(model: &str) -> bool {
@@ -643,6 +648,42 @@ impl AnthropicProvider {
         } else {
             effort.to_string()
         }
+    }
+
+    /// Default reasoning effort to apply when the user has *not* explicitly
+    /// configured one. Claude Opus models are reasoning-heavy flagships, so we
+    /// default them to their strongest supported thinking level (`xhigh` on
+    /// Opus 4.7/4.8, clamped to `high` on older Opus). Every other model keeps
+    /// the model's own default (no forced effort) so cheaper models stay cheap.
+    fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
+        if Self::normalized_model_key(model).contains("claude-opus") {
+            Some(Self::actual_effort_for_model(model, "max"))
+        } else {
+            None
+        }
+    }
+
+    /// The raw, user-configured reasoning effort for this provider, if any.
+    /// `None` means "use the model default" (see
+    /// [`Self::default_reasoning_effort_for_model`]).
+    fn stored_reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    /// Effective reasoning effort for `model`, resolving the model default when
+    /// the user has not configured an explicit effort.
+    fn effort_for_model(&self, model: &str) -> Option<String> {
+        if !Self::model_supports_reasoning_effort(model) {
+            return None;
+        }
+        Some(
+            self.stored_reasoning_effort()
+                .or_else(|| Self::default_reasoning_effort_for_model(model))
+                .unwrap_or_else(|| "none".to_string()),
+        )
     }
 
     fn model_supports_priority_service_tier(model: &str) -> bool {
@@ -703,7 +744,7 @@ impl AnthropicProvider {
         is_oauth: bool,
         show_thinking: bool,
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
-        let effort = self.reasoning_effort();
+        let effort = self.effort_for_model(model);
         let effort = effort.as_deref().filter(|effort| *effort != "none");
 
         let output_config = effort
@@ -1119,15 +1160,13 @@ impl Provider for AnthropicProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        if !Self::model_supports_reasoning_effort(&self.model()) {
+        let model = self.model();
+        if !Self::model_supports_reasoning_effort(&model) {
             return None;
         }
-        let effort = self
-            .reasoning_effort
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        Some(effort.unwrap_or_else(|| "none".to_string()))
+        // Surface the *effective* effort so the UI/status reflects the Opus
+        // default (e.g. `xhigh`) when the user has not picked one explicitly.
+        self.effort_for_model(&model)
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
@@ -1245,7 +1284,7 @@ impl Provider for AnthropicProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone(),
             )),
-            reasoning_effort: Arc::new(std::sync::RwLock::new(self.reasoning_effort())),
+            reasoning_effort: Arc::new(std::sync::RwLock::new(self.stored_reasoning_effort())),
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
             credentials: Arc::new(RwLock::new(None)),
             credential_mode: Arc::clone(&self.credential_mode),

@@ -170,6 +170,18 @@ impl Provider for OpenRouterProvider {
             request["provider"] = obj;
         }
 
+        // Merge user-configured extra request-body fields last so they can
+        // satisfy non-standard backend requirements (e.g. NVIDIA NIM
+        // DeepSeek-V4 `chat_template_kwargs`) and intentionally override any
+        // jcode-generated field with the same key (issue #341).
+        if let Some(extra) = self.extra_body.as_ref() {
+            if let Some(request_obj) = request.as_object_mut() {
+                for (key, value) in extra {
+                    request_obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
         let message_items = request
             .get("messages")
             .and_then(|value| value.as_array())
@@ -633,6 +645,7 @@ impl Provider for OpenRouterProvider {
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
             max_tokens: self.max_tokens,
+            extra_body: self.extra_body.clone(),
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             send_openrouter_headers: self.send_openrouter_headers,

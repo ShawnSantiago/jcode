@@ -1,9 +1,6 @@
 use super::*;
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
-use std::time::Duration;
-
-const PINNED_IMAGES_AUTO_HIDE_AFTER: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MouseScrollTraceState {
@@ -490,69 +487,17 @@ impl App {
     }
 
     fn side_pane_has_visual_images_ignoring_user_hidden(&self) -> bool {
-        if !self.pin_images || self.side_panel.focused_page().is_some() || self.diff_mode.is_file()
-        {
-            return false;
-        }
-
-        if self.is_remote {
-            !self.remote_side_pane_images.is_empty()
-        } else {
-            crate::session::has_rendered_images(&self.session)
-        }
+        // Images now render inline in the transcript flow, not in the side
+        // panel, so they no longer drive the side-panel visibility heuristics.
+        false
     }
 
     pub(super) fn update_pinned_images_auto_hide(&mut self) -> bool {
-        if !self.pin_images || self.side_panel.focused_page().is_some() || self.diff_mode.is_file()
-        {
-            self.pinned_images_auto_hide_deadline = None;
-            self.pinned_images_seen_count = 0;
-            return false;
-        }
-
-        let image_count = if self.is_remote {
-            self.remote_side_pane_images.len()
-        } else {
-            crate::session::render_images(&self.session).len()
-        };
-        if image_count == 0 {
-            self.pinned_images_auto_hide_deadline = None;
-            self.pinned_images_seen_count = 0;
-            return false;
-        }
-
-        let now = Instant::now();
-        let mut needs_redraw = false;
-        if image_count > self.pinned_images_seen_count {
-            self.pinned_images_seen_count = image_count;
-            // Don't re-reveal a panel the user explicitly hid (Alt+M). This also
-            // keeps the hide sticky across server reloads/reconnects, where the
-            // seen count resets to 0 while images are repopulated from the
-            // history snapshot (which would otherwise look like "new images").
-            if !self.side_panel_explicit_hidden {
-                self.side_panel_user_hidden = false;
-                self.pinned_images_auto_hide_deadline = Some(now + PINNED_IMAGES_AUTO_HIDE_AFTER);
-                needs_redraw = true;
-            }
-        }
-
-        if let Some(deadline) = self.pinned_images_auto_hide_deadline
-            && now >= deadline
-        {
-            self.pinned_images_auto_hide_deadline = None;
-            if !self.side_panel_user_hidden && self.side_pane_has_visual_images() {
-                self.side_panel_user_hidden = true;
-                self.set_diff_pane_focus(false);
-                self.sync_diagram_fit_context();
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Pinned image side panel hidden automatically. Press {} to show it again.",
-                    crate::tui::keybind::side_panel_toggle_key_label()
-                )));
-                needs_redraw = true;
-            }
-        }
-
-        needs_redraw
+        // Images render inline in the transcript now, so there is no longer a
+        // pinned-image side panel to auto-reveal or auto-hide.
+        self.pinned_images_auto_hide_deadline = None;
+        self.pinned_images_seen_count = 0;
+        false
     }
 
     fn side_pane_line_scroll_amount(&self) -> usize {
@@ -1459,6 +1404,21 @@ impl App {
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
         // Scrolling up cancels any pending overscroll rebound line immediately.
         self.chat_overscroll_last = None;
+        // While older compacted history is still settling on screen, the renderer
+        // is anchored to a distance-from-bottom rather than `scroll_offset`. Keep
+        // scrolling continuous by moving the anchor itself instead of a stale
+        // offset the renderer is currently ignoring.
+        if let Some(mut anchor) = self.pending_history_anchor {
+            let total = super::super::ui::last_total_wrapped_lines();
+            anchor.lines_from_bottom = anchor
+                .lines_from_bottom
+                .saturating_add(amount)
+                .min(total.max(anchor.lines_from_bottom));
+            self.pending_history_anchor = Some(anchor);
+            self.auto_scroll_paused = true;
+            self.maybe_queue_compacted_history_load();
+            return true;
+        }
         let before = (self.scroll_offset, self.auto_scroll_paused);
         let max = self.scroll_max_estimate();
         if !self.auto_scroll_paused {
@@ -1472,7 +1432,15 @@ impl App {
             self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         }
         self.auto_scroll_paused = true;
-        self.maybe_queue_compacted_history_load();
+        // If the upward scroll bottomed out against the top of the currently
+        // loaded content, fold the unsatisfied intent into the prefetch as
+        // overshoot so the newly loaded history scrolls into view smoothly.
+        let overshoot = if self.scroll_offset == 0 {
+            amount
+        } else {
+            0
+        };
+        self.maybe_queue_compacted_history_load_with_overshoot(overshoot);
         before != (self.scroll_offset, self.auto_scroll_paused)
     }
 
@@ -1494,6 +1462,18 @@ impl App {
     /// `false`, so the mouse-wheel queue does not accumulate phantom scroll
     /// that would later have to be undone before scrolling up moves the view.
     pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
+        // Mirror `scroll_up`: while an older-history prepend is still settling,
+        // the renderer is anchored to distance-from-bottom, so move the anchor
+        // toward the bottom instead of a stale `scroll_offset`.
+        if let Some(mut anchor) = self.pending_history_anchor {
+            if anchor.lines_from_bottom == 0 {
+                self.register_chat_overscroll();
+                return false;
+            }
+            anchor.lines_from_bottom = anchor.lines_from_bottom.saturating_sub(amount);
+            self.pending_history_anchor = Some(anchor);
+            return true;
+        }
         if !self.auto_scroll_paused {
             // Already pinned to the bottom: a further downward scroll is an
             // "overscroll". Reveal the elastic status line and keep it dwelling.
@@ -1529,6 +1509,7 @@ impl App {
     }
 
     pub(super) fn follow_chat_bottom(&mut self) {
+        self.pending_history_anchor = None;
         self.scroll_offset = 0;
         self.auto_scroll_paused = false;
     }
