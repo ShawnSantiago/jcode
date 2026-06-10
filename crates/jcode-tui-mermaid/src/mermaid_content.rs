@@ -131,6 +131,52 @@ pub fn parse_image_placeholder(line: &Line<'_>) -> Option<u64> {
     None
 }
 
+/// Marker prefix for inline raster images anchored in the transcript flow.
+/// Unlike mermaid placeholders, the marker encodes the placeholder geometry
+/// (`rows`/`cols`) so the scan step can build an exact scale-to-fit region.
+/// Kept short so the marker line (prefix + 16 hex + 2×(1+4) + suffix = 33
+/// cells) survives wrapping at the same narrow widths the mermaid marker does.
+const INLINE_IMAGE_MARKER_PREFIX: &str = "\x00IIMG:";
+
+/// Create placeholder lines for an inline raster image embedded in the
+/// transcript body: a marker line encoding `(hash, rows, cols)` followed by
+/// `rows - 1` blank lines that the draw step paints the image over.
+pub fn inline_image_placeholder_lines(hash: u64, rows: u16, cols: u16) -> Vec<Line<'static>> {
+    let invisible = Style::default().fg(Color::Black).bg(Color::Black);
+    let rows = rows.max(1);
+    let mut lines = Vec::with_capacity(rows as usize);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{}{:016x}:{:04x}:{:04x}{}",
+            INLINE_IMAGE_MARKER_PREFIX, hash, rows, cols, MERMAID_MARKER_SUFFIX
+        ),
+        invisible,
+    )));
+    for _ in 1..rows {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+/// Check if a line is an inline raster image placeholder and extract
+/// `(hash, rows, cols)`.
+pub fn parse_inline_image_placeholder(line: &Line<'_>) -> Option<(u64, u16, u16)> {
+    if line.spans.is_empty() {
+        return None;
+    }
+    let content = &line.spans[0].content;
+    let rest = content.strip_prefix(INLINE_IMAGE_MARKER_PREFIX)?;
+    let rest = rest.strip_suffix(MERMAID_MARKER_SUFFIX)?;
+    let mut parts = rest.split(':');
+    let hash = u64::from_str_radix(parts.next()?, 16).ok()?;
+    let rows = u16::from_str_radix(parts.next()?, 16).ok()?;
+    let cols = u16::from_str_radix(parts.next()?, 16).ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((hash, rows, cols))
+}
+
 /// Write a mermaid image marker into a buffer area (for video export mode).
 /// This allows the SVG pipeline to detect the region and embed the cached PNG.
 pub fn write_video_export_marker(hash: u64, area: Rect, buf: &mut Buffer) {
