@@ -2584,6 +2584,13 @@ impl SingleSessionApp {
                 .is_some_and(SingleSessionStatus::is_in_flight)
     }
 
+    /// The standalone activity pill only shows while waiting for the first
+    /// streamed token. Once text flows, the streaming tail cursor takes over
+    /// as the "alive" cue at the end of the revealed text.
+    pub(crate) fn streaming_activity_pill_visible(&self) -> bool {
+        self.has_activity_indicator() && self.streaming_response.is_empty()
+    }
+
     fn set_status(&mut self, status: SingleSessionStatus) {
         self.status = Some(status.label());
         self.status_kind = Some(status);
@@ -2688,6 +2695,8 @@ impl SingleSessionApp {
 
         match key {
             KeyInput::SpawnPanel => KeyOutcome::SpawnSession,
+            KeyInput::SpawnSelfDevSession => KeyOutcome::SpawnSelfDevSession,
+            KeyInput::SpawnHomeSession => KeyOutcome::SpawnHomeSession,
             KeyInput::OpenSessionSwitcher => self.open_session_switcher(),
             KeyInput::OpenModelPicker => self.open_model_picker(),
             KeyInput::HotkeyHelp => {
@@ -3529,6 +3538,16 @@ impl SingleSessionApp {
                 self.session_switcher.close();
                 KeyOutcome::SpawnSession
             }
+            KeyInput::SpawnSelfDevSession => {
+                self.capture_inline_widget_exit();
+                self.session_switcher.close();
+                KeyOutcome::SpawnSelfDevSession
+            }
+            KeyInput::SpawnHomeSession => {
+                self.capture_inline_widget_exit();
+                self.session_switcher.close();
+                KeyOutcome::SpawnHomeSession
+            }
             _ => KeyOutcome::None,
         }
     }
@@ -3890,9 +3909,24 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn streaming_response_styled_lines(&self) -> Vec<SingleSessionStyledLine> {
+        self.streaming_response_revealed_styled_lines(self.streaming_response.len())
+    }
+
+    /// Styled lines for the first `revealed_bytes` of the streaming response.
+    /// Drives the adaptive streaming reveal: the renderer grows the visible
+    /// prefix smoothly instead of popping whole provider chunks in at once.
+    pub(crate) fn streaming_response_revealed_styled_lines(
+        &self,
+        revealed_bytes: usize,
+    ) -> Vec<SingleSessionStyledLine> {
+        let mut end = revealed_bytes.min(self.streaming_response.len());
+        while end > 0 && !self.streaming_response.is_char_boundary(end) {
+            end -= 1;
+        }
+        let revealed = self.streaming_response[..end].trim_end();
         let mut lines = Vec::new();
-        if !self.streaming_response.is_empty() {
-            append_streaming_assistant_lines(&mut lines, self.streaming_response.trim_end());
+        if !revealed.is_empty() {
+            append_streaming_assistant_lines(&mut lines, revealed);
         }
         lines
     }
@@ -7401,7 +7435,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
             ("Ctrl+Up", "pull latest queued prompt back into the input"),
             ("PageUp/PageDown", "scroll transcript"),
             ("Ctrl+Home/End", "jump transcript to top/bottom"),
-            ("Super+K/J", "scroll transcript by one line"),
+            ("Super+K/J", "jump between user prompts"),
             ("Alt+Up/Down", "jump between user prompts"),
             ("Ctrl+[/]", "jump between user prompts"),
             ("Mouse wheel", "scroll transcript"),
@@ -7413,7 +7447,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
             ("Ctrl+A/E", "start/end of line"),
             ("Ctrl+U/K", "delete to line start/end"),
             ("Ctrl+W/Ctrl+Backspace", "delete previous word"),
-            ("Alt+Backspace", "delete previous word, terminal-style"),
+            ("Alt/Super+Backspace", "delete previous word"),
             ("Ctrl+←/→, Ctrl+B/F", "move by word"),
             ("Alt+B/F", "move by word, terminal-style"),
             ("Alt+D", "delete next word"),
@@ -7427,6 +7461,8 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
         title: "window",
         shortcuts: &[
             ("Ctrl+;", "reset/spawn fresh desktop session"),
+            ("Super+;", "spawn a self-dev jcode session"),
+            ("Super+'", "spawn a jcode session in home"),
             ("Ctrl+R", "reload sessions/models while a picker is open"),
             ("Ctrl+?", "toggle this help"),
             ("q", "close help or session info"),

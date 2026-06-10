@@ -76,10 +76,36 @@ pub(super) fn single_session_styled_text_buffer_with_opacity(
     wrap: Wrap,
     opacity: f32,
 ) -> Buffer {
+    single_session_styled_text_buffer_with_opacity_and_tail_fade(
+        font_system,
+        lines,
+        font_size,
+        line_height,
+        width,
+        height,
+        wrap,
+        opacity,
+        0.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn single_session_styled_text_buffer_with_opacity_and_tail_fade(
+    font_system: &mut FontSystem,
+    lines: &[SingleSessionStyledLine],
+    font_size: f32,
+    line_height: f32,
+    width: f32,
+    height: f32,
+    wrap: Wrap,
+    opacity: f32,
+    tail_fade_chars: f32,
+) -> Buffer {
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
     buffer.set_size(font_system, width, height);
     buffer.set_wrap(font_system, wrap);
     let segments = single_session_styled_text_segments_with_opacity(lines, opacity);
+    let segments = apply_streaming_tail_fade(segments, tail_fade_chars);
     // Inline span geometry uses glyphon cursors with byte offsets, and the
     // glyphon `highlight()` API used to position inline-code/math pills only
     // works on Advanced-shaped buffers. So any line carrying inline spans must be
@@ -214,6 +240,50 @@ pub(super) fn text_attrs_with_opacity(mut attrs: Attrs<'static>, opacity: f32) -
         (a as f32 * opacity).round().clamp(0.0, 255.0) as u8,
     ));
     attrs
+}
+
+/// Re-segment the trailing `tail_fade_chars` characters into per-character
+/// runs with a rising alpha ramp toward the end of the text. This is the
+/// streaming "tail fade": freshly revealed characters appear faint and gain
+/// opacity as newer characters arrive after them. Segments outside the fade
+/// window pass through untouched.
+pub(super) fn apply_streaming_tail_fade<'a>(
+    segments: Vec<(&'a str, Attrs<'static>)>,
+    tail_fade_chars: f32,
+) -> Vec<(&'a str, Attrs<'static>)> {
+    if tail_fade_chars < 0.5 {
+        return segments;
+    }
+    let total_chars: usize = segments.iter().map(|(text, _)| text.chars().count()).sum();
+    if total_chars == 0 {
+        return segments;
+    }
+    let fade_window = (tail_fade_chars.ceil() as usize).min(total_chars);
+    let fade_start = total_chars - fade_window;
+
+    let mut faded = Vec::with_capacity(segments.len() + fade_window);
+    let mut char_index = 0usize;
+    for (text, attrs) in segments {
+        let segment_chars = text.chars().count();
+        if char_index + segment_chars <= fade_start {
+            faded.push((text, attrs));
+            char_index += segment_chars;
+            continue;
+        }
+        for (byte_offset, ch) in text.char_indices() {
+            let char_text = &text[byte_offset..byte_offset + ch.len_utf8()];
+            if char_index < fade_start {
+                faded.push((char_text, attrs));
+            } else {
+                let distance_from_end = (total_chars - 1 - char_index) as f32;
+                let multiplier =
+                    ((distance_from_end + 1.0) / tail_fade_chars).clamp(0.0, 1.0);
+                faded.push((char_text, text_attrs_with_opacity(attrs, multiplier)));
+            }
+            char_index += 1;
+        }
+    }
+    faded
 }
 
 pub(super) fn push_assistant_markdown_inline_segments<'a>(
@@ -1008,5 +1078,77 @@ pub(super) fn single_session_line_rgba(style: SingleSessionLineStyle) -> [f32; 4
         SingleSessionLineStyle::OverlayTitle => PANEL_TITLE_COLOR,
         SingleSessionLineStyle::Overlay => OVERLAY_TEXT_COLOR,
         SingleSessionLineStyle::OverlaySelection => OVERLAY_SELECTION_TEXT_COLOR,
+    }
+}
+
+#[cfg(test)]
+mod tail_fade_tests {
+    use super::*;
+
+    fn attrs_with_alpha(alpha: u8) -> Attrs<'static> {
+        Attrs::new().color(TextColor::rgba(10, 20, 30, alpha))
+    }
+
+    fn segment_alpha(attrs: &Attrs<'static>) -> u8 {
+        attrs.color_opt.map(|color| color.as_rgba_tuple().3).unwrap_or(255)
+    }
+
+    #[test]
+    fn zero_window_passes_segments_through() {
+        let segments = vec![("hello world", attrs_with_alpha(255))];
+        let faded = apply_streaming_tail_fade(segments.clone(), 0.0);
+        assert_eq!(faded.len(), 1);
+        assert_eq!(faded[0].0, "hello world");
+        assert_eq!(segment_alpha(&faded[0].1), 255);
+    }
+
+    #[test]
+    fn tail_chars_ramp_toward_transparent_end() {
+        let segments = vec![("abcdef", attrs_with_alpha(200))];
+        let faded = apply_streaming_tail_fade(segments, 4.0);
+        // "ab" untouched, then c..f split per char with decreasing alpha.
+        let text: String = faded.iter().map(|(text, _)| *text).collect();
+        assert_eq!(text, "abcdef");
+        let alphas: Vec<u8> = faded.iter().map(|(_, attrs)| segment_alpha(attrs)).collect();
+        // Last char must be the faintest, monotonically increasing backward.
+        for window in alphas.windows(2) {
+            assert!(window[0] >= window[1], "alphas must not rise toward the end: {alphas:?}");
+        }
+        assert!(*alphas.last().unwrap() < 200);
+        assert_eq!(alphas[0], 200);
+    }
+
+    #[test]
+    fn window_larger_than_text_fades_everything() {
+        let segments = vec![("hi", attrs_with_alpha(255))];
+        let faded = apply_streaming_tail_fade(segments, 50.0);
+        assert_eq!(faded.len(), 2);
+        assert!(faded.iter().all(|(_, attrs)| segment_alpha(attrs) < 255));
+    }
+
+    #[test]
+    fn multibyte_chars_split_on_boundaries() {
+        let segments = vec![("héllo wörld", attrs_with_alpha(255))];
+        let faded = apply_streaming_tail_fade(segments, 6.0);
+        let text: String = faded.iter().map(|(text, _)| *text).collect();
+        assert_eq!(text, "héllo wörld");
+    }
+
+    #[test]
+    fn fade_spans_multiple_segments() {
+        let segments = vec![
+            ("first ", attrs_with_alpha(255)),
+            ("second", attrs_with_alpha(255)),
+        ];
+        let faded = apply_streaming_tail_fade(segments, 8.0);
+        let text: String = faded.iter().map(|(text, _)| *text).collect();
+        assert_eq!(text, "first second");
+        // The first segment's leading chars stay untouched.
+        assert_eq!(faded[0].0, "f");
+        assert_eq!(segment_alpha(&faded[0].1), 255);
+        // The final character is the faintest in the ramp.
+        let last = faded.last().unwrap();
+        assert_eq!(last.0, "d");
+        assert!(segment_alpha(&last.1) < 255);
     }
 }

@@ -243,6 +243,85 @@ fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache()
 }
 
 #[test]
+fn test_remote_fallback_claude_model_gets_api_key_route_without_oauth() {
+    // A newly released Claude model can reach the picker via the names-only
+    // catalog fallback (oversized route frames are downgraded to model names).
+    // With only ANTHROPIC_API_KEY configured, the fallback must synthesize a
+    // claude-api route; previously it only ever emitted claude-oauth routes.
+    with_temp_jcode_home(|| {
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["claude-fable-5".to_string()];
+        app.remote_model_options.clear();
+
+        let routes = app.build_remote_model_routes_fallback();
+
+        assert!(
+            routes.iter().any(|route| {
+                route.model == "claude-fable-5"
+                    && route.provider == "Anthropic"
+                    && route.api_method == "claude-api"
+                    && route.available
+            }),
+            "claude model with only an API key should get a claude-api fallback route, got {routes:?}"
+        );
+
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+        crate::auth::AuthStatus::invalidate_cache();
+    });
+}
+
+#[test]
+fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
+    // A stale persisted catalog can carry an OAuth-only route for a newly
+    // released Claude model. When an Anthropic API key is configured, opening
+    // the picker must add the claude-api route instead of trusting the stale
+    // single-route cache forever.
+    with_temp_jcode_home(|| {
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["claude-fable-5".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "claude-fable-5".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "claude-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
+        let entry = picker
+            .entries
+            .iter()
+            .find(|entry| entry.name == "claude-fable-5")
+            .expect("fable should be in the picker");
+        assert!(
+            entry
+                .options
+                .iter()
+                .any(|option| option.api_method == "claude-api" && option.available),
+            "stale oauth-only cached route should be augmented with claude-api, got {:?}",
+            entry.options
+        );
+
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+        crate::auth::AuthStatus::invalidate_cache();
+    });
+}
+
+#[test]
 fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -594,9 +673,8 @@ fn test_submit_input_commits_pending_streaming_assistant_text_before_user_messag
     // Mirror the real streaming caller: append any paced chunk the buffer reveals.
     // The paced StreamBuffer may reveal part of the text immediately, so commit
     // (below) must still flush the remainder.
-    if let Some(chunk) = app.stream_buffer.push(" that was still buffered.") {
-        app.append_streaming_text(&chunk);
-    }
+    let ops = app.stream_buffer.push_text(" that was still buffered.");
+    app.apply_stream_ops(ops);
 
     app.input = "follow up".to_string();
     app.cursor_pos = app.input.len();

@@ -310,8 +310,20 @@ pub(crate) fn build_single_session_vertices_with_scroll_and_reveal(
         spinner_tick,
         smooth_scroll_lines,
     );
-    if app.has_activity_indicator() {
+    if app.streaming_activity_pill_visible() {
         push_streaming_activity_cue(&mut vertices, app, size, spinner_tick, None, None);
+    }
+    if app.has_activity_indicator() && !app.streaming_response.is_empty() {
+        let viewport = single_session_body_viewport_for_tick(app, size, spinner_tick, 0.0);
+        push_single_session_streaming_tail_cursor(
+            &mut vertices,
+            app,
+            size,
+            &viewport,
+            None,
+            None,
+            spinner_tick as f32 * (DESKTOP_SPINNER_FRAME_MS as f32 / 1000.0),
+        );
     }
     push_single_session_selection(&mut vertices, app, size, None);
     push_single_session_scrollbar(
@@ -556,7 +568,7 @@ fn build_single_session_vertices_with_cached_body_internal(
         &viewport,
         rendered_body_lines.len(),
     );
-    if app.has_activity_indicator()
+    if app.streaming_activity_pill_visible()
         || activity_cue_motion.is_some_and(|motion| motion.exiting().is_some())
     {
         push_streaming_activity_cue(
@@ -3481,7 +3493,7 @@ pub(crate) fn push_streaming_activity_cue(
     viewport: Option<&SingleSessionBodyViewport>,
     motion: Option<&StreamingActivityCueMotionFrame>,
 ) {
-    let current = if app.has_activity_indicator() {
+    let current = if app.streaming_activity_pill_visible() {
         Some(
             motion
                 .and_then(StreamingActivityCueMotionFrame::current)
@@ -3586,6 +3598,122 @@ fn push_streaming_activity_cue_visual(
             size,
         );
     }
+}
+
+/// Soft breathing cursor at the end of the revealed streaming text. Replaces
+/// the standalone activity pill once tokens are flowing, keeping the "alive"
+/// cue exactly where the new text appears.
+pub(crate) const STREAMING_TAIL_CURSOR_COLOR: [f32; 4] = [0.000, 0.260, 0.720, 0.55];
+const STREAMING_TAIL_CURSOR_PULSE_PERIOD_SECONDS: f32 = 1.15;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_single_session_streaming_tail_cursor(
+    vertices: &mut Vec<Vertex>,
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    viewport: &SingleSessionBodyViewport,
+    streaming_buffer: Option<&Buffer>,
+    streaming_start_line: Option<usize>,
+    pulse_seconds: f32,
+) {
+    if !app.has_activity_indicator() || app.streaming_response.is_empty() {
+        return;
+    }
+    let Some(position) = streaming_tail_cursor_position(
+        app,
+        size,
+        viewport,
+        streaming_buffer,
+        streaming_start_line,
+    ) else {
+        return;
+    };
+
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let cursor_width = (typography.body_size * 0.46).clamp(5.0, 9.0);
+    let cursor_height = (typography.body_size * 0.92).clamp(9.0, 18.0);
+    let alpha = if crate::animation::desktop_reduced_motion_enabled() {
+        STREAMING_TAIL_CURSOR_COLOR[3]
+    } else {
+        let phase = (pulse_seconds / STREAMING_TAIL_CURSOR_PULSE_PERIOD_SECONDS).fract();
+        let pulse = 0.5 + 0.5 * (phase * std::f32::consts::TAU).sin();
+        STREAMING_TAIL_CURSOR_COLOR[3] * (0.45 + 0.55 * pulse)
+    };
+    let mut color = STREAMING_TAIL_CURSOR_COLOR;
+    color[3] = alpha;
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x: position.x,
+            y: position.y,
+            width: cursor_width,
+            height: cursor_height,
+        },
+        cursor_width * 0.45,
+        color,
+        size,
+    );
+}
+
+/// Position of the tail cursor: just after the last glyph of the streaming
+/// buffer when available, otherwise approximated from the last rendered line.
+fn streaming_tail_cursor_position(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    viewport: &SingleSessionBodyViewport,
+    streaming_buffer: Option<&Buffer>,
+    streaming_start_line: Option<usize>,
+) -> Option<CaretPosition> {
+    let layout = single_session_layout_for_total_lines(app, size, viewport.total_lines);
+    let line_height = layout.metrics.body_line_height;
+    let body_top = layout.body.y;
+    let body_bottom = layout.body_bottom();
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let gap = typography.body_size * 0.35;
+
+    if let (Some(buffer), Some(start_line)) = (streaming_buffer, streaming_start_line) {
+        let area_top = body_top
+            + viewport.top_offset_pixels
+            + start_line.saturating_sub(viewport.start_line) as f32 * line_height;
+        let mut last: Option<(f32, f32)> = None;
+        for run in buffer.layout_runs() {
+            last = Some((run.line_w, run.line_top));
+        }
+        let (line_w, line_top) = last?;
+        let y = area_top + line_top + (line_height - typography.body_size) * 0.5;
+        if y + typography.body_size * 0.5 > body_bottom || y < body_top - line_height {
+            return None;
+        }
+        return Some(CaretPosition {
+            x: (PANEL_TITLE_LEFT_PADDING + line_w + gap)
+                .min(single_session_content_right(size) - gap),
+            y,
+            height: typography.body_size,
+        });
+    }
+
+    // Fallback: approximate from the last non-blank visible line.
+    let (index, line) = viewport
+        .lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| !line.text.trim().is_empty())?;
+    let char_width = typography.body_size * 0.52;
+    let x = (PANEL_TITLE_LEFT_PADDING + line.text.chars().count() as f32 * char_width + gap)
+        .min(single_session_content_right(size) - gap);
+    let y = body_top
+        + viewport.top_offset_pixels
+        + index as f32 * line_height
+        + (line_height - typography.body_size) * 0.5;
+    if y + typography.body_size * 0.5 > body_bottom {
+        return None;
+    }
+    Some(CaretPosition {
+        x,
+        y,
+        height: typography.body_size,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9075,9 +9203,27 @@ pub(crate) fn single_session_body_text_buffer_from_lines_with_opacity(
     text_scale: f32,
     opacity: f32,
 ) -> Buffer {
+    single_session_body_text_buffer_from_lines_with_opacity_and_tail_fade(
+        font_system,
+        lines,
+        size,
+        text_scale,
+        opacity,
+        0.0,
+    )
+}
+
+pub(crate) fn single_session_body_text_buffer_from_lines_with_opacity_and_tail_fade(
+    font_system: &mut FontSystem,
+    lines: &[SingleSessionStyledLine],
+    size: PhysicalSize<u32>,
+    text_scale: f32,
+    opacity: f32,
+    tail_fade_chars: f32,
+) -> Buffer {
     let typography = single_session_typography_for_scale(text_scale);
     let content_width = single_session_content_width(size);
-    let mut buffer = single_session_styled_text_buffer_with_opacity(
+    let mut buffer = single_session_styled_text_buffer_with_opacity_and_tail_fade(
         font_system,
         lines,
         typography.body_size,
@@ -9086,6 +9232,7 @@ pub(crate) fn single_session_body_text_buffer_from_lines_with_opacity(
         single_session_body_text_buffer_layout_height(size, text_scale),
         Wrap::None,
         opacity,
+        tail_fade_chars,
     );
     buffer.shape_until(font_system, i32::MAX);
     buffer
@@ -9340,14 +9487,34 @@ pub(crate) fn append_single_session_streaming_response_rendered_body_lines(
     size: PhysicalSize<u32>,
     rendered_lines: &mut Vec<SingleSessionStyledLine>,
 ) {
+    append_single_session_streaming_response_rendered_body_lines_with_reveal(
+        app,
+        size,
+        rendered_lines,
+        app.streaming_response.len(),
+    );
+}
+
+/// Append the wrapped streaming-response lines, limited to the first
+/// `revealed_bytes` of the response. Drives the adaptive streaming reveal.
+pub(crate) fn append_single_session_streaming_response_rendered_body_lines_with_reveal(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    rendered_lines: &mut Vec<SingleSessionStyledLine>,
+    revealed_bytes: usize,
+) {
     if app.streaming_response.is_empty() {
+        return;
+    }
+    let lines = app.streaming_response_revealed_styled_lines(revealed_bytes);
+    if lines.is_empty() {
         return;
     }
     if !app.messages.is_empty() {
         rendered_lines.push(blank_render_line());
     }
     rendered_lines.extend(single_session_wrapped_body_lines(
-        app.streaming_response_styled_lines(),
+        lines,
         size,
         app.text_scale(),
     ));
@@ -9453,7 +9620,7 @@ pub(crate) fn single_session_body_bottom_for_total_lines(
 }
 
 fn streaming_activity_reserved_height(app: &SingleSessionApp) -> f32 {
-    if !app.has_activity_indicator() {
+    if !app.streaming_activity_pill_visible() {
         return 0.0;
     }
 

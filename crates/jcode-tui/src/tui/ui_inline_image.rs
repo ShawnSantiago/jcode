@@ -129,34 +129,52 @@ pub(crate) fn resolve_items(images: &[crate::session::RenderedImage]) -> Vec<Inl
     items
 }
 
-/// Compute how many rows an inline image should occupy at `chat_width`, given a
-/// viewport height to cap against.
-fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u16 {
+/// Compute how many `(rows, cols)` an inline image occupies at `chat_width`,
+/// given a viewport height to cap against. `cols` includes the 2-cell left
+/// border, matching what the draw step actually paints, so layout (e.g. info
+/// widget placement) can know the real horizontal extent.
+fn fit_geometry(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> (u16, u16) {
     if width == 0 || height == 0 {
-        return MIN_IMAGE_ROWS;
+        return (MIN_IMAGE_ROWS, chat_width.min(2));
     }
     let (cell_w, cell_h) = mermaid::get_font_size().unwrap_or(DEFAULT_CELL);
     let cell_w = cell_w.max(1) as u32;
     let cell_h = cell_h.max(1) as u32;
 
-    // Available width in pixels (leave 1 cell for the left border bar).
-    let avail_cells = chat_width.saturating_sub(1).max(1) as u32;
+    // Available width in pixels (border bar + padding take 2 cells, matching
+    // the renderer's BORDER_WIDTH).
+    let avail_cells = chat_width.saturating_sub(2).max(1) as u32;
     let avail_px = avail_cells * cell_w;
 
-    // Native pixel height, unless the image is wider than the pane, in which
-    // case it scales down to fit width (preserving aspect ratio).
-    let scaled_h_px = if width <= avail_px {
-        height
+    // Cap rows to a fraction of the viewport so tall images stay manageable.
+    let cap_rows = ((viewport_height as u32 * MAX_VIEWPORT_FRACTION_PERCENT as u32) / 100)
+        .max(MIN_IMAGE_ROWS as u32);
+    let cap_px = cap_rows * cell_h;
+
+    // Scale to fit *both* the width and the row cap, preserving aspect ratio,
+    // exactly like the draw-time fit does. This keeps the placeholder geometry
+    // and the rendered pixels in lockstep so borders/labels hug the image.
+    let scale_num_w = avail_px.min(width);
+    let scaled_h_by_w = height.saturating_mul(scale_num_w) / width.max(1);
+    let (final_w_px, final_h_px) = if scaled_h_by_w <= cap_px {
+        (scale_num_w, scaled_h_by_w)
     } else {
-        height.saturating_mul(avail_px) / width.max(1)
+        // Height-bound: shrink further so the height fits the cap.
+        let w = width.saturating_mul(cap_px) / height.max(1);
+        (w.min(avail_px).max(1), cap_px)
     };
 
-    let rows = div_ceil_u32(scaled_h_px.max(1), cell_h).max(MIN_IMAGE_ROWS as u32) as u16;
+    let rows = div_ceil_u32(final_h_px.max(1), cell_h).max(MIN_IMAGE_ROWS as u32) as u16;
+    let cols = (div_ceil_u32(final_w_px.max(1), cell_w) as u16)
+        .saturating_add(2)
+        .min(chat_width);
+    (rows.min(cap_rows.min(u16::MAX as u32) as u16).max(MIN_IMAGE_ROWS), cols)
+}
 
-    // Cap to a fraction of the viewport so tall images stay manageable.
-    let cap = ((viewport_height as u32 * MAX_VIEWPORT_FRACTION_PERCENT as u32) / 100)
-        .max(MIN_IMAGE_ROWS as u32) as u16;
-    rows.min(cap.max(MIN_IMAGE_ROWS))
+/// Compute how many rows an inline image should occupy at `chat_width`, given a
+/// viewport height to cap against.
+fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u16 {
+    fit_geometry(width, height, chat_width, viewport_height).0
 }
 
 /// Build the inline-images prepared section: a heading + correctly-sized
@@ -197,7 +215,7 @@ pub(crate) fn build_section(
             Span::styled(label, Style::default().add_modifier(Modifier::DIM)),
         ]));
 
-        let rows = fit_rows(item.width, item.height, width, viewport_height);
+        let (rows, cols) = fit_geometry(item.width, item.height, width, viewport_height);
         let region_start = lines.len();
         for _ in 0..rows {
             lines.push(Line::from(""));
@@ -207,6 +225,7 @@ pub(crate) fn build_section(
             end_line: region_start + rows as usize,
             hash: item.id,
             height: rows,
+            width: cols,
             render: ImageRegionRender::Fit,
         });
         // Trailing spacer between images.
@@ -276,6 +295,46 @@ mod tests {
     fn fit_rows_never_below_minimum() {
         let rows = fit_rows(10, 10, 80, 40);
         assert!(rows >= MIN_IMAGE_ROWS);
+    }
+
+    #[test]
+    fn fit_geometry_height_bound_image_narrows_proportionally() {
+        // Tall image hits the viewport cap; the recorded cols must shrink with
+        // it so the border/label hug the actual rendered picture.
+        let (rows, cols) = fit_geometry(1000, 4000, 100, 40);
+        let cap = ((40u32 * MAX_VIEWPORT_FRACTION_PERCENT as u32) / 100) as u16;
+        assert!(rows <= cap);
+        // Width-bound it would be ~100 cols; height-bound it must be far less.
+        assert!(cols < 50, "height-bound image should be narrow, got {cols}");
+        assert!(cols > 2, "image must occupy some columns, got {cols}");
+    }
+
+    #[test]
+    fn fit_geometry_small_window_never_exceeds_chat_width() {
+        for chat_width in [1u16, 2, 3, 5, 10] {
+            for viewport_height in [1u16, 2, 5, 10] {
+                let (rows, cols) =
+                    fit_geometry(1920, 1080, chat_width, viewport_height);
+                assert!(cols <= chat_width.max(2), "cols {cols} > width {chat_width}");
+                assert!(rows >= MIN_IMAGE_ROWS);
+            }
+        }
+    }
+
+    #[test]
+    fn fit_geometry_zero_dims_safe() {
+        let (rows, cols) = fit_geometry(0, 0, 80, 40);
+        assert!(rows >= MIN_IMAGE_ROWS);
+        assert!(cols <= 80);
+    }
+
+    #[test]
+    fn build_section_records_region_width() {
+        let items = vec![item(600, 400)];
+        let section = build_section(&items, 80, 40, false);
+        let region = &section.image_regions[0];
+        assert!(region.width > 2, "region width should include the image, got {}", region.width);
+        assert!(region.width <= 80);
     }
 
     #[test]

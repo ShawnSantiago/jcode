@@ -2388,6 +2388,12 @@ impl App {
         if self.reasoning_streaming {
             return;
         }
+        // A new reasoning trace supersedes the previous retained one. Fold the
+        // old trace away as soon as the new one starts streaming so stale
+        // reasoning never lingers next to the live trace.
+        if let Some(prev) = self.reasoning_retained.take() {
+            self.start_reasoning_collapse(prev);
+        }
         // Separate the reasoning block from any prior content with a blank line.
         if !self.streaming.streaming_text.is_empty() {
             if self.streaming.streaming_text.ends_with("\n\n") {
@@ -2630,6 +2636,49 @@ impl App {
         self.refresh_split_view_if_needed();
     }
 
+    /// Apply a batch of paced [`StreamOp`]s from the segment-aware
+    /// [`StreamBuffer`](crate::tui::stream_buffer::StreamBuffer) to the live
+    /// streaming view, preserving arrival order across answer text, reasoning
+    /// text, and reasoning-region boundaries. Returns true when anything
+    /// visible changed.
+    pub(super) fn apply_stream_ops(
+        &mut self,
+        ops: Vec<crate::tui::stream_buffer::StreamOp>,
+    ) -> bool {
+        use crate::tui::stream_buffer::StreamOp;
+        let mut changed = false;
+        for op in ops {
+            match op {
+                StreamOp::Text(text) => {
+                    if !text.is_empty() {
+                        // Real output: make sure any still-open reasoning region is
+                        // closed first so the answer renders as normal text. The
+                        // buffer queues an explicit CloseReasoning before
+                        // non-whitespace text, but be defensive about ordering.
+                        if self.reasoning_streaming && !text.trim().is_empty() {
+                            self.close_reasoning_region(None);
+                        }
+                        self.append_streaming_text(&text);
+                        changed = true;
+                    }
+                }
+                StreamOp::Reasoning(text) => {
+                    if !text.is_empty() {
+                        self.append_reasoning_text(&text);
+                        changed = true;
+                    }
+                }
+                StreamOp::CloseReasoning => {
+                    if self.reasoning_streaming {
+                        self.close_reasoning_region(None);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     /// In `current` reasoning display mode, reasoning is shown live but collapsed
     /// once the assistant commits a message or runs a tool. Strip any
     /// reasoning-marked lines (identified by [`REASONING_SENTINEL`]) from text
@@ -2676,8 +2725,12 @@ impl App {
     }
 
     pub(super) fn commit_pending_streaming_assistant_message(&mut self) -> bool {
-        if let Some(chunk) = self.stream_buffer.flush() {
-            self.append_streaming_text(&chunk);
+        let ops = self.stream_buffer.flush();
+        self.apply_stream_ops(ops);
+        // A commit is a hard message boundary: end any still-open reasoning
+        // region so `current` mode retains/discards the trace correctly.
+        if self.reasoning_streaming {
+            self.close_reasoning_region(None);
         }
 
         if self.streaming.streaming_text.is_empty() {
@@ -2761,6 +2814,7 @@ impl App {
 
         let trimmed = input.trim();
         let handled = commands::handle_help_command(self, trimmed)
+            || commands::handle_keys_command(self, trimmed)
             || commands::handle_ssh_command(self, trimmed)
             || commands::handle_session_command(self, trimmed)
             || commands::handle_dictation_command(self, trimmed)

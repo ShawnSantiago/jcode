@@ -117,6 +117,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/config", "Show or edit configuration"),
     RegisteredCommand::public("/log", "Mark the current location in the jcode logs"),
     RegisteredCommand::public(
+        "/keys",
+        "Show keybinding conflicts with your terminal and OS (/keys refresh to rescan)",
+    ),
+    RegisteredCommand::public(
         "/diff",
         "Cycle or set diff display mode (off/inline/full/pinned/file)",
     ),
@@ -1229,16 +1233,7 @@ impl App {
         let is_new_user = if preview_mode {
             true
         } else {
-            crate::storage::jcode_dir()
-                .ok()
-                .and_then(|dir| {
-                    let path = dir.join("setup_hints.json");
-                    std::fs::read_to_string(&path).ok()
-                })
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .and_then(|v| v.get("launch_count")?.as_u64())
-                .map(|count| count <= 5)
-                .unwrap_or(true)
+            Self::is_new_user_install()
         };
 
         if !is_new_user {

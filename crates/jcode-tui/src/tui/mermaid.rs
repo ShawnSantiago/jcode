@@ -16,6 +16,7 @@ pub use jcode_tui_mermaid::{
     invalidate_render_state, is_mermaid_lang, is_video_export_mode, normalize_aspect_ratio,
     parse_image_placeholder, preferred_aspect_ratio_bucket, protocol_type, register_active_diagram,
     register_external_image, register_inline_image, render_image_widget, render_image_widget_fit,
+    render_image_widget_fit_stable,
     render_image_widget_scale, render_image_widget_viewport, render_image_widget_viewport_precise,
     render_mermaid, render_mermaid_deferred, render_mermaid_deferred_with_registration,
     render_mermaid_deferred_with_stream_scope, render_mermaid_sized, render_mermaid_untracked,

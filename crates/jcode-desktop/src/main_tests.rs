@@ -2113,9 +2113,9 @@ fn single_session_active_work_uses_streaming_activity_cue_geometry() {
     let idle = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
     assert!(!vertices_have_rgb(&idle, NATIVE_SPINNER_HEAD_COLOR));
 
-    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
-        "streaming".to_string(),
-    ));
+    // Pre-token: the activity pill (with pulsing dots) shows while waiting for
+    // the first streamed token.
+    app.is_processing = true;
     let tick_zero = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
     let tick_one = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 1);
 
@@ -2158,6 +2158,21 @@ fn single_session_active_work_uses_streaming_activity_cue_geometry() {
     assert!(
         (26.0..=34.1).contains(&pill_width),
         "activity cue pill should stay compact, got {pill_bounds:?}"
+    );
+
+    // Once text streams, the pill yields to the tail cursor at the end of the
+    // revealed text.
+    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
+        "streaming".to_string(),
+    ));
+    let streaming = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
+    assert!(
+        !vertices_have_color(&streaming, STREAMING_ACTIVITY_PILL_COLOR),
+        "activity pill should hide once tokens stream"
+    );
+    assert!(
+        vertices_have_rgb(&streaming, STREAMING_TAIL_CURSOR_COLOR),
+        "streaming tail cursor should render at the end of the streamed text"
     );
 }
 
@@ -2215,9 +2230,7 @@ fn single_session_motion_geometry_survives_resize_and_text_scale_changes() {
     }
 
     let mut activity_app = SingleSessionApp::new(None);
-    activity_app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
-        "streaming answer".to_string(),
-    ));
+    activity_app.is_processing = true;
     assert_case(
         "activity cue",
         activity_app,
@@ -4310,6 +4323,10 @@ fn desktop_maps_terminal_editing_shortcuts_from_tui() {
         KeyInput::DeletePreviousWord
     );
     assert_eq!(
+        to_key_input(&Key::Named(NamedKey::Backspace), ModifiersState::SUPER),
+        KeyInput::DeletePreviousWord
+    );
+    assert_eq!(
         to_key_input(&Key::Named(NamedKey::ArrowUp), ModifiersState::CONTROL),
         KeyInput::RetrieveQueuedDraft
     );
@@ -4431,11 +4448,11 @@ fn desktop_maps_remaining_global_shortcuts() {
     );
     assert_eq!(
         to_key_input(&Key::Character("k".into()), ModifiersState::SUPER),
-        KeyInput::ScrollBodyLines(1)
+        KeyInput::JumpPrompt(-1)
     );
     assert_eq!(
         to_key_input(&Key::Character("j".into()), ModifiersState::SUPER),
-        KeyInput::ScrollBodyLines(-1)
+        KeyInput::JumpPrompt(1)
     );
     assert_eq!(
         to_key_input(&Key::Character("[".into()), ModifiersState::CONTROL),
@@ -4458,6 +4475,14 @@ fn desktop_maps_remaining_global_shortcuts() {
             ModifiersState::CONTROL | ModifiersState::SHIFT
         ),
         KeyInput::CopyTranscript
+    );
+    assert_eq!(
+        to_key_input(&Key::Character(";".into()), ModifiersState::SUPER),
+        KeyInput::SpawnSelfDevSession
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("'".into()), ModifiersState::SUPER),
+        KeyInput::SpawnHomeSession
     );
     assert_eq!(
         to_key_input(&Key::Character("q".into()), ModifiersState::CONTROL),
@@ -6557,7 +6582,21 @@ fn single_session_hotkey_help_toggles_discoverable_shortcuts() {
         "jump between user prompts"
     ));
     assert!(help_has_shortcut(&help, "Ctrl+Home/End", "jump transcript"));
-    assert!(help_has_shortcut(&help, "Super+K/J", "scroll transcript"));
+    assert!(help_has_shortcut(
+        &help,
+        "Super+K/J",
+        "jump between user prompts"
+    ));
+    assert!(help_has_shortcut(
+        &help,
+        "Super+;",
+        "spawn a self-dev jcode session"
+    ));
+    assert!(help_has_shortcut(
+        &help,
+        "Super+'",
+        "spawn a jcode session in home"
+    ));
     assert!(help_has_shortcut(
         &help,
         "Ctrl+Shift+K",

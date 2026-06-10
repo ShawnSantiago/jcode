@@ -84,8 +84,14 @@ fn query_font_size() -> (u16, u16) {
 }
 
 fn fast_picker() -> Picker {
-    let _font_size = query_font_size();
-    let mut picker = Picker::halfblocks();
+    // Use the real cell size from the terminal. Building the picker with the
+    // hardcoded halfblocks default (10x20) makes every cell<->pixel conversion
+    // wrong on HiDPI displays: images get scaled for 20px rows while Kitty
+    // renders them at the true row height, so placeholders/borders end up much
+    // taller than the picture.
+    let font_size = query_font_size();
+    let mut picker = Picker::from_fontsize(font_size);
+    picker.set_protocol_type(ProtocolType::Halfblocks);
     if let Some(protocol) = infer_protocol_from_env(
         std::env::var("TERM").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),

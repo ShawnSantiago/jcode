@@ -87,8 +87,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.reconcile_history_anchor();
     // Reveal buffered streaming text at the smooth paced rate on each tick, the
     // same as the local turn loop. Finalization paths still call flush().
-    if let Some(chunk) = app.stream_buffer.flush_smooth_frame() {
-        app.append_streaming_text(&chunk);
+    let ops = app.stream_buffer.flush_smooth_frame();
+    if app.apply_stream_ops(ops) {
         needs_redraw = true;
     }
 
@@ -751,9 +751,8 @@ pub(super) fn handle_disconnect(
     app.current_message_id = None;
     app.last_stream_activity = None;
     app.remote_resume_activity = None;
-    if let Some(chunk) = app.stream_buffer.flush() {
-        app.append_streaming_text(&chunk);
-    }
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
     if !app.streaming.streaming_text.is_empty() {
         let content = app.take_streaming_text();
         let content = app.collapse_reasoning_for_commit(content);
@@ -1395,6 +1394,7 @@ async fn parse_and_inject_key(
 
 fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
     let handled = super::commands::handle_help_command(app, trimmed)
+        || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_session_command(app, trimmed)
         || super::commands::handle_test_command(app, trimmed)
         || super::commands::handle_disabled_mission_command(app, trimmed)

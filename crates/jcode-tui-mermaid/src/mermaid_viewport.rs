@@ -1,3 +1,4 @@
+use super::widget_render::set_cell_if_visible;
 use super::*;
 
 fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
@@ -115,6 +116,7 @@ pub(super) fn ensure_kitty_viewport_state(
         && state.source_path == source_path
         && state.zoom_percent == zoom_percent
         && state.font_size == font_size
+        && state.fit_target.is_none()
     {
         return Some((state.unique_id, state.full_cols, state.full_rows));
     }
@@ -140,11 +142,78 @@ pub(super) fn ensure_kitty_viewport_state(
             full_cols,
             full_rows,
             pending_transmit: Some(kitty_transmit_virtual(&scaled, unique_id)),
+            fit_target: None,
         },
     );
 
     if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
         dbg.stats.viewport_protocol_rebuilds += 1;
+    }
+
+    cache
+        .get_mut(hash)
+        .map(|state| (state.unique_id, state.full_cols, state.full_rows))
+}
+
+/// Ensure Kitty virtual-placement state for an inline raster image scaled once
+/// to fit `(target_cols, target_rows)`. Unlike the zoomable diagram viewport,
+/// the scaled size is fixed by the placeholder geometry, so partial visibility
+/// during scrolling reuses the already-transmitted pixels and only re-addresses
+/// rows via unicode placeholders (no per-frame rescale or retransmit).
+pub(super) fn ensure_kitty_fit_state(
+    hash: u64,
+    source_path: &Path,
+    source: &DynamicImage,
+    target_cols: u16,
+    target_rows: u16,
+    font_size: (u16, u16),
+) -> Option<(u32, u16, u16)> {
+    if target_cols == 0 || target_rows == 0 {
+        return None;
+    }
+    let mut cache = KITTY_VIEWPORT_STATE.lock().ok()?;
+    if let Some(state) = cache.get_mut(hash)
+        && state.source_path == source_path
+        && state.font_size == font_size
+        && state.fit_target == Some((target_cols, target_rows))
+    {
+        return Some((state.unique_id, state.full_cols, state.full_rows));
+    }
+
+    // Scale once to fit the target cell box, preserving aspect ratio.
+    let max_w_px = (target_cols as u32).saturating_mul(font_size.0.max(1) as u32);
+    let max_h_px = (target_rows as u32).saturating_mul(font_size.1.max(1) as u32);
+    let scaled = if source.width() <= max_w_px && source.height() <= max_h_px {
+        source.clone()
+    } else {
+        source.resize(max_w_px, max_h_px, image::imageops::FilterType::Triangle)
+    };
+    let (full_cols, full_rows) = kitty_full_rect_for_image(&scaled, font_size);
+    if full_cols == 0 || full_rows == 0 {
+        return None;
+    }
+
+    let unique_id = cache
+        .get_mut(hash)
+        .map(|state| state.unique_id)
+        .unwrap_or_else(|| kitty_viewport_unique_id(hash));
+
+    cache.insert(
+        hash,
+        KittyViewportState {
+            source_path: source_path.to_path_buf(),
+            zoom_percent: 100,
+            font_size,
+            unique_id,
+            full_cols,
+            full_rows,
+            pending_transmit: Some(kitty_transmit_virtual(&scaled, unique_id)),
+            fit_target: Some((target_cols, target_rows)),
+        },
+    );
+
+    if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+        dbg.stats.fit_protocol_rebuilds += 1;
     }
 
     cache
@@ -557,6 +626,166 @@ static KITTY_DIACRITICS: [char; 297] = [
     '\u{1D243}',
     '\u{1D244}',
 ];
+
+/// Cheap cache probe for the inline fit state: returns the placement triple
+/// when the transmitted pixels already match `(target_cols, target_rows)` at
+/// this font size, without touching the source image at all. Keeps steady-state
+/// frames free of source-cache locks and (worst case) re-decodes.
+fn probe_kitty_fit_state(
+    hash: u64,
+    source_path: &Path,
+    target_cols: u16,
+    target_rows: u16,
+    font_size: (u16, u16),
+) -> Option<(u32, u16, u16)> {
+    let mut cache = KITTY_VIEWPORT_STATE.lock().ok()?;
+    let state = cache.get_mut(hash)?;
+    (state.source_path == source_path
+        && state.font_size == font_size
+        && state.fit_target == Some((target_cols, target_rows)))
+    .then(|| (state.unique_id, state.full_cols, state.full_rows))
+}
+
+/// Draw a rounded left border that hugs the image's real extent: `╭` on the
+/// image's first row, `╰` on its last, `│` between. Rows of the placeholder
+/// below the image (when the estimate was taller than the fitted image) get no
+/// border at all, so the line never extends past the picture.
+fn draw_fitted_left_border(buf: &mut Buffer, area: Rect, skip_rows: u16, full_rows: u16) {
+    let clamped = area.intersection(*buf.area());
+    if clamped.width == 0 || clamped.height == 0 || full_rows == 0 {
+        return;
+    }
+    let visible = clamped.height.min(full_rows.saturating_sub(skip_rows));
+    let border_style = Style::default().fg(rgb(100, 100, 100)); // DIM_COLOR
+    for row in 0..visible {
+        let global_row = skip_rows.saturating_add(row);
+        let ch = match (global_row == 0, global_row + 1 >= full_rows) {
+            (true, true) => '╶',
+            (true, false) => '╭',
+            (false, true) => '╰',
+            (false, false) => '│',
+        };
+        let y = clamped.y + row;
+        set_cell_if_visible(buf, clamped.x, y, ch, Some(border_style));
+        if clamped.width > 1 {
+            set_cell_if_visible(buf, clamped.x.saturating_add(1), y, ' ', None);
+        }
+    }
+}
+
+/// Render an inline raster image scaled-to-fit a fixed placeholder box, with
+/// stable pixels while scrolling.
+///
+/// `target_cols`/`target_rows` describe the full placeholder geometry computed
+/// at prepare time; `skip_rows` is how many of the image's top rows are
+/// scrolled off-screen. On Kitty this reuses one transmitted image and just
+/// re-addresses rows via unicode placeholders, so partial visibility never
+/// rescales or retransmits. Returns true when handled; callers should fall
+/// back to `render_image_widget_fit` when it returns false (non-Kitty
+/// protocols or oversized images).
+pub fn render_image_widget_fit_stable(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    target_cols: u16,
+    target_rows: u16,
+    skip_rows: u16,
+    centered: bool,
+    draw_border: bool,
+) -> bool {
+    if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    let buf_area = *buf.area();
+    let area = area.intersection(buf_area);
+    if area.width == 0 || area.height == 0 {
+        return false;
+    }
+
+    let border_width = if draw_border { BORDER_WIDTH } else { 0 };
+    if area.width <= border_width {
+        return false;
+    }
+
+    let picker = match PICKER.get().and_then(|p| p.as_ref()) {
+        Some(picker) => picker,
+        None => return false,
+    };
+    if picker.protocol_type() != ProtocolType::Kitty {
+        return false;
+    }
+
+    let cached = match get_cached_diagram(hash, None) {
+        Some(cached) => cached,
+        None => return false,
+    };
+    let source_path = cached.path;
+    let font_size = picker.font_size();
+    let fit_cols = target_cols.saturating_sub(border_width);
+
+    // Hot path: steady-state frames hit the already-transmitted state without
+    // ever touching (or re-decoding) the source image.
+    let placement = probe_kitty_fit_state(hash, &source_path, fit_cols, target_rows, font_size)
+        .or_else(|| {
+            let source = load_source_image(hash, &source_path)?;
+            ensure_kitty_fit_state(
+                hash,
+                &source_path,
+                source.as_ref(),
+                fit_cols,
+                target_rows,
+                font_size,
+            )
+        });
+    let Some((_, full_cols, full_rows)) = placement else {
+        return false;
+    };
+
+    if !can_use_kitty_virtual_viewport(full_cols, full_rows, 0, skip_rows) {
+        return false;
+    }
+
+    let mut image_area = Rect {
+        x: area.x + border_width,
+        y: area.y,
+        width: area.width - border_width,
+        height: area.height,
+    };
+    if draw_border {
+        // Border hugs the fitted image: rounded ends, and no line beyond the
+        // image's last row even when the placeholder estimate ran taller.
+        draw_fitted_left_border(buf, area, skip_rows, full_rows);
+    }
+    if image_area.width == 0 || image_area.height == 0 {
+        return true;
+    }
+    if centered && full_cols < image_area.width {
+        let x_offset = (image_area.width - full_cols) / 2;
+        image_area.x += x_offset;
+        image_area.width -= x_offset;
+    }
+
+    let visible_width = image_area.width.min(full_cols);
+    let visible_height = image_area
+        .height
+        .min(full_rows.saturating_sub(skip_rows));
+
+    if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
+        dbg.stats.image_state_hits += 1;
+        dbg.stats.fit_state_reuse_hits += 1;
+    }
+
+    render_kitty_virtual_viewport(
+        hash,
+        image_area,
+        buf,
+        0,
+        skip_rows,
+        visible_width,
+        visible_height,
+    )
+}
 
 /// Render an image by cropping a viewport (for pan/scroll in pinned pane).
 pub fn render_image_widget_viewport(

@@ -229,11 +229,12 @@ fn small_window_inline_activity_and_composer_lanes_do_not_overlap() {
     );
     app.draft = "first line\nsecond line\nthird line".to_string();
     app.draft_cursor = app.draft.len();
-    app.apply_session_event(session_launch::DesktopSessionEvent::TextDelta(
-        "streaming response while the resume picker is open".to_string(),
-    ));
+    // Activity pill (and its lane) only shows while waiting for the first
+    // streamed token, so simulate in-flight work without streamed text.
+    app.is_processing = true;
 
     assert!(app.has_activity_indicator());
+    assert!(app.streaming_activity_pill_visible());
     assert_eq!(
         app.render_inline_widget_kind(),
         Some(InlineWidgetKind::SessionSwitcher)

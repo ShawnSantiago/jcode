@@ -497,6 +497,22 @@ fn streaming_text_handoff_style_for_elapsed(elapsed: Duration) -> StreamingTextA
     }
 }
 
+/// Body cache key that also tracks how much of the streaming response is
+/// revealed, so the cached wrapped lines rebuild as the reveal advances.
+fn streaming_reveal_body_cache_key(
+    rendered_body_key: u64,
+    streaming_response_empty: bool,
+    revealed_bytes: usize,
+) -> u64 {
+    if streaming_response_empty {
+        return rendered_body_key;
+    }
+    let mut hasher = DefaultHasher::new();
+    rendered_body_key.hash(&mut hasher);
+    revealed_bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn streaming_text_handoff_start_after_len_change(
     previous_len: usize,
     next_len: usize,
@@ -1225,6 +1241,20 @@ async fn run() -> Result<()> {
                                     SESSION_SPAWN_REFRESH_DELAY,
                                 );
                                 window.request_redraw();
+                            }
+                        }
+                        KeyOutcome::SpawnSelfDevSession => {
+                            if let Err(error) = session_launch::launch_selfdev_session() {
+                                desktop_log::error(format_args!(
+                                    "jcode-desktop: failed to spawn self-dev session: {error:#}"
+                                ));
+                            }
+                        }
+                        KeyOutcome::SpawnHomeSession => {
+                            if let Err(error) = session_launch::launch_home_session() {
+                                desktop_log::error(format_args!(
+                                    "jcode-desktop: failed to spawn home session: {error:#}"
+                                ));
                             }
                         }
                         KeyOutcome::SendDraft {
@@ -5169,6 +5199,28 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
     Ok(())
 }
 
+/// Selection knobs for the real-transcript benchmarks.
+///
+/// Returns `(max_sessions, min_messages)`: how many of the largest on-disk
+/// transcripts to profile, and the minimum message count for a transcript to
+/// qualify. Both are overridable via environment variables so a run can target
+/// more (or fewer) of the biggest transcripts without a rebuild:
+///
+/// - `JCODE_DESKTOP_BENCHMARK_SESSIONS` (default 8)
+/// - `JCODE_DESKTOP_BENCHMARK_MIN_MESSAGES` (default 24)
+fn real_transcript_benchmark_selection() -> (usize, usize) {
+    let max_sessions = std::env::var("JCODE_DESKTOP_BENCHMARK_SESSIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(8);
+    let min_messages = std::env::var("JCODE_DESKTOP_BENCHMARK_MIN_MESSAGES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(24);
+    (max_sessions, min_messages)
+}
+
 /// Profile scrolling against the user's real on-disk transcripts.
 ///
 /// This loads the largest real session files (full, untruncated message lists)
@@ -5180,7 +5232,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
 fn run_real_transcript_scroll_benchmark(frames: usize) -> Result<()> {
     let frames = frames.max(1);
     let size = PhysicalSize::new(1200, 760);
-    let transcripts = session_data::load_largest_real_transcripts(8, 24)
+    let (max_sessions, min_messages) = real_transcript_benchmark_selection();
+    let transcripts = session_data::load_largest_real_transcripts(max_sessions, min_messages)
         .context("failed to load real transcripts for scroll benchmark")?;
 
     if transcripts.is_empty() {
@@ -5532,7 +5585,8 @@ fn benchmark_real_transcript_scroll(
 fn run_real_transcript_action_benchmark(frames: usize) -> Result<()> {
     let frames = frames.max(1);
     let size = PhysicalSize::new(1200, 760);
-    let transcripts = session_data::load_largest_real_transcripts(8, 24)
+    let (max_sessions, min_messages) = real_transcript_benchmark_selection();
+    let transcripts = session_data::load_largest_real_transcripts(max_sessions, min_messages)
         .context("failed to load real transcripts for action benchmark")?;
 
     if transcripts.is_empty() {
@@ -8062,7 +8116,9 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         }
         Key::Named(NamedKey::Tab) if modifiers.control_key() => KeyInput::CycleModel(1),
         Key::Named(NamedKey::Tab) => KeyInput::Autocomplete,
-        Key::Named(NamedKey::Backspace) if modifiers.control_key() || modifiers.alt_key() => {
+        Key::Named(NamedKey::Backspace)
+            if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() =>
+        {
             KeyInput::DeletePreviousWord
         }
         Key::Named(NamedKey::Backspace) => KeyInput::Backspace,
@@ -8166,10 +8222,10 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text == "[" => KeyInput::JumpPrompt(-1),
         Key::Character(text) if modifiers.control_key() && text == "]" => KeyInput::JumpPrompt(1),
         Key::Character(text) if modifiers.super_key() && text.eq_ignore_ascii_case("k") => {
-            KeyInput::ScrollBodyLines(1)
+            KeyInput::JumpPrompt(-1)
         }
         Key::Character(text) if modifiers.super_key() && text.eq_ignore_ascii_case("j") => {
-            KeyInput::ScrollBodyLines(-1)
+            KeyInput::JumpPrompt(1)
         }
         Key::Character(text)
             if (modifiers.control_key() || modifiers.super_key())
@@ -8177,6 +8233,10 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         {
             KeyInput::ExitApp
         }
+        Key::Character(text) if modifiers.super_key() && text == ";" => {
+            KeyInput::SpawnSelfDevSession
+        }
+        Key::Character(text) if modifiers.super_key() && text == "'" => KeyInput::SpawnHomeSession,
         Key::Character(text) if modifiers.control_key() && text == ";" => KeyInput::SpawnPanel,
         Key::Character(text) if modifiers.control_key() && (text == "?" || text == "/") => {
             KeyInput::HotkeyHelp
@@ -9168,6 +9228,18 @@ fn desktop_spinner_tick(_now: Instant) -> u64 {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     (millis / DESKTOP_SPINNER_FRAME_MS) as u64
+}
+
+/// Continuous wall-clock seconds for smooth (unquantized) pulse animations.
+/// Unlike `desktop_spinner_tick`, this is not stepped to 180ms frames, so
+/// breathing cues animate fluidly at the paced 16ms redraw interval.
+fn desktop_pulse_seconds() -> f32 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    // Wrap at a day to keep f32 precision; pulse phases only use fract().
+    ((millis % 86_400_000) as f64 / 1000.0) as f32
 }
 
 fn single_session_text_buffer_cache_key(
@@ -10192,6 +10264,9 @@ struct Canvas {
     single_session_streaming_response_len: usize,
     single_session_streaming_fade_started_at: Option<Instant>,
     single_session_streaming_handoff_started_at: Option<Instant>,
+    streaming_text_reveal: StreamingTextRevealMotion,
+    single_session_streaming_reveal_frame: StreamingTextRevealFrame,
+    single_session_streaming_revealed_bytes: usize,
     single_session_streaming_text_key: Option<u64>,
     single_session_streaming_text_start_line: Option<usize>,
     single_session_streaming_text_end_line: Option<usize>,
@@ -10338,6 +10413,9 @@ impl Canvas {
             single_session_streaming_response_len: 0,
             single_session_streaming_fade_started_at: None,
             single_session_streaming_handoff_started_at: None,
+            streaming_text_reveal: StreamingTextRevealMotion::default(),
+            single_session_streaming_reveal_frame: StreamingTextRevealFrame::default(),
+            single_session_streaming_revealed_bytes: 0,
             single_session_streaming_text_key: None,
             single_session_streaming_text_start_line: None,
             single_session_streaming_text_end_line: None,
@@ -10628,11 +10706,15 @@ impl Canvas {
             return;
         };
 
+        let tail_fade_chars = self.single_session_streaming_reveal_frame.tail_fade_chars;
+        // Quantize so the cache key only changes when the fade visibly moves.
+        let tail_fade_quantized = (tail_fade_chars * 4.0).round() as u32;
         let mut hasher = DefaultHasher::new();
         (render_size.width, render_size.height).hash(&mut hasher);
         app.text_scale().to_bits().hash(&mut hasher);
         start_line.hash(&mut hasher);
         end_line.hash(&mut hasher);
+        tail_fade_quantized.hash(&mut hasher);
         self.single_session_body_lines[start_line..end_line].hash(&mut hasher);
         let key = hasher.finish();
         if self.single_session_streaming_text_key == Some(key) {
@@ -10641,14 +10723,16 @@ impl Canvas {
 
         if let Some(font_system) = self.font_system.as_mut() {
             let lines = self.single_session_body_lines[start_line..end_line].to_vec();
-            self.single_session_streaming_text_buffer =
-                Some(single_session_body_text_buffer_from_lines_with_opacity(
+            self.single_session_streaming_text_buffer = Some(
+                single_session_body_text_buffer_from_lines_with_opacity_and_tail_fade(
                     font_system,
                     &lines,
                     render_size,
                     app.text_scale(),
                     1.0,
-                ));
+                    tail_fade_quantized as f32 / 4.0,
+                ),
+            );
             self.single_session_streaming_text_key = Some(key);
             self.single_session_streaming_text_start_line = Some(start_line);
             self.single_session_streaming_text_end_line = Some(end_line);
@@ -10921,7 +11005,11 @@ impl Canvas {
         tick: u64,
     ) -> (u64, bool) {
         let body_layout_size = single_session_body_layout_cache_size(app, render_size);
-        let key = app.rendered_body_cache_key(body_layout_size);
+        let key = streaming_reveal_body_cache_key(
+            app.rendered_body_cache_key(body_layout_size),
+            app.streaming_response.is_empty(),
+            self.single_session_streaming_revealed_bytes,
+        );
         if self.single_session_body_key == Some(key) {
             return (key, false);
         }
@@ -10957,10 +11045,11 @@ impl Canvas {
                 self.single_session_body_lines
                     .truncate(self.single_session_streaming_base_len);
             }
-            append_single_session_streaming_response_rendered_body_lines(
+            append_single_session_streaming_response_rendered_body_lines_with_reveal(
                 app,
                 render_size,
                 &mut self.single_session_body_lines,
+                self.single_session_streaming_revealed_bytes,
             );
         } else {
             let raw_key = app.rendered_body_cache_key((0, 0));
@@ -11290,6 +11379,11 @@ impl Canvas {
             self.single_session_body_text_window_start = None;
             self.single_session_body_text_window_end = None;
         } else if let DesktopApp::SingleSession(single_session) = app {
+            let reveal_frame = self
+                .streaming_text_reveal
+                .frame(&single_session.streaming_response, now);
+            self.single_session_streaming_reveal_frame = reveal_frame;
+            self.single_session_streaming_revealed_bytes = reveal_frame.revealed_bytes;
             let (rendered_body_key, rendered_body_changed) = self.cached_single_session_body_lines(
                 single_session,
                 single_session_render_size,
@@ -11321,6 +11415,9 @@ impl Canvas {
             self.single_session_streaming_text_opacity_bits = None;
             self.single_session_streaming_text_buffer = None;
             self.single_session_streaming_handoff_started_at = None;
+            self.streaming_text_reveal.clear();
+            self.single_session_streaming_reveal_frame = StreamingTextRevealFrame::default();
+            self.single_session_streaming_revealed_bytes = 0;
             self.streaming_text_needs_prepare = false;
             self.single_session_body_text_scroll_start = None;
             self.single_session_body_text_window_start = None;
@@ -11654,7 +11751,8 @@ impl Canvas {
                     || scrollbar_motion.is_active()
                     || scroll_motion_frame.active
                     || welcome_hero_reveal_active
-                    || streaming_text_arrival_style.active;
+                    || streaming_text_arrival_style.active
+                    || self.single_session_streaming_reveal_frame.active;
                 let geometry_cache_key = if single_session_issue_layout_for_frame.visible() {
                     None
                 } else {
@@ -11889,6 +11987,27 @@ impl Canvas {
             }
         }
         frame_profile.checkpoint("caret");
+        if let DesktopApp::SingleSession(single_session) = app
+            && self.single_session_streaming_text_buffer.is_some()
+            && let Some(viewport) = single_session_viewport.as_ref()
+        {
+            // The streaming tail cursor renders directly into the frame
+            // vertices (outside the primitive geometry cache) because it
+            // pulses continuously while text streams.
+            if !single_session_issue_layout_for_frame.visible() {
+                push_single_session_streaming_tail_cursor(
+                    vertices.to_mut(),
+                    single_session,
+                    single_session_render_size,
+                    viewport,
+                    self.single_session_streaming_text_buffer.as_ref(),
+                    self.single_session_streaming_text_start_line,
+                    desktop_pulse_seconds(),
+                );
+                animation_active = true;
+            }
+        }
+        frame_profile.checkpoint("streaming_tail_cursor");
         if let Some(mode_transition_frame) = self.app_mode_transition.frame(app.mode(), now) {
             compose_app_mode_transition_vertices(
                 &mut self.app_mode_transition_vertices,
