@@ -5183,6 +5183,28 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
     Ok(())
 }
 
+/// Selection knobs for the real-transcript benchmarks.
+///
+/// Returns `(max_sessions, min_messages)`: how many of the largest on-disk
+/// transcripts to profile, and the minimum message count for a transcript to
+/// qualify. Both are overridable via environment variables so a run can target
+/// more (or fewer) of the biggest transcripts without a rebuild:
+///
+/// - `JCODE_DESKTOP_BENCHMARK_SESSIONS` (default 8)
+/// - `JCODE_DESKTOP_BENCHMARK_MIN_MESSAGES` (default 24)
+fn real_transcript_benchmark_selection() -> (usize, usize) {
+    let max_sessions = std::env::var("JCODE_DESKTOP_BENCHMARK_SESSIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(8);
+    let min_messages = std::env::var("JCODE_DESKTOP_BENCHMARK_MIN_MESSAGES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(24);
+    (max_sessions, min_messages)
+}
+
 /// Profile scrolling against the user's real on-disk transcripts.
 ///
 /// This loads the largest real session files (full, untruncated message lists)
@@ -5194,7 +5216,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
 fn run_real_transcript_scroll_benchmark(frames: usize) -> Result<()> {
     let frames = frames.max(1);
     let size = PhysicalSize::new(1200, 760);
-    let transcripts = session_data::load_largest_real_transcripts(8, 24)
+    let (max_sessions, min_messages) = real_transcript_benchmark_selection();
+    let transcripts = session_data::load_largest_real_transcripts(max_sessions, min_messages)
         .context("failed to load real transcripts for scroll benchmark")?;
 
     if transcripts.is_empty() {
@@ -5546,7 +5569,8 @@ fn benchmark_real_transcript_scroll(
 fn run_real_transcript_action_benchmark(frames: usize) -> Result<()> {
     let frames = frames.max(1);
     let size = PhysicalSize::new(1200, 760);
-    let transcripts = session_data::load_largest_real_transcripts(8, 24)
+    let (max_sessions, min_messages) = real_transcript_benchmark_selection();
+    let transcripts = session_data::load_largest_real_transcripts(max_sessions, min_messages)
         .context("failed to load real transcripts for action benchmark")?;
 
     if transcripts.is_empty() {
