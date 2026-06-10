@@ -1,18 +1,17 @@
 use super::{Tool, ToolContext, ToolOutput};
-use crate::ambient::{
-    AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem,
-};
+use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jcode_pr_watch_core::{
-    ActionableItem, CheckRunState, CycleOutcome, Marker, PrTarget, PrWatchState, SurfaceError,
-    WatchEvent, normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments,
-    parse_gh_pr_view, parse_gh_review_comments, parse_gh_review_threads, parse_gh_reviews,
+    ActionableItem, AuthorizationGrant, CheckRunState, CycleOutcome, Marker, PrTarget,
+    PrWatchState, SurfaceError, WatchEvent, WriteScope, normalize_watch_state_json,
+    parse_gh_checks, parse_gh_issue_comments, parse_gh_pr_view, parse_gh_review_comments,
+    parse_gh_review_threads, parse_gh_reviews,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -36,6 +35,9 @@ enum PrWatchAction {
     List,
     PollNow,
     Monitor,
+    Authorize,
+    Revoke,
+    Reschedule,
     Stop,
     Readiness,
     Handoff,
@@ -59,6 +61,16 @@ struct PrWatchInput {
     max_runtime_seconds: Option<u64>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    expires_in_minutes: Option<u64>,
+    #[serde(default)]
+    single_use: Option<bool>,
+    #[serde(default)]
+    grant_id: Option<String>,
 }
 
 const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
@@ -82,8 +94,8 @@ impl Tool for PrWatchTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "stop", "readiness", "handoff"],
-                    "description": "Action. poll_now performs read-only gh CLI collection and updates local state; no mutations are performed."
+                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "authorize", "revoke", "reschedule", "stop", "readiness", "handoff"],
+                    "description": "Action. poll_now/monitor perform read-only gh CLI collection and update local state; no GitHub mutations are performed. authorize/revoke only record local grants for a separate explicit remediation workflow."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
                 "pr": {"type": "integer", "description": "Pull request number."},
@@ -93,7 +105,12 @@ impl Tool for PrWatchTool {
                 "poll_interval_seconds": {"type": "integer", "description": "Interval for the next scheduled poll. Defaults to state polling interval."},
                 "quiet_cycles_required": {"type": "integer", "description": "Quiet cycles required before the monitor stops as satisfied. Defaults to watch state or 3."},
                 "max_runtime_seconds": {"type": "integer", "description": "Maximum monitor runtime budget. Single-cycle monitor caps this to 900 and records the bounded value."},
-                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."}
+                "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."},
+                "scopes": {"type": "array", "items": {"type": "string", "enum": ["local_fix", "commit", "push", "comment", "resolve_threads"]}, "description": "Authorization scopes for action=authorize or action=revoke. merge is intentionally not supported."},
+                "reason": {"type": "string", "description": "Required human/operator reason for action=authorize."},
+                "expires_in_minutes": {"type": "integer", "description": "Grant lifetime for action=authorize. Defaults to 120, capped at 1440."},
+                "single_use": {"type": "boolean", "description": "Whether the grant is intended for one remediation use."},
+                "grant_id": {"type": "string", "description": "Specific grant id for action=revoke."}
             }
         })
     }
@@ -111,6 +128,9 @@ impl Tool for PrWatchTool {
             PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx).await,
             PrWatchAction::Monitor => monitor_once(&root, &store, params, &ctx).await,
             PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx).await,
+            PrWatchAction::Authorize => authorize_watch(&store, params, &ctx),
+            PrWatchAction::Revoke => revoke_watch_grant(&store, params, &ctx),
+            PrWatchAction::Reschedule => reschedule_watch(&store, params, &ctx),
             PrWatchAction::Status => status_like(&store, params),
             PrWatchAction::Readiness => readiness_report(&store, params),
             PrWatchAction::Handoff => handoff_report(&store, params),
@@ -243,6 +263,172 @@ fn list_watches(store: &Path) -> Result<ToolOutput> {
         .with_metadata(json!({"watches": states.into_iter().map(|(_, s)| s).collect::<Vec<_>>() })))
 }
 
+fn authorize_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<ToolOutput> {
+    let mut state = load_state_for_params(store, &params)?;
+    let scopes = parse_write_scopes(params.scopes.as_deref())?;
+    if scopes.is_empty() {
+        bail!("authorize requires at least one scope");
+    }
+    let reason = params
+        .reason
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .context("authorize requires a non-empty reason")?;
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "authorize")),
+        }
+    } else {
+        None
+    };
+    let now = Utc::now();
+    let expires_in_minutes = params.expires_in_minutes.unwrap_or(120).clamp(1, 24 * 60);
+    let grant_id = format!("grant-{}", now.timestamp_millis());
+    let grant = AuthorizationGrant {
+        grant_id: grant_id.clone(),
+        granted_at: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        expires_at: (now + Duration::minutes(expires_in_minutes as i64))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
+        granted_by_session_id: ctx.session_id.clone(),
+        scopes,
+        single_use: params.single_use.unwrap_or(false),
+        reason: Some(reason),
+    };
+    state.authorization.active_grants.push(grant.clone());
+    state.updated_at = Some(now_iso());
+    state.push_event(WatchEvent {
+        at: now_iso(),
+        kind: "grant_created".to_string(),
+        data: json!({
+            "grant_id": grant.grant_id,
+            "scopes": grant.scopes,
+            "expires_at": grant.expires_at,
+            "single_use": grant.single_use,
+            "reason": grant.reason,
+            "read_only_watch_invariant": true,
+        }),
+    });
+    let path = state_path(store, &state.watch_id);
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
+    Ok(ToolOutput::new(format!(
+        "PR watch grant recorded: {}\nRepo: {}\nPR: #{}\nGrant: {}\nScopes: {}\nExpires: {}\nNote: pr_watch poll_now/monitor/scheduled follow-ups remain read-only; this grant is for a separate explicit remediation workflow.{}",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        grant_id,
+        format_scopes(&grant.scopes),
+        grant.expires_at,
+        if would_write { "" } else { "\nDry run: no file written" }
+    ))
+    .with_title(format!("authorized {}", state.watch_id))
+    .with_metadata(json!({"watch": state, "grant_id": grant_id, "written": would_write})))
+}
+
+fn revoke_watch_grant(
+    store: &Path,
+    params: PrWatchInput,
+    _ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let mut state = load_state_for_params(store, &params)?;
+    let grant_id = params.grant_id.clone();
+    let scopes = parse_write_scopes(params.scopes.as_deref())?;
+    if grant_id.is_none() && scopes.is_empty() {
+        bail!("revoke requires grant_id or at least one scope");
+    }
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "revoke")),
+        }
+    } else {
+        None
+    };
+    let before = state.authorization.active_grants.len();
+    state.authorization.active_grants.retain(|grant| {
+        if let Some(id) = &grant_id {
+            return &grant.grant_id != id;
+        }
+        grant.scopes.is_disjoint(&scopes)
+    });
+    let revoked = before.saturating_sub(state.authorization.active_grants.len());
+    state.updated_at = Some(now_iso());
+    state.push_event(WatchEvent {
+        at: now_iso(),
+        kind: "grant_revoked".to_string(),
+        data: json!({"grant_id": grant_id, "scopes": scopes, "revoked_count": revoked}),
+    });
+    let path = state_path(store, &state.watch_id);
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
+    Ok(ToolOutput::new(format!(
+        "PR watch grant revoke recorded: {}\nRevoked grants: {}{}",
+        state.watch_id,
+        revoked,
+        if would_write {
+            ""
+        } else {
+            "\nDry run: no file written"
+        }
+    ))
+    .with_title(format!("revoked {}", state.watch_id))
+    .with_metadata(json!({"watch": state, "revoked_count": revoked, "written": would_write})))
+}
+
+fn reschedule_watch(
+    store: &Path,
+    mut params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let mut state = load_state_for_params(store, &params)?;
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "reschedule")),
+        }
+    } else {
+        None
+    };
+    apply_schedule_fields(&mut state, &params);
+    state.updated_at = Some(now_iso());
+    let canceled = if would_write {
+        cancel_queued_watch_items(&state)?
+    } else {
+        0
+    };
+    state.push_event(WatchEvent {
+        at: now_iso(),
+        kind: "rescheduled".to_string(),
+        data: json!({
+            "canceled_existing_items": canceled,
+            "lock_strategy": "watch lock file plus updated_at/cycle stale-write checks",
+            "read_only_watch_invariant": true,
+        }),
+    });
+    let path = state_path(store, &state.watch_id);
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
+    params.schedule_next = true;
+    let scheduled = maybe_schedule_next_monitor(ctx, &state, &params)?;
+    Ok(ToolOutput::new(format!(
+        "PR watch rescheduled: {}\nCanceled queued items: {}\nScheduled: {}\nNote: scheduled monitor cycles remain read-only and must not push, comment, resolve threads, or merge.{}",
+        state.watch_id,
+        canceled,
+        scheduled.unwrap_or_else(|| "not scheduled".to_string()),
+        if would_write { "" } else { "\nDry run: no file written" }
+    ))
+    .with_title(format!("rescheduled {}", state.watch_id))
+    .with_metadata(json!({"watch": state, "canceled": canceled, "written": would_write})))
+}
+
 fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     if let Some(seconds) = params.poll_interval_seconds {
         state.polling.poll_interval_seconds = seconds.max(60);
@@ -254,6 +440,116 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
         let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
         state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
     }
+}
+
+fn parse_write_scopes(values: Option<&[String]>) -> Result<BTreeSet<WriteScope>> {
+    let mut scopes = BTreeSet::new();
+    for value in values.unwrap_or(&[]) {
+        let scope = match value.as_str() {
+            "local_fix" => WriteScope::LocalFix,
+            "commit" => WriteScope::Commit,
+            "push" => WriteScope::Push,
+            "comment" => WriteScope::Comment,
+            "resolve_threads" => WriteScope::ResolveThreads,
+            "merge" => bail!("merge is not an authorizable pr_watch scope"),
+            other => bail!("unknown pr_watch authorization scope: {other}"),
+        };
+        scopes.insert(scope);
+    }
+    Ok(scopes)
+}
+
+fn format_scope(scope: WriteScope) -> &'static str {
+    match scope {
+        WriteScope::LocalFix => "local_fix",
+        WriteScope::Commit => "commit",
+        WriteScope::Push => "push",
+        WriteScope::Comment => "comment",
+        WriteScope::ResolveThreads => "resolve_threads",
+    }
+}
+
+fn format_scopes(scopes: &BTreeSet<WriteScope>) -> String {
+    if scopes.is_empty() {
+        return "none".to_string();
+    }
+    scopes
+        .iter()
+        .copied()
+        .map(format_scope)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn schedule_overdue_by_seconds(state: &PrWatchState) -> Option<i64> {
+    if state.terminal {
+        return None;
+    }
+    let next = state.polling.next_poll_at.as_deref()?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(next).ok()?;
+    let seconds = (Utc::now() - parsed.with_timezone(&Utc)).num_seconds();
+    (seconds > 0).then_some(seconds)
+}
+
+fn schedule_status_line(state: &PrWatchState) -> String {
+    match schedule_overdue_by_seconds(state) {
+        Some(seconds) => format!(
+            "Schedule: overdue by {}; recover with `pr_watch action=\"reschedule\" repo={} pr={} watch_id={} schedule_next=true`",
+            human_duration(seconds),
+            state.pr.repo,
+            state.pr.number,
+            state.watch_id
+        ),
+        None => format!(
+            "Schedule: next poll {}",
+            state
+                .polling
+                .next_poll_at
+                .as_deref()
+                .unwrap_or("not scheduled")
+        ),
+    }
+}
+
+fn human_duration(seconds: i64) -> String {
+    if seconds >= 3600 {
+        format!("{}h{}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m{}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+fn active_grant_lines(state: &PrWatchState) -> Vec<String> {
+    let now = now_iso();
+    state
+        .authorization
+        .active_grants
+        .iter()
+        .map(|grant| {
+            let active = now <= grant.expires_at;
+            format!(
+                "{} scopes={} expires={} status={} reason={}",
+                grant.grant_id,
+                format_scopes(&grant.scopes),
+                grant.expires_at,
+                if active { "active" } else { "expired" },
+                grant.reason.as_deref().unwrap_or("none")
+            )
+        })
+        .collect()
+}
+
+fn recent_grant_event_lines(state: &PrWatchState) -> Vec<String> {
+    state
+        .events
+        .iter()
+        .rev()
+        .filter(|event| matches!(event.kind.as_str(), "grant_created" | "grant_revoked"))
+        .take(5)
+        .map(|event| format!("{} {} {}", event.at, event.kind, event.data))
+        .collect()
 }
 
 fn monitor_max_runtime_seconds(params: &PrWatchInput) -> u64 {
@@ -363,9 +659,9 @@ fn maybe_schedule_next(
     let task = scheduled_poll_prompt(state);
     let mut manager = AmbientManager::new()?;
     if let Some(existing) =
-        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(|| {
-            find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline")
-        })
+        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(
+            || find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline"),
+        )
     {
         if existing.scheduled_for > Utc::now() {
             return Ok(Some(format!(
@@ -432,7 +728,9 @@ fn maybe_schedule_next_monitor(
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
     let mut manager = AmbientManager::new()?;
-    if let Some(existing) = find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor") {
+    if let Some(existing) =
+        find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
+    {
         if existing.scheduled_for > Utc::now() {
             return Ok(Some(format!(
                 "{} at {} (already scheduled)",
@@ -516,28 +814,37 @@ fn find_existing_scheduled_watch_item<'a>(
 }
 
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
+    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
     if state.last_successful_fetch.is_empty() {
         return format!(
-            "Run the first read-only PR watch baseline acknowledgement for {}. Use pr_watch with action=ack_baseline, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
-            state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+            "Run the first read-only PR watch baseline acknowledgement for {}. State file: {}. Use pr_watch with action=ack_baseline, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
+            state.watch_id, state_file, state.pr.repo, state.pr.number, state.watch_id
         );
     }
     format!(
-        "Run the next read-only PR watch poll for {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
-        state.watch_id, state.pr.repo, state.pr.number, state.watch_id
+        "Run the next read-only PR watch poll for {}. State file: {}. Use pr_watch with action=poll_now, repo={}, pr={}, watch_id={}, schedule_next=true. Do not push, comment, resolve threads, or merge.",
+        state.watch_id, state_file, state.pr.repo, state.pr.number, state.watch_id
     )
 }
 
 fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> String {
+    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
+    let grant_note = if state.authorization.active_grants.is_empty() {
+        "No active remediation grant is recorded."
+    } else {
+        "A remediation grant may be recorded, but this scheduled monitor must remain read-only; use a separate explicit remediation workflow to consume grants."
+    };
     format!(
-        "Run the next structured PR watch monitor cycle for {}. Use pr_watch with action=monitor, repo={}, pr={}, watch_id={}, schedule_next=true, poll_interval_seconds={}, quiet_cycles_required={}, max_runtime_seconds={}. The monitor is read-only: do not push, comment, resolve threads, or merge.",
+        "Run the next structured PR watch monitor cycle for {}. State file: {}. Use pr_watch with action=monitor, repo={}, pr={}, watch_id={}, schedule_next=true, poll_interval_seconds={}, quiet_cycles_required={}, max_runtime_seconds={}. {} The monitor is read-only: do not push, comment, resolve threads, or merge.",
         state.watch_id,
+        state_file,
         state.pr.repo,
         state.pr.number,
         state.watch_id,
         state.polling.poll_interval_seconds,
         state.polling.required_quiet_cycles,
         max_runtime_seconds,
+        grant_note,
     )
 }
 
@@ -1778,6 +2085,9 @@ fn is_failed_check(check: &CheckRunState) -> bool {
 fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
     let author = author.unwrap_or_default().to_ascii_lowercase();
     let body = body.unwrap_or_default().to_ascii_lowercase();
+    if body_contains_review_signal(&body) {
+        return false;
+    }
     body.starts_with("fix-summary:")
         || body.contains("triggered the review bot")
         || body.contains("automation progress")
@@ -1785,6 +2095,27 @@ fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
         || (author == "shopify"
             && body.contains("oxygen deployed a preview")
             && body.contains("deployment details"))
+        || ((author.contains("vercel") || body.contains("vercel"))
+            && (body.contains("deployment") || body.contains("preview"))
+            && (body.contains("ready")
+                || body.contains("completed")
+                || body.contains("deployed")
+                || body.contains("visit preview")))
+        || (body.contains("jules, reporting for duty")
+            || body.contains("reporting for duty! i'm here to lend a hand"))
+}
+
+fn body_contains_review_signal(body: &str) -> bool {
+    body.contains("[high]")
+        || body.contains("[medium]")
+        || body.contains("[low]")
+        || body.contains("requested changes")
+        || body.contains("please fix")
+        || body.contains("must fix")
+        || body.contains("security")
+        || body.contains("failing")
+        || body.contains("failed")
+        || body.contains("error:")
 }
 
 fn stable_body_hash(body: &str) -> String {
@@ -1845,6 +2176,22 @@ fn handoff_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
         "- Quiet cycles: {}/{}\n",
         state.polling.quiet_cycles, state.polling.required_quiet_cycles
     ));
+    text.push_str(&format!("- {}\n", schedule_status_line(&state)));
+    let grants = active_grant_lines(&state);
+    if !grants.is_empty() {
+        text.push_str("\n## Authorization grants\n");
+        for grant in grants {
+            text.push_str(&format!("- {grant}\n"));
+        }
+        text.push_str("- Watch invariant: pr_watch poll/status/monitor/scheduled follow-ups remain read-only even with active grants.\n");
+    }
+    let grant_events = recent_grant_event_lines(&state);
+    if !grant_events.is_empty() {
+        text.push_str("\n## Recent grant lifecycle events\n");
+        for event in grant_events {
+            text.push_str(&format!("- {event}\n"));
+        }
+    }
     text.push_str("\n## Evidence\n");
     for line in evidence_lines(&state) {
         text.push_str(&format!("- {}\n", line));
@@ -1876,7 +2223,7 @@ fn handoff_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
 
 fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
     let mut text = format!(
-        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={}",
+        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\n{}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={} (legacy display only; remote mutation requires a separate grant-consuming remediation workflow)",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -1893,6 +2240,7 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
             .next_poll_at
             .as_deref()
             .unwrap_or("not scheduled"),
+        schedule_status_line(state),
         state.policy.local_fix,
         state.policy.commit,
         state.policy.push,
@@ -1904,6 +2252,16 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
         for (surface, at) in &state.last_successful_fetch {
             text.push_str(&format!("\n- {}: {}", surface, at));
         }
+    }
+    let grants = active_grant_lines(state);
+    if !grants.is_empty() {
+        text.push_str("\nAuthorization grants:");
+        for grant in grants {
+            text.push_str(&format!("\n- {grant}"));
+        }
+        text.push_str(
+            "\nGrant note: pr_watch watch actions remain read-only even with active grants.",
+        );
     }
     text
 }
@@ -1995,6 +2353,12 @@ fn evidence_lines(state: &PrWatchState) -> Vec<String> {
     }
     if let Some(next) = &state.polling.next_poll_at {
         lines.push(format!("Next scheduled poll: {}", next));
+    }
+    if let Some(seconds) = schedule_overdue_by_seconds(state) {
+        lines.push(format!(
+            "Scheduled poll overdue by {}",
+            human_duration(seconds)
+        ));
     }
     lines
 }
@@ -2115,7 +2479,10 @@ mod tests {
                 .is_some()
         );
         assert!(schema.pointer("/properties/max_runtime_seconds").is_some());
-        assert!(!actions.iter().any(|value| value == "authorize"));
+        assert!(actions.iter().any(|value| value == "authorize"));
+        assert!(actions.iter().any(|value| value == "revoke"));
+        assert!(actions.iter().any(|value| value == "reschedule"));
+        assert!(schema.pointer("/properties/scopes").is_some());
     }
 
     fn monitor_params(max_runtime_seconds: Option<u64>) -> PrWatchInput {
@@ -2130,7 +2497,40 @@ mod tests {
             quiet_cycles_required: None,
             max_runtime_seconds,
             target: None,
+            scopes: None,
+            reason: None,
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
         }
+    }
+
+    #[test]
+    fn parse_write_scopes_rejects_merge_scope() {
+        let scopes = vec!["local_fix".to_string(), "push".to_string()];
+        let parsed = parse_write_scopes(Some(&scopes)).expect("valid scopes");
+        assert!(parsed.contains(&WriteScope::LocalFix));
+        assert!(parsed.contains(&WriteScope::Push));
+
+        let invalid = vec!["merge".to_string()];
+        assert!(parse_write_scopes(Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn schedule_overdue_detects_nonterminal_due_poll() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.polling.next_poll_at = Some(
+            (Utc::now() - Duration::minutes(7))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
+        );
+        assert!(schedule_overdue_by_seconds(&state).unwrap() >= 60);
+        assert!(schedule_status_line(&state).contains("overdue"));
+        state.terminal = true;
+        assert!(schedule_overdue_by_seconds(&state).is_none());
     }
 
     #[test]
@@ -2206,11 +2606,7 @@ mod tests {
             &scheduled_monitor_prompt(&state, 60),
             vec![],
         );
-        let other_poll_item = scheduled_item(
-            "sched_other",
-            &scheduled_poll_prompt(&other),
-            vec![],
-        );
+        let other_poll_item = scheduled_item("sched_other", &scheduled_poll_prompt(&other), vec![]);
         let items = vec![monitor_item, other_poll_item];
 
         assert!(find_existing_scheduled_watch_item(&items, &state, "poll_now").is_none());
@@ -2609,6 +3005,11 @@ mod tests {
             quiet_cycles_required: None,
             max_runtime_seconds: None,
             target: None,
+            scopes: None,
+            reason: None,
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
@@ -2791,7 +3192,9 @@ mod tests {
         ));
         assert!(is_automation_chatter(
             Some("shopify"),
-            Some("Oxygen deployed a preview of your `feature` branch. Details:\n| Storefront | Status | Preview link | Deployment details |")
+            Some(
+                "Oxygen deployed a preview of your `feature` branch. Details:\n| Storefront | Status | Preview link | Deployment details |"
+            )
         ));
         assert!(!is_automation_chatter(
             Some("reviewer"),
@@ -2800,6 +3203,18 @@ mod tests {
         assert!(!is_automation_chatter(
             Some("shopify"),
             Some("Please fix the deployment configuration")
+        ));
+        assert!(is_automation_chatter(
+            Some("vercel[bot]"),
+            Some("Vercel deployment completed. Visit Preview: https://example.vercel.app")
+        ));
+        assert!(is_automation_chatter(
+            Some("google-labs-jules"),
+            Some("👋 Jules, reporting for duty! I'm here to lend a hand with this pull request.")
+        ));
+        assert!(!is_automation_chatter(
+            Some("vercel[bot]"),
+            Some("[high] The preview failed because auth is broken. Please fix before merge.")
         ));
     }
 }

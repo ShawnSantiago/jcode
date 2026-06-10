@@ -222,3 +222,43 @@ Recommended first implementation is Slice B, not C. It provides reliability and 
 ## Recommendation
 
 Implement **single-cycle structured monitor** first. It is safer than a sleeping loop and directly addresses the observed failure mode: scheduled tasks had too much prose and not enough structured tool intent. Multi-cycle bounded sleeping can come later if needed.
+
+## 2026-06-10 Dogfood improvement addendum
+
+Recent dogfooding showed three recurring operator pain points: stale scheduled wakeups, manual edits to `.jcode/pr-feedback-watch/*-state.json` for commit/push/comment policy, and deployment-only bot comments being counted as actionable. The implementation now treats these as first-class watch concerns while preserving the read-only monitor invariant.
+
+### Stale watch recovery
+
+`pr_watch status`, `readiness`, and `handoff` report whether `polling.next_poll_at` is overdue. If a watch is stale, recover it with a structured monitor reschedule:
+
+```text
+pr_watch action="reschedule" repo="OWNER/REPO" pr=123 watch_id="OWNER~2fREPO-pr-123" schedule_next=true
+```
+
+`reschedule` is watch-id scoped, uses the existing watch lock plus state stale-write checks, cancels queued watch items for that watch, records a `rescheduled` event, and schedules a read-only `monitor` follow-up.
+
+### Authorization grants are local records only
+
+`pr_watch action="authorize"` records an operator grant envelope with scopes, reason, session id, expiry, and single-use intent. `pr_watch action="revoke"` invalidates grants by `grant_id` or scope set.
+
+Important invariants:
+
+- `poll_now`, `ack_baseline`, `monitor`, scheduled follow-ups, `status`, `readiness`, and `handoff` remain read-only even with active grants.
+- Grants are for a separate, deliberately invoked remediation workflow.
+- `merge` is not an authorizable scope.
+- Legacy policy booleans are displayed for compatibility only; direct state JSON edits are deprecated except emergency debugging.
+- Handoff output surfaces recent grant lifecycle events so reviewers can audit grant provenance.
+
+Example grant recording:
+
+```text
+pr_watch action="authorize" repo="OWNER/REPO" pr=123 watch_id="OWNER~2fREPO-pr-123" scopes=["commit","push","comment","resolve_threads"] reason="User requested automatic remediation for this PR"
+```
+
+### Automation-noise filtering
+
+Deployment-only Vercel comments, assistant handshake comments such as “Jules, reporting for duty”, and existing ignore markers are filtered as automation chatter. The filter remains conservative: severity markers, requested-change language, failing/error text, and security language preserve actionability even when authored by a bot.
+
+### Follow-up
+
+After the grant model soaks, remove dependence on legacy boolean policy fields from downstream watch state and migrate old watch artifacts to the grant-envelope model.
