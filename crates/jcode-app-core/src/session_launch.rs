@@ -29,6 +29,48 @@ fn resume_provider_arg(provider_key: Option<&str>) -> Option<&'static str> {
         .and_then(crate::provider::cli_provider_arg_for_session_key)
 }
 
+/// Metadata describing why a session window is being spawned, exported to
+/// spawn hooks and spawned terminals as `JCODE_SPAWN_*` env vars so external
+/// programs (tmux, kitty remote, herd, window managers) can reroute or place
+/// the window. See `[terminal] spawn_hook` in config.
+#[derive(Debug, Clone, Default)]
+pub struct SessionSpawnContext {
+    /// Spawn kind override (e.g. "swarm-agent", "restart"). Defaults to
+    /// "resume" or "selfdev" based on the launch helper used.
+    pub kind: Option<String>,
+    /// Extra `JCODE_SPAWN_*` env entries (e.g. swarm/coordinator ids).
+    pub extra_env: Vec<(String, String)>,
+}
+
+impl SessionSpawnContext {
+    pub fn kind(kind: impl Into<String>) -> Self {
+        Self {
+            kind: Some(kind.into()),
+            extra_env: Vec::new(),
+        }
+    }
+
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_env.push((key.into(), value.into()));
+        self
+    }
+
+    fn apply(
+        &self,
+        mut command: crate::terminal_launch::TerminalCommand,
+        default_kind: &str,
+        session_id: &str,
+    ) -> crate::terminal_launch::TerminalCommand {
+        command = command
+            .kind(self.kind.as_deref().unwrap_or(default_kind))
+            .session_id(session_id);
+        for (key, value) in &self.extra_env {
+            command = command.spawn_env(key.clone(), value.clone());
+        }
+        command
+    }
+}
+
 /// Compute the window/terminal title used when (re)launching a session.
 pub fn resumed_window_title(session_id: &str) -> String {
     let session_name = crate::process_title::session_name(session_id);
@@ -39,6 +81,63 @@ pub fn resumed_window_title(session_id: &str) -> String {
     } else {
         format!("{} jcode {}", icon, session_label)
     }
+}
+
+/// Focus/raise the window for `session_id` via the configured focus hook.
+///
+/// Returns `true` when a hook was configured and its process started (the
+/// built-in wmctrl/xdotool fallback should then be skipped). The hook receives
+/// `JCODE_FOCUS_SESSION_ID` and `JCODE_FOCUS_TITLE` env vars.
+pub fn focus_session_via_hook(session_id: &str, title: &str) -> bool {
+    let hook = {
+        let config = &crate::config::config().terminal;
+        config
+            .focus_hook
+            .as_deref()
+            .map(str::trim)
+            .filter(|hook| !hook.is_empty())
+            .map(str::to_string)
+    };
+    let Some(hook) = hook else {
+        return false;
+    };
+
+    let parts = match crate::terminal_launch::parse_hook_command(&hook) {
+        Ok(parts) => parts,
+        Err(error) => {
+            crate::logging::warn(&format!("Focus hook '{hook}' failed to parse: {error}"));
+            return false;
+        }
+    };
+    let (program, args) = parts
+        .split_first()
+        .expect("parse_hook_command guarantees at least one part");
+
+    let mut cmd = std::process::Command::new(crate::terminal_launch::expand_home(program));
+    cmd.args(args)
+        .env("JCODE_FOCUS_SESSION_ID", session_id)
+        .env("JCODE_FOCUS_TITLE", title)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match crate::platform::spawn_detached(&mut cmd) {
+        Ok(_) => true,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Focus hook '{hook}' failed to start ({error}); falling back to built-in focus"
+            ));
+            false
+        }
+    }
+}
+
+/// Focus a session window: configured focus hook first, then the built-in
+/// wmctrl/xdotool title search (Linux only) as a best-effort fallback.
+pub fn focus_session_window_best_effort(session_id: &str, title: &str) {
+    if focus_session_via_hook(session_id, title) {
+        return;
+    }
+    focus_title_best_effort(title);
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -80,6 +179,23 @@ pub fn spawn_resume_in_new_terminal_with_provider(
     cwd: &std::path::Path,
     provider_key: Option<&str>,
 ) -> Result<bool> {
+    spawn_resume_in_new_terminal_with_context(
+        exe,
+        session_id,
+        cwd,
+        provider_key,
+        &SessionSpawnContext::default(),
+    )
+}
+
+#[cfg(unix)]
+pub fn spawn_resume_in_new_terminal_with_context(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+    context: &SessionSpawnContext,
+) -> Result<bool> {
     let title = resumed_window_title(session_id);
     let mut args = vec!["--fresh-spawn".to_string()];
     if let Some(provider_arg) = resume_provider_arg(provider_key) {
@@ -90,6 +206,7 @@ pub fn spawn_resume_in_new_terminal_with_provider(
     let command = crate::terminal_launch::TerminalCommand::new(exe, args)
         .title(title)
         .fresh_spawn();
+    let command = context.apply(command, "resume", session_id);
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
@@ -109,6 +226,23 @@ pub fn spawn_selfdev_in_new_terminal_with_provider(
     cwd: &std::path::Path,
     provider_key: Option<&str>,
 ) -> Result<bool> {
+    spawn_selfdev_in_new_terminal_with_context(
+        exe,
+        session_id,
+        cwd,
+        provider_key,
+        &SessionSpawnContext::default(),
+    )
+}
+
+#[cfg(unix)]
+pub fn spawn_selfdev_in_new_terminal_with_context(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+    context: &SessionSpawnContext,
+) -> Result<bool> {
     let selfdev_title = format!("{} [self-dev]", resumed_window_title(session_id));
     let mut args = vec!["--fresh-spawn".to_string()];
     if let Some(provider_arg) = resume_provider_arg(provider_key) {
@@ -123,9 +257,10 @@ pub fn spawn_selfdev_in_new_terminal_with_provider(
     let command = crate::terminal_launch::TerminalCommand::new(exe, args)
         .title(selfdev_title.clone())
         .fresh_spawn();
+    let command = context.apply(command, "selfdev", session_id);
     let spawned = crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)?;
     if spawned {
-        focus_title_best_effort(&selfdev_title);
+        focus_session_window_best_effort(session_id, &selfdev_title);
     }
     Ok(spawned)
 }
@@ -220,6 +355,23 @@ pub fn spawn_resume_in_new_terminal_with_provider(
     cwd: &std::path::Path,
     provider_key: Option<&str>,
 ) -> Result<bool> {
+    spawn_resume_in_new_terminal_with_context(
+        exe,
+        session_id,
+        cwd,
+        provider_key,
+        &SessionSpawnContext::default(),
+    )
+}
+
+#[cfg(not(unix))]
+pub fn spawn_resume_in_new_terminal_with_context(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+    context: &SessionSpawnContext,
+) -> Result<bool> {
     use std::process::{Command, Stdio};
 
     let mut jcode_args: Vec<String> = Vec::new();
@@ -229,6 +381,13 @@ pub fn spawn_resume_in_new_terminal_with_provider(
     }
     jcode_args.push("--resume".to_string());
     jcode_args.push(session_id.to_string());
+
+    let hook_command = crate::terminal_launch::TerminalCommand::new(exe, jcode_args.clone())
+        .title(resumed_window_title(session_id));
+    let hook_command = context.apply(hook_command, "resume", session_id);
+    if crate::terminal_launch::try_spawn_via_configured_hook(&hook_command, cwd) {
+        return Ok(true);
+    }
 
     let wezterm_gui = find_wezterm_gui_binary();
     let alacritty_available = Command::new("where")
@@ -318,6 +477,23 @@ pub fn spawn_selfdev_in_new_terminal_with_provider(
     cwd: &std::path::Path,
     provider_key: Option<&str>,
 ) -> Result<bool> {
+    spawn_selfdev_in_new_terminal_with_context(
+        exe,
+        session_id,
+        cwd,
+        provider_key,
+        &SessionSpawnContext::default(),
+    )
+}
+
+#[cfg(not(unix))]
+pub fn spawn_selfdev_in_new_terminal_with_context(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+    context: &SessionSpawnContext,
+) -> Result<bool> {
     use std::process::{Command, Stdio};
 
     let mut jcode_args: Vec<String> = Vec::new();
@@ -330,6 +506,13 @@ pub fn spawn_selfdev_in_new_terminal_with_provider(
         session_id.to_string(),
         "self-dev".to_string(),
     ]);
+
+    let hook_command = crate::terminal_launch::TerminalCommand::new(exe, jcode_args.clone())
+        .title(format!("{} [self-dev]", resumed_window_title(session_id)));
+    let hook_command = context.apply(hook_command, "selfdev", session_id);
+    if crate::terminal_launch::try_spawn_via_configured_hook(&hook_command, cwd) {
+        return Ok(true);
+    }
 
     let wezterm_gui = find_wezterm_gui_binary();
     let alacritty_available = Command::new("where")

@@ -475,7 +475,11 @@ impl Provider for OpenAIProvider {
                         }
                         Err(OpenAIStreamFailure::Other(error)) => {
                             let elapsed_ms = attempt_started.elapsed().as_millis();
-                            let error_str = error.to_string().to_lowercase();
+                            // Full anyhow chain ({:#}) so a send-level transport
+                            // cause wrapped behind `.context("Failed to send
+                            // request to OpenAI API")` (e.g. TLS BadRecordMac) is
+                            // visible to the retry classifier.
+                            let error_str = format!("{error:#}").to_lowercase();
                             if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                                 log_openai_stream_lifecycle(
                                     crate::logging::LogLevel::Warn,

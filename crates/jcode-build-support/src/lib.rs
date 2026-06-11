@@ -7,10 +7,10 @@ pub use paths::{
     SELFDEV_CARGO_PROFILE, binary_name, binary_stem, client_update_candidate,
     current_binary_build_time_string, current_binary_built_at, find_dev_binary,
     find_repo_in_ancestors, get_repo_dir, is_jcode_repo, launcher_binary_path, launcher_dir,
-    preferred_reload_candidate, release_binary_path, run_selfdev_build, selfdev_binary_path,
-    selfdev_build_command, selfdev_build_command_for_target, shared_server_update_candidate,
-    update_launcher_symlink_to_current, update_launcher_symlink_to_stable,
-    version_matches_installed_channel,
+    preferred_reload_candidate, release_binary_path, resolve_binary_payload, run_selfdev_build,
+    selfdev_binary_path, selfdev_build_command, selfdev_build_command_for_target,
+    shared_server_update_candidate, update_launcher_symlink_to_current,
+    update_launcher_symlink_to_stable, version_matches_installed_channel,
 };
 pub use source_state::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
@@ -859,11 +859,20 @@ fn is_release_channel_marker(marker: &str) -> bool {
 /// when `shared` is missing entirely (nothing to protect). Any mtime
 /// uncertainty on an existing shared binary is treated as "not older" so we
 /// never repair away an unverifiable (possibly newer) pinned build.
+///
+/// Both paths are resolved through [`resolve_binary_payload`] so release
+/// installs (wrapper script + `.bin` payload) compare the payloads that
+/// actually run instead of the tiny wrapper scripts, whose mtimes carry no
+/// version information.
 fn shared_server_binary_is_strictly_older_than(
     shared: &std::path::Path,
     stable: &std::path::Path,
 ) -> bool {
-    let mtime = |p: &std::path::Path| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
+    let mtime = |p: &std::path::Path| {
+        std::fs::metadata(resolve_binary_payload(p))
+            .ok()
+            .and_then(|m| m.modified().ok())
+    };
     let stable_mtime = match mtime(stable) {
         Some(m) => m,
         None => return false,

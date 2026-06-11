@@ -74,7 +74,9 @@ pub(super) async fn run_stream_with_retries(
         {
             Ok(()) => return,
             Err(e) => {
-                let error_str = e.to_string().to_lowercase();
+                // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
+                // cause (e.g. TLS BadRecordMac) is visible to the classifier.
+                let error_str = format!("{e:#}").to_lowercase();
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     crate::logging::info(&format!("Transient API error, will retry: {}", e));
                     last_error = Some(e);

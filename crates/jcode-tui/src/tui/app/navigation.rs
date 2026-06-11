@@ -717,7 +717,9 @@ impl App {
                 let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
                     return false;
                 };
-                picker_cell.borrow_mut().apply_preview_scroll_step(direction)
+                picker_cell
+                    .borrow_mut()
+                    .apply_preview_scroll_step(direction)
             }
         }
     }
@@ -817,6 +819,20 @@ impl App {
     pub(super) fn set_side_panel_ratio_preset(&mut self, next: u8) {
         self.set_diagram_pane_ratio(next as i16, false, false);
         self.set_status_notice(format!("Side panel: {}%", self.diagram_pane_ratio_target));
+    }
+
+    /// Toggle whether inline transcript images render expanded or as
+    /// collapsed label stubs. Persisted so the choice survives restarts and
+    /// session resumes.
+    pub(super) fn toggle_inline_images(&mut self) {
+        self.inline_images_visible = !self.inline_images_visible;
+        super::ui_prefs::save_inline_images_visible(self.inline_images_visible);
+        let status = if self.inline_images_visible {
+            "Inline images: ON"
+        } else {
+            "Inline images: hidden (Alt+Shift+I to show)"
+        };
+        self.set_status_notice(status);
     }
 
     pub(super) fn toggle_side_panel(&mut self) {
@@ -1435,11 +1451,7 @@ impl App {
         // If the upward scroll bottomed out against the top of the currently
         // loaded content, fold the unsatisfied intent into the prefetch as
         // overshoot so the newly loaded history scrolls into view smoothly.
-        let overshoot = if self.scroll_offset == 0 {
-            amount
-        } else {
-            0
-        };
+        let overshoot = if self.scroll_offset == 0 { amount } else { 0 };
         self.maybe_queue_compacted_history_load_with_overshoot(overshoot);
         before != (self.scroll_offset, self.auto_scroll_paused)
     }

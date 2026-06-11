@@ -13,14 +13,30 @@ impl SelfDevTool {
         file: &mut tokio::fs::File,
     ) -> Result<BuildLockGuard> {
         let mut last_note: Option<String> = None;
+        // Tolerate transient lookup misses: a concurrent save() of this (or
+        // any) request file can momentarily make it unreadable, and load_all
+        // silently skips unreadable entries. Only a *persistent* absence means
+        // the request was actually pruned/cancelled.
+        let mut missing_streak = 0u32;
         loop {
             let pending = BuildRequest::pending_requests_for_scope(worktree_scope)?;
-            let my_index = pending
+            let my_index = match pending
                 .iter()
                 .position(|request| request.request_id == request_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Queued build request {} disappeared", request_id)
-                })?;
+            {
+                Some(idx) => {
+                    missing_streak = 0;
+                    idx
+                }
+                None => {
+                    missing_streak += 1;
+                    if missing_streak >= 4 {
+                        anyhow::bail!("Queued build request {} disappeared", request_id);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+            };
 
             if my_index == 0
                 && let Some(lock) = Self::try_acquire_build_lock(worktree_scope)?

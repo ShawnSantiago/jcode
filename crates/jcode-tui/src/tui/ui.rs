@@ -74,14 +74,16 @@ mod diagram_pane;
 mod file_diff_ui;
 #[path = "ui_frame_metrics.rs"]
 mod frame_metrics;
+#[path = "ui_smoothness.rs"]
+mod smoothness;
 #[path = "ui_header.rs"]
 mod header;
+#[path = "ui_inline_image.rs"]
+pub(crate) mod inline_image_ui;
 #[path = "ui_inline_interactive.rs"]
 mod inline_interactive_ui;
 #[path = "ui_inline.rs"]
 mod inline_ui;
-#[path = "ui_inline_image.rs"]
-pub(crate) mod inline_image_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
 #[path = "ui_memory_estimates.rs"]
@@ -202,6 +204,12 @@ static LAST_TOTAL_WRAPPED_LINES: AtomicUsize = AtomicUsize::new(0);
 /// handlers adopt this so manual scrolling resumes from the on-screen position.
 #[cfg(not(test))]
 static LAST_RESOLVED_CHAT_SCROLL: AtomicUsize = AtomicUsize::new(0);
+/// Whether the tail-follow viewport is mid catch-up slide (a large content
+/// append is being scrolled into view over several frames instead of jumping).
+/// Drives the redraw loop so the slide completes promptly.
+#[cfg(not(test))]
+static TAIL_CATCHUP_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// Wrapped line indices where each user prompt starts (updated each render frame).
 /// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
 #[cfg(not(test))]
@@ -215,6 +223,7 @@ thread_local! {
     static TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_TOTAL_WRAPPED_LINES: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
+    static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -408,6 +417,31 @@ pub(crate) fn set_last_resolved_chat_scroll(value: usize) {
     #[cfg(not(test))]
     {
         LAST_RESOLVED_CHAT_SCROLL.store(value, Ordering::Relaxed);
+    }
+}
+
+/// Whether the tail-follow viewport is still sliding toward the bottom after a
+/// large append. The redraw loop keeps animation cadence while this is set.
+pub(crate) fn tail_catchup_active() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_TAIL_CATCHUP_ACTIVE.with(Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        TAIL_CATCHUP_ACTIVE.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn set_tail_catchup_active(active: bool) {
+    #[cfg(test)]
+    {
+        TEST_TAIL_CATCHUP_ACTIVE.with(|cell| cell.set(active));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        TAIL_CATCHUP_ACTIVE.store(active, Ordering::Relaxed);
     }
 }
 
@@ -784,6 +818,9 @@ struct BodyCacheKey {
     centered: bool,
     /// Whether inline images render at all (Alt+M hides them).
     pin_images: bool,
+    /// Whether inline images render expanded or as collapsed label stubs
+    /// (Alt+Shift+I toggles; persisted).
+    inline_images_visible: bool,
     /// Signature of the inline image set; anchored images render inside the
     /// body, so the body must rebuild when images arrive or change.
     images_signature: (usize, u64),
@@ -860,6 +897,7 @@ impl BodyCacheState {
                     // late-arriving image may target an already-prepared
                     // message; only reuse bases built with the same image set.
                     && entry.key.pin_images == key.pin_images
+                    && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
             })
             .max_by_key(|entry| entry.msg_count)
@@ -878,6 +916,7 @@ impl BodyCacheState {
                     // late-arriving image may target an already-prepared
                     // message; only reuse bases built with the same image set.
                     && entry.key.pin_images == key.pin_images
+                    && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
             })
             .max_by_key(|entry| entry.msg_count)
@@ -916,6 +955,7 @@ impl BodyCacheState {
                     // late-arriving image may target an already-prepared
                     // message; only reuse bases built with the same image set.
                     && entry.key.pin_images == key.pin_images
+                    && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
             })
             .max_by_key(|(_, entry)| entry.msg_count)
@@ -935,6 +975,7 @@ impl BodyCacheState {
                     // late-arriving image may target an already-prepared
                     // message; only reuse bases built with the same image set.
                     && entry.key.pin_images == key.pin_images
+                    && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
             })
             .max_by_key(|(_, entry)| entry.msg_count)
@@ -1024,8 +1065,9 @@ struct FullPrepCacheKey {
     streaming_text_len: usize,
     streaming_text_hash: u64,
     batch_progress_hash: u64,
-    reasoning_trace_hash: u64,
     inline_images_signature: (usize, u64),
+    /// Whether inline images render expanded or as collapsed label stubs.
+    inline_images_visible: bool,
 }
 
 #[derive(Clone)]
@@ -1187,6 +1229,9 @@ pub(crate) use frame_metrics::{
     debug_flicker_frame_history, debug_slow_frame_history, recent_flicker_copy_target_for_key,
     recent_flicker_ui_notice,
 };
+pub(crate) use smoothness::{report_json as smoothness_report_json, reset as smoothness_reset};
+#[cfg(test)]
+pub(crate) use smoothness::frame_from_buffer as smoothness_frame_from_buffer;
 
 #[cfg(test)]
 pub(crate) use frame_metrics::{
@@ -2782,6 +2827,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if visual_debug::overlay_enabled() {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }
+
+    // Observe the rendered messages area for the anchor-stability (smoothness)
+    // report. Runs on the final buffer so it sees exactly what the user sees.
+    smoothness::observe_frame(
+        frame.buffer_mut(),
+        messages_area,
+        app.scroll_offset(),
+        !app.auto_scroll_paused(),
+    );
 
     // Record the frame capture if enabled
     if let Some(capture) = debug_capture {

@@ -110,6 +110,101 @@ fn test_env_override_swarm_model() {
 }
 
 #[test]
+fn spawn_hook_defaults_to_none_and_parses_from_toml() {
+    assert_eq!(Config::default().terminal.spawn_hook, None);
+
+    let cfg: Config = toml::from_str("[terminal]\nspawn_hook = \"tmux new-window\"\n")
+        .expect("spawn_hook should parse");
+    assert_eq!(cfg.terminal.spawn_hook.as_deref(), Some("tmux new-window"));
+}
+
+#[test]
+fn hooks_config_defaults_and_parses_from_toml() {
+    let defaults = Config::default().hooks;
+    assert_eq!(defaults.turn_end, None);
+    assert_eq!(defaults.session_start, None);
+    assert_eq!(defaults.session_end, None);
+    assert_eq!(defaults.pre_tool, None);
+    assert_eq!(defaults.post_tool, None);
+    assert_eq!(defaults.pre_tool_timeout_ms, 5000);
+
+    let cfg: Config = toml::from_str(
+        "[hooks]\nturn_end = \"notify-turn\"\npre_tool = \"~/bin/policy\"\npre_tool_timeout_ms = 1500\n",
+    )
+    .expect("hooks config should parse");
+    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("notify-turn"));
+    assert_eq!(cfg.hooks.pre_tool.as_deref(), Some("~/bin/policy"));
+    assert_eq!(cfg.hooks.pre_tool_timeout_ms, 1500);
+}
+
+#[test]
+fn test_env_override_lifecycle_hooks() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_turn_end = std::env::var_os("JCODE_HOOK_TURN_END");
+    let prev_timeout = std::env::var_os("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS");
+
+    crate::env::set_var("JCODE_HOOK_TURN_END", "my-notifier --fast");
+    crate::env::set_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", "250");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("my-notifier --fast"));
+    assert_eq!(cfg.hooks.pre_tool_timeout_ms, 250);
+
+    // Empty env value disables a config-file hook.
+    crate::env::set_var("JCODE_HOOK_TURN_END", " ");
+    let mut cfg = Config::default();
+    cfg.hooks.turn_end = Some("from-config".to_string());
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.hooks.turn_end, None);
+
+    restore_env_var("JCODE_HOOK_TURN_END", prev_turn_end);
+    restore_env_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", prev_timeout);
+}
+
+#[test]
+fn test_env_override_spawn_hook() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_SPAWN_HOOK");
+    crate::env::set_var("JCODE_SPAWN_HOOK", "kitty @ launch --type=tab --");
+
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(
+        cfg.terminal.spawn_hook.as_deref(),
+        Some("kitty @ launch --type=tab --")
+    );
+
+    // Empty env value disables a config-file hook.
+    crate::env::set_var("JCODE_SPAWN_HOOK", "  ");
+    let mut cfg = Config::default();
+    cfg.terminal.spawn_hook = Some("tmux new-window".to_string());
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.terminal.spawn_hook, None);
+
+    restore_env_var("JCODE_SPAWN_HOOK", prev);
+}
+
+#[test]
+fn test_env_override_focus_hook() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_FOCUS_HOOK");
+    crate::env::set_var("JCODE_FOCUS_HOOK", "niri-focus-jcode");
+
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.terminal.focus_hook.as_deref(), Some("niri-focus-jcode"));
+
+    // Empty env value disables a config-file hook.
+    crate::env::set_var("JCODE_FOCUS_HOOK", "");
+    let mut cfg = Config::default();
+    cfg.terminal.focus_hook = Some("wmctrl -a".to_string());
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.terminal.focus_hook, None);
+
+    restore_env_var("JCODE_FOCUS_HOOK", prev);
+}
+
+#[test]
 fn test_env_override_memory_sidecar() {
     let _guard = crate::storage::lock_test_env();
     let prev_model = std::env::var_os("JCODE_MEMORY_MODEL");
@@ -638,6 +733,54 @@ fn test_external_auth_source_allowed_for_path_ignores_broad_legacy_entry() {
     cfg.auth.trusted_external_sources = vec!["test_source".to_string()];
 
     assert!(!cfg.external_auth_source_allowed_for_path_config("test_source", &path));
+}
+
+/// Regression test for issue #349: a removed/unknown `update_channel` value
+/// (older configs could contain `"manual"`) must not fail the whole config
+/// parse. A hard parse failure during the reload handoff left the reload
+/// marker stuck in `starting` and clients re-requested the reload forever.
+#[test]
+fn unknown_update_channel_value_falls_back_to_stable_instead_of_failing_parse() {
+    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"manual\"\n")
+        .expect("unknown update_channel must not fail config parse");
+    assert_eq!(
+        cfg.features.update_channel,
+        super::UpdateChannel::Stable,
+        "unknown channel should fall back to the default"
+    );
+
+    // Other settings in the same config must survive the fallback.
+    let cfg: Config = toml::from_str(
+        "[features]\nupdate_channel = \"manual\"\nmemory = false\n\n[display]\ncentered = true\n",
+    )
+    .expect("config with unknown update_channel should parse");
+    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Stable);
+    assert!(!cfg.features.memory);
+    assert!(cfg.display.centered);
+}
+
+#[test]
+fn known_update_channel_values_still_parse() {
+    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"main\"\n")
+        .expect("main update_channel should parse");
+    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Main);
+
+    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"stable\"\n")
+        .expect("stable update_channel should parse");
+    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Stable);
+}
+
+#[test]
+fn update_channel_parse_accepts_known_aliases_and_rejects_unknown() {
+    use super::UpdateChannel;
+    assert_eq!(UpdateChannel::parse("stable"), Some(UpdateChannel::Stable));
+    assert_eq!(UpdateChannel::parse("release"), Some(UpdateChannel::Stable));
+    assert_eq!(UpdateChannel::parse("main"), Some(UpdateChannel::Main));
+    assert_eq!(UpdateChannel::parse("nightly"), Some(UpdateChannel::Main));
+    assert_eq!(UpdateChannel::parse("edge"), Some(UpdateChannel::Main));
+    assert_eq!(UpdateChannel::parse(" Main "), Some(UpdateChannel::Main));
+    assert_eq!(UpdateChannel::parse("manual"), None);
+    assert_eq!(UpdateChannel::parse(""), None);
 }
 
 impl Config {

@@ -1607,6 +1607,11 @@ mod stream_runtime_tests {
         assert!(is_retryable_error("temporary failure in name resolution"));
         assert!(is_retryable_error("no route to host"));
         assert!(is_retryable_error("network is unreachable"));
+        // A send-level cause that callers now surface via the full anyhow
+        // chain ({:#}) instead of the masked top-level context alone.
+        assert!(is_retryable_error(
+            "failed to send request to openai api: error sending request: received fatal alert: badrecordmac"
+        ));
     }
 
     #[test]

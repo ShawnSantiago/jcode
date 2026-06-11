@@ -1036,6 +1036,7 @@ pub fn download_and_install_blocking_with_progress(
         let version = release.tag_name.trim_start_matches('v');
         let dest_dir = build::builds_dir()?.join("versions").join(version);
         fs::create_dir_all(&dest_dir).context("Failed to create version install dir")?;
+        let mut installed_files = Vec::new();
         for entry in fs::read_dir(&extract_dir).context("Failed to read extracted archive")? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -1062,6 +1063,17 @@ pub fn download_and_install_blocking_with_progress(
                 || dest.extension().is_some_and(|ext| ext == "bin")
             {
                 crate::platform::set_permissions_executable(&dest)?;
+            }
+            installed_files.push(dest);
+        }
+        // Give every installed file the same mtime. The wrapper script and the
+        // `.bin` payload otherwise land with whatever sub-second skew the copy
+        // loop produced, and any code comparing binary freshness by mtime then
+        // sees two "different age" files for one logical install.
+        let install_stamp = SystemTime::now();
+        for path in &installed_files {
+            if let Ok(file) = fs::File::options().write(true).open(path) {
+                let _ = file.set_modified(install_stamp);
             }
         }
         let _ = fs::remove_dir_all(&extract_dir);

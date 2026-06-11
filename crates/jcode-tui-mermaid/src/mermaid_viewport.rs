@@ -646,6 +646,102 @@ fn probe_kitty_fit_state(
     .then(|| (state.unique_id, state.full_cols, state.full_rows))
 }
 
+/// Readiness of the Kitty stable-fit fast path for an inline image at a given
+/// placeholder geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineFitReadiness {
+    /// Scale + transmit state already exists for this geometry; drawing is a
+    /// cheap placeholder re-address.
+    Ready,
+    /// Kitty is active but the scaled/encoded state is missing. Building it on
+    /// the UI thread costs tens of milliseconds for a large screenshot, so
+    /// callers should prewarm it off-thread via [`prewarm_inline_fit_state`].
+    NeedsPrewarm,
+    /// The stable-fit fast path does not apply (no picker, non-Kitty protocol,
+    /// or video export); callers should use the regular synchronous path.
+    Unsupported,
+}
+
+/// Check whether the Kitty stable-fit state for `hash` is ready at the
+/// `(target_cols, target_rows)` placeholder geometry. Cheap: a couple of mutex
+/// lookups, no decoding and no filesystem reads beyond a cache-path stat.
+pub fn inline_fit_readiness(
+    hash: u64,
+    target_cols: u16,
+    target_rows: u16,
+    draw_border: bool,
+) -> InlineFitReadiness {
+    if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+        return InlineFitReadiness::Unsupported;
+    }
+    let picker = match PICKER.get().and_then(|p| p.as_ref()) {
+        Some(picker) => picker,
+        None => return InlineFitReadiness::Unsupported,
+    };
+    if picker.protocol_type() != ProtocolType::Kitty {
+        return InlineFitReadiness::Unsupported;
+    }
+    let Some(cached) = get_cached_diagram(hash, None) else {
+        return InlineFitReadiness::NeedsPrewarm;
+    };
+    let border_width = if draw_border { BORDER_WIDTH } else { 0 };
+    let fit_cols = target_cols.saturating_sub(border_width);
+    if probe_kitty_fit_state(
+        hash,
+        &cached.path,
+        fit_cols,
+        target_rows,
+        picker.font_size(),
+    )
+    .is_some()
+    {
+        InlineFitReadiness::Ready
+    } else {
+        InlineFitReadiness::NeedsPrewarm
+    }
+}
+
+/// Build (decode + scale + escape-encode) the Kitty stable-fit state for an
+/// inline image, mirroring the geometry math of
+/// [`render_image_widget_fit_stable`]. Intended to run off the UI thread so the
+/// first visible frame of a large image does not hitch the render loop.
+/// Returns true when the state exists afterwards.
+pub fn prewarm_inline_fit_state(
+    hash: u64,
+    target_cols: u16,
+    target_rows: u16,
+    draw_border: bool,
+) -> bool {
+    let picker = match PICKER.get().and_then(|p| p.as_ref()) {
+        Some(picker) => picker,
+        None => return false,
+    };
+    if picker.protocol_type() != ProtocolType::Kitty {
+        return false;
+    }
+    let Some(cached) = get_cached_diagram(hash, None) else {
+        return false;
+    };
+    let font_size = picker.font_size();
+    let border_width = if draw_border { BORDER_WIDTH } else { 0 };
+    let fit_cols = target_cols.saturating_sub(border_width);
+    if probe_kitty_fit_state(hash, &cached.path, fit_cols, target_rows, font_size).is_some() {
+        return true;
+    }
+    let Some(source) = load_source_image(hash, &cached.path) else {
+        return false;
+    };
+    ensure_kitty_fit_state(
+        hash,
+        &cached.path,
+        source.as_ref(),
+        fit_cols,
+        target_rows,
+        font_size,
+    )
+    .is_some()
+}
+
 /// Draw a rounded left border that hugs the image's real extent: `╭` on the
 /// image's first row, `╰` on its last, `│` between. Rows of the placeholder
 /// below the image (when the estimate was taller than the fitted image) get no
@@ -767,9 +863,7 @@ pub fn render_image_widget_fit_stable(
     }
 
     let visible_width = image_area.width.min(full_cols);
-    let visible_height = image_area
-        .height
-        .min(full_rows.saturating_sub(skip_rows));
+    let visible_height = image_area.height.min(full_rows.saturating_sub(skip_rows));
 
     if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
         dbg.stats.image_state_hits += 1;

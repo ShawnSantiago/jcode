@@ -93,6 +93,7 @@ mod tui_lifecycle_runtime;
 mod tui_state;
 mod turn;
 mod turn_memory;
+mod ui_prefs;
 
 pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 
@@ -129,19 +130,6 @@ struct PendingSplitPrompt {
 struct PendingLocalTransfer {
     receiver: mpsc::Receiver<anyhow::Result<PreparedTransferSession>>,
 }
-
-/// A reasoning trace that is animating out of view in `current` display mode. Its
-/// rendered height shrinks from full to zero over [`REASONING_COLLAPSE_DURATION`],
-/// after which it is dropped entirely. `markup` is the sentinel-wrapped dim+italic
-/// block exactly as it last rendered live.
-#[derive(Debug, Clone)]
-struct ReasoningCollapse {
-    markup: String,
-    started: Instant,
-}
-
-/// Duration of the reasoning-trace shrink-away animation (`current` mode).
-pub(crate) const REASONING_COLLAPSE_DURATION: Duration = Duration::from_millis(220);
 
 #[derive(Debug, Clone)]
 struct LocalRewindUndoSnapshot {
@@ -799,17 +787,12 @@ pub struct App {
     // closed reasoning block back out of the stream in place, keeping any answer
     // text that preceded it in order.
     reasoning_block_start: Option<usize>,
-    // `current` reasoning-display mode keeps the *most recently closed* reasoning
-    // trace on screen (sliced out of the live stream but rendered as its own dim
-    // section just above the stream) until the next trace finishes. Holds the
-    // sentinel-wrapped dim+italic markup of that retained block, or `None` when
-    // nothing is retained.
-    reasoning_retained: Option<String>,
-    // A previously-retained reasoning trace that is now animating away: it shrinks
-    // vertically (its visible height interpolates from full down to zero) and is
-    // dropped once the animation completes. Holds the block markup plus the
-    // animation start instant.
-    reasoning_collapse: Option<ReasoningCollapse>,
+    // Display-message indices of reasoning traces committed during the current
+    // turn (`current` reasoning-display mode anchors each closed trace in the
+    // transcript flow). Cleared - and the messages removed - when the next user
+    // prompt is submitted, keeping `current` mode ephemeral across turns
+    // without ever moving a trace while it is on screen.
+    turn_reasoning_trace_indices: Vec<usize>,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
@@ -1066,6 +1049,10 @@ pub struct App {
     side_panel_explicit_hidden: bool,
     // Pin read images to side pane
     pin_images: bool,
+    // Inline transcript images render expanded (true) or as collapsed label
+    // stubs (false). Toggled with Alt+Shift+I; persisted in UI preferences so
+    // it survives restarts and session resumes.
+    inline_images_visible: bool,
     // Auto-hide deadline for the pinned image side pane only.
     pinned_images_auto_hide_deadline: Option<Instant>,
     pinned_images_seen_count: usize,

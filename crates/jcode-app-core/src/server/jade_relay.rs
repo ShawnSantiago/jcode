@@ -1139,19 +1139,22 @@ fn spawn_launch_window(
         .map(|(path, _label)| path)
         .or_else(|| std::env::current_exe().ok())
         .unwrap_or_else(|| PathBuf::from("jcode"));
+    let context = crate::session_launch::SessionSpawnContext::kind("jade-relay");
     if selfdev_requested {
-        crate::session_launch::spawn_selfdev_in_new_terminal_with_provider(
+        crate::session_launch::spawn_selfdev_in_new_terminal_with_context(
             &exe,
             session_id,
             cwd,
             provider_key,
+            &context,
         )
     } else {
-        crate::session_launch::spawn_resume_in_new_terminal_with_provider(
+        crate::session_launch::spawn_resume_in_new_terminal_with_context(
             &exe,
             session_id,
             cwd,
             provider_key,
+            &context,
         )
     }
 }

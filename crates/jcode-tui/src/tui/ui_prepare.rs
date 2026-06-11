@@ -536,8 +536,8 @@ pub(super) fn prepare_messages(
         streaming_text_len: app.streaming_text().len(),
         streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
         batch_progress_hash: active_batch_progress_hash(app),
-        reasoning_trace_hash: reasoning_trace_hash(app),
         inline_images_signature: app.side_pane_images_signature(),
+        inline_images_visible: app.inline_images_visible(),
     };
 
     super::note_full_prep_request();
@@ -602,6 +602,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
                 width,
                 height,
                 prefix_blank,
+                app.inline_images_visible(),
             ))
         }
     } else {
@@ -623,16 +624,9 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let batch_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
 
     let streaming_start = Instant::now();
-    let has_reasoning_trace =
-        app.reasoning_retained_markup().is_some() || app.reasoning_collapse_state().is_some();
-    let reasoning_prefix_blank = has_reasoning_trace
-        && (!body_prepared.wrapped_lines.is_empty()
-            || !batch_progress_prepared.wrapped_lines.is_empty());
-    let reasoning_prepared = if has_reasoning_trace {
-        Arc::new(prepare_reasoning_trace(app, width, reasoning_prefix_blank))
-    } else {
-        Arc::new(empty_prepared_messages())
-    };
+    // Reasoning traces in `current` mode are anchored display messages inside
+    // the body now; no separate retained/collapsing trace section exists.
+    let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
     let stream_prefix_blank = has_streaming
         && (!body_prepared.wrapped_lines.is_empty()
@@ -648,8 +642,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let is_initial_empty = app.onboarding_preview_mode()
         || (app.display_messages().is_empty()
             && !app.is_processing()
-            && app.streaming_text().is_empty()
-            && !has_reasoning_trace);
+            && app.streaming_text().is_empty());
 
     if is_initial_empty {
         let compose_start = Instant::now();
@@ -777,6 +770,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         pin_images: app.pin_images(),
+        inline_images_visible: app.inline_images_visible(),
         images_signature: app.side_pane_images_signature(),
     };
     let msg_count = app.display_messages().len();
@@ -864,6 +858,7 @@ pub(super) fn prepare_body_incremental(
     // anchored image matching a *new* message must be injected here; its anchor
     // target did not exist when the base was built.
     let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
+    let inline_images_visible = app.inline_images_visible();
     // 0-based ordinal of the next rendered user prompt, excluding synthetic
     // attached-image label messages, mirroring the session renderer's count.
     let mut anchor_prompt_ordinal = if anchored_images.by_prompt.is_empty() {
@@ -929,7 +924,7 @@ pub(super) fn prepare_body_incremental(
                     let ordinal = anchor_prompt_ordinal;
                     anchor_prompt_ordinal += 1;
                     if let Some(items) = anchored_images.by_prompt.get(&ordinal) {
-                        for line in super::inline_image_ui::anchored_image_lines(items, width) {
+                        for line in super::inline_image_ui::anchored_image_lines(items, width, inline_images_visible) {
                             new_lines.push(line);
                             new_line_raw_overrides.push(None);
                             new_line_copy_offsets.push(0);
@@ -1030,7 +1025,7 @@ pub(super) fn prepare_body_incremental(
                         ));
                     }
                     if let Some(items) = anchored_images.by_tool.get(&tc.id) {
-                        for line in super::inline_image_ui::anchored_image_lines(items, width) {
+                        for line in super::inline_image_ui::anchored_image_lines(items, width, inline_images_visible) {
                             new_lines.push(line);
                             new_line_raw_overrides.push(None);
                             new_line_copy_offsets.push(0);
@@ -1349,90 +1344,6 @@ fn prepare_streaming_cached(
     wrap_lines(lines, &[], &[], &[], width)
 }
 
-/// Hash of the retained/collapsing reasoning trace so the full-prep and viewport
-/// caches invalidate as the trace shrinks (a coarse height bucket keeps the
-/// animation smooth without rebuilding on every sub-pixel change).
-pub(super) fn reasoning_trace_hash(app: &dyn TuiState) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if let Some(markup) = app.reasoning_retained_markup() {
-        0u8.hash(&mut hasher);
-        markup.hash(&mut hasher);
-    }
-    if let Some((markup, progress)) = app.reasoning_collapse_state() {
-        1u8.hash(&mut hasher);
-        markup.hash(&mut hasher);
-        // Bucket the shrink fraction so we rebuild per visible-row change, not per
-        // frame; the collapse is short so ~40 buckets is plenty smooth.
-        ((progress * 40.0) as u32).hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-/// Build the retained / collapsing reasoning trace section that renders just above
-/// the live stream in `current` reasoning-display mode. The retained trace renders
-/// at full height; a collapsing trace shrinks vertically by dropping its top rows
-/// (so it appears to slide up and shrink away) as `progress` advances to 1.0.
-fn prepare_reasoning_trace(app: &dyn TuiState, width: u16, prefix_blank: bool) -> PreparedMessages {
-    let centered = app.centered_mode();
-    markdown::set_center_code_blocks(centered);
-    let display_width = width.saturating_sub(4) as usize;
-    let content_width = if centered {
-        display_width.clamp(1, 96)
-    } else {
-        display_width
-    };
-    let align = if centered {
-        ratatui::layout::Alignment::Center
-    } else {
-        ratatui::layout::Alignment::Left
-    };
-
-    let render_block = |markup: &str| -> Vec<Line<'static>> {
-        let mut md = markdown::render_markdown_with_width(markup, Some(content_width));
-        if centered {
-            markdown::recenter_structured_blocks_for_display(&mut md, display_width);
-        }
-        md
-    };
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // The retained trace (waiting for its successor) renders at full height.
-    if let Some(markup) = app.reasoning_retained_markup() {
-        for line in render_block(markup) {
-            lines.push(align_if_unset(line, align));
-        }
-    }
-
-    // The collapsing trace shrinks: keep only the bottom `keep` rows so it appears
-    // to fold upward into nothing. At progress 1.0 nothing remains.
-    if let Some((markup, progress)) = app.reasoning_collapse_state() {
-        let block = render_block(markup);
-        let total = block.len();
-        if total > 0 && progress < 1.0 {
-            let keep = ((total as f32) * (1.0 - progress)).ceil() as usize;
-            let keep = keep.min(total);
-            if keep > 0 {
-                let drop = total - keep;
-                for line in block.into_iter().skip(drop) {
-                    lines.push(align_if_unset(line, align));
-                }
-            }
-        }
-    }
-
-    if lines.is_empty() {
-        return empty_prepared_messages();
-    }
-
-    if prefix_blank {
-        lines.insert(0, Line::from(""));
-    }
-
-    wrap_lines(lines, &[], &[], &[], width)
-}
-
 pub(super) fn prepare_body(
     app: &dyn TuiState,
     width: u16,
@@ -1457,6 +1368,7 @@ pub(super) fn prepare_body(
     // Images anchored to transcript messages render inline right after the
     // message that produced them (tool result or user prompt).
     let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
+    let inline_images_visible = app.inline_images_visible();
     let mut anchor_prompt_ordinal = 0usize;
 
     for (msg_idx, msg) in app.display_messages().iter().enumerate() {
@@ -1490,7 +1402,7 @@ pub(super) fn prepare_body(
                     let ordinal = anchor_prompt_ordinal;
                     anchor_prompt_ordinal += 1;
                     if let Some(items) = anchored_images.by_prompt.get(&ordinal) {
-                        for line in super::inline_image_ui::anchored_image_lines(items, width) {
+                        for line in super::inline_image_ui::anchored_image_lines(items, width, inline_images_visible) {
                             lines.push(line);
                             line_raw_overrides.push(None);
                             line_copy_offsets.push(0);
@@ -1621,7 +1533,7 @@ pub(super) fn prepare_body(
                         ));
                     }
                     if let Some(items) = anchored_images.by_tool.get(&tc.id) {
-                        for line in super::inline_image_ui::anchored_image_lines(items, width) {
+                        for line in super::inline_image_ui::anchored_image_lines(items, width, inline_images_visible) {
                             lines.push(line);
                             line_raw_overrides.push(None);
                             line_copy_offsets.push(0);

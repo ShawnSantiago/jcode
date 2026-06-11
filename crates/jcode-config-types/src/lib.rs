@@ -202,7 +202,7 @@ impl ReasoningDisplayMode {
 }
 
 /// Update channel: how aggressively to receive updates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
     /// Only update from tagged GitHub Releases (default).
@@ -210,6 +210,33 @@ pub enum UpdateChannel {
     Stable,
     /// Update from latest commit on main branch (bleeding edge).
     Main,
+}
+
+impl UpdateChannel {
+    /// Parse a channel name, returning `None` for unknown values.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "stable" | "release" => Some(Self::Stable),
+            "main" | "nightly" | "edge" => Some(Self::Main),
+            _ => None,
+        }
+    }
+}
+
+/// Config deserialization is deliberately lenient: an unknown or removed
+/// channel name (e.g. a stale `update_channel = "manual"` left in
+/// config.toml) falls back to the default channel instead of failing the
+/// entire config parse. A strict enum here once made the freshly exec'd
+/// server die during the reload handoff, leaving the handoff marker stuck
+/// in `starting` and clients re-requesting the reload forever (issue #349).
+impl<'de> Deserialize<'de> for UpdateChannel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
 }
 
 impl std::fmt::Display for UpdateChannel {
@@ -363,11 +390,7 @@ pub struct NamedProviderConfig {
     /// some OpenAI-compatible backends require (e.g. NVIDIA NIM DeepSeek-V4
     /// needs `chat_template_kwargs = { thinking = true, reasoning_effort = "high" }`).
     /// Must be a JSON object; keys here override jcode-generated body fields.
-    #[serde(
-        default,
-        alias = "extra-body",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, alias = "extra-body", skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
 }
 
@@ -452,6 +475,91 @@ impl SwarmSpawnMode {
             Self::Visible => "visible",
             Self::Headless => "headless",
             Self::Auto => "auto",
+        }
+    }
+}
+
+/// Terminal window/pane spawning configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// External command that takes over headed session spawns (new terminal
+    /// windows for swarm agents, resume-in-new-terminal, self-dev, restarts).
+    ///
+    /// When set, jcode runs `<spawn_hook> <jcode-binary> <args...>` instead of
+    /// opening a terminal emulator itself, with `JCODE_SPAWN_*` metadata env
+    /// vars describing the spawn (kind, session id, title, cwd, full command).
+    /// This lets multiplexers and wrappers (tmux, kitty remote, zellij, herd
+    /// runners, window managers) decide where and how the session appears.
+    ///
+    /// Example: `spawn_hook = "tmux new-window"` opens each headed spawn as a
+    /// tmux window in the current server. If the hook fails to launch, jcode
+    /// falls back to its built-in terminal detection.
+    ///
+    /// Env override: `JCODE_SPAWN_HOOK` (set empty to disable a config hook).
+    pub spawn_hook: Option<String>,
+    /// External command used to focus/raise an existing session window.
+    ///
+    /// When set, jcode runs the hook (instead of wmctrl/xdotool) whenever it
+    /// wants to bring a session's window to the foreground, with
+    /// `JCODE_FOCUS_SESSION_ID` and `JCODE_FOCUS_TITLE` env vars. Pair this
+    /// with `spawn_hook` so wrappers that own placement (tmux, kitty remote,
+    /// herd) also own focus (e.g. `tmux select-window`, Wayland compositor
+    /// IPC like `niri msg`).
+    ///
+    /// Env override: `JCODE_FOCUS_HOOK` (set empty to disable a config hook).
+    pub focus_hook: Option<String>,
+}
+
+/// Lifecycle hooks: external commands jcode runs at well-defined points.
+///
+/// Hook commands are parsed shell-style (quotes work) but executed directly,
+/// with `JCODE_HOOK_*` env vars describing the event (`JCODE_HOOK_EVENT`,
+/// `JCODE_HOOK_SESSION_ID`, `JCODE_HOOK_CWD`, event-specific fields, and a
+/// `JCODE_HOOK_PAYLOAD` JSON mirror). Hook processes get
+/// `JCODE_HOOKS_DISABLED=1` so nested jcode invocations don't recurse.
+///
+/// All hooks except `pre_tool` are observers: detached, fire-and-forget,
+/// failures only logged. `pre_tool` is a gate: jcode waits for it and exit
+/// code 2 blocks the tool call (stderr becomes the error shown to the model);
+/// exit 0 allows; anything else fails open.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Runs when an agent turn completes.
+    /// Fields: STATUS ("ok"/"error"), DURATION_MS, MODEL, LAST_ASSISTANT_TEXT.
+    /// Env override: JCODE_HOOK_TURN_END.
+    pub turn_end: Option<String>,
+    /// Runs when a session becomes active (created or resumed).
+    /// Fields: SOURCE ("create"/"resume").
+    /// Env override: JCODE_HOOK_SESSION_START.
+    pub session_start: Option<String>,
+    /// Runs when a session closes normally.
+    /// Env override: JCODE_HOOK_SESSION_END.
+    pub session_end: Option<String>,
+    /// Gate hook before each tool call. Receives TOOL_NAME and the tool input
+    /// JSON on stdin (also truncated in TOOL_INPUT). Exit 0 allows, exit 2
+    /// blocks (stderr is fed back to the model), anything else fails open.
+    /// Env override: JCODE_HOOK_PRE_TOOL.
+    pub pre_tool: Option<String>,
+    /// Runs after each tool call completes.
+    /// Fields: TOOL_NAME, STATUS ("ok"/"error"), DURATION_MS, OUTPUT_BYTES.
+    /// Env override: JCODE_HOOK_POST_TOOL.
+    pub post_tool: Option<String>,
+    /// Max milliseconds to wait for the pre_tool gate before failing open
+    /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
+    pub pre_tool_timeout_ms: u64,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            turn_end: None,
+            session_start: None,
+            session_end: None,
+            pre_tool: None,
+            post_tool: None,
+            pre_tool_timeout_ms: 5000,
         }
     }
 }

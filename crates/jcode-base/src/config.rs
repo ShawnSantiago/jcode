@@ -6,11 +6,11 @@
 pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
     CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
-    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, KeybindingsConfig,
+    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HooksConfig, KeybindingsConfig,
     MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
     NamedProviderType, NativeScrollbarConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode,
-    SafetyConfig, SessionPickerResumeAction, SwarmSpawnMode, UpdateChannel, WebSearchConfig,
-    WebSearchEngine,
+    SafetyConfig, SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -72,10 +72,17 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_EFFORT_INCREASE_KEY",
     "JCODE_EMAIL_REPLY_ENABLED",
     "JCODE_EMAIL_TO",
+    "JCODE_FOCUS_HOOK",
     "JCODE_GATEWAY_BIND_ADDR",
     "JCODE_GATEWAY_ENABLED",
     "JCODE_GATEWAY_PORT",
     "JCODE_HOME",
+    "JCODE_HOOK_PRE_TOOL",
+    "JCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
+    "JCODE_HOOK_POST_TOOL",
+    "JCODE_HOOK_SESSION_END",
+    "JCODE_HOOK_SESSION_START",
+    "JCODE_HOOK_TURN_END",
     "JCODE_IDLE_ANIMATION",
     "JCODE_IMAP_HOST",
     "JCODE_INFO_WIDGET_TOGGLE_KEY",
@@ -131,6 +138,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SIDE_PANEL_TOGGLE_KEY",
     "JCODE_SIDE_PANEL_NATIVE_SCROLLBAR",
     "JCODE_SMTP_PASSWORD",
+    "JCODE_SPAWN_HOOK",
     "JCODE_STREAM_IDLE_TIMEOUT_SECS",
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_MODEL",
@@ -418,6 +426,12 @@ pub struct Config {
 
     /// Agent-specific model defaults
     pub agents: AgentsConfig,
+
+    /// Terminal window/pane spawning configuration
+    pub terminal: TerminalConfig,
+
+    /// Lifecycle hooks (external commands at turn/session/tool boundaries)
+    pub hooks: HooksConfig,
 
     /// Ambient mode configuration
     pub ambient: AmbientConfig,

@@ -108,7 +108,29 @@ pub fn inline_image_dims(media_type: &str, data_b64: &str) -> Option<(u64, u32, 
 /// once the file exists). Returns `(id, width, height)` on success.
 pub fn materialize_inline_image(media_type: &str, data_b64: &str) -> Option<(u64, u32, u32)> {
     let id = inline_image_id(media_type, data_b64);
+    materialize_inline_image_by_id(id, media_type, data_b64)
+}
 
+/// Cheap presence probe: is this inline image already registered in the
+/// in-memory render cache? One mutex lock + map lookup; no payload hashing,
+/// no payload clone, no filesystem access. Used by the per-frame draw path so
+/// steady-state scrolling never touches the multi-megabyte payload.
+pub fn inline_image_is_materialized(id: u64) -> bool {
+    RENDER_CACHE
+        .lock()
+        .map(|cache| cache.entries.contains_key(&(id, RenderProfile::default())))
+        .unwrap_or(false)
+}
+
+/// [`materialize_inline_image`] for callers that already know the stable
+/// content id, skipping the full-payload hash. Also primes the decoded-source
+/// cache so the first fit/scale render does not decode the same bytes a second
+/// time from disk.
+pub fn materialize_inline_image_by_id(
+    id: u64,
+    media_type: &str,
+    data_b64: &str,
+) -> Option<(u64, u32, u32)> {
     if let Ok(mut cache) = RENDER_CACHE.lock()
         && let Some(existing) = cache.get(id, None, Some(RenderProfile::default()))
     {
@@ -120,20 +142,22 @@ pub fn materialize_inline_image(media_type: &str, data_b64: &str) -> Option<(u64
         .ok()?;
     let image = image::load_from_memory(&bytes).ok()?;
     let (width, height) = image.dimensions();
-    dims_cache_put(
-        id,
-        InlineDims {
-            width,
-            height,
-        },
-    );
+    dims_cache_put(id, InlineDims { width, height });
 
     let ext = inline_image_extension(media_type);
+    let path = {
+        let cache = RENDER_CACHE.lock().ok()?;
+        cache.cache_dir.join(format!("{:016x}_inline.{}", id, ext))
+    };
+    if !path.exists() && fs::write(&path, &bytes).is_err() {
+        return None;
+    }
+    // Prime the source cache with the already-decoded pixels so the follow-up
+    // render does not re-open + re-decode the file we just wrote.
+    if let Ok(mut source) = SOURCE_CACHE.lock() {
+        source.insert(id, path.clone(), image);
+    }
     if let Ok(mut cache) = RENDER_CACHE.lock() {
-        let path = cache.cache_dir.join(format!("{:016x}_inline.{}", id, ext));
-        if !path.exists() && fs::write(&path, &bytes).is_err() {
-            return None;
-        }
         cache.insert(
             id,
             RenderProfile::default(),
@@ -204,10 +228,7 @@ pub(crate) fn dimensions_from_header(data: &[u8]) -> Option<(u32, u32)> {
             }
             let marker = data[i + 1];
             // SOF0 (baseline) / SOF1 / SOF2 (progressive) etc.
-            if (0xC0..=0xCF).contains(&marker)
-                && marker != 0xC4
-                && marker != 0xC8
-                && marker != 0xCC
+            if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
             {
                 let height = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
                 let width = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
@@ -247,8 +268,10 @@ pub(crate) fn dimensions_from_header(data: &[u8]) -> Option<(u32, u32)> {
     if data.len() > 30 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         let fourcc = &data[12..16];
         if fourcc == b"VP8X" && data.len() > 30 {
-            let w = 1 + (u32::from(data[24]) | (u32::from(data[25]) << 8) | (u32::from(data[26]) << 16));
-            let h = 1 + (u32::from(data[27]) | (u32::from(data[28]) << 8) | (u32::from(data[29]) << 16));
+            let w = 1
+                + (u32::from(data[24]) | (u32::from(data[25]) << 8) | (u32::from(data[26]) << 16));
+            let h = 1
+                + (u32::from(data[27]) | (u32::from(data[28]) << 8) | (u32::from(data[29]) << 16));
             return Some((w, h));
         }
         if fourcc == b"VP8 " && data.len() > 30 {

@@ -272,16 +272,10 @@ impl Config {
                 self.features.persist_memory_injections = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL") {
-            match v.trim().to_lowercase().as_str() {
-                "main" | "nightly" | "edge" => {
-                    self.features.update_channel = UpdateChannel::Main;
-                }
-                "stable" | "release" => {
-                    self.features.update_channel = UpdateChannel::Stable;
-                }
-                _ => {}
-            }
+        if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL")
+            && let Some(channel) = UpdateChannel::parse(&v)
+        {
+            self.features.update_channel = channel;
         }
 
         // Agents (spawned helper sessions)
@@ -309,6 +303,48 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.agents.memory_sidecar_enabled = parsed;
+            }
+        }
+
+        // Terminal spawning
+        if let Ok(v) = std::env::var("JCODE_SPAWN_HOOK") {
+            let trimmed = v.trim();
+            // An explicitly empty env value disables a config-file hook.
+            self.terminal.spawn_hook = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_FOCUS_HOOK") {
+            let trimmed = v.trim();
+            // An explicitly empty env value disables a config-file hook.
+            self.terminal.focus_hook = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+
+        // Lifecycle hooks. Empty env values disable config-file hooks.
+        fn hook_env_override(slot: &mut Option<String>, key: &str) {
+            if let Ok(v) = std::env::var(key) {
+                let trimmed = v.trim();
+                *slot = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+        }
+        hook_env_override(&mut self.hooks.turn_end, "JCODE_HOOK_TURN_END");
+        hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
+        hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
+        hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
+        if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.hooks.pre_tool_timeout_ms = parsed;
             }
         }
 
