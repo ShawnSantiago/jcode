@@ -299,8 +299,10 @@ fn selfdev_cli_repo_resolver_falls_back_to_primary_without_resumed_repo() {
     let session_id = session.id.clone();
     session.save().expect("save session");
 
-    let resolved =
-        super::resolve_selfdev_cli_repo_dir_from(Some(repo.path().to_path_buf()), Some(&session_id));
+    let resolved = super::resolve_selfdev_cli_repo_dir_from(
+        Some(repo.path().to_path_buf()),
+        Some(&session_id),
+    );
 
     assert_eq!(resolved.as_deref(), Some(repo.path()));
 }

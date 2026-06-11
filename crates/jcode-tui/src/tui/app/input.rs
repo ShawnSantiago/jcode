@@ -2578,8 +2578,7 @@ impl App {
         let mut removed = 0usize;
         for idx in indices {
             let idx = idx.saturating_sub(removed);
-            if idx < self.display_messages.len() && self.display_messages[idx].role == "reasoning"
-            {
+            if idx < self.display_messages.len() && self.display_messages[idx].role == "reasoning" {
                 self.display_messages.remove(idx);
                 removed += 1;
             }

@@ -263,9 +263,10 @@ impl SelfDevTool {
                     request.built_source = original.built_source.clone();
                     request.published_version = original.published_version.clone();
                     request.validated = original.validated;
-                    request.last_progress = original.last_progress.clone().or_else(|| {
-                        Some("attached build completed".to_string())
-                    });
+                    request.last_progress = original
+                        .last_progress
+                        .clone()
+                        .or_else(|| Some("attached build completed".to_string()));
                     request.save()?;
                     Self::append_output_line(
                         &mut file,

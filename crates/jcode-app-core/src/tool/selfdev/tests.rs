@@ -432,11 +432,8 @@ fn reload_repo_resolver_prefers_working_dir_before_recent_build_repo() {
     std::fs::create_dir_all(&nested).expect("nested dir");
     std::fs::create_dir_all(&recent_nested).expect("recent nested dir");
 
-    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
-        None,
-        Some(&nested),
-        Some(recent_nested),
-    );
+    let resolved =
+        reload::resolve_selfdev_reload_repo_dir_from(None, Some(&nested), Some(recent_nested));
     assert_eq!(resolved.as_deref(), Some(repo.path()));
 }
 

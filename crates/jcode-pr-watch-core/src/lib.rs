@@ -1104,15 +1104,19 @@ mod tests {
         assert_eq!(state.pr.number, 188);
         assert_eq!(state.pr.base_ref.as_deref(), Some("master"));
         assert_eq!(state.polling.quiet_cycles, 2);
-        assert!(state
-            .last_seen
-            .review_threads
-            .contains_key("PRRT_kwDOSQE1Ec5_cHz3"));
+        assert!(
+            state
+                .last_seen
+                .review_threads
+                .contains_key("PRRT_kwDOSQE1Ec5_cHz3")
+        );
         assert!(state.last_seen.review_comments.contains_key("3183715059"));
-        assert!(state
-            .last_seen
-            .timeline
-            .contains_key("cross-referenced:2026-05-11T06:00:53Z"));
+        assert!(
+            state
+                .last_seen
+                .timeline
+                .contains_key("cross-referenced:2026-05-11T06:00:53Z")
+        );
         assert_eq!(state.last_cycle.status, CycleStatus::QuietPending);
     }
 

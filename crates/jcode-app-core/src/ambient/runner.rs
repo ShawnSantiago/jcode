@@ -648,47 +648,48 @@ impl AmbientRunnerHandle {
             }
 
             // Load manager to check should_run and update queue info
-            let (should_run, ready_direct_items, ready_ambient_items, next_direct_due) = match AmbientManager::new() {
-                Ok(mut mgr) => {
-                    let has_ready_ambient_items = mgr.has_ready_ambient_items();
-                    let ready_direct_items = mgr.take_ready_direct_items();
-                    let ready_ambient_items = if ambient_allowed && has_ready_ambient_items {
-                        mgr.ready_ambient_items()
-                    } else {
-                        Vec::new()
-                    };
-                    let next_direct_due = mgr
-                        .queue()
-                        .items()
-                        .iter()
-                        .filter(|item| item.target.is_direct_delivery())
-                        .map(|item| item.scheduled_for)
-                        .min();
-                    // Update queue info for widget
-                    {
-                        let mut qc = self.inner.queue_count.write().await;
-                        *qc = mgr.queue().len();
+            let (should_run, ready_direct_items, ready_ambient_items, next_direct_due) =
+                match AmbientManager::new() {
+                    Ok(mut mgr) => {
+                        let has_ready_ambient_items = mgr.has_ready_ambient_items();
+                        let ready_direct_items = mgr.take_ready_direct_items();
+                        let ready_ambient_items = if ambient_allowed && has_ready_ambient_items {
+                            mgr.ready_ambient_items()
+                        } else {
+                            Vec::new()
+                        };
+                        let next_direct_due = mgr
+                            .queue()
+                            .items()
+                            .iter()
+                            .filter(|item| item.target.is_direct_delivery())
+                            .map(|item| item.scheduled_for)
+                            .min();
+                        // Update queue info for widget
+                        {
+                            let mut qc = self.inner.queue_count.write().await;
+                            *qc = mgr.queue().len();
+                        }
+                        {
+                            let mut qp = self.inner.next_queue_preview.write().await;
+                            *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                        }
+                        // Also run if there are pending email reply directives
+                        (
+                            ambient_allowed
+                                && (mgr.should_run()
+                                    || !ready_ambient_items.is_empty()
+                                    || ambient::has_pending_directives()),
+                            ready_direct_items,
+                            ready_ambient_items,
+                            next_direct_due,
+                        )
                     }
-                    {
-                        let mut qp = self.inner.next_queue_preview.write().await;
-                        *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                    Err(e) => {
+                        logging::error(&format!("Ambient runner: failed to load manager: {}", e));
+                        (false, Vec::new(), Vec::new(), None)
                     }
-                    // Also run if there are pending email reply directives
-                    (
-                        ambient_allowed
-                            && (mgr.should_run()
-                                || !ready_ambient_items.is_empty()
-                                || ambient::has_pending_directives()),
-                        ready_direct_items,
-                        ready_ambient_items,
-                        next_direct_due,
-                    )
-                }
-                Err(e) => {
-                    logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    (false, Vec::new(), Vec::new(), None)
-                }
-            };
+                };
 
             if !ready_direct_items.is_empty() {
                 self.deliver_ready_direct_items(&provider, ready_direct_items)
@@ -933,7 +934,8 @@ impl AmbientRunnerHandle {
         let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
-        let (system_prompt, initial_message) = self.build_cycle_context(provider, ready_items).await?;
+        let (system_prompt, initial_message) =
+            self.build_cycle_context(provider, ready_items).await?;
 
         // Visible mode: spawn a full TUI instead of running headlessly
         if visible {

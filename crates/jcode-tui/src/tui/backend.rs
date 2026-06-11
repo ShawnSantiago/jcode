@@ -967,10 +967,7 @@ impl RemoteConnection {
                         Err(error) => {
                             crate::logging::warn(&format!(
                                 "RemoteConnection::next_event: invalid utf8={} bytes={} (session_id={:?}, client_instance_id={:?})",
-                                error,
-                                line_len,
-                                self.session_id,
-                                self.client_instance_id
+                                error, line_len, self.session_id, self.client_instance_id
                             ));
                             return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
                                 error.to_string(),

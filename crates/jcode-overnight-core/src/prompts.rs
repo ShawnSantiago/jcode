@@ -239,8 +239,8 @@ pub fn build_continuation_prompt(manifest: &OvernightManifest) -> String {
 mod tests {
     use super::*;
     use crate::{
-        GitSnapshot, OVERNIGHT_VERSION, OvernightManifest, OvernightRunStatus,
-        ResourceSnapshot, UsageProjection,
+        GitSnapshot, OVERNIGHT_VERSION, OvernightManifest, OvernightRunStatus, ResourceSnapshot,
+        UsageProjection,
     };
     use chrono::Utc;
     use std::path::PathBuf;
