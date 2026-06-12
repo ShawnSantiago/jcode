@@ -744,6 +744,9 @@ async fn run() -> Result<()> {
     if let Some(output_dir) = hero_screenshot_capture_dir(&args) {
         return run_hero_screenshot_capture(&output_dir).await;
     }
+    if let Some(capture) = gallery_screenshot_capture_request(&args) {
+        return run_gallery_screenshot_capture(&capture).await;
+    }
     if let Some(raw_events) = stream_e2e_benchmark_raw_events(&args) {
         return run_stream_e2e_benchmark(raw_events);
     }
@@ -2306,6 +2309,8 @@ const DESKTOP_HELP_LINES: &[&str] = &[
     "  --startup-log                Print launch timing milestones to stderr",
     "  --startup-benchmark          Print launch timings and exit after the first frame",
     "  --capture-hero-animation DIR Write deterministic hero animation PNG frames and exit",
+    "  --capture-gallery-screens DIR Render gallery fixture states to PNGs headlessly and exit",
+    "  --capture-keys KEYS          With --capture-gallery-screens: comma-separated keys to replay first",
     "  --resize-render-benchmark[N]  Print CPU resize/render benchmark JSON and exit",
     "  --scroll-render-benchmark[N]  Print CPU scroll/render benchmark JSON and exit",
     "  --real-transcript-scroll-benchmark[N]  Profile scrolling against your real on-disk transcripts and exit",
@@ -2332,6 +2337,157 @@ fn hero_screenshot_capture_dir(args: &[String]) -> Option<PathBuf> {
                     .flatten()
             })
     })
+}
+
+/// Request for a headless gallery screenshot capture.
+///
+/// `--capture-gallery-screens DIR` renders every gallery fixture state to a
+/// PNG in DIR without opening a window. `--gallery-state STATE` (optional)
+/// restricts the capture to a single state, and `--capture-keys KEYSPEC`
+/// (optional) replays comma-separated key names against each state before
+/// rendering, so arbitrary interaction states can be inspected visually.
+struct GalleryScreenshotCaptureRequest {
+    output_dir: PathBuf,
+    state: Option<String>,
+    keys: Vec<String>,
+}
+
+fn gallery_screenshot_capture_request(args: &[String]) -> Option<GalleryScreenshotCaptureRequest> {
+    let output_dir = args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--capture-gallery-screens=")
+            .map(PathBuf::from)
+            .or_else(|| {
+                (arg == "--capture-gallery-screens")
+                    .then(|| args.get(index + 1).map(PathBuf::from))
+                    .flatten()
+            })
+    })?;
+    let keys = args
+        .iter()
+        .enumerate()
+        .find_map(|(index, arg)| {
+            arg.strip_prefix("--capture-keys=")
+                .map(str::to_string)
+                .or_else(|| {
+                    (arg == "--capture-keys")
+                        .then(|| args.get(index + 1).cloned())
+                        .flatten()
+                })
+        })
+        .map(|spec| {
+            spec.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(GalleryScreenshotCaptureRequest {
+        output_dir,
+        state: desktop_gallery::state_from_args(args),
+        keys,
+    })
+}
+
+/// Parse a key name from `--capture-keys` into a `KeyInput`.
+fn capture_key_input(name: &str) -> Option<KeyInput> {
+    Some(match name {
+        "escape" => KeyInput::Escape,
+        "enter" => KeyInput::Enter,
+        "backspace" => KeyInput::Backspace,
+        "tab" => KeyInput::Autocomplete,
+        "submit" => KeyInput::SubmitDraft,
+        "model-picker" => KeyInput::OpenModelPicker,
+        "session-switcher" => KeyInput::OpenSessionSwitcher,
+        "hotkey-help" => KeyInput::HotkeyHelp,
+        "session-info" => KeyInput::ToggleSessionInfo,
+        "scroll-up" => KeyInput::ScrollBodyLines(-3),
+        "scroll-down" => KeyInput::ScrollBodyLines(3),
+        "scroll-top" => KeyInput::ScrollBodyToTop,
+        "scroll-bottom" => KeyInput::ScrollBodyToBottom,
+        "page-up" => KeyInput::ScrollBodyPages(-1),
+        "page-down" => KeyInput::ScrollBodyPages(1),
+        "text-bigger" => KeyInput::AdjustTextScale(1),
+        "text-smaller" => KeyInput::AdjustTextScale(-1),
+        other => {
+            let text = other.strip_prefix("char:")?;
+            KeyInput::Character(text.to_string())
+        }
+    })
+}
+
+async fn run_gallery_screenshot_capture(
+    request: &GalleryScreenshotCaptureRequest,
+) -> Result<()> {
+    std::fs::create_dir_all(&request.output_dir).with_context(|| {
+        format!(
+            "failed to create gallery screenshot directory {}",
+            request.output_dir.display()
+        )
+    })?;
+    let states: Vec<String> = match &request.state {
+        Some(state) => vec![state.clone()],
+        None => desktop_gallery::gallery_states()
+            .iter()
+            .map(|state| state.to_string())
+            .collect(),
+    };
+    let keys = request
+        .keys
+        .iter()
+        .map(|name| {
+            capture_key_input(name)
+                .with_context(|| format!("unknown capture key name {name:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let size = PhysicalSize::new(DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32);
+    let mut manifest = Vec::new();
+    for state in &states {
+        let mut app = desktop_gallery::temporary_app(state);
+        for key in &keys {
+            app.handle_key(key.clone());
+        }
+        let DesktopApp::SingleSession(single) = &app else {
+            anyhow::bail!("gallery screenshot capture only supports single-session states");
+        };
+        let (image, vertices) = render_hero_frame_to_image(single, size, 4, 1.0, false).await?;
+        let filename = if request.keys.is_empty() {
+            format!("gallery-{state}.png")
+        } else {
+            let key_part = request
+                .keys
+                .join("+")
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '_' | ':') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>();
+            format!("gallery-{state}+{key_part}.png")
+        };
+        let path = request.output_dir.join(&filename);
+        image
+            .save(&path)
+            .with_context(|| format!("failed to save {}", path.display()))?;
+        manifest.push(serde_json::json!({
+            "state": state,
+            "file": filename,
+            "keys": request.keys,
+            "vertices": vertices,
+            "snapshot": serde_json::to_value(app.snapshot())?,
+        }));
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "output_dir": request.output_dir,
+            "screens": manifest,
+        })
+    );
+    Ok(())
 }
 
 async fn run_hero_screenshot_capture(output_dir: &Path) -> Result<()> {

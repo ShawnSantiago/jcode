@@ -24,6 +24,10 @@ const TEMPORARY_DESKTOP_GALLERY_STATES: &[&str] = &[
     "long-transcript",
 ];
 
+pub(super) fn gallery_states() -> &'static [&'static str] {
+    TEMPORARY_DESKTOP_GALLERY_STATES
+}
+
 pub(super) fn launch_temporary_windows() -> Result<()> {
     let binary = std::env::current_exe().context("failed to resolve current desktop binary")?;
     for state in TEMPORARY_DESKTOP_GALLERY_STATES {
