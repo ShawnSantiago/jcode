@@ -243,6 +243,39 @@ pub(in crate::tui::app) fn handle_server_event(
 
     let had_remote_resume_activity = app.remote_resume_activity.is_some();
 
+    // A turn can start in this session without this client sending a message:
+    // swarm wake delivery, background-task wakes, scheduled tasks, resume-all,
+    // or another window attached to the same session. When live turn-stream
+    // events arrive while this client thinks the session is idle, adopt the
+    // turn so the status line/spinner reflect the in-progress work and the
+    // terminal Done/Error event can settle it like a resumed remote turn.
+    let externally_started_turn_event = app.current_message_id.is_none()
+        && !app.is_processing
+        && matches!(
+            &event,
+            ServerEvent::TextDelta { .. }
+                | ServerEvent::TextReplace { .. }
+                | ServerEvent::ReasoningDelta { .. }
+                | ServerEvent::ReasoningDone { .. }
+                | ServerEvent::ToolStart { .. }
+                | ServerEvent::ToolInput { .. }
+                | ServerEvent::ToolExec { .. }
+                | ServerEvent::ToolDone { .. }
+                | ServerEvent::BatchProgress { .. }
+                | ServerEvent::ConnectionPhase { .. }
+                | ServerEvent::StatusDetail { .. }
+        );
+    if externally_started_turn_event {
+        crate::logging::info(
+            "Adopting externally started turn: stream event received while idle with no current_message_id",
+        );
+        app.is_processing = true;
+        if app.processing_started.is_none() {
+            app.processing_started = Some(Instant::now());
+        }
+        app.last_stream_activity = Some(Instant::now());
+    }
+
     if matches!(
         &event,
         ServerEvent::TextDelta { .. }
@@ -262,6 +295,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::ConnectionPhase { .. }
             | ServerEvent::StatusDetail { .. }
             | ServerEvent::MessageEnd
+            | ServerEvent::RetryRollback { .. }
             | ServerEvent::UpstreamProvider { .. }
             | ServerEvent::Interrupted
             | ServerEvent::Done { .. }
@@ -600,6 +634,25 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::MessageEnd => {
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;
+            true
+        }
+        ServerEvent::RetryRollback { attempt, max } => {
+            // A transient transport fault interrupted the provider mid-response
+            // and the server is retrying the request from the top. The retry is
+            // a fresh sample, not a deterministic replay, so all partial output
+            // from the aborted attempt must be discarded: the live streaming
+            // buffer, in-progress tool calls, and any assistant text already
+            // committed to the transcript by a mid-stream ToolStart boundary.
+            crate::logging::warn(&format!(
+                "Retry rollback (attempt {}/{}): discarding partial streamed output",
+                attempt, max
+            ));
+            app.rollback_streaming_attempt();
+            remote.clear_pending();
+            app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
+                attempt,
+                max,
+            });
             true
         }
         ServerEvent::UpstreamProvider { provider } => {

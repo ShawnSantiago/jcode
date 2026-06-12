@@ -286,6 +286,10 @@ pub(crate) struct SingleSessionApp {
     view: SingleSessionViewState,
     side_panel: DesktopSidePanelState,
     pending_issue_sync_request: bool,
+    /// Session id whose transcript should be hydrated from disk off the UI
+    /// thread. Set when resuming from the session switcher; serviced by the
+    /// event loop so large transcript parses never stall key handling.
+    pending_transcript_hydration: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1000,7 +1004,9 @@ impl InlineWidgetKind {
     pub(crate) fn visible_line_limit(self) -> usize {
         match self {
             Self::HotkeyHelp => 18,
-            Self::SessionInfo => 10,
+            // Compact type fits the whole panel including the closing rail
+            // corner; truncating mid-panel leaves the box-drawing rail open.
+            Self::SessionInfo => 18,
             Self::ModelPicker => usize::MAX,
             Self::SessionSwitcher => 24,
             Self::SlashSuggestions => DESKTOP_SLASH_SUGGESTION_ROW_LIMIT + 1,
@@ -1835,6 +1841,7 @@ impl SingleSessionApp {
             view: SingleSessionViewState::default(),
             side_panel: DesktopSidePanelState::default(),
             pending_issue_sync_request: false,
+            pending_transcript_hydration: None,
         }
     }
 
@@ -2564,6 +2571,18 @@ impl SingleSessionApp {
 
     #[cfg(test)]
     pub(crate) fn finish_inline_widget_exit_animation_for_test(&mut self) {
+        if let Some(closing) = &mut self.view.closing_inline_widget {
+            closing.started_at = Instant::now() - INLINE_WIDGET_EXIT_DURATION * 2;
+        }
+    }
+
+    /// Fast-forward entry/exit animations so captures render the settled
+    /// frame instead of a mid-reveal state. Used by the headless gallery
+    /// screenshot tool.
+    pub(crate) fn settle_animations_for_capture(&mut self) {
+        if let Some(opened_at) = &mut self.view.inline_widget_opened_at {
+            *opened_at = Instant::now() - INLINE_WIDGET_REVEAL_DURATION * 2;
+        }
         if let Some(closing) = &mut self.view.closing_inline_widget {
             closing.started_at = Instant::now() - INLINE_WIDGET_EXIT_DURATION * 2;
         }
@@ -3592,9 +3611,48 @@ impl SingleSessionApp {
         self.show_help = false;
         self.welcome.timeline = false;
         self.session_switcher.close();
-        self.hydrate_resumed_session_from_disk(&session_id);
+        // Card previews (if any) are applied synchronously above via
+        // replace-session state; the full transcript can be large, so defer
+        // the disk parse to the event loop instead of blocking this key.
+        self.pending_transcript_hydration = Some(session_id.clone());
         self.set_status(SingleSessionStatus::Info(format!("resumed {title}")));
         KeyOutcome::Redraw
+    }
+
+    /// Take the session id queued for off-thread transcript hydration.
+    pub(crate) fn take_pending_transcript_hydration(&mut self) -> Option<String> {
+        self.pending_transcript_hydration.take()
+    }
+
+    /// Queue a transcript hydration to be serviced off the UI thread.
+    pub(crate) fn request_transcript_hydration(&mut self, session_id: &str) {
+        self.pending_transcript_hydration = Some(session_id.to_string());
+    }
+
+    /// Apply a transcript loaded off the UI thread, if it still matches the
+    /// live session. Returns true when the transcript was applied.
+    pub(crate) fn apply_hydrated_transcript(
+        &mut self,
+        session_id: &str,
+        result: Result<Option<Vec<SessionTranscriptMessage>>, String>,
+    ) -> bool {
+        if self.live_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        match result {
+            Ok(Some(messages)) if !messages.is_empty() => {
+                self.apply_resumed_session_transcript(messages);
+                true
+            }
+            Ok(_) => false,
+            Err(error) => {
+                crate::desktop_log::warn(format_args!(
+                    "jcode-desktop: failed to hydrate resumed transcript for {session_id}: {error}"
+                ));
+                self.error = Some(format!("failed to load transcript: {error}"));
+                false
+            }
+        }
     }
 
     fn handle_stdin_response_key(&mut self, key: KeyInput) -> KeyOutcome {
@@ -6367,29 +6425,27 @@ fn session_switcher_styled_lines(
     } else {
         format!("filter {}", switcher.filter.trim())
     };
-    let selected_label = switcher
-        .selected_session()
-        .map(|session| compact_tool_text(&session.title, 44))
-        .unwrap_or_else(|| "no session selected".to_string());
     let mut lines = vec![
         styled_line(
             format!("Resume sessions · {session_count} sessions · {filter_label}"),
             SingleSessionLineStyle::OverlayTitle,
         ),
         styled_line(
-            "Type to filter · Up/Down select · Tab or Left/Right preview · PageUp/PageDown scroll · Enter resume here · Ctrl+Enter open terminal · Esc close",
+            "type filter · ↑/↓ · Tab preview · Enter resume · Esc",
             SingleSessionLineStyle::Overlay,
         ),
         styled_line(
+            // Kept to one short line: the selected row is already highlighted
+            // in the list, and long header text wraps inside the narrow rail
+            // and pushes the session rows out of the visible card.
             format!(
-                "selected: {} · filter: {} · focus: {}",
-                selected_label,
-                if switcher.filter.is_empty() {
-                    "<none>"
-                } else {
-                    switcher.filter.as_str()
-                },
+                "focus: {}{}",
                 session_switcher_focus_label(switcher.focus),
+                if switcher.filter.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · filter: {}", switcher.filter.as_str())
+                },
             ),
             SingleSessionLineStyle::Meta,
         ),
@@ -6894,12 +6950,12 @@ fn session_info_inline_styled_lines(app: &SingleSessionApp) -> Vec<SingleSession
             SingleSessionLineStyle::Overlay,
         ),
         styled_line(
-            format!("│ status       {}", compact_tool_text(status, 92)),
+            format!(
+                "│ status       {} · model {}",
+                compact_tool_text(status, 46),
+                compact_tool_text(&model, 40)
+            ),
             SingleSessionLineStyle::Status,
-        ),
-        styled_line(
-            format!("│ model        {}", compact_tool_text(&model, 92)),
-            SingleSessionLineStyle::Overlay,
         ),
         styled_line(
             format!(
@@ -6952,10 +7008,6 @@ fn session_info_inline_styled_lines(app: &SingleSessionApp) -> Vec<SingleSession
             ),
             SingleSessionLineStyle::Overlay,
         ),
-        styled_line(
-            "│ tokens       not yet emitted by desktop stream; showing local transcript stats instead",
-            SingleSessionLineStyle::Meta,
-        ),
     ];
 
     if let Some(session) = &app.session {
@@ -6991,7 +7043,7 @@ fn session_info_inline_styled_lines(app: &SingleSessionApp) -> Vec<SingleSession
 }
 
 fn session_info_inline_line_count(app: &SingleSessionApp) -> usize {
-    12 + usize::from(
+    10 + usize::from(
         app.session
             .as_ref()
             .is_some_and(|session| !session.subtitle.trim().is_empty()),

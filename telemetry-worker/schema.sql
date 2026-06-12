@@ -91,25 +91,12 @@ CREATE TABLE IF NOT EXISTS events (
     feedback_rating TEXT,
     feedback_reason TEXT,
     feedback_text TEXT,
-    session_start_hour_utc INTEGER,
-    session_start_weekday_utc INTEGER,
-    session_end_hour_utc INTEGER,
-    session_end_weekday_utc INTEGER,
-    previous_session_gap_secs INTEGER,
-    sessions_started_24h INTEGER DEFAULT 0,
-    sessions_started_7d INTEGER DEFAULT 0,
-    active_sessions_at_start INTEGER DEFAULT 0,
-    other_active_sessions_at_start INTEGER DEFAULT 0,
-    max_concurrent_sessions INTEGER DEFAULT 0,
-    multi_sessioned INTEGER DEFAULT 0,
-    turn_index INTEGER,
-    turn_started_ms INTEGER,
-    turn_active_duration_ms INTEGER,
-    idle_before_turn_ms INTEGER,
-    idle_after_turn_ms INTEGER,
-    turn_success INTEGER DEFAULT 0,
-    turn_abandoned INTEGER DEFAULT 0,
-    turn_end_reason TEXT,
+    -- NOTE: schema-v5 per-turn fields (turn_index, turn timings, turn_success,
+    -- turn_abandoned, turn_end_reason) and session cadence fields (hour/weekday,
+    -- previous_session_gap_secs, sessions_started_24h/7d, concurrency) live in
+    -- turn_details / session_details, NOT here. D1 caps tables at 100 columns
+    -- and events sits at 96 in production, so it has no headroom. See
+    -- migrations/0013_detail_table_turn_session_fields.sql.
     error_provider_timeout INTEGER DEFAULT 0,
     error_auth_failed INTEGER DEFAULT 0,
     error_tool_error INTEGER DEFAULT 0,
@@ -127,12 +114,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_step ON events(step);
 CREATE INDEX IF NOT EXISTS idx_events_feedback_rating ON events(feedback_rating);
-CREATE INDEX IF NOT EXISTS idx_events_turn_index ON events(turn_index);
-CREATE INDEX IF NOT EXISTS idx_events_session_start_hour_utc ON events(session_start_hour_utc);
-CREATE INDEX IF NOT EXISTS idx_events_multi_sessioned ON events(multi_sessioned);
 
 CREATE TABLE IF NOT EXISTS session_details (
     event_id TEXT PRIMARY KEY,
+    session_start_hour_utc INTEGER,
+    session_start_weekday_utc INTEGER,
+    session_end_hour_utc INTEGER,
+    session_end_weekday_utc INTEGER,
+    previous_session_gap_secs INTEGER,
+    sessions_started_24h INTEGER DEFAULT 0,
+    sessions_started_7d INTEGER DEFAULT 0,
+    active_sessions_at_start INTEGER DEFAULT 0,
+    other_active_sessions_at_start INTEGER DEFAULT 0,
+    max_concurrent_sessions INTEGER DEFAULT 0,
+    multi_sessioned INTEGER DEFAULT 0,
     first_file_edit_ms INTEGER,
     first_test_pass_ms INTEGER,
     tool_cat_read_search INTEGER DEFAULT 0,
@@ -179,6 +174,17 @@ CREATE TABLE IF NOT EXISTS session_details (
 
 CREATE TABLE IF NOT EXISTS turn_details (
     event_id TEXT PRIMARY KEY,
+    turn_index INTEGER,
+    turn_started_ms INTEGER,
+    turn_active_duration_ms INTEGER,
+    idle_before_turn_ms INTEGER,
+    idle_after_turn_ms INTEGER,
+    turn_success INTEGER DEFAULT 0,
+    turn_abandoned INTEGER DEFAULT 0,
+    turn_end_reason TEXT,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
     assistant_responses INTEGER DEFAULT 0,
     first_assistant_response_ms INTEGER,
     first_tool_call_ms INTEGER,

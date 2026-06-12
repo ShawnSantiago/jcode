@@ -52,7 +52,79 @@ export default {
       return jsonResponse({ error: "Internal error" }, 500);
     }
   },
+
+  // Nightly retention pruning. D1 hard-caps databases at 500 MB; without this
+  // the raw events table eventually fills the cap and every insert starts
+  // returning 500s (which silently drops all telemetry). High-volume raw rows
+  // are pruned on a schedule while aggregate signal is preserved in the
+  // daily_active_users rollup and in long-retention lifecycle events.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(pruneOldEvents(env));
+  },
 };
+
+// Retention windows, in days, per event type. Children (turn_details /
+// session_details) are deleted before their parent events rows to satisfy the
+// FOREIGN KEY (event_id) constraints.
+//
+// Rationale:
+// - turn_end / session_start / onboarding_step are the high-volume rows that
+//   filled the database; their aggregate signal is captured in the
+//   daily_active_users rollup at insert time.
+// - session_end / session_crash power the headline "total users" and crash
+//   metrics; keep them for 12 months per the documented retention policy.
+// - install and feedback rows are tiny and act as identity/product anchors;
+//   they are never pruned here.
+const RETENTION_DAYS = {
+  turn_end: 30,
+  session_start: 30,
+  onboarding_step: 30,
+  upgrade: 60,
+  auth_success: 180,
+  session_end: 365,
+  session_crash: 365,
+};
+
+const PRUNE_BATCH_LIMIT = 10000;
+const PRUNE_MAX_BATCHES_PER_RUN = 12;
+
+async function pruneOldEvents(env) {
+  let batchesUsed = 0;
+  for (const [eventType, days] of Object.entries(RETENTION_DAYS)) {
+    const cutoff = `-${days} days`;
+    while (batchesUsed < PRUNE_MAX_BATCHES_PER_RUN) {
+      batchesUsed += 1;
+      try {
+        // Delete detail children first so the events FK never blocks the prune.
+        await env.DB.prepare(
+          `DELETE FROM turn_details WHERE event_id IN (
+             SELECT event_id FROM events
+             WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
+             LIMIT ?)`
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        await env.DB.prepare(
+          `DELETE FROM session_details WHERE event_id IN (
+             SELECT event_id FROM events
+             WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
+             LIMIT ?)`
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        const result = await env.DB.prepare(
+          `DELETE FROM events WHERE id IN (
+             SELECT id FROM events
+             WHERE event = ? AND created_at < datetime('now', ?)
+             LIMIT ?)`
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        const changes = result?.meta?.changes ?? result?.changes ?? 0;
+        if (changes < PRUNE_BATCH_LIMIT) {
+          break;
+        }
+      } catch (err) {
+        console.warn(`retention prune failed for ${eventType}`, err?.message || err);
+        break;
+      }
+    }
+  }
+}
 
 async function insertEvent(env, body) {
   const columns = await getEventColumns(env);
@@ -300,6 +372,17 @@ async function insertTurnDetails(env, body, columns) {
   }
   const values = [
     ["event_id", body.event_id],
+    ["turn_index", body.turn_index ?? null],
+    ["turn_started_ms", body.turn_started_ms ?? null],
+    ["turn_active_duration_ms", body.turn_active_duration_ms ?? null],
+    ["idle_before_turn_ms", body.idle_before_turn_ms ?? null],
+    ["idle_after_turn_ms", body.idle_after_turn_ms ?? null],
+    ["turn_success", boolToInt(body.turn_success)],
+    ["turn_abandoned", boolToInt(body.turn_abandoned)],
+    ["turn_end_reason", body.turn_end_reason || null],
+    ["input_tokens", body.input_tokens || 0],
+    ["output_tokens", body.output_tokens || 0],
+    ["total_tokens", body.total_tokens || 0],
     ["assistant_responses", body.assistant_responses || 0],
     ["first_assistant_response_ms", body.first_assistant_response_ms ?? null],
     ["first_tool_call_ms", body.first_tool_call_ms ?? null],
@@ -463,6 +546,17 @@ async function insertSessionDetails(env, body, columns) {
   }
   const values = [
     ["event_id", body.event_id],
+    ["session_start_hour_utc", body.session_start_hour_utc ?? null],
+    ["session_start_weekday_utc", body.session_start_weekday_utc ?? null],
+    ["session_end_hour_utc", body.session_end_hour_utc ?? null],
+    ["session_end_weekday_utc", body.session_end_weekday_utc ?? null],
+    ["previous_session_gap_secs", body.previous_session_gap_secs ?? null],
+    ["sessions_started_24h", body.sessions_started_24h || 0],
+    ["sessions_started_7d", body.sessions_started_7d || 0],
+    ["active_sessions_at_start", body.active_sessions_at_start || 0],
+    ["other_active_sessions_at_start", body.other_active_sessions_at_start || 0],
+    ["max_concurrent_sessions", body.max_concurrent_sessions || 0],
+    ["multi_sessioned", boolToInt(body.multi_sessioned)],
     ["first_file_edit_ms", body.first_file_edit_ms || null],
     ["first_test_pass_ms", body.first_test_pass_ms || null],
     ["tool_cat_read_search", body.tool_cat_read_search || 0],

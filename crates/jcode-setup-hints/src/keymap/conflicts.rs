@@ -349,8 +349,10 @@ mod tests {
 
     #[test]
     fn deduplicates_repeated_interceptor_chords() {
-        let mut cfg = KeybindingsConfig::default();
-        cfg.side_panel_toggle = "cmd+1".to_string();
+        let cfg = KeybindingsConfig {
+            side_panel_toggle: "cmd+1".to_string(),
+            ..Default::default()
+        };
         // Ghostty lists both super+1 and super+digit_1 for goto_tab:1.
         let snapshot = snapshot_with(vec![
             term_binding("cmd+1", "goto_tab:1"),
@@ -362,8 +364,10 @@ mod tests {
 
     #[test]
     fn disabled_binding_is_not_reported() {
-        let mut cfg = KeybindingsConfig::default();
-        cfg.model_switch_next = "none".to_string();
+        let cfg = KeybindingsConfig {
+            model_switch_next: "none".to_string(),
+            ..Default::default()
+        };
         let snapshot = snapshot_with(vec![term_binding("ctrl+tab", "next_tab")]);
         let conflicts = detect_conflicts(&cfg, &snapshot);
         assert!(

@@ -5,6 +5,7 @@ mod auth_account_picker;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
+    account_command_from_picker, execute_account_command_local, execute_account_command_remote,
     handle_account_command_remote, handle_auth_command, resolve_account_provider_descriptor,
     save_openai_fast_setting_local,
 };
@@ -16,7 +17,11 @@ use std::sync::Arc;
 
 impl App {
     fn open_auth_browser(url: &str) -> bool {
-        open::that_detached(url).is_ok()
+        // Honors --no-browser/NO_BROWSER/JCODE_NO_BROWSER and never opens real
+        // browser windows from test binaries (login flows are exercised by TUI
+        // tests; without this guard a test run pops OAuth pages on the
+        // developer's desktop).
+        super::helpers::open_path_or_url_detached(url).is_ok()
     }
 
     fn record_oauth_preflight(
@@ -1408,7 +1413,7 @@ impl App {
             }));
 
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = open::that_detached(&verification_uri);
+            let _ = Self::open_auth_browser(&verification_uri);
 
             let token = match crate::auth::copilot::poll_for_access_token(
                 &client,
@@ -2374,20 +2379,7 @@ impl App {
 
         match self.provider.set_model(&model_request) {
             Ok(()) => {
-                self.provider_session_id = None;
-                self.session.provider_session_id = None;
-                self.upstream_provider = None;
-                let active_model = self.provider.model();
-                self.update_context_limit_for_model(&active_model);
-                self.session.provider_key =
-                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                        &model_request,
-                        self.provider.name(),
-                        self.session.provider_key.as_deref(),
-                    );
-                self.session.model = Some(active_model.clone());
-                let _ = self.session.save();
-                self.invalidate_model_picker_cache();
+                let active_model = self.finalize_model_switch(&model_request);
                 crate::bus::Bus::global().publish_models_updated();
                 crate::logging::auth_event(
                     "auth_changed_runtime_model_applied",

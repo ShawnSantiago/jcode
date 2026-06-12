@@ -163,7 +163,13 @@ impl SetupHintsState {
     }
 
     /// Record that a nudge prompt was shown to the user and persist the count.
+    /// Only invoked on Windows/macOS nudge paths; under `cfg(test)` on other
+    /// platforms it compiles but has no caller.
     #[cfg(any(test, windows, target_os = "macos"))]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        allow(dead_code, reason = "only called on Windows/macOS nudge paths")
+    )]
     fn record_nudge_shown(&mut self) {
         self.terminal_nudge_count = self.terminal_nudge_count.saturating_add(1);
         let _ = self.save();

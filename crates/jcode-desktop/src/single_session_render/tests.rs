@@ -478,9 +478,11 @@ fn inline_widget_command_palettes_draw_structured_cards_not_text_boxes() {
         vertex_count_for_color(&model_vertices, INLINE_COMMAND_ROW_BACKGROUND_COLOR) > 0,
         "unselected model row should be a rendered rounded card"
     );
+    // Left accent rails were intentionally removed from the model picker
+    // (commit b8672145); selection is conveyed by the filled row card alone.
     assert!(
-        vertex_count_for_color(&model_vertices, MODEL_PICKER_ROW_ACCENT_COLOR) > 0,
-        "selected model row should use a rendered accent rail instead of selector text"
+        vertex_count_for_color(&model_vertices, MODEL_PICKER_ROW_ACCENT_COLOR) == 0,
+        "model rows should not render the removed accent rail"
     );
 
     let session_lines = vec![
@@ -1964,8 +1966,10 @@ fn session_switcher_text_buffer_shapes_loaded_session_rows() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // The rail ellipsis-truncates long rows to its column budget; the row
+    // label must still be shaped, while the full title lives in the preview.
     assert!(
-        rendered_inline_text.contains("visible resume row"),
+        rendered_inline_text.contains("active session"),
         "desktop text buffer should shape session rows, got:\n{rendered_inline_text}"
     );
 
@@ -1994,21 +1998,20 @@ fn session_switcher_text_buffer_shapes_loaded_session_rows() {
         .iter()
         .find(|area| std::ptr::eq(area.buffer, &buffers[7]))
         .expect("split preview text area");
-    let preview_start_line = inline_widget_split_preview_start(
-        app.render_inline_widget_kind(),
-        &app.render_inline_widget_styled_lines(),
-    )
-    .expect("session switcher preview start line");
-    let typography = single_session_typography_for_scale(app.text_scale());
-    let expected_preview_top = inline_area.top
-        + preview_start_line as f32
-            * inline_widget_line_height(app.render_inline_widget_kind(), &typography);
+    // The preview pane is anchored to the top of its column, not to the
+    // "Preview" header row offset inside the combined line list: a long
+    // session list would push the row offset below the visible card and
+    // leave the pane empty.
     assert!(
-        (preview_area.top - expected_preview_top).abs() <= 1.0,
-        "compact preview buffer should be positioned at its visual row offset: inline_top={}, preview_top={}, expected={}",
+        preview_area.top >= inline_area.top - 16.0,
+        "preview pane should start near the top of the card: inline_top={}, preview_top={}",
         inline_area.top,
-        preview_area.top,
-        expected_preview_top
+        preview_area.top
+    );
+    assert!(
+        (preview_area.bounds.bottom as f32) <= single_session_draft_top(size),
+        "preview pane should stay above the composer: bottom={}",
+        preview_area.bounds.bottom
     );
     assert!(
         (preview_area.top - preview_area.bounds.top as f32).abs() <= 1.0,

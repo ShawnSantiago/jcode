@@ -59,7 +59,7 @@ impl App {
         match event.result {
             Ok(payload) => {
                 let copied = copy_image_to_clipboard(&payload.png_path, &payload.png);
-                let opened = open::that_detached(&payload.png_path).is_ok();
+                let opened = super::helpers::open_path_or_url_detached(&payload.png_path).is_ok();
 
                 let mut md = payload.markdown;
                 let mut footer = format!(

@@ -48,7 +48,7 @@ const SLASH_SUGGESTIONS_INLINE_CARD_HIGHLIGHT_COLOR: [f32; 4] = [1.000, 1.000, 1
 const SLASH_SUGGESTIONS_INLINE_CARD_ACCENT_COLOR: [f32; 4] = [0.105, 0.355, 0.950, 0.48];
 pub(crate) const SLASH_SUGGESTIONS_INLINE_SELECTION_BACKGROUND_COLOR: [f32; 4] =
     [0.215, 0.420, 0.900, 0.155];
-const MODEL_PICKER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.946, 0.962, 0.988, 0.975];
+pub(crate) const MODEL_PICKER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.946, 0.962, 0.988, 0.975];
 const MODEL_PICKER_CARD_BORDER_COLOR: [f32; 4] = [0.105, 0.140, 0.235, 0.26];
 const MODEL_PICKER_CARD_HIGHLIGHT_COLOR: [f32; 4] = [1.000, 1.000, 1.000, 0.55];
 const MODEL_PICKER_CARD_ACCENT_COLOR: [f32; 4] = [0.110, 0.310, 0.760, 0.40];
@@ -1564,6 +1564,59 @@ fn fresh_welcome_inline_widget_visual_offset(
     }
 }
 
+/// Resolved inline-widget card geometry for headless captures and quality
+/// metrics: (card_rect, text_top, line_height, visible_text_bottom,
+/// visible_text_right).
+pub(crate) fn inline_widget_capture_geometry(
+    app: &SingleSessionApp,
+    size: PhysicalSize<u32>,
+    total_lines: usize,
+) -> Option<(Rect, f32, f32, f32, f32)> {
+    let line_count = app.render_inline_widget_visible_line_count();
+    if line_count == 0 {
+        return None;
+    }
+    let progress = app.render_inline_widget_reveal_progress().clamp(0.0, 1.0);
+    if progress <= 0.001 {
+        return None;
+    }
+    let kind = app.render_inline_widget_kind();
+    let typography = single_session_typography_for_scale(app.text_scale());
+    let session_layout = single_session_layout_for_total_lines(app, size, total_lines);
+    let body_bottom = session_layout.body_bottom();
+    let welcome_chrome_offset_pixels = welcome_timeline_visual_offset_pixels(app, size, 0.0);
+    let welcome_chrome_visible =
+        welcome_timeline_chrome_visible(app, size, welcome_chrome_offset_pixels);
+    let inline_bottom_limit =
+        inline_widget_bottom_limit_for_layout(app, session_layout, welcome_chrome_visible);
+    let target_top = inline_widget_target_top(
+        size,
+        kind,
+        app.text_scale(),
+        body_bottom,
+        welcome_chrome_visible,
+        welcome_chrome_offset_pixels,
+    );
+    let inline_lines = app.render_inline_widget_styled_lines();
+    let layout = inline_widget_card_layout_with_bottom_limit(
+        size,
+        kind,
+        &typography,
+        line_count,
+        inline_widget_text_width_for_lines(kind, &inline_lines, size, app.text_scale()),
+        target_top,
+        progress,
+        inline_bottom_limit,
+    )?;
+    Some((
+        layout.card,
+        layout.text_top,
+        inline_widget_line_height(kind, &typography),
+        layout.visible_text_bottom,
+        layout.visible_text_right,
+    ))
+}
+
 fn push_single_session_inline_widget_card(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
@@ -2539,7 +2592,9 @@ fn session_switcher_split_columns(
     }
 
     let gap_width = (content_width * 0.018).clamp(9.0, 15.0);
-    let preferred_rail_width = (content_width * 0.38).clamp(250.0, 365.0);
+    // With the compact switcher font the rail needs a larger share to show
+    // meaningful session titles next to the wrapped preview pane.
+    let preferred_rail_width = (content_width * 0.46).clamp(280.0, 430.0);
     let max_rail_width = (content_width - gap_width - 210.0)
         .max(content_width * 0.42)
         .min(content_width - gap_width - 96.0);
@@ -3052,9 +3107,24 @@ fn inline_widget_card_layout_with_bottom_limit(
     };
     let max_card_height = available_card_height
         .min((size.height as f32 * 0.56).max(line_height * 3.0 + padding_y * 2.0));
-    let final_card_height = requested_card_height
+    let mut final_card_height = requested_card_height
         .min(max_card_height)
         .max(minimum_card_height.min(max_card_height));
+    // When the card cannot fit all rows, quantize its height down to a whole
+    // number of text rows so the bottom edge never slices through glyphs.
+    if requested_card_height > max_card_height + 0.5 {
+        let content_height = (final_card_height - padding_y * 2.0).max(line_height);
+        let mut whole_rows = (content_height / line_height).floor().max(1.0);
+        // Model picker rows are two-line groups (name + provider meta) after
+        // a three-line header; end on a whole group so the last visible model
+        // keeps its meta line.
+        if kind == Some(InlineWidgetKind::ModelPicker) && whole_rows > 4.0 {
+            let header_rows = 3.0;
+            let group_rows = ((whole_rows - header_rows) / 2.0).floor() * 2.0;
+            whole_rows = header_rows + group_rows.max(2.0);
+        }
+        final_card_height = whole_rows * line_height + padding_y * 2.0;
+    }
     let final_card = Rect {
         x: (text_left - padding_x).max(0.0),
         y: card_y,
@@ -3096,6 +3166,11 @@ fn inline_widget_line_height(
         Some(InlineWidgetKind::SlashSuggestions) => {
             inline_widget_font_size(kind, typography) * typography.meta_line_height
         }
+        Some(InlineWidgetKind::SessionSwitcher)
+        | Some(InlineWidgetKind::HotkeyHelp)
+        | Some(InlineWidgetKind::SessionInfo) => {
+            inline_widget_font_size(kind, typography) * typography.body_line_height
+        }
         _ => typography.body_size * typography.body_line_height,
     }
 }
@@ -3107,7 +3182,9 @@ fn inline_widget_text_width_for_lines(
     ui_scale: f32,
 ) -> f32 {
     let typography = single_session_typography_for_scale(ui_scale);
-    let average_char_width = inline_widget_font_size(kind, &typography) * 0.57;
+    // JetBrains Mono advance width is 0.6em; under-estimating clips the
+    // longest line at the card right clip edge.
+    let average_char_width = inline_widget_font_size(kind, &typography) * 0.6;
     let max_columns = lines
         .iter()
         .map(|line| inline_widget_visual_columns(&line.text))
@@ -3125,6 +3202,15 @@ fn inline_widget_font_size(
     match kind {
         Some(InlineWidgetKind::SlashSuggestions) => {
             (typography.meta_size * SLASH_SUGGESTIONS_INLINE_FONT_SCALE).max(12.0)
+        }
+        // The switcher splits its card into a narrow rail + preview pane;
+        // full body-size text fits so few characters per rail line that
+        // headers wrap and push the session rows out of the card.
+        Some(InlineWidgetKind::SessionSwitcher) => (typography.body_size * 0.72).max(13.0),
+        // Dense reference tables: compact type keeps two-column rows on one
+        // line instead of wrapping and breaking the table alignment.
+        Some(InlineWidgetKind::HotkeyHelp) | Some(InlineWidgetKind::SessionInfo) => {
+            (typography.body_size * 0.72).max(13.0)
         }
         _ => typography.body_size,
     }
@@ -8949,17 +9035,41 @@ fn single_session_text_buffers_from_key_reusing_unchanged_from_options(
         let inline_widget_font_size = inline_widget_font_size(key.inline_widget_kind, &typography);
         let inline_widget_line_height =
             inline_widget_line_height(key.inline_widget_kind, &typography);
-        let inline_widget_wrap = if matches!(
-            key.inline_widget_kind,
-            Some(InlineWidgetKind::SlashSuggestions) | Some(InlineWidgetKind::ModelPicker)
-        ) {
-            Wrap::None
+        // All inline widgets are aligned tables or row lists; wrapping any
+        // line shifts the rows below it out of alignment with their
+        // selection/row chrome. Long lines ellipsis-truncate instead.
+        let inline_widget_wrap = Wrap::None;
+        // For non-wrapping kinds, pre-truncate each line to the columns that
+        // actually fit the rail so text ends with an ellipsis instead of
+        // being sliced mid-glyph at the clip edge.
+        let truncated_lines;
+        let buffer_lines: &[SingleSessionStyledLine] = if inline_widget_wrap == Wrap::None {
+            let advance = inline_widget_font_size * 0.6;
+            let max_columns = ((inline_widget_primary_width / advance).floor() as usize).max(4);
+            truncated_lines = key
+                .inline_widget
+                .iter()
+                .map(|line| {
+                    if line.text.chars().count() > max_columns {
+                        SingleSessionStyledLine::new(
+                            format!(
+                                "{}…",
+                                line.text.chars().take(max_columns - 1).collect::<String>()
+                            ),
+                            line.style,
+                        )
+                    } else {
+                        line.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            &truncated_lines
         } else {
-            Wrap::Word
+            &key.inline_widget
         };
         single_session_styled_text_buffer(
             font_system,
-            &key.inline_widget,
+            buffer_lines,
             inline_widget_font_size,
             inline_widget_line_height,
             inline_widget_primary_width,
@@ -9105,7 +9215,9 @@ fn inline_widget_text_width_for_split_buffers(
     }
 
     let typography = single_session_typography_for_scale(ui_scale);
-    let average_char_width = inline_widget_font_size(kind, &typography) * 0.57;
+    // JetBrains Mono advance width is 0.6em; under-estimating clips the
+    // longest line at the card right clip edge.
+    let average_char_width = inline_widget_font_size(kind, &typography) * 0.6;
     let max_columns = primary
         .iter()
         .chain(preview.iter())
@@ -9128,7 +9240,7 @@ fn inline_widget_estimated_wrapped_text_height(
         return line_height;
     }
 
-    let average_char_width = inline_widget_font_size(kind, typography) * 0.57;
+    let average_char_width = inline_widget_font_size(kind, typography) * 0.6;
     let columns_per_line = (width / average_char_width).floor().max(1.0) as usize;
     let visual_lines = lines
         .iter()
@@ -10194,13 +10306,12 @@ pub(crate) fn single_session_text_areas_for_state(
                 - layout.padding_x * 0.85)
                 .min(right as f32)
                 .max(preview_left);
-            let preview_top = (layout.text_top
-                + inline_widget_preview_start_line.unwrap_or(0) as f32
-                    * inline_widget_line_height(inline_widget_kind, &typography))
-            .max(columns.preview.y + 8.0);
-            let preview_bottom = layout
-                .visible_text_bottom
-                .min(columns.preview.y + columns.preview.height - 8.0)
+            // Anchor the preview to the top of its pane. Positioning it at
+            // the "Preview" header's row offset within the combined line
+            // list pushes it below the visible card whenever the session
+            // list is long, leaving the pane empty.
+            let preview_top = columns.preview.y + 8.0;
+            let preview_bottom = (columns.preview.y + columns.preview.height - 8.0)
                 .min(draft_top)
                 .max(preview_top + 1.0);
             if preview_right > preview_left {

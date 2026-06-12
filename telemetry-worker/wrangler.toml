@@ -2,6 +2,12 @@ name = "jcode-telemetry"
 main = "src/worker.js"
 compatibility_date = "2025-01-01"
 
+# Nightly retention prune (see RETENTION_DAYS in src/worker.js). D1 hard-caps
+# databases at 500 MB; without pruning, inserts eventually fail with 500s and
+# telemetry silently stops being recorded.
+[triggers]
+crons = ["17 4 * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "jcode-telemetry"

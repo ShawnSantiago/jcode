@@ -3337,7 +3337,8 @@ fn single_session_status_slash_opens_inline_session_info() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(info.contains("fresh / not started"));
-    assert!(info.contains("tokens"));
+    assert!(info.contains("status"));
+    assert!(info.contains("model"));
 }
 
 #[test]
@@ -7668,6 +7669,48 @@ fn single_session_resume_picker_accepts_vim_navigation_keys() {
 }
 
 #[test]
+fn switcher_resume_defers_transcript_hydration_off_key_path() {
+    let mut app = SingleSessionApp::new(None);
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    app.apply_session_switcher_cards(vec![test_session_card("session_alpha", "alpha", "active")]);
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert_eq!(app.live_session_id.as_deref(), Some("session_alpha"));
+    assert_eq!(
+        app.take_pending_transcript_hydration().as_deref(),
+        Some("session_alpha"),
+        "switcher resume should queue hydration for the event loop instead of \
+         blocking the key handler on a disk parse"
+    );
+    assert_eq!(app.take_pending_transcript_hydration(), None);
+
+    // A hydrated transcript for the live session applies...
+    let applied = app.apply_hydrated_transcript(
+        "session_alpha",
+        Ok(Some(vec![session_data::SessionTranscriptMessage {
+            role: "user".to_string(),
+            content: "hydrated prompt".to_string(),
+        }])),
+    );
+    assert!(applied);
+    assert!(app.body_lines().join("\n").contains("hydrated prompt"));
+
+    // ...but a stale result for a different session is dropped.
+    let stale = app.apply_hydrated_transcript(
+        "session_other",
+        Ok(Some(vec![session_data::SessionTranscriptMessage {
+            role: "user".to_string(),
+            content: "stale prompt".to_string(),
+        }])),
+    );
+    assert!(!stale);
+    assert!(!app.body_lines().join("\n").contains("stale prompt"));
+}
+
+#[test]
 fn single_session_resumed_transcript_hydration_replaces_card_preview() {
     let mut app =
         SingleSessionApp::new(Some(test_session_card("session_alpha", "alpha", "closed")));
@@ -9399,9 +9442,15 @@ fn fresh_welcome_model_picker_only_reserves_inline_lane() {
         inline_area.top,
         version_area.bounds.bottom
     );
+    // The welcome hero/version chrome is shifted up by the welcome timeline
+    // offset while an inline widget is open, so the unshifted
+    // handwritten_welcome_bounds cannot be compared against the inline area
+    // directly. The version label renders below the hero with the same
+    // offset applied, so staying below its bounds keeps the picker clear of
+    // the hero as well (asserted above against version_area).
     assert!(
-        inline_area.top > handwritten_welcome_bounds(size).1[1],
-        "fresh inline picker must not overlap the handwritten welcome hero"
+        inline_area.top >= version_area.bounds.bottom as f32,
+        "fresh inline picker must stay below the offset welcome chrome"
     );
     assert!(
         inline_area.bounds.bottom > inline_area.bounds.top,
@@ -9409,7 +9458,7 @@ fn fresh_welcome_model_picker_only_reserves_inline_lane() {
     );
 
     let vertices = build_single_session_vertices(&app, size, 0.0, 0);
-    let inline_card_vertices = positions_for_color(&vertices, [0.982, 0.990, 1.000, 0.82]);
+    let inline_card_vertices = positions_for_color(&vertices, MODEL_PICKER_CARD_BACKGROUND_COLOR);
     assert!(
         !inline_card_vertices.is_empty(),
         "inline picker should draw a rounded card background"

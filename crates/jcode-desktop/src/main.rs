@@ -20,6 +20,9 @@ mod session_data;
 mod session_launch;
 mod single_session;
 mod single_session_render;
+#[cfg(test)]
+#[path = "state_space_tests.rs"]
+mod state_space_tests;
 mod workspace;
 
 use ab_glyph::{Font, FontArc, Glyph as AbGlyph, PxScale, ScaleFont, point};
@@ -740,6 +743,9 @@ async fn run() -> Result<()> {
     }
     if let Some(output_dir) = hero_screenshot_capture_dir(&args) {
         return run_hero_screenshot_capture(&output_dir).await;
+    }
+    if let Some(capture) = gallery_screenshot_capture_request(&args) {
+        return run_gallery_screenshot_capture(&capture).await;
     }
     if let Some(raw_events) = stream_e2e_benchmark_raw_events(&args) {
         return run_stream_e2e_benchmark(raw_events);
@@ -1606,6 +1612,9 @@ async fn run() -> Result<()> {
                         window.set_title(&app.status_title());
                         window.request_redraw();
                     }
+                    if start_pending_transcript_hydration(&mut app, event_loop_proxy.clone()) {
+                        window.request_redraw();
+                    }
                     log_desktop_slow_interaction(
                         "keyboard_input",
                         keyboard_started.elapsed(),
@@ -1830,6 +1839,21 @@ async fn run() -> Result<()> {
                 window.set_title(&app.status_title());
                 interaction_latency.mark("github_issue_sync", Instant::now());
                 window.request_redraw();
+            }
+            Event::UserEvent(DesktopUserEvent::TranscriptHydrated {
+                session_id,
+                result,
+                loaded_in,
+            }) => {
+                if app.apply_hydrated_transcript(&session_id, result) {
+                    desktop_log::info(format_args!(
+                        "jcode-desktop: hydrated resumed transcript for {session_id} in {}ms",
+                        loaded_in.as_millis()
+                    ));
+                    window.set_title(&app.status_title());
+                    interaction_latency.mark("transcript_hydration", Instant::now());
+                    window.request_redraw();
+                }
             }
             Event::UserEvent(DesktopUserEvent::SessionEvents(batch)) => {
                 let ui_received_at = Instant::now();
@@ -2208,6 +2232,48 @@ fn start_pending_github_issue_sync(
     }
 }
 
+/// Start an off-thread transcript load for a session resumed from the
+/// switcher (or a promoted workspace card). The result is delivered back to
+/// the event loop as `DesktopUserEvent::TranscriptHydrated`, so large
+/// transcript parses never stall key handling. Falls back to a synchronous
+/// load if the job slot or thread spawn fails.
+fn start_pending_transcript_hydration(
+    app: &mut DesktopApp,
+    event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
+) -> bool {
+    let Some(session_id) = app.take_pending_transcript_hydration() else {
+        return false;
+    };
+    let job_session_id = session_id.clone();
+    let spawned =
+        spawn_bounded_desktop_async_job("jcode-desktop-transcript-hydration", move || {
+            let started = Instant::now();
+            let result = session_data::load_session_transcript_by_id(&job_session_id)
+                .map_err(|error| format!("{error:#}"));
+            if event_loop_proxy
+                .send_event(DesktopUserEvent::TranscriptHydrated {
+                    session_id: job_session_id,
+                    result,
+                    loaded_in: started.elapsed(),
+                })
+                .is_err()
+            {
+                desktop_log::warn(format_args!(
+                    "jcode-desktop: failed to deliver hydrated transcript"
+                ));
+            }
+        });
+    if let Err(error) = spawned {
+        desktop_log::warn(format_args!(
+            "jcode-desktop: transcript hydration fell back to blocking load: {error:#}"
+        ));
+        let result = session_data::load_session_transcript_by_id(&session_id)
+            .map_err(|error| format!("{error:#}"));
+        app.apply_hydrated_transcript(&session_id, result);
+    }
+    true
+}
+
 fn spawn_desktop_preferences_saver() -> Option<mpsc::Sender<workspace::DesktopPreferences>> {
     let (tx, rx) = mpsc::channel::<workspace::DesktopPreferences>();
     match std::thread::Builder::new()
@@ -2303,6 +2369,9 @@ const DESKTOP_HELP_LINES: &[&str] = &[
     "  --startup-log                Print launch timing milestones to stderr",
     "  --startup-benchmark          Print launch timings and exit after the first frame",
     "  --capture-hero-animation DIR Write deterministic hero animation PNG frames and exit",
+    "  --capture-gallery-screens DIR Render gallery fixture states to PNGs headlessly and exit",
+    "  --capture-keys KEYS          With --capture-gallery-screens: comma-separated keys to replay first",
+    "  --capture-size WxH           With --capture-gallery-screens: render size in pixels",
     "  --resize-render-benchmark[N]  Print CPU resize/render benchmark JSON and exit",
     "  --scroll-render-benchmark[N]  Print CPU scroll/render benchmark JSON and exit",
     "  --real-transcript-scroll-benchmark[N]  Profile scrolling against your real on-disk transcripts and exit",
@@ -2329,6 +2398,193 @@ fn hero_screenshot_capture_dir(args: &[String]) -> Option<PathBuf> {
                     .flatten()
             })
     })
+}
+
+/// Request for a headless gallery screenshot capture.
+///
+/// `--capture-gallery-screens DIR` renders every gallery fixture state to a
+/// PNG in DIR without opening a window. `--gallery-state STATE` (optional)
+/// restricts the capture to a single state, and `--capture-keys KEYSPEC`
+/// (optional) replays comma-separated key names against each state before
+/// rendering, so arbitrary interaction states can be inspected visually.
+struct GalleryScreenshotCaptureRequest {
+    output_dir: PathBuf,
+    state: Option<String>,
+    keys: Vec<String>,
+    size: Option<PhysicalSize<u32>>,
+}
+
+fn gallery_screenshot_capture_request(args: &[String]) -> Option<GalleryScreenshotCaptureRequest> {
+    let output_dir = args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--capture-gallery-screens=")
+            .map(PathBuf::from)
+            .or_else(|| {
+                (arg == "--capture-gallery-screens")
+                    .then(|| args.get(index + 1).map(PathBuf::from))
+                    .flatten()
+            })
+    })?;
+    let keys = args
+        .iter()
+        .enumerate()
+        .find_map(|(index, arg)| {
+            arg.strip_prefix("--capture-keys=")
+                .map(str::to_string)
+                .or_else(|| {
+                    (arg == "--capture-keys")
+                        .then(|| args.get(index + 1).cloned())
+                        .flatten()
+                })
+        })
+        .map(|spec| {
+            spec.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let size = args
+        .iter()
+        .enumerate()
+        .find_map(|(index, arg)| {
+            arg.strip_prefix("--capture-size=")
+                .map(str::to_string)
+                .or_else(|| {
+                    (arg == "--capture-size")
+                        .then(|| args.get(index + 1).cloned())
+                        .flatten()
+                })
+        })
+        .and_then(|spec| {
+            let (width, height) = spec.split_once('x')?;
+            Some(PhysicalSize::new(
+                width.trim().parse().ok()?,
+                height.trim().parse().ok()?,
+            ))
+        });
+    Some(GalleryScreenshotCaptureRequest {
+        output_dir,
+        state: desktop_gallery::state_from_args(args),
+        keys,
+        size,
+    })
+}
+
+/// Parse a key name from `--capture-keys` into a `KeyInput`.
+fn capture_key_input(name: &str) -> Option<KeyInput> {
+    Some(match name {
+        "escape" => KeyInput::Escape,
+        "enter" => KeyInput::Enter,
+        "backspace" => KeyInput::Backspace,
+        "tab" => KeyInput::Autocomplete,
+        "submit" => KeyInput::SubmitDraft,
+        "model-picker" => KeyInput::OpenModelPicker,
+        "session-switcher" => KeyInput::OpenSessionSwitcher,
+        "hotkey-help" => KeyInput::HotkeyHelp,
+        "session-info" => KeyInput::ToggleSessionInfo,
+        "scroll-up" => KeyInput::ScrollBodyLines(-3),
+        "scroll-down" => KeyInput::ScrollBodyLines(3),
+        "scroll-top" => KeyInput::ScrollBodyToTop,
+        "scroll-bottom" => KeyInput::ScrollBodyToBottom,
+        "page-up" => KeyInput::ScrollBodyPages(-1),
+        "page-down" => KeyInput::ScrollBodyPages(1),
+        "text-bigger" => KeyInput::AdjustTextScale(1),
+        "text-smaller" => KeyInput::AdjustTextScale(-1),
+        other => {
+            let text = other.strip_prefix("char:")?;
+            KeyInput::Character(text.to_string())
+        }
+    })
+}
+
+async fn run_gallery_screenshot_capture(request: &GalleryScreenshotCaptureRequest) -> Result<()> {
+    std::fs::create_dir_all(&request.output_dir).with_context(|| {
+        format!(
+            "failed to create gallery screenshot directory {}",
+            request.output_dir.display()
+        )
+    })?;
+    let states: Vec<String> = match &request.state {
+        Some(state) => vec![state.clone()],
+        None => desktop_gallery::gallery_states()
+            .iter()
+            .map(|state| state.to_string())
+            .collect(),
+    };
+    let keys = request
+        .keys
+        .iter()
+        .map(|name| {
+            capture_key_input(name).with_context(|| format!("unknown capture key name {name:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let size = request.size.unwrap_or_else(|| {
+        PhysicalSize::new(DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32)
+    });
+    let mut manifest = Vec::new();
+    for state in &states {
+        let mut app = desktop_gallery::temporary_app(state);
+        for key in &keys {
+            app.handle_key(key.clone());
+        }
+        let DesktopApp::SingleSession(single) = &mut app else {
+            anyhow::bail!("gallery screenshot capture only supports single-session states");
+        };
+        single.settle_animations_for_capture();
+        let single = &*single;
+        let rendered_lines = single_session_rendered_body_lines_for_tick(single, size, 4);
+        let widget_geometry =
+            inline_widget_capture_geometry(single, size, rendered_lines.len()).map(
+                |(card, text_top, line_height, visible_text_bottom, visible_text_right)| {
+                    serde_json::json!({
+                        "card": { "x": card.x, "y": card.y, "width": card.width, "height": card.height },
+                        "text_top": text_top,
+                        "line_height": line_height,
+                        "visible_text_bottom": visible_text_bottom,
+                        "visible_text_right": visible_text_right,
+                    })
+                },
+            );
+        let (image, vertices) = render_hero_frame_to_image(single, size, 4, 1.0, false).await?;
+        let filename = if request.keys.is_empty() {
+            format!("gallery-{state}.png")
+        } else {
+            let key_part = request
+                .keys
+                .join("+")
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '_' | ':') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>();
+            format!("gallery-{state}+{key_part}.png")
+        };
+        let path = request.output_dir.join(&filename);
+        image
+            .save(&path)
+            .with_context(|| format!("failed to save {}", path.display()))?;
+        manifest.push(serde_json::json!({
+            "state": state,
+            "file": filename,
+            "keys": request.keys,
+            "vertices": vertices,
+            "inline_widget": widget_geometry,
+            "snapshot": serde_json::to_value(app.snapshot())?,
+        }));
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "output_dir": request.output_dir,
+            "screens": manifest,
+        })
+    );
+    Ok(())
 }
 
 async fn run_hero_screenshot_capture(output_dir: &Path) -> Result<()> {
@@ -2697,6 +2953,11 @@ enum DesktopUserEvent {
     GitHubIssuesSyncFinished(
         std::result::Result<desktop_issue_cache::GitHubIssueSyncSummary, String>,
     ),
+    TranscriptHydrated {
+        session_id: String,
+        result: std::result::Result<Option<Vec<workspace::SessionTranscriptMessage>>, String>,
+        loaded_in: Duration,
+    },
     RecoveryCount(usize),
 }
 
@@ -6493,6 +6754,9 @@ fn run_desktop_app_worker_process(desktop_mode: DesktopMode) -> Result<()> {
                         {
                             let outcome =
                                 runtime.handle_key_input(desktop_key_event_to_key_input(&key));
+                            runtime
+                                .driver_mut()
+                                .service_pending_transcript_hydration_blocking();
                             if matches!(outcome, KeyOutcome::ForceReload) {
                                 let reload_requested = DesktopProtocolEnvelope::new(
                                     next_worker_sequence,
@@ -7821,9 +8085,40 @@ impl DesktopApp {
         let session_id = card.session_id.clone();
         let mut single_session = SingleSessionApp::new(Some(card));
         single_session.initialize_resumed_session(&session_id);
-        single_session.hydrate_resumed_session_from_disk(&session_id);
+        single_session.request_transcript_hydration(&session_id);
         *self = Self::SingleSession(single_session);
         true
+    }
+
+    /// Take the session id queued for off-thread transcript hydration.
+    fn take_pending_transcript_hydration(&mut self) -> Option<String> {
+        match self {
+            Self::SingleSession(app) => app.take_pending_transcript_hydration(),
+            Self::Workspace(_) => None,
+        }
+    }
+
+    /// Apply a transcript that finished loading off the UI thread.
+    fn apply_hydrated_transcript(
+        &mut self,
+        session_id: &str,
+        result: std::result::Result<Option<Vec<workspace::SessionTranscriptMessage>>, String>,
+    ) -> bool {
+        match self {
+            Self::SingleSession(app) => app.apply_hydrated_transcript(session_id, result),
+            Self::Workspace(_) => false,
+        }
+    }
+
+    /// Service any queued transcript hydration synchronously. Used by the
+    /// app-worker process, which has no event-loop proxy; the disk scan is
+    /// bounded so the worst case stays small.
+    fn service_pending_transcript_hydration_blocking(&mut self) {
+        if let Self::SingleSession(app) = self
+            && let Some(session_id) = app.take_pending_transcript_hydration()
+        {
+            app.hydrate_resumed_session_from_disk(&session_id);
+        }
     }
 
     fn apply_session_event(&mut self, event: session_launch::DesktopSessionEvent) {
