@@ -15,13 +15,16 @@
 //! Run with:
 //!   cargo test -p jcode-desktop state_space -- --nocapture
 
-use super::DesktopApp;
 use super::desktop_app_driver::{DesktopAppDriver, DesktopSurfaceSnapshot};
 use super::desktop_gallery;
 use super::single_session::SingleSessionApp;
 use super::single_session_render::build_single_session_vertices;
 use super::workspace::{self, KeyInput, PanelSizePreset, Workspace};
-use std::collections::{HashSet, VecDeque};
+use super::{
+    DesktopApp, Vertex, WorkspaceVertexBuildParams, build_vertices_into, workspace_render_layout,
+    workspace_status_bar_target_color,
+};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
@@ -255,15 +258,39 @@ fn check_invariants(app: &DesktopApp) -> Vec<String> {
 /// Render oracle for single-session states: vertex build must not panic and
 /// must produce finite vertex data.
 fn check_render(app: &DesktopApp) -> Vec<String> {
-    let DesktopApp::SingleSession(single) = app else {
-        return Vec::new();
-    };
     let mut violations = Vec::new();
     for &size in RENDER_ORACLE_SIZES {
-        let single = single.clone();
-        let built = catch_unwind(AssertUnwindSafe(|| {
-            build_single_session_vertices(&single, size, 0.0, 4)
-        }));
+        let built: std::thread::Result<Vec<Vertex>> = match app {
+            DesktopApp::SingleSession(single) => {
+                let single = single.clone();
+                catch_unwind(AssertUnwindSafe(move || {
+                    build_single_session_vertices(&single, size, 0.0, 4)
+                }))
+            }
+            DesktopApp::Workspace(workspace) => {
+                let workspace = workspace.clone();
+                catch_unwind(AssertUnwindSafe(move || {
+                    let layout = workspace_render_layout(&workspace, size, Some(size));
+                    let mut vertices = Vec::new();
+                    build_vertices_into(
+                        WorkspaceVertexBuildParams {
+                            workspace: &workspace,
+                            size,
+                            render_layout: layout,
+                            focus_pulse: 0.0,
+                            space_hold_progress: None,
+                            surface_frames: None,
+                            exiting_surfaces: &HashMap::new(),
+                            workspace_panel_cache: None,
+                            status_color: workspace_status_bar_target_color(&workspace),
+                            status_text_frame: None,
+                        },
+                        &mut vertices,
+                    );
+                    vertices
+                }))
+            }
+        };
         let vertices = match built {
             Ok(vertices) => vertices,
             Err(payload) => {
