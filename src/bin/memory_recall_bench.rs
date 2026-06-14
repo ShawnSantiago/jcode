@@ -390,6 +390,7 @@ struct PoolRecord {
 struct PoolCandidate {
     id: String,
     content: String,
+    #[serde(default)]
     retrievers: Vec<String>,
 }
 
@@ -449,6 +450,154 @@ fn cmd_pool(args: &[String]) -> Result<()> {
 
     std::fs::write(&out_path, out)?;
     println!("Wrote pool for {} queries -> {}", queries.len(), out_path.display());
+    Ok(())
+}
+
+// ---------------- LLM judge (direct Anthropic via jcode Sidecar) ----------------
+
+#[derive(Deserialize)]
+struct JudgeInput {
+    qid: String,
+    query: String,
+    candidates: Vec<PoolCandidate>,
+}
+
+const JUDGE_SYSTEM: &str = "You judge whether stored MEMORIES would be genuinely useful to surface to an AI coding agent given the CURRENT conversation context. \
+Be strict and prefer precision: a memory is relevant ONLY if a competent engineer would say \"yes, knowing this specifically helps respond here.\" \
+Mark relevant when the memory is a fact, user preference, correction, or procedure that applies to what is happening right now. \
+Mark NOT relevant when it is off-topic, generic/obvious, only shares surface keywords, or would be noise. When unsure, exclude it. \
+The context contains boilerplate (system reminders, tool output); focus on what is actually being worked on. \
+Reply with ONLY a JSON array of the relevant candidate numbers, e.g. [1,4] or []. No prose.";
+
+fn build_judge_prompt(input: &JudgeInput) -> String {
+    let query = truncate_for_judge(&input.query, 6000);
+    let mut p = String::new();
+    p.push_str("CURRENT CONTEXT:\n");
+    p.push_str(&query);
+    p.push_str("\n\nCANDIDATE MEMORIES:\n");
+    for (i, c) in input.candidates.iter().enumerate() {
+        p.push_str(&format!("{}. {}\n", i + 1, c.content.replace('\n', " ")));
+    }
+    p.push_str("\nReturn the numbers of the relevant memories as a JSON array.");
+    p
+}
+
+fn truncate_for_judge(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    // Keep the TAIL: the most recent context is the most informative for recall.
+    let chars: Vec<char> = s.chars().collect();
+    chars[chars.len() - max..].iter().collect()
+}
+
+fn parse_judge_response(resp: &str, n: usize) -> Vec<usize> {
+    // Extract the first JSON array of integers from the response.
+    let start = resp.find('[');
+    let end = resp.rfind(']');
+    let (Some(s), Some(e)) = (start, end) else {
+        return Vec::new();
+    };
+    if e < s {
+        return Vec::new();
+    }
+    let slice = &resp[s..=e];
+    let nums: Vec<i64> = serde_json::from_str(slice).unwrap_or_default();
+    nums.into_iter()
+        .filter_map(|x| {
+            let idx = x as usize;
+            if idx >= 1 && idx <= n {
+                Some(idx - 1)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn cmd_judge(args: &[String]) -> Result<()> {
+    let opts = parse_kv(args);
+    let model = opts
+        .get("model")
+        .cloned()
+        .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string());
+    let concurrency: usize = opts.get("concurrency").and_then(|s| s.parse().ok()).unwrap_or(8);
+
+    let input_path = bench_root().join("labels/judge_ready.jsonl");
+    let text = std::fs::read_to_string(&input_path)
+        .with_context(|| format!("reading {}", input_path.display()))?;
+    let inputs: Vec<JudgeInput> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    eprintln!("Judging {} queries with model {} (concurrency {})", inputs.len(), model, concurrency);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let results = rt.block_on(async {
+        use futures::stream::{self, StreamExt};
+        stream::iter(inputs.into_iter())
+            .map(|input| {
+                let model = model.clone();
+                async move {
+                    let sidecar = jcode::sidecar::Sidecar::with_claude_model(&model);
+                    let prompt = build_judge_prompt(&input);
+                    let n = input.candidates.len();
+                    let mut relevant_ids = Vec::new();
+                    // Retry once on transient failure.
+                    for attempt in 0..2 {
+                        match sidecar.complete(JUDGE_SYSTEM, &prompt).await {
+                            Ok(resp) => {
+                                let idxs = parse_judge_response(&resp, n);
+                                relevant_ids = idxs
+                                    .into_iter()
+                                    .map(|i| input.candidates[i].id.clone())
+                                    .collect();
+                                break;
+                            }
+                            Err(e) => {
+                                if attempt == 1 {
+                                    eprintln!("judge failed for {}: {}", input.qid, e);
+                                } else {
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                }
+                            }
+                        }
+                    }
+                    GoldRecord {
+                        qid: input.qid,
+                        relevant_ids,
+                    }
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await
+    });
+
+    let out_path = bench_root().join("labels/gold.jsonl");
+    std::fs::create_dir_all(out_path.parent().unwrap())?;
+    let mut out = String::new();
+    let mut with_rel = 0usize;
+    let mut total = 0usize;
+    for g in &results {
+        if !g.relevant_ids.is_empty() {
+            with_rel += 1;
+        }
+        total += g.relevant_ids.len();
+        out.push_str(&serde_json::to_string(g)?);
+        out.push('\n');
+    }
+    std::fs::write(&out_path, out)?;
+    println!(
+        "Judged {} queries -> {} ({} with >=1 relevant, {} total labels)",
+        results.len(),
+        out_path.display(),
+        with_rel,
+        total
+    );
     Ok(())
 }
 
@@ -612,6 +761,7 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "queries" => cmd_queries(rest),
         "pool" => cmd_pool(rest),
+        "judge" => cmd_judge(rest),
         "metrics" => cmd_metrics(rest),
         _ => {
             eprintln!(

@@ -105,6 +105,18 @@ impl Sidecar {
         &self.model
     }
 
+    /// Construct a sidecar pinned to a specific Claude model (used by the
+    /// memory recall benchmark judge so the relevance labels come from a strong,
+    /// fixed model regardless of the user's configured memory model).
+    pub fn with_claude_model(model: impl Into<String>) -> Self {
+        Self {
+            client: crate::provider::shared_http_client(),
+            model: model.into(),
+            max_tokens: DEFAULT_MAX_TOKENS,
+            backend: SidecarBackend::Claude,
+        }
+    }
+
     /// Return the currently selected backend label.
     pub fn backend_name(&self) -> &'static str {
         match self.backend {
