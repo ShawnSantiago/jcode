@@ -623,3 +623,155 @@ fn score_and_filter_prioritizes_matching_skill_memories() {
     assert_eq!(ranked[0].0.id, "skill:todo-planning-skill");
     assert!(ranked[0].1 > ranked[1].1);
 }
+
+#[test]
+fn hybrid_fuse_rescues_lexical_match_dense_would_miss() {
+    // A memory that is the obvious lexical answer (shares the rare identifier
+    // `find_similar_hybrid`) but is given a deliberately ORTHOGONAL embedding so
+    // pure dense cosine ranks it last. BM25 must rescue it into the top result.
+    let target = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "The function find_similar_hybrid fuses dense and bm25 with RRF.",
+    )
+    .with_embedding(vec![0.0, 1.0]);
+
+    let distractor_a = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "Unrelated note about coffee brewing temperatures.",
+    )
+    .with_embedding(vec![1.0, 0.0]);
+    let distractor_b = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "Another unrelated note about bicycle maintenance.",
+    )
+    .with_embedding(vec![0.95, 0.05]);
+
+    // Query embedding points along the distractors' axis, so dense alone would
+    // rank the target dead last; the query TEXT contains the rare identifier.
+    let query_text = "how does find_similar_hybrid work";
+    let query_emb = vec![1.0, 0.0];
+
+    let ranked = MemoryManager::hybrid_fuse(
+        vec![target.clone(), distractor_a, distractor_b],
+        query_text,
+        &query_emb,
+        3,
+    );
+
+    assert!(!ranked.is_empty(), "hybrid must return candidates");
+    assert_eq!(
+        ranked[0].0.id, target.id,
+        "BM25 should rescue the exact-identifier memory to the top despite poor dense score"
+    );
+}
+
+#[test]
+fn hybrid_fuse_returns_dense_hits_without_lexical_overlap() {
+    // When the query shares NO tokens with any memory, hybrid must still return
+    // the dense-nearest memory (fusion falls back to the dense ranking).
+    let near = MemoryEntry::new(MemoryCategory::Fact, "alpha bravo charlie")
+        .with_embedding(vec![1.0, 0.0]);
+    let far =
+        MemoryEntry::new(MemoryCategory::Fact, "delta echo foxtrot").with_embedding(vec![0.0, 1.0]);
+
+    let ranked = MemoryManager::hybrid_fuse(
+        vec![near.clone(), far],
+        "zzz_nonmatching_query_token",
+        &[1.0, 0.0],
+        2,
+    );
+
+    assert!(!ranked.is_empty());
+    assert_eq!(
+        ranked[0].0.id, near.id,
+        "dense-nearest memory should rank first"
+    );
+}
+
+#[test]
+fn hybrid_excludes_superseded_memories() {
+    with_temp_home(|_home| {
+        let manager = MemoryManager::new().with_project_dir("/tmp/jcode-hybrid-supersede");
+
+        // Two memories on the same topic with explicit distinct ids (avoid
+        // same-millisecond id collisions).
+        // Distinct embeddings so the write-time dedup does not merge them.
+        let old = MemoryEntry::new(MemoryCategory::Fact, "The build uses cargo profile dev")
+            .with_embedding(vec![1.0, 0.0]);
+        let new = MemoryEntry::new(MemoryCategory::Fact, "The build uses cargo profile selfdev")
+            .with_embedding(vec![0.0, 1.0]);
+
+        let old_id = manager.remember_project(old).expect("remember old");
+        let new_id = manager.remember_project(new).expect("remember new");
+        assert_ne!(old_id, new_id, "ids must differ");
+
+        // Supersede the old memory.
+        let mut graph = manager.load_project_graph().expect("load");
+        graph.supersede(&new_id, &old_id);
+        manager.save_project_graph(&graph).expect("save");
+
+        let results = manager
+            .find_similar_hybrid("cargo build profile selfdev", &[0.0, 1.0], 10)
+            .expect("hybrid");
+        let ids: Vec<&str> = results.iter().map(|(e, _)| e.id.as_str()).collect();
+
+        assert!(
+            !ids.contains(&old_id.as_str()),
+            "superseded memory must not surface from hybrid retrieval; got {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&new_id.as_str()),
+            "the superseding memory should still surface; got {:?}",
+            ids
+        );
+    });
+}
+
+#[test]
+fn focus_query_text_strips_noise_and_leads_with_user_intent() {
+    let raw = "\
+<system-reminder>\n# Session Context\nDate: 2026-06-14\n</system-reminder>\n\
+User:\n\
+how do I fix the scroll bug in navigation.rs\n\
+Assistant:\n\
+Let me look at the handler.\n\
+[Tool: read]\n\
+[Result: fn handle_scroll() { ... }]\n\
+Assistant:\n\
+The bug is in the mouse delta calc.";
+
+    let focused = super::focus_query_text(raw);
+
+    // System-reminder block is gone.
+    assert!(
+        !focused.contains("Session Context"),
+        "reminder not stripped: {focused}"
+    );
+    assert!(!focused.contains("<system-reminder>"));
+    // Tool noise is gone.
+    assert!(
+        !focused.contains("[Tool:"),
+        "tool marker not stripped: {focused}"
+    );
+    assert!(!focused.contains("[Result:"));
+    // Role markers are gone.
+    assert!(!focused.contains("User:"));
+    assert!(!focused.contains("Assistant:"));
+    // Real prose is kept.
+    assert!(focused.contains("scroll bug in navigation.rs"));
+    assert!(focused.contains("mouse delta calc"));
+    // Leads with the latest user intent.
+    assert!(
+        focused.starts_with("how do I fix the scroll bug in navigation.rs"),
+        "should lead with latest user message: {focused}"
+    );
+}
+
+#[test]
+fn focus_query_text_falls_back_when_all_stripped() {
+    let raw = "<system-reminder>\nonly boilerplate\n</system-reminder>\n[Tool: read]";
+    let focused = super::focus_query_text(raw);
+    // Nothing substantive survives -> fall back to raw rather than empty.
+    assert_eq!(focused, raw);
+}

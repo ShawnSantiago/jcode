@@ -643,7 +643,7 @@ fn probe_kitty_fit_state(
     (state.source_path == source_path
         && state.font_size == font_size
         && state.fit_target == Some((target_cols, target_rows)))
-    .then(|| (state.unique_id, state.full_cols, state.full_rows))
+    .then_some((state.unique_id, state.full_cols, state.full_rows))
 }
 
 /// Readiness of the Kitty stable-fit fast path for an inline image at a given
@@ -779,6 +779,7 @@ fn draw_fitted_left_border(buf: &mut Buffer, area: Rect, skip_rows: u16, full_ro
 /// rescales or retransmits. Returns true when handled; callers should fall
 /// back to `render_image_widget_fit` when it returns false (non-Kitty
 /// protocols or oversized images).
+#[allow(clippy::too_many_arguments)]
 pub fn render_image_widget_fit_stable(
     hash: u64,
     area: Rect,

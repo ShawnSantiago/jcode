@@ -3,7 +3,7 @@ use crate::protocol::ServerEvent;
 use crate::provider::Provider;
 use crate::server::{
     SessionInterruptQueues, SwarmMember, VersionedPlan, broadcast_swarm_status,
-    register_session_interrupt_queue, swarm_id_for_dir,
+    register_background_tool_signal, register_session_interrupt_queue, swarm_id_for_dir,
 };
 use crate::tool::Registry;
 use anyhow::Result;
@@ -64,6 +64,15 @@ pub(super) async fn create_headless_session(
 
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     new_agent.set_memory_enabled(memory_enabled);
+    // Inline swarm mode renders a live gallery of worker viewports in the
+    // coordinator TUI; enable the per-agent output tap so this worker streams a
+    // throttled output tail onto the bus.
+    if matches!(
+        crate::config::config().agents.swarm_spawn_mode,
+        crate::config::SwarmSpawnMode::Inline
+    ) {
+        new_agent.set_inline_output_tap(true);
+    }
     if provider_key_override.is_some() {
         new_agent.set_session_provider_key(provider_key_override.clone());
     }
@@ -127,6 +136,10 @@ pub(super) async fn create_headless_session(
             agent_guard.soft_interrupt_queue(),
         )
         .await;
+        register_background_tool_signal(
+            &client_session_id,
+            agent_guard.background_tool_signal(),
+        );
     }
 
     let swarm_id = if swarm_enabled {
@@ -166,6 +179,7 @@ pub(super) async fn create_headless_session(
                 joined_at: now,
                 last_status_change: now,
                 is_headless: true,
+                output_tail: None,
             },
         );
     }

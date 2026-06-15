@@ -453,10 +453,26 @@ pub struct AgentsConfig {
     pub swarm_model: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
+    /// Maximum percentage (1-90) of the chat column height the inline swarm
+    /// gallery band may occupy. Leave unset to use the built-in default (40%).
+    /// Lower values keep more of the transcript visible; set near the minimum
+    /// to effectively collapse the gallery to a thin strip.
+    pub swarm_gallery_max_pct: Option<u8>,
     /// Optional default model override for the memory sidecar.
     pub memory_model: Option<String>,
     /// Whether memory should use the sidecar for relevance/extraction.
     pub memory_sidecar_enabled: bool,
+    /// Minimum turns between Mode-2 memory reranks (cadence floor). The
+    /// expensive listwise LLM rerank runs at most once per this many turns;
+    /// skipped turns fall back to hybrid-ordered surfacing. A topic change or
+    /// the first turn always forces a rerank regardless of cadence. 0 or 1 =
+    /// rerank every turn (no gating). Default 3.
+    #[serde(default = "default_memory_rerank_cadence")]
+    pub memory_rerank_cadence: usize,
+}
+
+fn default_memory_rerank_cadence() -> usize {
+    3
 }
 
 /// How swarm-created agents should be spawned.
@@ -468,6 +484,9 @@ pub enum SwarmSpawnMode {
     Visible,
     /// Create the worker in-process without opening a terminal window.
     Headless,
+    /// Like headless (no terminal window), but the coordinator renders a live
+    /// inline gallery viewport of each worker's streaming output.
+    Inline,
     /// Try visible first and fall back to headless if a window cannot be opened.
     Auto,
 }
@@ -477,6 +496,7 @@ impl SwarmSpawnMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "visible" | "headed" => Some(Self::Visible),
             "headless" => Some(Self::Headless),
+            "inline" => Some(Self::Inline),
             "auto" => Some(Self::Auto),
             _ => None,
         }
@@ -487,6 +507,7 @@ impl SwarmSpawnMode {
         match self {
             Self::Visible => "visible",
             Self::Headless => "headless",
+            Self::Inline => "inline",
             Self::Auto => "auto",
         }
     }

@@ -103,6 +103,17 @@ jobs:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
+    # Some dependencies (e.g. convert_case 0.10.0 via derive_more/crossterm, and
+    # proc-macro2/quote) accidentally ship a `rust-toolchain.toml` *inside their
+    # published crate*. When cargo builds such a crate its CWD is that crate dir,
+    # so the rustup proxy honours the file: convert_case pins `channel = "1.83.0"`
+    # and proc-macro2 requests `components = ["rust-src"]`. That made every
+    # Build & Test job (a) race two parallel `rust-src` downloads and (b) later
+    # try to compile convert_case with rustc 1.83.0, failing with E0514/E0599.
+    # RUSTUP_TOOLCHAIN takes precedence over any rust-toolchain.toml override, so
+    # pinning it here makes every step use this job's installed stable toolchain.
+    env:
+      RUSTUP_TOOLCHAIN: stable
     strategy:
       fail-fast: false
       matrix:
@@ -127,15 +138,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
-        continue-on-error: true
-        id: sccache
+          # Pre-install rust-src in the (serial) toolchain step. Some build-script
+          # / proc-macro units trigger an on-demand `rustup component add rust-src`,
+          # and when several parallel cargo/rustc processes request it at once they
+          # race on the shared `~/.rustup/downloads/*.partial` file and fail with
+          # "could not rename ... No such file or directory". Fetching it once here
+          # removes the race. (Was failing every Build & Test job.)
+          components: rust-src
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}
+          # Suffix bumped to evict caches that held 1.83.0 / <unknown rustc>
+          # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
+          key: ${{ matrix.os }}-stablepin
 
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
@@ -154,9 +169,13 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
           fi
-          if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
-            export RUSTC_WRAPPER=sccache
-          fi
+          # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
+          # step used sccache while the later `cargo test --no-run` steps did not,
+          # so sccache emitted rlibs/rmetas stamped `<unknown rustc version>` that
+          # the non-sccache test compile then rejected with E0514
+          # ("compiled by an incompatible version of rustc"). rust-cache already
+          # caches target/ across runs, so a clean, wrapper-consistent build is
+          # both correct and fast enough.
           export RUSTC="$(rustup which rustc)"
           CARGO_BIN="$(rustup which cargo)"
           "$CARGO_BIN" build --release --target ${{ matrix.target }}
@@ -167,6 +186,17 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 900 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
 
+      - name: Compile integration test binaries
+        shell: bash
+        # Build the integration-test binaries up front (not counted against the
+        # run steps' execution budgets). The e2e suite in particular is heavy
+        # (burst-spawn concurrency), and folding compilation into its 900s run
+        # budget was pushing slower hosted ubuntu/macos runners over the limit.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            --test provider_matrix --test e2e --no-run
+
       - name: Run provider matrix tests
         shell: bash
         run: |
@@ -176,7 +206,10 @@ jobs:
       - name: Run e2e tests
         shell: bash
         run: |
-          python3 .github/scripts/run_with_timeout.py 900 \
+          # e2e is fast (~1-2 min of execution); the generous budget only guards
+          # against an occasional slow hosted runner. Compilation is already done
+          # in the dedicated compile step above.
+          python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} --test e2e
 
       - name: Check PowerShell script syntax (Windows)

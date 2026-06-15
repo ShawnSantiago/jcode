@@ -442,19 +442,19 @@ impl GmailClient {
         }
         let envelope: Value = serde_json::from_str(&text)?;
         // Composio wraps the upstream response as { data, status, headers }.
-        if let Some(inner) = envelope.get("status").and_then(|s| s.as_u64()) {
-            if inner >= 400 {
-                return Err(anyhow::anyhow!(
-                    "Gmail API error {} (via Composio): {}",
-                    inner,
-                    truncate_error(
-                        &envelope
-                            .get("data")
-                            .map(|d| d.to_string())
-                            .unwrap_or_default()
-                    )
-                ));
-            }
+        if let Some(inner) = envelope.get("status").and_then(|s| s.as_u64())
+            && inner >= 400
+        {
+            return Err(anyhow::anyhow!(
+                "Gmail API error {} (via Composio): {}",
+                inner,
+                truncate_error(
+                    &envelope
+                        .get("data")
+                        .map(|d| d.to_string())
+                        .unwrap_or_default()
+                )
+            ));
         }
         if let Some(err) = envelope.get("error").filter(|e| !e.is_null()) {
             return Err(anyhow::anyhow!(

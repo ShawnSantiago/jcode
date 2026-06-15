@@ -106,10 +106,10 @@ fn should_defer_history_for_runtime_identity_with_allow(
 /// from a dev/dirty test binary (whose real version would otherwise be
 /// unorderable and short-circuit the comparison).
 fn client_release_version() -> String {
-    if cfg!(test) || cfg!(debug_assertions) {
-        if let Some(v) = std::env::var_os("JCODE_TEST_CLIENT_VERSION_OVERRIDE") {
-            return v.to_string_lossy().into_owned();
-        }
+    if (cfg!(test) || cfg!(debug_assertions))
+        && let Some(v) = std::env::var_os("JCODE_TEST_CLIENT_VERSION_OVERRIDE")
+    {
+        return v.to_string_lossy().into_owned();
     }
     jcode_build_meta::VERSION.to_string()
 }
@@ -756,6 +756,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.clear_pending_remote_retry();
                 let ops = app.stream_buffer.flush();
                 app.apply_stream_ops(ops);
+                // The turn can finish with a reasoning region still open (the
+                // model streamed reasoning but never sent ReasoningDone and never
+                // began answer text). Close it as a hard message boundary so the
+                // live-rendered reasoning is anchored/retained instead of being
+                // silently stripped by `collapse_reasoning_for_commit` below.
+                if app.reasoning_streaming {
+                    app.close_reasoning_region(None);
+                }
                 app.pause_streaming_tps(false);
                 if !app.streaming.streaming_text.is_empty() {
                     let duration = app.display_turn_duration_secs();
@@ -878,20 +886,23 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
-            if crate::network_retry::classify_message(&message).is_some()
-                && app.schedule_pending_remote_network_wait(&message)
+            // Connectivity failures (DNS, connection reset, no route, transient
+            // TLS, timeouts) are always transient: the request never reached the
+            // provider. Hold the turn and resume when the network recovers,
+            // regardless of the pending message's auto_retry flag. This must run
+            // before the non-retryable auto-poke check so a transient disconnect
+            // is never misclassified as a permanent failure that stops auto-poke.
+            let is_connectivity_error =
+                crate::tui::app::commands::is_auto_poke_connectivity_error(&message)
+                    || crate::network_retry::classify_message(&message).is_some();
+            if is_connectivity_error
+                && app.schedule_pending_remote_network_wait_with_force(&message, true)
             {
                 return false;
             }
             if app.auto_poke_incomplete_todos
                 && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
             {
-                if crate::tui::app::commands::is_auto_poke_connectivity_error(&message) {
-                    crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
-                        app, &message,
-                    );
-                    return false;
-                }
                 if app.schedule_pending_remote_retry_with_limit(
                     "⚠ Remote request failed with a likely non-retryable error.",
                     2,
@@ -1228,13 +1239,18 @@ pub(in crate::tui::app) fn handle_server_event(
             if session_changed || token_usage_totals.is_some() {
                 app.remote_token_usage_totals = token_usage_totals;
             }
-            if token_usage_totals.is_some() {
+            if let Some(totals) = token_usage_totals {
                 app.token_accounting.total_input_tokens = 0;
                 app.token_accounting.total_output_tokens = 0;
                 app.token_accounting.total_cache_reported_input_tokens = 0;
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                // Token totals are restored from history above, but the dollar
+                // cost was never reconstructed, so resumed sessions showed `$0`
+                // in the cost widget until a new call happened. Price the
+                // restored totals once to seed the displayed cost.
+                app.seed_cost_from_history_totals(&totals);
             }
             if let Some(totals) = token_usage_totals {
                 crate::logging::info(&format!(

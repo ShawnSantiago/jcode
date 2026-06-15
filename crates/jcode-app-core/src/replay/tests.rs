@@ -251,6 +251,7 @@ fn test_export_timeline_includes_persisted_swarm_replay_events() {
                     is_headless: None,
                     live_attachments: None,
                     status_age_secs: None,
+                    output_tail: None,
                 }],
             },
         },
@@ -318,6 +319,7 @@ fn test_timeline_to_replay_events_converts_swarm_replay_events() {
                     is_headless: None,
                     live_attachments: None,
                     status_age_secs: None,
+                    output_tail: None,
                 }],
             },
         },
@@ -382,6 +384,7 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         is_headless: None,
         live_attachments: None,
         status_age_secs: None,
+        output_tail: None,
     }]);
     seed.save().unwrap();
 

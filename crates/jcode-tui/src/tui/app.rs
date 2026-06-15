@@ -63,7 +63,7 @@ mod debug;
 mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
-mod helpers;
+pub(crate) mod helpers;
 mod inline_interactive;
 mod input;
 mod input_help;
@@ -999,6 +999,9 @@ pub struct App {
     last_injected_memory_signature: Option<(String, Instant)>,
     // Swarm feature toggle for this session
     swarm_enabled: bool,
+    // Debug-only: force the inline swarm gallery active (bypasses spawn-mode
+    // and members-present gating) so visual tests can drive it deterministically.
+    debug_force_inline_gallery: bool,
     // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
@@ -1071,6 +1074,14 @@ pub struct App {
     // stubs (false). Toggled with Alt+Shift+I; persisted in UI preferences so
     // it survives restarts and session resumes.
     inline_images_visible: bool,
+    // Per-image inline expand level (Fit/Large/Huge), keyed by image id. Cycled
+    // by clicking the `expand` badge under an image. Absent ids are `Fit`.
+    // `expanded_images_version` bumps on every change so the body/full prep
+    // caches (which embed anchored images) invalidate exactly like the
+    // `inline_images_visible` toggle does.
+    expanded_images:
+        std::collections::HashMap<u64, super::ui::inline_image_ui::ImageExpandLevel>,
+    expanded_images_version: u64,
     // Auto-hide deadline for the pinned image side pane only.
     pinned_images_auto_hide_deadline: Option<Instant>,
     pinned_images_seen_count: usize,

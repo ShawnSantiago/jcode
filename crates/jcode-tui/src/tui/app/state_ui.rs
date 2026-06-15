@@ -95,6 +95,17 @@ impl App {
     }
 
     pub(super) fn note_client_interaction(&mut self) {
+        // A terminal only delivers key/mouse/paste events to the focused window,
+        // so receiving one is proof this window is focused *right now*. Adopt that
+        // focus state directly instead of relying solely on FocusGained reports:
+        // some compositors/multiplexers (Wayland tiling WMs, tmux, certain SSH
+        // setups) can drop a FocusGained after a FocusLost, leaving the window
+        // wrongly stuck as "unfocused idle". In that state the run loop throttles
+        // repaints to ~1 Hz, so scrolling updates state but the screen only
+        // repaints about once a second -- the intermittent "can't scroll" bug.
+        if !self.client_focused {
+            self.set_client_focused(true);
+        }
         if !crate::perf::tui_policy().enable_focus_change {
             self.note_client_focus(false);
         }
@@ -871,7 +882,7 @@ fn grouped_u64(value: u64) -> String {
     let raw = value.to_string();
     let mut grouped = String::with_capacity(raw.len() + raw.len() / 3);
     for (index, ch) in raw.chars().enumerate() {
-        if index > 0 && (raw.len() - index) % 3 == 0 {
+        if index > 0 && (raw.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(ch);
@@ -917,7 +928,7 @@ fn human_count(value: u64) -> String {
 }
 
 fn bold_count(value: u64) -> String {
-    format!("{}", human_count(value))
+    human_count(value).to_string()
 }
 
 fn bold_count_usize(value: usize) -> String {
@@ -936,7 +947,7 @@ fn opt_usize(value: Option<usize>) -> String {
 
 fn opt_string(value: Option<&str>) -> String {
     value
-        .map(|value| format!("{}", value))
+        .map(|value| value.to_string())
         .unwrap_or_else(|| "None".to_string())
 }
 

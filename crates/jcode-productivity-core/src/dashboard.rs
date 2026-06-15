@@ -81,6 +81,7 @@ impl Svg {
         ));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rect_op(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, fill: &str, opacity: f32) {
         self.body.push_str(&format!(
             "<rect x='{x:.1}' y='{y:.1}' width='{w:.1}' height='{h:.1}' rx='{r:.1}' ry='{r:.1}' fill='{fill}' fill-opacity='{opacity:.2}'/>"

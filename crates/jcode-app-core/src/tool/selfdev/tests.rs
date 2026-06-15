@@ -279,6 +279,7 @@ fn schema_only_advertises_core_selfdev_fields() {
         "enter",
         "setup",
         "build",
+        "build-reload",
         "test",
         "cancel-build",
         "reload",
@@ -326,6 +327,7 @@ fn non_selfdev_schema_only_exposes_onramp_actions() {
     );
     for hidden in [
         "build",
+        "build-reload",
         "test",
         "cancel-build",
         "socket-info",
@@ -765,6 +767,66 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     .expect("request two exists");
     assert_eq!(request_one.state, BuildRequestState::Completed);
     assert_eq!(request_two.state, BuildRequestState::Completed);
+}
+
+#[tokio::test]
+async fn build_reload_waits_for_build_then_reloads() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+
+    let mut session = session::Session::create(None, Some("Build+reload session".to_string()));
+    session.is_canary = true;
+    session.short_name = Some("gamma".to_string());
+    session.save().expect("save session");
+
+    // The reload phase blocks on a server ack. Spawn a watcher that mirrors the
+    // server: it observes reload signals and acknowledges them so the inline
+    // reload can complete deterministically in test mode. It keeps acking every
+    // signal it sees (the RELOAD_SIGNAL channel is a process-global shared by
+    // parallel tests, and `wait_for_reload_ack` matches by request id, so acking
+    // unrelated/stale signals is harmless).
+    let mut signal_rx = server::subscribe_reload_signal_for_tests();
+    let acker = tokio::spawn(async move {
+        if let Some(signal) = signal_rx.borrow_and_update().clone() {
+            server::acknowledge_reload_signal(&signal);
+        }
+        while signal_rx.changed().await.is_ok() {
+            if let Some(signal) = signal_rx.borrow_and_update().clone() {
+                server::acknowledge_reload_signal(&signal);
+            }
+        }
+    });
+
+    let tool = SelfDevTool::new();
+    let output = tool
+        .execute(
+            json!({"action": "build-reload", "reason": "combined build and reload"}),
+            create_test_context(&session.id, Some(repo.path().to_path_buf())),
+        )
+        .await
+        .expect("build-reload should succeed");
+
+    acker.abort();
+
+    assert!(
+        output.output.contains("Build completed successfully"),
+        "unexpected output: {}",
+        output.output
+    );
+    let meta = output.metadata.expect("build-reload metadata");
+    assert_eq!(meta["phase"].as_str(), Some("reload"));
+    assert_eq!(meta["build_finished"].as_bool(), Some(true));
+    assert_eq!(meta["build_succeeded"].as_bool(), Some(true));
+
+    let request_id = meta["request_id"].as_str().expect("request id in metadata");
+    let request = BuildRequest::load(request_id)
+        .expect("load request")
+        .expect("request exists");
+    assert_eq!(request.state, BuildRequestState::Completed);
 }
 
 #[tokio::test]

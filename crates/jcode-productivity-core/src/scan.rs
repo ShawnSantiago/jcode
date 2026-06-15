@@ -314,15 +314,14 @@ fn summarize(raw: RawSession) -> SessionSummary {
 
     // Fall back to header timestamps for the activity calendar when individual
     // messages lacked timestamps (common for imported transcripts).
-    if active_dates.is_empty() {
-        if let Some(ts) = raw.updated_at.as_deref().or(raw.created_at.as_deref())
-            && let Ok(dt) = DateTime::parse_from_rfc3339(ts)
-        {
-            let local = dt.with_timezone(&Local);
-            s.hour_hist[local.hour() as usize] += 1;
-            s.weekday_hist[local.weekday().num_days_from_monday() as usize] += 1;
-            active_dates.insert(local.format("%Y-%m-%d").to_string());
-        }
+    if active_dates.is_empty()
+        && let Some(ts) = raw.updated_at.as_deref().or(raw.created_at.as_deref())
+        && let Ok(dt) = DateTime::parse_from_rfc3339(ts)
+    {
+        let local = dt.with_timezone(&Local);
+        s.hour_hist[local.hour() as usize] += 1;
+        s.weekday_hist[local.weekday().num_days_from_monday() as usize] += 1;
+        active_dates.insert(local.format("%Y-%m-%d").to_string());
     }
 
     s.active_dates = active_dates.into_iter().collect();

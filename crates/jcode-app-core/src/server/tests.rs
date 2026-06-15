@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
+
 use super::{
     FileAccess, Server, SessionInterruptQueues, SwarmMember, dispatch_background_task_completion,
     file_activity_scope_label, persist_swarm_state_snapshot,
@@ -176,6 +178,7 @@ async fn test_agent(provider: Arc<dyn Provider>) -> Arc<Mutex<Agent>> {
     Arc::new(Mutex::new(Agent::new(provider, registry)))
 }
 
+#[allow(clippy::type_complexity)]
 fn empty_swarm_status_state() -> (
     Arc<RwLock<HashMap<String, std::collections::HashSet<String>>>>,
     Arc<RwLock<std::collections::VecDeque<super::SwarmEvent>>>,
@@ -211,6 +214,7 @@ fn attached_swarm_member(
         joined_at: Instant::now(),
         last_status_change: Instant::now(),
         is_headless: false,
+        output_tail: None,
     }
 }
 
@@ -237,6 +241,7 @@ fn persisted_headless_member(
         joined_at: Instant::now(),
         last_status_change: Instant::now(),
         is_headless: true,
+        output_tail: None,
     }
 }
 

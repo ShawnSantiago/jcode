@@ -261,6 +261,27 @@ fn relevance_context_signature(context: &str) -> String {
         .join("\n")
 }
 
+/// Decide whether to run the expensive Mode-2 listwise rerank this turn.
+///
+/// - First rerank of a session (`last_rerank_turn == None`) always fires.
+/// - A topic change always fires (don't delay a genuine topic jump).
+/// - Otherwise the cadence floor applies: fire only if at least `cadence` turns
+///   have passed since the last rerank. `cadence <= 1` means every turn.
+fn should_run_rerank(
+    turn_count: usize,
+    last_rerank_turn: Option<usize>,
+    cadence: usize,
+    topic_changed: bool,
+) -> bool {
+    if topic_changed {
+        return true;
+    }
+    match last_rerank_turn {
+        None => true,
+        Some(last) => cadence <= 1 || turn_count.saturating_sub(last) >= cadence,
+    }
+}
+
 fn bump_turn_stat() {
     if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
         stats.turns_processed = stats.turns_processed.saturating_add(1);
@@ -293,6 +314,9 @@ struct SessionState {
     turn_count: usize,
     /// Turn count since last extraction for this session
     turns_since_extraction: usize,
+    /// `turn_count` at which the Mode-2 listwise rerank last ran, for the
+    /// cadence floor (rerank at most once per `memory_rerank_cadence` turns).
+    last_rerank_turn: Option<usize>,
 }
 
 /// The persistent memory agent state
@@ -404,6 +428,10 @@ impl MemoryAgent {
         if context.is_empty() {
             return Ok(());
         }
+        // Focused query (latest user intent, boilerplate/tool-noise stripped) used
+        // for listwise LLM reranking. Benchmarking showed the cross-encoder/LLM
+        // reranker only works with this focused query, not the full noisy window.
+        let focused_query = memory::format_focused_query_for_relevance(&messages);
 
         let context_signature = relevance_context_signature(&context);
         {
@@ -460,11 +488,13 @@ impl MemoryAgent {
             };
 
         // Check for topic change (comparing against this session's last embedding)
+        let mut topic_changed = false;
         {
             let ss = self.session_state(session_id);
             if let Some(ref last_emb) = ss.last_context_embedding {
                 let similarity = embedding::cosine_similarity(&context_embedding, last_emb);
                 if similarity < TOPIC_CHANGE_THRESHOLD {
+                    topic_changed = true;
                     crate::logging::info(&format!(
                         "[{}] Topic change detected (sim={:.2}), resetting session memory state",
                         session_id, similarity
@@ -528,10 +558,13 @@ impl MemoryAgent {
             }
         }
 
-        // Step 2: Find similar memories by embedding
-        let candidates = memory_manager.find_similar_with_embedding(
+        // Step 2: Find candidate memories via hybrid retrieval (dense + BM25
+        // fused with RRF). Benchmarking showed the old dense-only path with a
+        // 0.5 cosine floor surfaced essentially nothing on real session windows;
+        // hybrid recovers recall and lets the sidecar/rerank do the filtering.
+        let candidates = memory_manager.find_similar_hybrid(
+            &context,
             &context_embedding,
-            memory::EMBEDDING_SIMILARITY_THRESHOLD,
             memory::EMBEDDING_MAX_HITS,
         )?;
 
@@ -571,7 +604,13 @@ impl MemoryAgent {
             return Ok(());
         }
 
-        // Step 3: Use Haiku to decide what's relevant and worth surfacing
+        // Step 3: Decide which candidates to surface.
+        // Mode-2 (sidecar enabled): a single listwise LLM rerank reorders the
+        // hybrid candidates by relevance to the focused query and omits
+        // irrelevant ones; we surface the top MAX_MEMORIES_PER_TURN. This matches
+        // the validated benchmark pipeline (recall@5 0.53 -> 0.75) and uses ONE
+        // LLM call instead of the old per-candidate binary checks.
+        // Mode-1 (no sidecar): take the top hybrid-ranked candidates by score.
         memory::set_state(MemoryState::SidecarChecking {
             count: new_candidates.len(),
         });
@@ -579,9 +618,42 @@ impl MemoryAgent {
 
         let candidate_ids: Vec<String> = new_candidates.iter().map(|(e, _)| e.id.clone()).collect();
 
-        let relevant = self
-            .evaluate_candidates(session_id, &context, new_candidates)
-            .await?;
+        // Cadence gate for the EXPENSIVE Mode-2 rerank: run the listwise LLM
+        // rerank at most once per `memory_rerank_cadence` turns. Skipped turns
+        // still surface memories via hybrid order (recall@5 ~0.53 vs ~0.79 on a
+        // reranked turn) - never blind. A topic change or the first rerank of a
+        // session always fires, so genuine topic jumps are never delayed.
+        let should_rerank = {
+            let cadence = crate::config::config().agents.memory_rerank_cadence;
+            let ss = self.session_state(session_id);
+            should_run_rerank(ss.turn_count, ss.last_rerank_turn, cadence, topic_changed)
+        };
+
+        let relevant = if memory::memory_sidecar_enabled()
+            && let Some(sidecar) = self.sidecar.as_ref()
+        {
+            if should_rerank {
+                let reranked = crate::memory_rerank::rerank_candidates(
+                    sidecar,
+                    &focused_query,
+                    new_candidates,
+                )
+                .await;
+                let turn = self.session_state(session_id).turn_count;
+                self.session_state(session_id).last_rerank_turn = Some(turn);
+                reranked.into_iter().take(MAX_MEMORIES_PER_TURN).collect()
+            } else {
+                // Cadence-gated turn: fall back to hybrid-ordered surfacing (no
+                // LLM call) so memory still surfaces, just not LLM-reranked.
+                crate::logging::info(&format!(
+                    "[{}] Memory rerank gated by cadence; using hybrid order this turn",
+                    session_id
+                ));
+                self.select_top_candidates_no_sidecar(session_id, new_candidates)
+            }
+        } else {
+            self.select_top_candidates_no_sidecar(session_id, new_candidates)
+        };
 
         let verified_ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
         let rejected_ids: Vec<String> = candidate_ids
@@ -644,91 +716,30 @@ impl MemoryAgent {
         Ok(())
     }
 
-    /// Use Haiku to evaluate which candidates are actually relevant
-    async fn evaluate_candidates(
+    /// Mode-1 (no sidecar) candidate selection: take the top hybrid-ranked
+    /// candidates by score, capped at `MAX_MEMORIES_PER_TURN`.
+    ///
+    /// In Mode-2 the listwise LLM reranker (`memory_rerank::rerank_candidates`)
+    /// handles relevance selection instead, so this is only reached when the
+    /// memory sidecar is disabled (no LLM available to judge relevance).
+    fn select_top_candidates_no_sidecar(
         &self,
         session_id: &str,
-        context: &str,
         candidates: Vec<(MemoryEntry, f32)>,
-    ) -> Result<Vec<MemoryEntry>> {
-        if !memory::memory_sidecar_enabled() {
-            return Ok(candidates
-                .into_iter()
-                .take(MAX_MEMORIES_PER_TURN)
-                .map(|(entry, sim)| {
-                    crate::logging::info(&format!(
-                        "[{}] Memory relevant (semantic sim={:.2}): {}",
-                        session_id,
-                        sim,
-                        &entry.content[..entry.content.len().min(40)]
-                    ));
-                    entry
-                })
-                .collect());
-        }
-
-        let Some(sidecar) = self.sidecar.clone() else {
-            return Ok(Vec::new());
-        };
-
-        let mut relevant = Vec::new();
-
-        // Process in parallel
-        let futures: Vec<_> = candidates
-            .iter()
+    ) -> Vec<MemoryEntry> {
+        candidates
+            .into_iter()
             .take(MAX_MEMORIES_PER_TURN)
             .map(|(entry, sim)| {
-                let sidecar = sidecar.clone();
-                let content = entry.content.clone();
-                let ctx = context.to_string();
-                let similarity = *sim;
-                async move {
-                    let start = Instant::now();
-                    let result = sidecar.check_relevance(&content, &ctx).await;
-                    (result, start.elapsed(), similarity)
-                }
+                crate::logging::info(&format!(
+                    "[{}] Memory relevant (semantic sim={:.2}): {}",
+                    session_id,
+                    sim,
+                    &entry.content[..entry.content.len().min(40)]
+                ));
+                entry
             })
-            .collect();
-
-        let results = futures::future::join_all(futures).await;
-
-        for ((entry, _), (result, elapsed, sim)) in candidates.iter().zip(results) {
-            match result {
-                Ok((is_relevant, reason)) => {
-                    memory::add_event(MemoryEventKind::SidecarComplete {
-                        latency_ms: elapsed.as_millis() as u64,
-                    });
-
-                    if is_relevant {
-                        crate::logging::info(&format!(
-                            "[{}] Memory relevant (sim={:.2}): {} - {}",
-                            session_id,
-                            sim,
-                            &entry.content[..entry.content.len().min(40)],
-                            reason
-                        ));
-                        memory::add_event(MemoryEventKind::SidecarRelevant {
-                            memory_preview: entry.content[..entry.content.len().min(30)]
-                                .to_string(),
-                        });
-                        relevant.push(entry.clone());
-                    } else {
-                        memory::add_event(MemoryEventKind::SidecarNotRelevant);
-                    }
-                }
-                Err(e) => {
-                    memory::add_event(MemoryEventKind::Error {
-                        message: e.to_string(),
-                    });
-                }
-            }
-
-            if relevant.len() >= MAX_MEMORIES_PER_TURN {
-                break;
-            }
-        }
-
-        Ok(relevant)
+            .collect()
     }
 
     /// Extract memories from a context string
@@ -1028,27 +1039,12 @@ impl MemoryAgent {
                 }
             }
 
-            // 2. Boost confidence for verified memories (they were actually useful)
-            let mut boosted = 0usize;
-            for id in &ctx.verified_ids {
-                match boost_memory_confidence(&memory_manager, id, 0.05) {
-                    Ok(()) => boosted += 1,
-                    Err(e) => {
-                        crate::logging::info(&format!("Confidence boost failed for {}: {}", id, e))
-                    }
-                }
-            }
-
-            // 3. Gentle decay for rejected memories (may be stale)
-            let mut decayed = 0usize;
-            for id in &ctx.rejected_ids {
-                match decay_memory_confidence(&memory_manager, id, 0.02) {
-                    Ok(()) => decayed += 1,
-                    Err(e) => {
-                        crate::logging::info(&format!("Confidence decay failed for {}: {}", id, e))
-                    }
-                }
-            }
+            // 2 + 3. Batch confidence updates: boost verified, decay rejected.
+            // Each graph is loaded and saved ONCE for the whole turn instead of
+            // once per id (graphs are multi-MB JSON; per-id round trips rewrote
+            // megabytes 5-10x per turn).
+            let (boosted, decayed) =
+                apply_confidence_updates(&memory_manager, &ctx.verified_ids, &ctx.rejected_ids);
             if boosted > 0 || decayed > 0 {
                 memory::add_event(MemoryEventKind::MaintenanceConfidence { boosted, decayed });
             }
@@ -1514,74 +1510,76 @@ async fn discover_links(manager: &MemoryManager, memory_ids: &[String]) -> Resul
     Ok(linked)
 }
 
-/// Boost a memory's confidence score
-fn boost_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
-    // Load project graph first
-    let mut graph = manager.load_project_graph()?;
-    if graph.get_memory(memory_id).is_some() {
-        if let Some(entry) = graph.get_memory_mut(memory_id) {
-            entry.boost_confidence(amount);
-            let conf = entry.confidence;
-            manager.save_project_graph(&graph)?;
-            crate::logging::info(&format!(
-                "Boosted confidence for {} to {:.2}",
-                memory_id, conf
-            ));
-        }
-        return Ok(());
+/// Apply confidence boosts (verified) and decays (rejected) in a single pass
+/// over each graph. Loads and saves the project and global graphs at most ONCE
+/// each, instead of once per id, to avoid rewriting multi-MB JSON repeatedly.
+///
+/// Returns (boosted_count, decayed_count).
+fn apply_confidence_updates(
+    manager: &MemoryManager,
+    verified_ids: &[String],
+    rejected_ids: &[String],
+) -> (usize, usize) {
+    const BOOST: f32 = 0.05;
+    const DECAY: f32 = 0.02;
+
+    if verified_ids.is_empty() && rejected_ids.is_empty() {
+        return (0, 0);
     }
 
-    // Try global
-    let mut graph = manager.load_global_graph()?;
-    if graph.get_memory(memory_id).is_some() {
-        if let Some(entry) = graph.get_memory_mut(memory_id) {
-            entry.boost_confidence(amount);
-            let conf = entry.confidence;
-            manager.save_global_graph(&graph)?;
-            crate::logging::info(&format!(
-                "Boosted confidence for {} to {:.2}",
-                memory_id, conf
-            ));
+    let mut boosted = 0usize;
+    let mut decayed = 0usize;
+
+    // Process project then global; an id lives in exactly one graph, so once an
+    // update lands we don't need to touch it again.
+    for scope in ["project", "global"] {
+        let mut graph = match if scope == "project" {
+            manager.load_project_graph()
+        } else {
+            manager.load_global_graph()
+        } {
+            Ok(g) => g,
+            Err(e) => {
+                crate::logging::info(&format!(
+                    "Confidence update: failed to load {} graph: {}",
+                    scope, e
+                ));
+                continue;
+            }
+        };
+
+        let mut changed = false;
+        for id in verified_ids {
+            if let Some(entry) = graph.get_memory_mut(id) {
+                entry.boost_confidence(BOOST);
+                boosted += 1;
+                changed = true;
+            }
         }
-        return Ok(());
+        for id in rejected_ids {
+            if let Some(entry) = graph.get_memory_mut(id) {
+                entry.decay_confidence(DECAY);
+                decayed += 1;
+                changed = true;
+            }
+        }
+
+        if changed {
+            let saved = if scope == "project" {
+                manager.save_project_graph(&graph)
+            } else {
+                manager.save_global_graph(&graph)
+            };
+            if let Err(e) = saved {
+                crate::logging::info(&format!(
+                    "Confidence update: failed to save {} graph: {}",
+                    scope, e
+                ));
+            }
+        }
     }
 
-    Err(anyhow::anyhow!("Memory not found: {}", memory_id))
-}
-
-/// Decay a memory's confidence score
-fn decay_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
-    // Load project graph first
-    let mut graph = manager.load_project_graph()?;
-    if graph.get_memory(memory_id).is_some() {
-        if let Some(entry) = graph.get_memory_mut(memory_id) {
-            entry.decay_confidence(amount);
-            let conf = entry.confidence;
-            manager.save_project_graph(&graph)?;
-            crate::logging::info(&format!(
-                "Decayed confidence for {} to {:.2}",
-                memory_id, conf
-            ));
-        }
-        return Ok(());
-    }
-
-    // Try global
-    let mut graph = manager.load_global_graph()?;
-    if graph.get_memory(memory_id).is_some() {
-        if let Some(entry) = graph.get_memory_mut(memory_id) {
-            entry.decay_confidence(amount);
-            let conf = entry.confidence;
-            manager.save_global_graph(&graph)?;
-            crate::logging::info(&format!(
-                "Decayed confidence for {} to {:.2}",
-                memory_id, conf
-            ));
-        }
-        return Ok(());
-    }
-
-    Err(anyhow::anyhow!("Memory not found: {}", memory_id))
+    (boosted, decayed)
 }
 
 /// Initialize and start the global memory agent

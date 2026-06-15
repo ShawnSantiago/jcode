@@ -798,10 +798,10 @@ async fn consume_native_stream(
                 // Emitted after the matching `ToolUseEnd`; attach it to the most
                 // recent tool call so probes can replay it on the next turn.
                 StreamEvent::ToolUseSignature(signature) => {
-                    if let Some(tool) = outcome.tool_calls.last_mut() {
-                        if !signature.is_empty() {
-                            tool.thought_signature = Some(signature);
-                        }
+                    if let Some(tool) = outcome.tool_calls.last_mut()
+                        && !signature.is_empty()
+                    {
+                        tool.thought_signature = Some(signature);
                     }
                 }
                 StreamEvent::TokenUsage {

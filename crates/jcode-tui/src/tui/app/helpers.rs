@@ -32,14 +32,14 @@ static TODOS_CACHE: std::sync::LazyLock<Mutex<TodosCache>> =
 /// immediately rather than after the 5s TTL. Stale-while-revalidate still
 /// applies: the next read returns the last value and kicks a background refresh.
 pub(crate) fn invalidate_git_info_cache() {
-    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        if let Some((ts, _cached, refreshing)) = guard.as_mut() {
-            // Backdate the timestamp past the TTL so the next `gather_git_info`
-            // treats the entry as expired and spawns a refresh, while still
-            // returning the last-known value (no flicker to empty).
-            *ts = std::time::Instant::now() - Duration::from_secs(3600);
-            *refreshing = false;
-        }
+    if let Ok(mut guard) = GIT_INFO_CACHE.lock()
+        && let Some((ts, _cached, refreshing)) = guard.as_mut()
+    {
+        // Backdate the timestamp past the TTL so the next `gather_git_info`
+        // treats the entry as expired and spawns a refresh, while still
+        // returning the last-known value (no flicker to empty).
+        *ts = std::time::Instant::now() - Duration::from_secs(3600);
+        *refreshing = false;
     }
 }
 
@@ -48,11 +48,11 @@ pub(crate) fn invalidate_git_info_cache() {
 /// Call this right after the app persists a local todo write so the info widget
 /// reflects the new list immediately rather than after the 1s TTL.
 pub(crate) fn invalidate_todos_cache(session_id: &str) {
-    if let Ok(mut cache) = TODOS_CACHE.lock() {
-        if let Some((ts, _todos, refreshing)) = cache.get_mut(session_id) {
-            *ts = std::time::Instant::now() - Duration::from_secs(3600);
-            *refreshing = false;
-        }
+    if let Ok(mut cache) = TODOS_CACHE.lock()
+        && let Some((ts, _todos, refreshing)) = cache.get_mut(session_id)
+    {
+        *ts = std::time::Instant::now() - Duration::from_secs(3600);
+        *refreshing = false;
     }
 }
 
@@ -62,11 +62,11 @@ pub(crate) fn invalidate_todos_cache(session_id: &str) {
 /// queues or cancels a task) so the ambient panel reflects the new queue/next
 /// wake immediately rather than after the 2s TTL.
 pub(crate) fn invalidate_ambient_info_cache() {
-    if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
-        if let Some((ts, _enabled, _cached, refreshing)) = guard.as_mut() {
-            *ts = std::time::Instant::now() - Duration::from_secs(3600);
-            *refreshing = false;
-        }
+    if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock()
+        && let Some((ts, _enabled, _cached, refreshing)) = guard.as_mut()
+    {
+        *ts = std::time::Instant::now() - Duration::from_secs(3600);
+        *refreshing = false;
     }
 }
 
@@ -416,7 +416,7 @@ pub(super) fn effort_display_label(effort: &str) -> &str {
 ///   `claude-opus-4-6[1m]`-> `Claude Opus 4.6 (1M)`
 ///   `gemini-2.5-pro`     -> `Gemini 2.5 Pro`
 /// Unknown shapes are returned mostly as-is so we never hide the real id.
-pub(super) fn pretty_model_display_name(model: &str) -> String {
+pub(crate) fn pretty_model_display_name(model: &str) -> String {
     let model = model.trim();
     if model.is_empty() {
         return "your default model".to_string();
@@ -437,9 +437,8 @@ pub(super) fn pretty_model_display_name(model: &str) -> String {
         // `-<major>-<minor>` version into `<major>.<minor>` and title-case the
         // family/tier words.
         prettify_claude(core)
-    } else if lower.starts_with("gemini-") {
-        title_case_dashed(core)
     } else {
+        // Gemini and everything else: just title-case the dashed segments.
         title_case_dashed(core)
     };
 
@@ -508,8 +507,10 @@ pub(super) fn inferred_reasoning_efforts(
         || provider.contains("claude")
         || model.starts_with("claude-");
     if is_anthropic {
+        // NOTE: `claude-fable-5` is intentionally excluded. The live Messages
+        // API rejects both an adaptive `thinking` block and an `output_config`
+        // effort for it, so it exposes no reasoning-effort levels.
         let supports_effort = model.contains("claude-mythos")
-            || model.contains("claude-fable-5")
             || model.contains("claude-opus-4-8")
             || model.contains("claude-opus-4-7")
             || model.contains("claude-opus-4-6")
@@ -520,10 +521,7 @@ pub(super) fn inferred_reasoning_efforts(
         if !supports_effort {
             return Vec::new();
         }
-        if model.contains("claude-fable-5")
-            || model.contains("claude-opus-4-8")
-            || model.contains("claude-opus-4-7")
-        {
+        if model.contains("claude-opus-4-8") || model.contains("claude-opus-4-7") {
             return vec!["none", "low", "medium", "high", "xhigh"];
         }
         return vec!["none", "low", "medium", "high"];

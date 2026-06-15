@@ -90,6 +90,11 @@ fn fast_picker() -> Picker {
     // renders them at the true row height, so placeholders/borders end up much
     // taller than the picture.
     let font_size = query_font_size();
+    // `from_fontsize` is deprecated upstream in favor of `from_query_stdio` /
+    // `halfblocks`, but neither lets us inject an already-measured cell size:
+    // `halfblocks` hardcodes 10x20 and there is no public font-size setter. We
+    // deliberately keep it to stay correct on HiDPI terminals.
+    #[allow(deprecated)]
     let mut picker = Picker::from_fontsize(font_size);
     picker.set_protocol_type(ProtocolType::Halfblocks);
     if let Some(protocol) = infer_protocol_from_env(

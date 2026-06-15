@@ -838,6 +838,16 @@ async fn run() -> Result<()> {
     let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
     let (session_event_tx, session_event_rx) = mpsc::channel();
     spawn_session_event_forwarder(session_event_rx, event_loop_proxy.clone());
+    if simulate_stream_requested(&args) && app.is_single_session() {
+        // Dev-only: drive the real streaming pipeline with synthetic, bursty
+        // TextDelta events so the streaming reveal animation can be observed and
+        // recorded live without a backend. Mirrors provider chunk cadence.
+        if let DesktopApp::SingleSession(single) = &mut app {
+            seed_desktop_stream_simulator_transcript(single);
+        }
+        window.set_title(&app.status_title());
+        spawn_desktop_stream_simulator(session_event_tx.clone());
+    }
     let reasoning_effort_queue = spawn_desktop_reasoning_effort_request_queue()?;
     let mut recovery_scan_pending = app.is_single_session() && !desktop_gallery;
     let mut first_frame_presented = false;
@@ -2352,6 +2362,104 @@ fn headless_chat_smoke_message(args: &[String]) -> Option<String> {
                     .flatten()
             })
     })
+}
+
+/// Dev-only flag: `--simulate-stream` drives the live single-session app with
+/// synthetic streaming deltas so the streaming reveal animation can be observed
+/// and recorded without a real backend.
+fn simulate_stream_requested(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--simulate-stream" || arg == "--simulate-streaming")
+}
+
+const DESKTOP_STREAM_SIMULATOR_SCRIPT: &str = "Sure, let me walk through how the streaming text reveal works in the desktop app. \
+When the provider sends tokens, they arrive in bursty chunks rather than a smooth flow, \
+so the renderer keeps a `revealed_chars` cursor that eases toward the full response length. \
+The trailing characters get a per-character alpha ramp called the tail fade, \
+and a soft breathing cursor sits at the very end of the revealed text to signal activity.\n\n\
+Here is a short list of the moving parts:\n\
+- The reveal motion integrates a rate proportional to the backlog.\n\
+- The body text buffer is rebuilt as the reveal advances.\n\
+- A separate overlay buffer paints the streaming tail with its own opacity.\n\n\
+Once the response finishes, the overlay hands off to the committed transcript message. \
+That handoff should be seamless, with no visible jump or flicker as the text settles into place. \
+This paragraph is intentionally long so the streaming text wraps across many lines and the \
+viewport scrolls while new tokens keep arriving at the bottom of the transcript.";
+
+/// Seed a small prior transcript so the simulated stream appends after existing
+/// messages, mirroring the common case of streaming inside an active session.
+fn seed_desktop_stream_simulator_transcript(app: &mut SingleSessionApp) {
+    app.replace_session(Some(workspace::SessionCard {
+        session_id: "simulate-stream".to_string(),
+        title: "Streaming simulation".to_string(),
+        subtitle: "dev stream harness".to_string(),
+        detail: "fixture".to_string(),
+        preview_lines: Vec::new(),
+        detail_lines: Vec::new(),
+        transcript_messages: Vec::new(),
+    }));
+    app.messages.push(SingleSessionMessage::user(
+        "Explain how the desktop streaming text reveal works.",
+    ));
+    app.messages.push(SingleSessionMessage::assistant(
+        "Earlier reply: the desktop renders streamed assistant text with an adaptive reveal so bursty provider chunks flow in smoothly instead of popping.",
+    ));
+    app.scroll_body_to_bottom();
+}
+
+/// Spawn a background thread that emits synthetic streaming events to exercise
+/// the real desktop streaming animation pipeline.
+fn spawn_desktop_stream_simulator(
+    session_event_tx: mpsc::Sender<session_launch::DesktopSessionEvent>,
+) {
+    std::thread::Builder::new()
+        .name("jcode-desktop-stream-simulator".to_string())
+        .spawn(move || {
+            // Give the window a moment to come up before streaming starts.
+            std::thread::sleep(Duration::from_millis(900));
+            if session_event_tx
+                .send(session_launch::DesktopSessionEvent::SessionStarted {
+                    session_id: "simulate-stream".to_string(),
+                })
+                .is_err()
+            {
+                return;
+            }
+            // Emit word-sized deltas, occasionally bursting several words at once
+            // to mimic real provider chunking, with brief stalls between bursts.
+            let words: Vec<&str> = DESKTOP_STREAM_SIMULATOR_SCRIPT
+                .split_inclusive(' ')
+                .collect();
+            let mut index = 0usize;
+            let mut burst_phase = 0usize;
+            while index < words.len() {
+                let burst = match burst_phase % 4 {
+                    0 => 1,
+                    1 => 3,
+                    2 => 2,
+                    _ => 5,
+                };
+                burst_phase += 1;
+                let end = (index + burst).min(words.len());
+                let chunk: String = words[index..end].concat();
+                index = end;
+                if session_event_tx
+                    .send(session_launch::DesktopSessionEvent::TextDelta(chunk))
+                    .is_err()
+                {
+                    return;
+                }
+                let pause = match burst_phase % 5 {
+                    0 => Duration::from_millis(220),
+                    3 => Duration::from_millis(120),
+                    _ => Duration::from_millis(45),
+                };
+                std::thread::sleep(pause);
+            }
+            std::thread::sleep(Duration::from_millis(400));
+            let _ = session_event_tx.send(session_launch::DesktopSessionEvent::Done);
+        })
+        .ok();
 }
 
 const DESKTOP_HELP_LINES: &[&str] = &[
@@ -10542,6 +10650,7 @@ struct Canvas {
     app_mode_transition: AppModeTransitionState,
     app_mode_transition_vertices: Vec<Vertex>,
     single_session_scroll_motion: SingleSessionScrollMotion,
+    streaming_follow_motion: StreamingFollowMotion,
     transcript_message_motion: TranscriptMessageMotionRegistry,
     needs_initial_frame: bool,
     boot_frame_presented: bool,
@@ -10691,6 +10800,7 @@ impl Canvas {
             app_mode_transition: AppModeTransitionState::default(),
             app_mode_transition_vertices: Vec::new(),
             single_session_scroll_motion: SingleSessionScrollMotion::default(),
+            streaming_follow_motion: StreamingFollowMotion::default(),
             transcript_message_motion: TranscriptMessageMotionRegistry::default(),
             needs_initial_frame: true,
             boot_frame_presented: false,
@@ -11591,6 +11701,7 @@ impl Canvas {
             }
         };
         let smooth_scroll_lines = smooth_scroll_lines + scroll_motion_frame.smooth_scroll_lines;
+        let mut smooth_scroll_lines = smooth_scroll_lines;
         frame_profile.checkpoint("scroll_motion");
 
         let (welcome_hero_reveal_progress, welcome_hero_reveal_active) =
@@ -11658,6 +11769,7 @@ impl Canvas {
         let mut body_text_window_line_count = 0usize;
         let mut streaming_text_line_count = 0usize;
         let mut inline_widget_line_count = 0usize;
+        let mut streaming_follow_active = false;
         let defer_text_this_frame = self.defer_initial_text_frame;
         if defer_text_this_frame {
             self.defer_initial_text_frame = false;
@@ -11686,6 +11798,20 @@ impl Canvas {
             );
             single_session_rendered_body_key = Some(rendered_body_key);
             body_line_count = self.single_session_body_lines.len();
+            // Smoothly follow streaming growth: hold the viewport a fraction of a
+            // line above the bottom as new wrapped lines append, then ease down,
+            // so the transcript slides instead of snapping a whole line per frame.
+            let streaming_follow = self.streaming_follow_motion.frame(
+                StreamingFollowInput {
+                    total_lines: body_line_count,
+                    anchored_to_bottom: single_session.body_scroll_lines
+                        <= SCROLL_FRACTIONAL_EPSILON,
+                    streaming_active: !single_session.streaming_response.is_empty(),
+                },
+                now,
+            );
+            smooth_scroll_lines += streaming_follow.offset_lines;
+            streaming_follow_active = streaming_follow.active;
             inline_widget_line_count = single_session.render_inline_widget_visible_line_count();
             frame_profile.checkpoint("body_lines_cache");
             self.ensure_font_system();
@@ -11711,6 +11837,7 @@ impl Canvas {
             self.single_session_streaming_text_buffer = None;
             self.single_session_streaming_handoff_started_at = None;
             self.streaming_text_reveal.clear();
+            self.streaming_follow_motion.clear();
             self.single_session_streaming_reveal_frame = StreamingTextRevealFrame::default();
             self.single_session_streaming_revealed_bytes = 0;
             self.streaming_text_needs_prepare = false;
@@ -12047,7 +12174,8 @@ impl Canvas {
                     || scroll_motion_frame.active
                     || welcome_hero_reveal_active
                     || streaming_text_arrival_style.active
-                    || self.single_session_streaming_reveal_frame.active;
+                    || self.single_session_streaming_reveal_frame.active
+                    || streaming_follow_active;
                 let geometry_cache_key = if single_session_issue_layout_for_frame.visible() {
                     None
                 } else {

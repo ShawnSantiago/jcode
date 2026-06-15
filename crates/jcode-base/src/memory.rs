@@ -52,7 +52,10 @@ pub use pending::{
     take_pending_memory,
 };
 use pending::{begin_memory_check, finish_memory_check};
-pub(crate) use prompt_support::{format_context_for_extraction, format_context_for_relevance};
+pub(crate) use prompt_support::format_context_for_extraction;
+pub use prompt_support::{
+    focus_query_text, format_context_for_relevance, format_focused_query_for_relevance,
+};
 
 const LEGACY_NOTE_CATEGORY: &str = "note";
 const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
@@ -134,7 +137,13 @@ impl MemoryEntryEmbeddingExt for MemoryEntry {
 
         match crate::embedding::embed(&self.content) {
             Ok(embedding) => {
-                self.embedding = Some(embedding);
+                // Tag with the active local model so dense search only compares
+                // vectors from the same model. Untagged legacy memories are
+                // treated as this same model via effective_embedding_model().
+                self.set_embedding(
+                    Some(embedding),
+                    Some(crate::memory_types::LEGACY_EMBEDDING_MODEL.to_string()),
+                );
                 true
             }
             Err(err) => {
@@ -590,6 +599,90 @@ impl MemoryManager {
     ) -> Result<Vec<(MemoryEntry, f32)>> {
         let entries_with_emb = self.collect_memories_with_embeddings_scoped(scope)?;
         Self::score_and_filter(entries_with_emb, query_embedding, "", threshold, limit)
+    }
+
+    /// Hybrid retrieval: fuse dense (embedding cosine) and sparse (BM25 over
+    /// memory search text) rankings with Reciprocal Rank Fusion.
+    ///
+    /// This is the recall-oriented live retrieval path. Unlike
+    /// `find_similar_with_embedding`, it does NOT apply a hard cosine floor
+    /// (which benchmarking showed zeroes out recall): instead it pulls a
+    /// generous candidate pool from each retriever and lets RRF + the
+    /// downstream sidecar/rerank decide. Lexical signal is essential for the
+    /// identifier/path/term-heavy memories agents store.
+    pub fn find_similar_hybrid(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        self.find_similar_hybrid_scoped(query_text, query_embedding, limit, MemoryScope::All)
+    }
+
+    pub fn find_similar_hybrid_scoped(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        scope: MemoryScope,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        let entries = self.collect_memories_with_embeddings_scoped(scope)?;
+        Ok(Self::hybrid_fuse(
+            entries,
+            query_text,
+            query_embedding,
+            limit,
+        ))
+    }
+
+    /// Pull pool, rank by dense and BM25 separately, fuse with RRF.
+    fn hybrid_fuse(
+        entries: Vec<MemoryEntry>,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Vec<(MemoryEntry, f32)> {
+        let entries: Vec<MemoryEntry> = entries
+            .into_iter()
+            .filter(|e| e.embedding.is_some())
+            .collect();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Generous per-retriever pool so fusion has signal to work with.
+        let pool = (limit * 5).max(HYBRID_POOL_MIN);
+
+        // Dense ranking (no hard threshold; just take the top by cosine).
+        let emb_refs: Vec<&[f32]> = entries
+            .iter()
+            .filter_map(|e| e.embedding.as_deref())
+            .collect();
+        let dense_scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
+        let mut dense: Vec<(usize, f32)> = dense_scores.iter().copied().enumerate().collect();
+        dense.sort_by(|a, b| b.1.total_cmp(&a.1));
+        dense.truncate(pool);
+
+        // Sparse (BM25) ranking over memory search text.
+        let sparse = bm25_rank(&entries, query_text, pool);
+
+        // RRF fusion.
+        const RRF_K: f32 = 60.0;
+        let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+        for (rank, (idx, _)) in dense.iter().enumerate() {
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+        }
+        for (rank, (idx, _)) in sparse.iter().enumerate() {
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+        }
+
+        let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();
+        top_k_by_score(
+            fused
+                .into_iter()
+                .filter_map(|(idx, score)| entries[idx].take().map(|e| (e, score))),
+            limit,
+        )
     }
 
     fn collect_all_memories_with_embeddings(&self) -> Result<Vec<MemoryEntry>> {
@@ -1838,6 +1931,79 @@ pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.5;
 
 /// Maximum embedding hits to verify with sidecar
 pub const EMBEDDING_MAX_HITS: usize = 10;
+
+/// Minimum per-retriever candidate pool size for hybrid fusion.
+const HYBRID_POOL_MIN: usize = 50;
+
+/// Rank memories by BM25 over their normalized search text.
+///
+/// Returns `(entry_index, score)` pairs sorted by score desc, truncated to
+/// `limit`. Memories with zero query-term overlap are dropped.
+fn bm25_rank(entries: &[MemoryEntry], query_text: &str, limit: usize) -> Vec<(usize, f32)> {
+    const K1: f32 = 1.2;
+    const B: f32 = 0.75;
+
+    let q_terms: Vec<String> = normalize_search_text(query_text)
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    if q_terms.is_empty() {
+        return Vec::new();
+    }
+    let q_set: std::collections::HashSet<&String> = q_terms.iter().collect();
+
+    // Tokenize each doc once; compute df and doc lengths.
+    let docs: Vec<Vec<String>> = entries
+        .iter()
+        .map(|e| {
+            e.searchable_text()
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .collect();
+
+    let n = docs.len().max(1) as f32;
+    let avgdl = docs.iter().map(|d| d.len()).sum::<usize>() as f32 / n;
+    let mut df: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+    for doc in &docs {
+        let unique: std::collections::HashSet<&str> = doc.iter().map(|s| s.as_str()).collect();
+        for t in unique {
+            *df.entry(t).or_insert(0.0) += 1.0;
+        }
+    }
+
+    let mut scored: Vec<(usize, f32)> = Vec::new();
+    for (idx, doc) in docs.iter().enumerate() {
+        if doc.is_empty() {
+            continue;
+        }
+        let dl = doc.len() as f32;
+        let mut tf: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+        for t in doc {
+            *tf.entry(t.as_str()).or_insert(0.0) += 1.0;
+        }
+        let mut score = 0.0f32;
+        for term in &q_set {
+            let Some(&f) = tf.get(term.as_str()) else {
+                continue;
+            };
+            let n_q = *df.get(term.as_str()).unwrap_or(&0.0);
+            if n_q == 0.0 {
+                continue;
+            }
+            let idf = (((n - n_q + 0.5) / (n_q + 0.5)) + 1.0).ln();
+            let denom = f + K1 * (1.0 - B + B * dl / avgdl);
+            score += idf * (f * (K1 + 1.0)) / denom;
+        }
+        if score > 0.0 {
+            scored.push((idx, score));
+        }
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(limit);
+    scored
+}
 
 impl Default for MemoryManager {
     fn default() -> Self {

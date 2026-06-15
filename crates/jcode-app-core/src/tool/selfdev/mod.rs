@@ -433,6 +433,7 @@ impl SelfDevTool {
                             "enter",
                             "setup",
                             "build",
+                            "build-reload",
                             "test",
                             "cancel-build",
                             "reload",
@@ -441,7 +442,7 @@ impl SelfDevTool {
                             "socket-info",
                             "socket-help"
                         ],
-                        "description": "Action."
+                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step."
                     },
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
@@ -546,6 +547,21 @@ impl Tool for SelfDevTool {
                 )
                 .await
             }
+            "build-reload" | "build_reload" => {
+                if is_selfdev {
+                    self.do_build_reload(
+                        params.reason,
+                        params.target,
+                        params.context,
+                        &ctx,
+                    )
+                    .await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "build-reload",
+                    )))
+                }
+            }
             "test" => {
                 self.do_test(
                     params.command,
@@ -580,9 +596,9 @@ impl Tool for SelfDevTool {
             }
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
-                 'test', 'cancel-build', 'reload', 'status', 'find-config', 'socket-info', or \
-                 'socket-help'. Outside self-dev mode use 'enter', 'setup', 'reload', 'status', \
-                 or 'find-config'.",
+                 'build-reload', 'test', 'cancel-build', 'reload', 'status', 'find-config', \
+                 'socket-info', or 'socket-help'. Outside self-dev mode use 'enter', 'setup', \
+                 'reload', 'status', or 'find-config'.",
                 action
             ))),
         };
@@ -607,6 +623,17 @@ impl SelfDevTool {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0)
             .unwrap_or(15)
+    }
+
+    /// How long `build-reload` waits inline for the queued build (and any
+    /// builds ahead of it in the queue) to finish before giving up and telling
+    /// the agent to reload manually.
+    fn build_reload_wait_secs() -> u64 {
+        std::env::var("JCODE_SELFDEV_BUILD_WAIT_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(1800)
     }
 
     fn session_is_selfdev(session_id: &str) -> bool {

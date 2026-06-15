@@ -301,7 +301,13 @@ impl SelfDevTool {
 
         let target_binary = build::find_dev_binary(&repo_dir)
             .unwrap_or_else(|| build::release_binary_path(&repo_dir));
-        if !target_binary.exists() {
+        // In a test session the rest of this method fakes the build source,
+        // hash and published state, so the real on-disk binary check is both
+        // inconsistent and environment-dependent (CI builds a release binary;
+        // a local debug/selfdev checkout may not have target/release/jcode).
+        // Skipping it lets the reload-signal/ack contract be exercised
+        // deterministically regardless of which profile was built locally.
+        if !SelfDevTool::is_test_session() && !target_binary.exists() {
             return Ok(ToolOutput::new(
                 format!(
                     "No binary found at {}.\n\

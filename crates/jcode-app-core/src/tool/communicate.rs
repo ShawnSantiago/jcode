@@ -593,7 +593,7 @@ impl Tool for CommunicateTool {
     }
 
     fn description(&self) -> &str {
-        "Coordinate agents. For spawn, prefer providing a prompt so the new agent starts with a concrete task instead of idling. Spawned/assigned agents automatically report their final response back to the owning coordinator."
+        "Coordinate agents. Any agent can spawn child agents, and those children can spawn their own, forming a recursive spawn tree capped at depth 5. For spawn, prefer providing a prompt so the new agent starts with a concrete task instead of idling. Spawned/assigned agents automatically report their final response back to the agent that spawned them; you can stop any agent in the subtree you spawned."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -682,8 +682,8 @@ impl Tool for CommunicateTool {
                 },
                 "spawn_mode": {
                     "type": "string",
-                    "enum": ["visible", "headless", "auto"],
-                    "description": "Per-call spawn mode for swarm-created agents. Overrides agents.swarm_spawn_mode config when set. Defaults to visible/headed behavior."
+                    "enum": ["visible", "headless", "inline", "auto"],
+                    "description": "Per-call spawn mode for swarm-created agents. Overrides agents.swarm_spawn_mode config when set. 'visible' opens a terminal window, 'headless' runs in-process with no UI, 'inline' runs in-process and renders a live gallery viewport in the coordinator, 'auto' tries visible then falls back to headless. Defaults to visible/headed behavior."
                 },
                 "session_ids": {
                     "type": "array",

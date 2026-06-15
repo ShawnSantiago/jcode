@@ -25,6 +25,10 @@ static EMBEDDER_CACHE: OnceLock<Mutex<EmbedderCache>> = OnceLock::new();
 /// Embedding vector type
 pub type EmbeddingVec = backend::EmbeddingVec;
 
+/// Cross-encoder reranker (re-exported from the embedding backend). Scores a
+/// (query, passage) pair jointly for second-stage reranking.
+pub use backend::CrossEncoder;
+
 /// The embedder handles model loading and inference.
 pub struct Embedder {
     inner: backend::Embedder,
@@ -87,6 +91,14 @@ impl Embedder {
             crate::logging::info("Embedding model missing; downloading (one-time setup)...");
         }
         let inner = backend::Embedder::load_from_dir(&model_dir)?;
+        Ok(Self { inner })
+    }
+
+    /// Load a model from an explicit directory (must contain `model.onnx` and
+    /// `tokenizer.json`). Used for A/B evaluating alternative embedding models
+    /// without touching the process-wide cached embedder.
+    pub fn load_from_dir(model_dir: &std::path::Path) -> Result<Self> {
+        let inner = backend::Embedder::load_from_dir(model_dir)?;
         Ok(Self { inner })
     }
 

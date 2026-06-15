@@ -49,7 +49,8 @@ mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
-    dispatch_background_task_completion, dispatch_background_task_progress, dispatch_ui_activity,
+    dispatch_background_task_completion, dispatch_background_task_progress,
+    dispatch_swarm_output_tail, dispatch_ui_activity,
 };
 use self::debug::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
@@ -57,9 +58,10 @@ use self::headless::create_headless_session;
 use self::reload::await_reload_signal;
 use self::runtime::ServerRuntime;
 use self::swarm::{
-    broadcast_swarm_plan, broadcast_swarm_plan_with_previous, broadcast_swarm_status,
-    record_swarm_event, record_swarm_event_for_session, refresh_swarm_task_staleness,
-    remove_plan_participant, remove_session_from_swarm, rename_plan_participant, run_swarm_message,
+    MAX_SWARM_SPAWN_DEPTH, broadcast_swarm_plan, broadcast_swarm_plan_with_previous,
+    broadcast_swarm_status, record_swarm_event, record_swarm_event_for_session,
+    refresh_swarm_task_staleness, remove_plan_participant, remove_session_from_swarm,
+    rename_plan_participant, run_swarm_message, swarm_is_self_or_ancestor, swarm_spawn_depth,
     update_member_status, update_member_status_with_report,
 };
 use self::swarm_channels::{
@@ -322,8 +324,9 @@ pub use self::state::{
 };
 use self::state::{
     SessionInterruptQueues, fanout_live_client_event, fanout_session_event,
-    queue_soft_interrupt_for_session, register_session_event_sender,
-    register_session_interrupt_queue, remove_session_interrupt_queue,
+    queue_soft_interrupt_for_session, register_background_tool_signal,
+    register_session_event_sender, register_session_interrupt_queue,
+    remove_background_tool_signal, remove_session_interrupt_queue, rename_background_tool_signal,
     rename_session_interrupt_queue, session_event_fanout_sender, unregister_session_event_sender,
 };
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
@@ -446,6 +449,13 @@ pub struct Server {
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         use crate::id::{new_memorable_server_id, server_icon};
+
+        // Register the live provider so background helpers (the memory sidecar)
+        // can make cheap model calls on whatever provider the user is running.
+        // Without this, the sidecar only works on OpenAI/Claude OAuth and
+        // silently degrades (rerank -> hybrid order, no relevance/extraction) on
+        // Copilot, Antigravity, Gemini, Cursor, Bedrock, and OpenRouter.
+        crate::provider::set_active_provider(Arc::clone(&provider));
 
         let (event_tx, _) = broadcast::channel(1024);
         let (client_debug_response_tx, _) = broadcast::channel(64);
@@ -670,6 +680,10 @@ impl Server {
                 .await;
                 let mut shutdown_signals = self.shutdown_signals.write().await;
                 shutdown_signals.insert(session_id.clone(), agent_guard.graceful_shutdown_signal());
+                register_background_tool_signal(
+                    &session_id,
+                    agent_guard.background_tool_signal(),
+                );
             }
 
             let stored_recovery_record = reload_recovery::peek_for_session(&session_id)
@@ -1812,6 +1826,9 @@ impl Server {
                 // communication actions (comm_propose_plan / comm_approve_plan), not
                 // todowrite broadcasts.
                 Ok(BusEvent::TodoUpdated(_)) => {}
+                Ok(BusEvent::SwarmOutputTail(tail)) => {
+                    dispatch_swarm_output_tail(&tail, &swarm_members, &swarms_by_id).await;
+                }
                 Ok(_) => {
                     // Ignore other events
                 }

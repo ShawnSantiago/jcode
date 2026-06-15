@@ -29,6 +29,7 @@ pub mod copilot_usage;
 pub mod dictation;
 #[cfg(feature = "embeddings")]
 pub mod embedding;
+pub mod embedding_backend;
 #[cfg(not(feature = "embeddings"))]
 pub mod embedding_stub;
 pub mod env;
@@ -47,6 +48,7 @@ pub mod memory;
 pub mod memory_agent;
 pub mod memory_graph;
 pub mod memory_log;
+pub mod memory_rerank;
 pub mod memory_types;
 pub mod message;
 pub mod model_pricing;

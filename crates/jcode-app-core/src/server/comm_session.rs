@@ -7,9 +7,10 @@ use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
     create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
-    record_swarm_event_for_session, remove_session_channel_subscriptions,
-    remove_session_from_swarm, remove_session_interrupt_queue, truncate_detail,
-    update_member_status, update_member_status_with_report,
+    record_swarm_event_for_session, remove_background_tool_signal,
+    remove_session_channel_subscriptions, remove_session_from_swarm,
+    remove_session_interrupt_queue, truncate_detail, update_member_status,
+    update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::config::SwarmSpawnMode;
@@ -191,15 +192,14 @@ async fn resolve_coordinator_spawn_identity(
     if let Some(agent) = {
         let agent_sessions = sessions.read().await;
         agent_sessions.get(req_session_id).cloned()
-    } {
-        if let Ok(agent_guard) = agent.try_lock() {
-            return CoordinatorSpawnIdentity {
-                model: Some(agent_guard.provider_model()),
-                provider_key: agent_guard.session_provider_key(),
-                route_api_method: agent_guard.session_route_api_method(),
-                is_canary: agent_guard.is_canary(),
-            };
-        }
+    } && let Ok(agent_guard) = agent.try_lock()
+    {
+        return CoordinatorSpawnIdentity {
+            model: Some(agent_guard.provider_model()),
+            provider_key: agent_guard.session_provider_key(),
+            route_api_method: agent_guard.session_route_api_method(),
+            is_canary: agent_guard.is_canary(),
+        };
     }
 
     // Agent busy (mid-turn) or not resident: read the authoritative persisted
@@ -442,6 +442,7 @@ async fn register_visible_spawned_member(
                 joined_at: now,
                 last_status_change: now,
                 is_headless: false,
+                output_tail: None,
             },
         );
     }
@@ -518,7 +519,11 @@ pub(super) async fn spawn_swarm_agent(
         .map(append_swarm_completion_report_instructions);
 
     let visible_spawn = match resolved_spawn_mode {
-        SwarmSpawnMode::Headless => Err(anyhow::anyhow!("headless spawn requested")),
+        // Inline workers run in-process like headless ones; the difference is
+        // purely how the coordinator renders them (a live inline gallery).
+        SwarmSpawnMode::Headless | SwarmSpawnMode::Inline => {
+            Err(anyhow::anyhow!("headless spawn requested"))
+        }
         SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
             resolved_working_dir.as_deref(),
             spawn_model.as_deref(),
@@ -827,18 +832,23 @@ pub(super) async fn handle_comm_stop(
     soft_interrupt_queues: &SessionInterruptQueues,
     swarm_mutation_runtime: &SwarmMutationRuntime,
 ) {
-    let swarm_id = if let Some(swarm_id) = require_coordinator_swarm(
-        id,
-        &req_session_id,
-        "Only the coordinator can stop agents.",
-        client_event_tx,
-        swarm_members,
-        swarm_coordinators,
-    )
-    .await
-    {
-        swarm_id
-    } else {
+    // Stopping is authorized per-target by ownership (the requester is the
+    // target's spawner or a transitive ancestor) rather than by the swarm-level
+    // coordinator slot, so that any parent can stop agents in its own subtree.
+    // We only require the requester to be a member of a swarm here; the concrete
+    // permission check happens below via `stop_allowed`.
+    let swarm_id = {
+        let members = swarm_members.read().await;
+        members
+            .get(&req_session_id)
+            .and_then(|member| member.swarm_id.clone())
+    };
+    let Some(swarm_id) = swarm_id else {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Not in a swarm.".to_string(),
+            retry_after_secs: None,
+        });
         return;
     };
 
@@ -859,7 +869,15 @@ pub(super) async fn handle_comm_stop(
         let members = swarm_members.read().await;
         members
             .get(&target_session)
-            .map(|member| swarm_stop_allowed_by_owner(&req_session_id, member, force))
+            .map(|member| {
+                swarm_stop_allowed_by_owner(&req_session_id, member, force)
+                    || (!force
+                        && super::swarm_is_self_or_ancestor(
+                            &members,
+                            &req_session_id,
+                            &target_session,
+                        ))
+            })
             .unwrap_or(false)
     };
     if !stop_allowed {
@@ -902,6 +920,7 @@ pub(super) async fn handle_comm_stop(
     drop(sessions_guard);
     if let Some(agent_arc) = removed_agent {
         remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
+        remove_background_tool_signal(&target_session);
         if let Ok(agent) = agent_arc.try_lock() {
             let memory_enabled = agent.memory_enabled();
             let transcript = if memory_enabled {
@@ -1055,7 +1074,11 @@ async fn ensure_spawn_coordinator_swarm(
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) -> Option<String> {
-    let (swarm_id, from_name, coordinator_id, coordinator_is_stale) = {
+    // `permission_error` is retained for signature compatibility with callers and
+    // tests; recursive spawning no longer rejects non-coordinators, so it is only
+    // referenced defensively below.
+    let _ = permission_error;
+    let (swarm_id, from_name, depth, is_root, coordinator_id, coordinator_is_stale) = {
         let members = swarm_members.read().await;
         let swarm_id = members
             .get(req_session_id)
@@ -1063,6 +1086,13 @@ async fn ensure_spawn_coordinator_swarm(
         let from_name = members
             .get(req_session_id)
             .and_then(|member| member.friendly_name.clone());
+        // Depth in the spawn tree (root coordinators are depth 0). A session is a
+        // "root" when it has no spawner/owner above it.
+        let depth = super::swarm_spawn_depth(&members, req_session_id);
+        let is_root = members
+            .get(req_session_id)
+            .and_then(|member| member.report_back_to_session_id.clone())
+            .is_none();
         let coordinator_id = if let Some(ref swarm_id) = swarm_id {
             let coordinators = swarm_coordinators.read().await;
             coordinators.get(swarm_id).cloned()
@@ -1075,7 +1105,14 @@ async fn ensure_spawn_coordinator_swarm(
                     && !swarm_member_status_is_stale_for_coordination(&member.status)
             })
         });
-        (swarm_id, from_name, coordinator_id, coordinator_is_stale)
+        (
+            swarm_id,
+            from_name,
+            depth,
+            is_root,
+            coordinator_id,
+            coordinator_is_stale,
+        )
     };
 
     let Some(swarm_id) = swarm_id else {
@@ -1087,130 +1124,70 @@ async fn ensure_spawn_coordinator_swarm(
         return None;
     };
 
-    if coordinator_id.as_deref() == Some(req_session_id) {
-        return Some(swarm_id);
-    }
-
-    if coordinator_id.is_some() && !coordinator_is_stale {
+    // Enforce the recursive spawn depth cap. An agent at depth `d` may only spawn
+    // a child (which lands at depth `d + 1`) while `d < MAX_SWARM_SPAWN_DEPTH`.
+    if depth >= super::MAX_SWARM_SPAWN_DEPTH {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
-            message: permission_error.to_string(),
+            message: format!(
+                "Swarm spawn depth limit reached (max {}). This agent is at depth {depth}; it cannot spawn further nested agents. Ask a higher-level agent to take on additional parallel work, or have an existing agent finish before nesting deeper.",
+                super::MAX_SWARM_SPAWN_DEPTH
+            ),
             retry_after_secs: None,
         });
         return None;
     }
 
-    let promoted = {
-        let mut coordinators = swarm_coordinators.write().await;
-        match coordinators.get(&swarm_id) {
-            Some(existing) if existing == req_session_id => false,
-            Some(_) if !coordinator_is_stale => {
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: permission_error.to_string(),
-                    retry_after_secs: None,
-                });
-                return None;
-            }
-            _ => {
-                coordinators.insert(swarm_id.clone(), req_session_id.to_string());
-                true
-            }
-        }
-    };
+    // Coordinator-slot election is now only about the swarm-level coordinator used
+    // for shared plan operations (propose/approve/assign). Only a root session
+    // (depth 0, no spawner) claims it, and only when the slot is empty or stale.
+    // Non-root spawners coordinate their own subtree via report-back ownership and
+    // never disturb the swarm-level coordinator slot. Crucially, the presence of a
+    // live coordinator no longer blocks anyone from spawning.
+    if is_root && coordinator_id.as_deref() != Some(req_session_id) {
+        let should_claim = coordinator_id.is_none() || coordinator_is_stale;
+        if should_claim {
+            let promoted = {
+                let mut coordinators = swarm_coordinators.write().await;
+                match coordinators.get(&swarm_id) {
+                    Some(existing) if existing == req_session_id => false,
+                    Some(_) if !coordinator_is_stale => false,
+                    _ => {
+                        coordinators.insert(swarm_id.clone(), req_session_id.to_string());
+                        true
+                    }
+                }
+            };
 
-    if promoted {
-        {
-            let mut members = swarm_members.write().await;
-            if let Some(member) = members.get_mut(req_session_id) {
-                member.role = "coordinator".to_string();
+            if promoted {
+                {
+                    let mut members = swarm_members.write().await;
+                    if let Some(member) = members.get_mut(req_session_id) {
+                        member.role = "coordinator".to_string();
+                    }
+                }
+                let swarm_state = SwarmState {
+                    members: Arc::clone(swarm_members),
+                    swarms_by_id: Arc::clone(swarms_by_id),
+                    plans: Arc::clone(swarm_plans),
+                    coordinators: Arc::clone(swarm_coordinators),
+                };
+                persist_swarm_state_for(&swarm_id, &swarm_state).await;
+                broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+                let _ = client_event_tx.send(ServerEvent::Notification {
+                    from_session: req_session_id.to_string(),
+                    from_name,
+                    notification_type: NotificationType::Message {
+                        scope: Some("swarm".to_string()),
+                        channel: None,
+                    },
+                    message: "You are the coordinator for this swarm.".to_string(),
+                });
             }
         }
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        persist_swarm_state_for(&swarm_id, &swarm_state).await;
-        broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
-        let _ = client_event_tx.send(ServerEvent::Notification {
-            from_session: req_session_id.to_string(),
-            from_name,
-            notification_type: NotificationType::Message {
-                scope: Some("swarm".to_string()),
-                channel: None,
-            },
-            message: "You are the coordinator for this swarm.".to_string(),
-        });
     }
 
     Some(swarm_id)
-}
-
-async fn require_coordinator_swarm(
-    id: u64,
-    req_session_id: &str,
-    permission_error: &str,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
-) -> Option<String> {
-    let (swarm_id, is_coordinator, coordinator_is_stale) = {
-        let members = swarm_members.read().await;
-        let swarm_id = members
-            .get(req_session_id)
-            .and_then(|member| member.swarm_id.clone());
-        let coordinator_id = if let Some(ref swarm_id) = swarm_id {
-            let coordinators = swarm_coordinators.read().await;
-            coordinators.get(swarm_id).cloned()
-        } else {
-            None
-        };
-        let is_coordinator = coordinator_id.as_deref() == Some(req_session_id);
-        let coordinator_is_stale = coordinator_id.as_ref().is_some_and(|coordinator| {
-            !members.get(coordinator).is_some_and(|member| {
-                member.swarm_id.as_deref() == swarm_id.as_deref()
-                    && !swarm_member_status_is_stale_for_coordination(&member.status)
-            })
-        });
-        (swarm_id, is_coordinator, coordinator_is_stale)
-    };
-
-    if !is_coordinator
-        && coordinator_is_stale
-        && let Some(ref swarm_id) = swarm_id
-    {
-        let mut coordinators = swarm_coordinators.write().await;
-        coordinators.insert(swarm_id.clone(), req_session_id.to_string());
-        drop(coordinators);
-        let mut members = swarm_members.write().await;
-        if let Some(member) = members.get_mut(req_session_id) {
-            member.role = "coordinator".to_string();
-        }
-        return Some(swarm_id.clone());
-    }
-
-    if !is_coordinator {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: permission_error.to_string(),
-            retry_after_secs: None,
-        });
-        return None;
-    }
-
-    match swarm_id {
-        Some(swarm_id) => Some(swarm_id),
-        None => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: "Not in a swarm.".to_string(),
-                retry_after_secs: None,
-            });
-            None
-        }
-    }
 }
 
 #[cfg(test)]

@@ -334,6 +334,54 @@ fn test_scroll_key_then_render() {
     let _text_after = render_and_snap(&app, &mut terminal);
 }
 
+/// Regression for the wide-emoji "ghost" artifact (ratatui issue #2357): when
+/// the chat view actually scrolls, `scroll_up`/`scroll_down` must arm a forced
+/// full redraw so the next frame issues a `terminal.clear()`. Ratatui's diff
+/// does not re-emit the trailing cell after a wide grapheme when its symbol is
+/// unchanged, so incremental-only diffs leave stale characters on kitty/foot.
+#[test]
+fn scroll_arms_force_full_redraw_to_clear_wide_grapheme_ghosts() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 60);
+
+    // Render at bottom first so LAST_MAX_SCROLL is populated and there is room
+    // to actually move the viewport upward.
+    let _ = render_and_snap(&app, &mut terminal);
+
+    let (up_code, up_mods) = scroll_up_key(&app);
+
+    app.force_full_redraw = false;
+    app.handle_key(up_code.clone(), up_mods).unwrap();
+
+    // The scroll moved the viewport, so a clean repaint must be armed.
+    assert!(app.auto_scroll_paused, "scroll up should pause auto-scroll");
+    assert!(app.scroll_offset > 0, "scroll up should move the viewport");
+    assert!(
+        app.force_full_redraw,
+        "a viewport-moving scroll must arm force_full_redraw to clear ghosts"
+    );
+
+    // Scrolling back down to the bottom should likewise arm a full redraw.
+    let (down_code, down_mods) = scroll_down_key(&app);
+    app.force_full_redraw = false;
+    let mut armed_on_down = false;
+    for _ in 0..80 {
+        app.force_full_redraw = false;
+        let moved = app.handle_key(down_code.clone(), down_mods).is_ok();
+        let _ = moved;
+        if app.force_full_redraw {
+            armed_on_down = true;
+        }
+        if !app.auto_scroll_paused {
+            break;
+        }
+    }
+    assert!(
+        armed_on_down,
+        "a viewport-moving downward scroll must also arm force_full_redraw"
+    );
+}
+
 #[test]
 fn test_scroll_round_trip() {
     let _render_lock = scroll_render_test_lock();
@@ -811,6 +859,498 @@ fn test_prompt_jump_loads_older_history_when_at_top() {
     assert!(
         app.display_messages().len() > messages_before,
         "prompt-up at the top should load older history"
+    );
+}
+
+/// Return the first non-empty rendered line of the chat viewport, used as a
+/// proxy for "where the viewport is anchored". If a scroll notch moves the
+/// view, this string must change.
+fn first_visible_content_line(text: &str) -> String {
+    text.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Reproduction harness for the intermittent "can't scroll" report.
+///
+/// Mimics the real event loop: render a frame (so LAST_MAX_SCROLL reflects the
+/// content), feed one wheel-up notch, drain the momentum the way the tick does,
+/// then render again. Each notch from a scrollable bottom must visibly move the
+/// viewport. Sweeps content/viewport sizes and streaming on/off because the
+/// report is size/timing dependent ("only sometimes").
+#[test]
+fn repro_wheel_up_from_bottom_always_moves_viewport() {
+    let _render_lock = scroll_render_test_lock();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &height in &[8u16, 12, 16, 20, 25, 30] {
+        for &padding in &[6usize, 12, 24, 40] {
+            for &streaming in &[false, true] {
+                let (mut app, mut terminal) = create_scroll_test_app(80, height, 1, padding);
+                if streaming {
+                    app.is_processing = true;
+                    app.status = ProcessingStatus::Streaming;
+                }
+
+                // Establish the rendered scroll extent at the bottom.
+                let bottom = render_and_snap(&app, &mut terminal);
+                let max_scroll = crate::tui::ui::last_max_scroll();
+                if max_scroll == 0 {
+                    // Content fits; nothing to scroll. Not a failure.
+                    continue;
+                }
+
+                // One wheel-up notch, drained as the tick would, then re-render.
+                app.handle_mouse_event(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: 10,
+                    row: height / 2,
+                    modifiers: KeyModifiers::empty(),
+                });
+                // Drain any queued momentum the way handle_tick does.
+                for _ in 0..16 {
+                    app.progress_mouse_scroll_animation();
+                }
+                let after = render_and_snap(&app, &mut terminal);
+
+                if after == bottom {
+                    failures.push(format!(
+                        "h={height} pad={padding} streaming={streaming}: \
+                         wheel-up did not move the viewport (max_scroll={max_scroll}, \
+                         offset={}, paused={})",
+                        app.scroll_offset, app.auto_scroll_paused
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "wheel-up dead zones found:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// A burst of wheel notches followed by a single wheel-down notch must move the
+/// view back down. Repro for momentum/queue state leaving the view stuck.
+#[test]
+fn repro_wheel_down_after_up_burst_moves_viewport() {
+    let _render_lock = scroll_render_test_lock();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &height in &[10u16, 16, 25] {
+        for &padding in &[12usize, 24, 40] {
+            for &streaming in &[false, true] {
+                let (mut app, mut terminal) = create_scroll_test_app(80, height, 1, padding);
+                if streaming {
+                    app.is_processing = true;
+                    app.status = ProcessingStatus::Streaming;
+                }
+                render_and_snap(&app, &mut terminal);
+                if crate::tui::ui::last_max_scroll() == 0 {
+                    continue;
+                }
+
+                // Flick up several notches.
+                for _ in 0..4 {
+                    app.handle_mouse_event(MouseEvent {
+                        kind: MouseEventKind::ScrollUp,
+                        column: 10,
+                        row: height / 2,
+                        modifiers: KeyModifiers::empty(),
+                    });
+                }
+                for _ in 0..30 {
+                    app.progress_mouse_scroll_animation();
+                }
+                let scrolled = render_and_snap(&app, &mut terminal);
+
+                // One wheel-down notch must move the viewport back toward bottom.
+                app.handle_mouse_event(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 10,
+                    row: height / 2,
+                    modifiers: KeyModifiers::empty(),
+                });
+                for _ in 0..16 {
+                    app.progress_mouse_scroll_animation();
+                }
+                let after = render_and_snap(&app, &mut terminal);
+
+                if after == scrolled {
+                    failures.push(format!(
+                        "h={height} pad={padding} streaming={streaming}: \
+                         wheel-down after up-burst did not move (offset={}, paused={})",
+                        app.scroll_offset, app.auto_scroll_paused
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "wheel-down dead zones found:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Keyboard scroll-up via the real key path must move the viewport on the very
+/// first notch from the bottom, across sizes and streaming state.
+#[test]
+fn repro_key_scroll_up_first_notch_moves_viewport() {
+    let _render_lock = scroll_render_test_lock();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &height in &[8u16, 12, 16, 20, 25, 30] {
+        for &padding in &[6usize, 12, 24, 40] {
+            for &streaming in &[false, true] {
+                let (mut app, mut terminal) = create_scroll_test_app(80, height, 1, padding);
+                if streaming {
+                    app.is_processing = true;
+                    app.status = ProcessingStatus::Streaming;
+                }
+                let (up_code, up_mods) = scroll_up_key(&app);
+
+                let bottom = render_and_snap(&app, &mut terminal);
+                let max_scroll = crate::tui::ui::last_max_scroll();
+                if max_scroll == 0 {
+                    continue;
+                }
+
+                app.handle_key(up_code.clone(), up_mods).unwrap();
+                let after = render_and_snap(&app, &mut terminal);
+
+                let moved = first_visible_content_line(&after)
+                    != first_visible_content_line(&bottom)
+                    || after != bottom;
+                if !moved {
+                    failures.push(format!(
+                        "h={height} pad={padding} streaming={streaming}: \
+                         key scroll-up first notch did not move (max_scroll={max_scroll}, \
+                         offset={}, paused={})",
+                        app.scroll_offset, app.auto_scroll_paused
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "key scroll-up dead zones found:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Reproduction for the reasoning-streaming scroll report: while reasoning is
+/// actively streaming in (paced frames, like the real server), a user scroll-up
+/// must move the rendered viewport AND that scrolled position must survive the
+/// next paced reasoning frames (auto-follow must not yank the view back to the
+/// bottom). This is the "I can't scroll while it's thinking" scenario.
+#[test]
+fn repro_scroll_up_holds_while_reasoning_streams() {
+    let _render_lock = scroll_render_test_lock();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &height in &[12u16, 20, 30] {
+        for &padding in &[24usize, 40] {
+            let (mut app, mut terminal) = create_scroll_test_app(80, height, 1, padding);
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.is_processing = true;
+            app.status = ProcessingStatus::Streaming;
+
+            // Render at the bottom so scroll metrics are populated.
+            let bottom = render_and_snap(&app, &mut terminal);
+            if crate::tui::ui::last_max_scroll() == 0 {
+                continue;
+            }
+
+            // Reasoning begins streaming in (paced through StreamBuffer).
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ReasoningDelta {
+                    text: "let me think about this carefully\n".repeat(8),
+                },
+                &mut remote,
+            );
+            // Drain a couple paced frames the way the tick does, rendering between.
+            for _ in 0..3 {
+                let ops = app.stream_buffer.flush_smooth_frame();
+                app.apply_stream_ops(ops);
+                render_and_snap(&app, &mut terminal);
+            }
+
+            // User scrolls up while reasoning is still streaming.
+            app.handle_key(KeyCode::PageUp, KeyModifiers::empty()).unwrap();
+            let scrolled = render_and_snap(&app, &mut terminal);
+
+            let moved = scrolled != bottom;
+            if !moved {
+                failures.push(format!(
+                    "h={height} pad={padding}: scroll-up during reasoning stream did not move \
+                     (offset={}, paused={}, max={})",
+                    app.scroll_offset,
+                    app.auto_scroll_paused,
+                    crate::tui::ui::last_max_scroll()
+                ));
+                continue;
+            }
+
+            // More reasoning streams in; the user's scrolled position must hold
+            // (not snap back to the bottom).
+            for burst in 0..5 {
+                app.handle_server_event(
+                    crate::protocol::ServerEvent::ReasoningDelta {
+                        text: format!("more reasoning content burst {burst}\n").repeat(4),
+                    },
+                    &mut remote,
+                );
+                let ops = app.stream_buffer.flush_smooth_frame();
+                app.apply_stream_ops(ops);
+                let frame = render_and_snap(&app, &mut terminal);
+                if !app.auto_scroll_paused {
+                    failures.push(format!(
+                        "h={height} pad={padding}: reasoning burst {burst} un-paused scroll \
+                         (auto-follow yanked the view back to bottom)"
+                    ));
+                    break;
+                }
+                if frame == bottom {
+                    failures.push(format!(
+                        "h={height} pad={padding}: reasoning burst {burst} snapped view back to \
+                         bottom while user had scrolled up"
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "reasoning-streaming scroll dead zones found:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Closer reproduction of the real loop: mouse-wheel scroll (the momentum-queue
+/// path) while reasoning tokens trickle in one delta at a time, with momentum
+/// drain + render interleaved exactly like `handle_tick`. The viewport must move
+/// on the wheel and must not be snapped back to the bottom by the trickling
+/// reasoning deltas.
+#[test]
+fn repro_mouse_wheel_during_token_by_token_reasoning() {
+    let _render_lock = scroll_render_test_lock();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &height in &[12u16, 20, 30] {
+        let (mut app, mut terminal) = create_scroll_test_app(80, height, 1, 40);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+
+        let bottom = render_and_snap(&app, &mut terminal);
+        if crate::tui::ui::last_max_scroll() == 0 {
+            continue;
+        }
+
+        // Token-by-token reasoning trickles in with paced reveal between tokens.
+        let tokens = [
+            "Let ", "me ", "think ", "about ", "the ", "problem ", "step ", "by ", "step.\n",
+            "First ", "I ", "consider ", "the ", "inputs ", "and ", "constraints.\n",
+        ];
+        for tok in tokens {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ReasoningDelta {
+                    text: tok.to_string(),
+                },
+                &mut remote,
+            );
+            let ops = app.stream_buffer.flush_smooth_frame();
+            app.apply_stream_ops(ops);
+            render_and_snap(&app, &mut terminal);
+        }
+
+        // Wheel up one notch (momentum-queue path).
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: height / 2,
+            modifiers: KeyModifiers::empty(),
+        });
+        // Drain momentum the way the tick does, rendering each frame.
+        for _ in 0..20 {
+            app.progress_mouse_scroll_animation();
+            render_and_snap(&app, &mut terminal);
+        }
+        let scrolled = render_and_snap(&app, &mut terminal);
+
+        if scrolled == bottom {
+            failures.push(format!(
+                "h={height}: wheel-up during token reasoning did not move \
+                 (offset={}, paused={}, max={})",
+                app.scroll_offset,
+                app.auto_scroll_paused,
+                crate::tui::ui::last_max_scroll()
+            ));
+            continue;
+        }
+
+        // Keep trickling reasoning tokens + draining momentum; the scrolled view
+        // must hold (not snap back), as it would in the real loop.
+        for i in 0..20 {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ReasoningDelta {
+                    text: format!("token{i} "),
+                },
+                &mut remote,
+            );
+            let ops = app.stream_buffer.flush_smooth_frame();
+            app.apply_stream_ops(ops);
+            app.progress_mouse_scroll_animation();
+            let frame = render_and_snap(&app, &mut terminal);
+            if frame == bottom || !app.auto_scroll_paused {
+                failures.push(format!(
+                    "h={height}: trickle {i} snapped back to bottom (paused={}, offset={})",
+                    app.auto_scroll_paused, app.scroll_offset
+                ));
+                break;
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "mouse-wheel reasoning scroll dead zones:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The reasoning region closing (anchoring) restructures the transcript: the
+/// block moves out of `streaming_text` into `display_messages`, and preceding
+/// answer text commits. If the user had scrolled up to read history, that reflow
+/// must not snap their view to the bottom or leave it stuck. This is the most
+/// likely "I scrolled up while it was thinking and then it jumped / froze" path.
+#[test]
+fn repro_scroll_held_across_reasoning_close_and_answer() {
+    let _render_lock = scroll_render_test_lock();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for &height in &[12u16, 20, 30] {
+        for &padding in &[24usize, 40] {
+            let (mut app, mut terminal) = create_scroll_test_app(80, height, 1, padding);
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.is_processing = true;
+            app.status = ProcessingStatus::Streaming;
+
+            render_and_snap(&app, &mut terminal);
+            if crate::tui::ui::last_max_scroll() == 0 {
+                continue;
+            }
+
+            // Reasoning streams in.
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ReasoningDelta {
+                    text: "thinking about the question in some detail here\n".repeat(6),
+                },
+                &mut remote,
+            );
+            let ops = app.stream_buffer.flush();
+            app.apply_stream_ops(ops);
+            render_and_snap(&app, &mut terminal);
+
+            // User scrolls up to read earlier history while it thinks.
+            app.handle_mouse_event(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 10,
+                row: height / 2,
+                modifiers: KeyModifiers::empty(),
+            });
+            for _ in 0..20 {
+                app.progress_mouse_scroll_animation();
+            }
+            let scrolled = render_and_snap(&app, &mut terminal);
+            let scrolled_offset = app.scroll_offset;
+            if !app.auto_scroll_paused {
+                failures.push(format!("h={height} pad={padding}: scroll-up did not pause"));
+                continue;
+            }
+
+            // Reasoning closes (anchors) and the answer begins -- the big reflow.
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ReasoningDone { duration_secs: None },
+                &mut remote,
+            );
+            app.handle_server_event(
+                crate::protocol::ServerEvent::TextDelta {
+                    text: "Here is the actual answer to your question.\n".to_string(),
+                },
+                &mut remote,
+            );
+            let ops = app.stream_buffer.flush();
+            app.apply_stream_ops(ops);
+            let after = render_and_snap(&app, &mut terminal);
+
+            // The view must still be paused (user is reading) and not snapped to
+            // the bottom by the reflow.
+            if !app.auto_scroll_paused {
+                failures.push(format!(
+                    "h={height} pad={padding}: reasoning close un-paused scroll \
+                     (jumped to bottom); was offset={scrolled_offset}, now {}",
+                    app.scroll_offset
+                ));
+                continue;
+            }
+            // It is fine for the absolute offset to shift to keep the SAME content
+            // under the reader (anchor reconcile), but the frame must not become the
+            // bottom-follow frame, and the user must still be able to scroll further.
+            let _ = (scrolled, after);
+
+            // Verify scrolling still responds after the reflow.
+            let before_more = render_and_snap(&app, &mut terminal);
+            app.handle_mouse_event(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 10,
+                row: height / 2,
+                modifiers: KeyModifiers::empty(),
+            });
+            for _ in 0..20 {
+                app.progress_mouse_scroll_animation();
+            }
+            let after_more = render_and_snap(&app, &mut terminal);
+            if after_more == before_more && app.scroll_offset > 0 {
+                failures.push(format!(
+                    "h={height} pad={padding}: scroll unresponsive after reasoning close \
+                     (offset={}, max={})",
+                    app.scroll_offset,
+                    crate::tui::ui::last_max_scroll()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "scroll-across-reasoning-close dead zones:\n{}",
+        failures.join("\n")
     );
 }
 

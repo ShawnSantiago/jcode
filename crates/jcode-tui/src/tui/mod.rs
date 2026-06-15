@@ -32,6 +32,7 @@ pub mod permissions {
 mod remote_diff;
 pub mod screenshot;
 pub mod session_picker;
+pub(crate) mod session_facts;
 mod stream_buffer;
 pub mod test_harness;
 mod ui;
@@ -208,6 +209,11 @@ pub trait TuiState {
     fn chat_overscroll_active(&self) -> bool {
         false
     }
+    /// Seconds remaining in the overscroll dwell window, used to render the
+    /// `(overscroll x.x)` countdown. `None` when not shown.
+    fn chat_overscroll_remaining(&self) -> Option<f32> {
+        None
+    }
     /// Whether a mouse drag-selection is currently held at the top/bottom edge of
     /// a pane and should keep auto-scrolling on every tick (browser-style). When
     /// true the redraw loop must stay responsive even if the transcript is
@@ -263,9 +269,9 @@ pub trait TuiState {
     fn session_compaction_count(&self) -> usize {
         0
     }
-    /// Whether running in remote (client-server) mode
 
     // ---- Session / server ----
+    /// Whether running in remote (client-server) mode
     fn is_remote_mode(&self) -> bool;
     /// Whether running in canary/self-dev mode
     fn is_canary(&self) -> bool;
@@ -334,9 +340,19 @@ pub trait TuiState {
     fn server_update_available(&self) -> Option<bool>;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
-    /// Whether workspace mode is enabled for this client.
+
+    /// Whether the inline swarm gallery band should be shown above the chat.
+    /// Active when `agents.swarm_spawn_mode = inline` and the swarm has members.
+    fn inline_swarm_gallery_active(&self) -> bool {
+        false
+    }
+    /// Members to render in the inline swarm gallery band.
+    fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        Vec::new()
+    }
 
     // ---- Workspace ----
+    /// Whether workspace mode is enabled for this client.
     fn workspace_mode_enabled(&self) -> bool {
         false
     }
@@ -397,6 +413,16 @@ pub trait TuiState {
     /// Persisted across restarts/resume via UI preferences.
     fn inline_images_visible(&self) -> bool {
         true
+    }
+    /// Per-image inline expand level for `image_id` (Fit when never expanded).
+    /// Cycled by clicking the per-image `expand` badge.
+    fn image_expand_level(&self, _image_id: u64) -> ImageExpandLevel {
+        ImageExpandLevel::Fit
+    }
+    /// Monotonic counter bumped whenever any image's expand level changes, so
+    /// prepared-frame caches that embed anchored image geometry invalidate.
+    fn expanded_images_version(&self) -> u64 {
+        0
     }
     /// Remaining seconds before the pinned image side pane auto-hides.
     fn pinned_images_auto_hide_remaining_secs(&self) -> Option<u64> {
@@ -1348,6 +1374,17 @@ pub(crate) fn redraw_interval_with_policy(
         };
     }
 
+    // The elastic overscroll line shows a live `(overscroll x.x)` countdown that
+    // depletes over ~1.5s. Without a dedicated branch it falls through to the
+    // 250ms idle cadence and ticks in coarse, steppy jumps. Drive it at the
+    // smooth animation cadence so the countdown reads as continuous.
+    if state.chat_overscroll_active() {
+        return match policy.tier {
+            crate::perf::PerformanceTier::Minimal => fast_interval,
+            _ => animation_interval,
+        };
+    }
+
     // While the terminal is backgrounded (FocusLost), an idle session has nothing
     // worth a fast tick: decorative animations are paused and the run loop only
     // repaints throttled idle frames. Use the slow deep-idle interval so the
@@ -1511,6 +1548,7 @@ pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
     ui::draw(frame, state);
 }
 
+pub use ui::inline_image_ui::ImageExpandLevel;
 pub use ui::{
     PinnedDiagramLiveDebugSnapshot, PinnedDiagramProbeRect, SidePanelDebugStats,
     SidePanelMermaidProbe, SidePanelMermaidProbeRect, debug_probe_pinned_diagram,

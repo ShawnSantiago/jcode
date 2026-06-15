@@ -95,11 +95,32 @@ impl App {
     }
 
     pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
+        self.schedule_pending_remote_network_wait_with_force(reason, false)
+    }
+
+    /// Hold the in-flight remote turn until the network recovers, then resume it.
+    ///
+    /// Connectivity failures (DNS, connection reset, no route, transient TLS,
+    /// timeouts) are always transient: the request never reached the provider,
+    /// so resending after the network comes back is both safe and correct. When
+    /// `force` is set we wait regardless of the pending message's `auto_retry`
+    /// flag and promote it to auto-retry so the tick-based resume re-sends it.
+    /// This prevents a transient disconnect from being misclassified as a
+    /// permanent, non-retryable failure that stops auto-poke.
+    pub(super) fn schedule_pending_remote_network_wait_with_force(
+        &mut self,
+        reason: &str,
+        force: bool,
+    ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
         if !pending.auto_retry {
-            return false;
+            if force {
+                pending.auto_retry = true;
+            } else {
+                return false;
+            }
         }
 
         let plan = crate::network_retry::wait_plan();
@@ -432,6 +453,7 @@ impl App {
             improve_mode,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
+            debug_force_inline_gallery: false,
             diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -475,6 +497,8 @@ impl App {
             side_panel_explicit_hidden: false,
             pin_images: display.pin_images,
             inline_images_visible: super::ui_prefs::inline_images_visible(),
+            expanded_images: std::collections::HashMap::new(),
+            expanded_images_version: 0,
             pinned_images_auto_hide_deadline: None,
             pinned_images_seen_count: 0,
             chat_native_scrollbar: display.native_scrollbars.chat,
@@ -814,6 +838,7 @@ impl App {
             improve_mode,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
+            debug_force_inline_gallery: false,
             diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -857,6 +882,8 @@ impl App {
             side_panel_explicit_hidden: false,
             pin_images: display.pin_images,
             inline_images_visible: super::ui_prefs::inline_images_visible(),
+            expanded_images: std::collections::HashMap::new(),
+            expanded_images_version: 0,
             pinned_images_auto_hide_deadline: None,
             pinned_images_seen_count: 0,
             chat_native_scrollbar: display.native_scrollbars.chat,

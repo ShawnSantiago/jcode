@@ -79,8 +79,10 @@ impl App {
     /// flick still glides a touch, without long runaway momentum.
     const MOUSE_SCROLL_MAX_QUEUE: i16 = 30;
     /// How long the overscroll status line stays revealed after the last
-    /// downward overscroll tick before it rebounds away.
-    const OVERSCROLL_DWELL: std::time::Duration = std::time::Duration::from_millis(600);
+    /// downward overscroll tick before it rebounds away. Long enough that the
+    /// depleting countdown indicator is perceivable and the line reads as a
+    /// temporary, pull-to-reveal panel.
+    const OVERSCROLL_DWELL: std::time::Duration = std::time::Duration::from_millis(1500);
 
     fn log_mouse_scroll_trace(
         &self,
@@ -173,6 +175,19 @@ impl App {
         crate::tui::mermaid::clear_image_state();
         crate::tui::clear_side_panel_render_caches();
         self.last_visible_diagram_hash = self.current_visible_diagram_hash();
+    }
+
+    /// If a left-click landed on an inline image's `expand` badge, cycle that
+    /// image's size and return `true`. Returns `false` (so the click can fall
+    /// through to link/selection handling) when no badge was hit.
+    pub(super) fn try_cycle_image_expand_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(image_id) =
+            super::super::ui::inline_image_expand_target_from_screen(column, row)
+        else {
+            return false;
+        };
+        self.cycle_image_expand(image_id);
+        true
     }
 
     pub(super) fn try_open_link_at(&mut self, column: u16, row: u16) -> bool {
@@ -837,6 +852,35 @@ impl App {
         self.set_status_notice(status);
     }
 
+    /// Cycle the per-image inline expand level (Fit -> Large -> Huge -> Fit)
+    /// for `image_id`. Bumps `expanded_images_version` so the body/full-prep
+    /// caches rebuild with the new placeholder geometry. Returns the new level.
+    pub(super) fn cycle_image_expand(
+        &mut self,
+        image_id: u64,
+    ) -> crate::tui::ui::inline_image_ui::ImageExpandLevel {
+        use crate::tui::ui::inline_image_ui::ImageExpandLevel;
+        let current = self
+            .expanded_images
+            .get(&image_id)
+            .copied()
+            .unwrap_or_default();
+        let next = current.next();
+        if matches!(next, ImageExpandLevel::Fit) {
+            self.expanded_images.remove(&image_id);
+        } else {
+            self.expanded_images.insert(image_id, next);
+        }
+        self.expanded_images_version = self.expanded_images_version.wrapping_add(1);
+        let status = match next {
+            ImageExpandLevel::Fit => "Image size: fit",
+            ImageExpandLevel::Large => "Image size: large",
+            ImageExpandLevel::Huge => "Image size: huge",
+        };
+        self.set_status_notice(status);
+        next
+    }
+
     pub(super) fn toggle_side_panel(&mut self) {
         if self.side_panel_user_hidden {
             self.side_panel_user_hidden = false;
@@ -1394,6 +1438,12 @@ impl App {
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && self.try_cycle_image_expand_at(mouse.column, mouse.row)
+        {
+            finish_mouse_event!(false, "cycle_image_expand");
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
             && self.try_open_link_at(mouse.column, mouse.row)
         {
             finish_mouse_event!(false, "open_link");
@@ -1435,6 +1485,11 @@ impl App {
             self.pending_history_anchor = Some(anchor);
             self.auto_scroll_paused = true;
             self.maybe_queue_compacted_history_load();
+            // Force a full repaint: ratatui's diff does not re-emit the trailing
+            // cell after a wide grapheme (emoji/CJK) when the symbol is unchanged,
+            // so terminals like kitty/foot leave a stale "ghost" char from the
+            // previous frame. See ratatui issue #2357. A clean redraw avoids it.
+            self.force_full_redraw = true;
             return true;
         }
         let before = (self.scroll_offset, self.auto_scroll_paused);
@@ -1455,7 +1510,13 @@ impl App {
         // overshoot so the newly loaded history scrolls into view smoothly.
         let overshoot = if self.scroll_offset == 0 { amount } else { 0 };
         self.maybe_queue_compacted_history_load_with_overshoot(overshoot);
-        before != (self.scroll_offset, self.auto_scroll_paused)
+        let changed = before != (self.scroll_offset, self.auto_scroll_paused);
+        if changed {
+            // See note above (ratatui #2357): force a clean repaint on scroll so
+            // wide-grapheme trailing cells cannot leave a ghost character.
+            self.force_full_redraw = true;
+        }
+        changed
     }
 
     pub(super) fn pause_chat_auto_scroll(&mut self) {
@@ -1486,6 +1547,8 @@ impl App {
             }
             anchor.lines_from_bottom = anchor.lines_from_bottom.saturating_sub(amount);
             self.pending_history_anchor = Some(anchor);
+            // ratatui #2357: clean repaint on scroll to avoid wide-grapheme ghosts.
+            self.force_full_redraw = true;
             return true;
         }
         if !self.auto_scroll_paused {
@@ -1509,7 +1572,7 @@ impl App {
             0
         };
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
-        if self.scroll_offset >= bottom_threshold {
+        let changed = if self.scroll_offset >= bottom_threshold {
             self.follow_chat_bottom();
             true
         } else {
@@ -1519,7 +1582,12 @@ impl App {
             // later has to be undone before scrolling up moves the view again.
             self.scroll_offset = self.scroll_offset.min(bottom_threshold);
             self.scroll_offset != before
+        };
+        if changed {
+            // ratatui #2357: clean repaint on scroll to avoid wide-grapheme ghosts.
+            self.force_full_redraw = true;
         }
+        changed
     }
 
     pub(super) fn follow_chat_bottom(&mut self) {
@@ -1540,6 +1608,19 @@ impl App {
         self.chat_overscroll_last
             .map(|t| t.elapsed() < Self::OVERSCROLL_DWELL)
             .unwrap_or(false)
+    }
+
+    /// Seconds remaining in the overscroll dwell window before the line
+    /// rebounds away. Returns `None` when the overscroll line is not currently
+    /// shown. Drives the visible `(overscroll x.x)` countdown so users can see
+    /// the line is temporary.
+    pub(super) fn chat_overscroll_remaining(&self) -> Option<f32> {
+        let last = self.chat_overscroll_last?;
+        let elapsed = last.elapsed();
+        if elapsed >= Self::OVERSCROLL_DWELL {
+            return None;
+        }
+        Some(Self::OVERSCROLL_DWELL.saturating_sub(elapsed).as_secs_f32())
     }
 
     /// Drive the overscroll dwell timer. Returns `true` when the revealed state

@@ -187,6 +187,15 @@ pub fn provider_model_to_select_after_auth(
     // route; ties and unranked providers preserve catalog order.
     let orders = provider_preferred_model_orders(activation);
     if !orders.is_empty() {
+        // 1. Auto-promote a brand-new frontier release that is not yet in the
+        //    curated list. Model ids in these families encode their version
+        //    (`gpt-5.5`, `claude-opus-4-8`), so a strictly-newer *pure* flagship
+        //    id (no cheap/specialized suffix) should become the default the day
+        //    it ships, without waiting for a code change.
+        if let Some(newer) = newest_frontier_release(activation, &matching_routes) {
+            return Some(newer);
+        }
+        // 2. Otherwise pick the best curated model by quality order.
         return matching_routes
             .iter()
             .min_by_key(|route| preferred_model_rank(orders, &route.model))
@@ -208,17 +217,52 @@ pub fn provider_model_to_select_after_auth(
     matching_routes.first().map(|route| route.model.clone())
 }
 
+/// Curated flagship-first order for Bedrock-hosted models. Bedrock ids carry a
+/// vendor prefix (`anthropic.claude-opus-4-...`, `us.anthropic.claude-...`) which
+/// `parse_frontier_model`/`normalize_model_for_preference` strip before matching,
+/// so the bare canonical ids here line up with the live route ids. Claude Opus
+/// is the flagship, then Sonnet, then Nova/Llama/Mistral, then Haiku/cheap.
+const ALL_BEDROCK_MODELS: &[&str] = &[
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet",
+    "amazon.nova-pro",
+    "meta.llama3-1-405b-instruct",
+    "mistral.mistral-large",
+    "claude-3-5-haiku",
+    "amazon.nova-lite",
+    "amazon.nova-micro",
+];
+
+/// Curated flagship-first order for Gemini (Code Assist OAuth + Gemini API).
+/// `pro` is Gemini's flagship tier and `flash`/`lite` are the cheaper tiers, so
+/// (unlike Claude/OpenAI) `pro` must NOT be treated as a non-flagship marker for
+/// this family. Listed newest-and-strongest first.
+const ALL_GEMINI_MODELS: &[&str] = &[
+    "gemini-3.1-pro",
+    "gemini-3-pro",
+    "gemini-2.5-pro",
+    "gemini-1.5-pro",
+    "gemini-3-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+];
+
 /// Flagship-first preference tiers used only to break ties when falling back to
 /// an arbitrary matching route after a login. Each inner slice is one curated
 /// family ordered best-first; earlier families outrank later ones. Returns an
 /// empty slice for providers without a curated order (local OpenAI-compatible,
-/// Gemini, Bedrock arns, OpenRouter, ...), which preserves live-catalog order.
+/// raw OpenRouter, ...), which preserves live-catalog order.
 ///
 /// Copilot and Cursor proxy Claude/OpenAI models under their bare canonical ids
 /// (`copilot:claude-opus-4-8`), so they share the same "catalog lists the cheap
 /// model first" hazard as a direct login and get the combined Claude+OpenAI
 /// order. The Claude/OpenAI subscription default bias mirrors jcode's global
-/// default model.
+/// default model. Bedrock/Azure/Gemini/Antigravity are native hosted catalogs
+/// whose route lists are often ordered oldest-first, so they get an explicit
+/// curated order too.
 fn provider_preferred_model_orders(
     activation: &AuthActivationResult,
 ) -> &'static [&'static [&'static str]] {
@@ -229,6 +273,11 @@ fn provider_preferred_model_orders(
             crate::provider::ALL_CLAUDE_MODELS,
             crate::provider::ALL_OPENAI_MODELS,
         ],
+        Some("bedrock") => &[ALL_BEDROCK_MODELS],
+        // Azure hosts the OpenAI family.
+        Some("azure-openai") => &[crate::provider::ALL_OPENAI_MODELS],
+        // Gemini (Code Assist OAuth) and Antigravity both serve Gemini models.
+        Some("gemini") | Some("antigravity") => &[ALL_GEMINI_MODELS],
         _ => &[],
     }
 }
@@ -252,12 +301,305 @@ fn preferred_model_rank(orders: &[&[&str]], model: &str) -> usize {
 }
 
 /// Normalize a model id for flagship-preference comparison: lowercase, drop a
-/// `[1m]` long-context suffix, and strip a trailing 8-digit `-YYYYMMDD` date so
-/// live dated ids (`claude-haiku-4-5-20251001`) match bare canonical ids
-/// (`claude-haiku-4-5`).
+/// `[1m]` long-context suffix, strip a trailing 8-digit `-YYYYMMDD` date so live
+/// dated ids (`claude-haiku-4-5-20251001`) match bare canonical ids
+/// (`claude-haiku-4-5`), and strip hosted-vendor prefixes/suffixes so Bedrock and
+/// proxy ids line up with the curated bare ids.
+///
+/// Examples:
+///   `us.anthropic.claude-opus-4-20250514-v1:0` -> `claude-opus-4`
+///   `anthropic.claude-3-5-sonnet-20241022-v2:0` -> `claude-3-5-sonnet`
+///   `accounts/fireworks/models/qwen3-coder` -> `qwen3-coder`
+///   `models/gemini-3-pro-preview` -> `gemini-3-pro`
 fn normalize_model_for_preference(model: &str) -> String {
-    let canonical = jcode_provider_core::model_id::canonical(model);
-    jcode_provider_core::model_id::strip_date_suffix(&canonical).to_string()
+    let mut id = jcode_provider_core::model_id::canonical(model);
+
+    // Drop a `/`-qualified path prefix (`accounts/x/models/y`, `models/gemini`).
+    if let Some(idx) = id.rfind('/') {
+        id = id[idx + 1..].to_string();
+    }
+
+    // Drop a trailing Bedrock version tag (`-v1:0`, `-v2:0`, `:0`).
+    if let Some(idx) = id.find(":0") {
+        id = id[..idx].to_string();
+    }
+    if let Some(stripped) = strip_trailing_bedrock_version(&id) {
+        id = stripped;
+    }
+
+    // Drop a trailing release-date suffix.
+    id = jcode_provider_core::model_id::strip_date_suffix(&id).to_string();
+
+    // Drop a trailing `-preview`/`-exp`/`-latest` marketing suffix so Gemini
+    // preview ids match their canonical family entry.
+    for suffix in ["-preview", "-exp", "-latest"] {
+        if let Some(base) = id.strip_suffix(suffix) {
+            id = base.to_string();
+        }
+    }
+
+    // Drop a leading hosted-vendor segment (`anthropic.`, `us.anthropic.`,
+    // `meta.`, `amazon.`, `mistral.`) so `anthropic.claude-opus-4` matches the
+    // curated `claude-opus-4`. Keep `amazon.nova`/`meta.llama`/`mistral.` whole
+    // because those families are listed with their vendor prefix in
+    // `ALL_BEDROCK_MODELS`; only strip the region + the redundant `anthropic.`.
+    id = strip_bedrock_region_prefix(&id);
+    if let Some(rest) = id.strip_prefix("anthropic.") {
+        id = rest.to_string();
+    }
+
+    id
+}
+
+/// Strip a leading Bedrock region routing segment (`us.`, `eu.`, `apac.`,
+/// `us-gov.`) from a model id.
+fn strip_bedrock_region_prefix(id: &str) -> String {
+    for region in ["us-gov.", "us.", "eu.", "apac.", "ap.", "global."] {
+        if let Some(rest) = id.strip_prefix(region) {
+            return rest.to_string();
+        }
+    }
+    id.to_string()
+}
+
+/// Strip a trailing Bedrock version tag like `-v1`, `-v2` (after the `:0` has
+/// already been removed). Returns `None` when there is no such tag.
+fn strip_trailing_bedrock_version(id: &str) -> Option<String> {
+    let (head, tail) = id.rsplit_once('-')?;
+    let is_version_tag =
+        tail.len() >= 2 && tail.starts_with('v') && tail[1..].chars().all(|c| c.is_ascii_digit());
+    is_version_tag.then(|| head.to_string())
+}
+
+/// A parsed "frontier flagship" model id: its family prefix (e.g. `claude-opus`
+/// or `gpt`) plus an ordered version vector parsed from the trailing numeric
+/// components, used to compare releases within a family.
+///
+/// Only *pure* flagship ids parse successfully: ids carrying a cheaper or
+/// specialized tier word (`mini`, `nano`, `haiku`, `flash`, `codex`, `pro`,
+/// `chat`, ...) are rejected so a new cheap/specialized model never auto-promotes
+/// over the flagship.
+struct FrontierModel {
+    family: String,
+    version: Vec<u64>,
+}
+
+/// Tier/specialization words that disqualify an id from frontier auto-promotion
+/// for the default (Claude/OpenAI-style) families. These mark cheaper or
+/// non-default variants that must never outrank a clean flagship id purely
+/// because they share a (possibly higher) version number.
+///
+/// NOTE: this list is used for families whose flagship id is *bare* (no tier
+/// word), e.g. `claude-opus-4-8`, `gpt-5.5`. Families like Gemini, whose flagship
+/// id contains a tier word (`gemini-3-pro`), use a family-specific rule instead
+/// (see [`frontier_families`]).
+const NON_FLAGSHIP_TIER_WORDS: &[&str] = &[
+    "mini", "nano", "haiku", "flash", "lite", "small", "tiny", "instant", "codex", "pro", "chat",
+    "audio", "realtime", "image", "tts", "embed", "search", "guard", "deep", "thinking",
+];
+
+/// One frontier-eligible family: the canonical id prefix to match (after
+/// [`normalize_model_for_preference`]) and, optionally, a required flagship tier
+/// token that must be present (e.g. Gemini's `pro`). When `flagship_token` is
+/// `Some`, version parsing ignores that token and rejects any *other* trailing
+/// word; when `None`, the id must be bare (Claude/OpenAI style) and is rejected
+/// if it contains any [`NON_FLAGSHIP_TIER_WORDS`].
+#[derive(Clone, Copy)]
+struct FrontierFamily {
+    prefix: &'static str,
+    flagship_token: Option<&'static str>,
+}
+
+/// Family descriptors eligible for frontier auto-promotion per provider. Only the
+/// strongest family per provider is listed (Claude Opus, GPT base, Gemini Pro) so
+/// we never auto-promote a cheaper family/tier over the curated flagship.
+fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFamily] {
+    const CLAUDE: FrontierFamily = FrontierFamily {
+        prefix: "claude-opus",
+        flagship_token: None,
+    };
+    const GPT: FrontierFamily = FrontierFamily {
+        prefix: "gpt",
+        flagship_token: None,
+    };
+    const GEMINI: FrontierFamily = FrontierFamily {
+        prefix: "gemini",
+        flagship_token: Some("pro"),
+    };
+    match activation.provider_id.as_deref() {
+        Some("claude") | Some("claude-api") => &[CLAUDE],
+        Some("openai") | Some("openai-api") | Some("azure-openai") => &[GPT],
+        // Copilot/Cursor proxy both families under canonical ids.
+        Some("copilot") | Some("cursor") => &[CLAUDE, GPT],
+        // Bedrock hosts Claude under `anthropic.claude-opus-...` (prefix stripped
+        // by normalize), so the Claude family applies.
+        Some("bedrock") => &[CLAUDE],
+        Some("gemini") | Some("antigravity") => &[GEMINI],
+        _ => &[],
+    }
+}
+
+/// Parse a model id into a [`FrontierModel`] if it is a clean flagship id for one
+/// of `families`. Returns `None` for non-matching families, ids with a
+/// non-flagship tier word, or ids without a parseable version.
+fn parse_frontier_model(model: &str, families: &[FrontierFamily]) -> Option<FrontierModel> {
+    let normalized = normalize_model_for_preference(model);
+    // Find the family this id belongs to (longest prefix wins so `claude-opus`
+    // is preferred over a hypothetical `claude`).
+    let family = families
+        .iter()
+        .filter(|fam| normalized.starts_with(fam.prefix))
+        .max_by_key(|fam| fam.prefix.len())?;
+
+    match family.flagship_token {
+        None => {
+            // Bare-flagship family (Claude/OpenAI): reject any tier word, then
+            // require a pure-numeric remainder after the prefix.
+            if NON_FLAGSHIP_TIER_WORDS
+                .iter()
+                .any(|word| normalized.contains(word))
+            {
+                return None;
+            }
+            let remainder = normalized[family.prefix.len()..].trim_matches(['-', '.', ' ']);
+            let version = parse_version_components(remainder)?;
+            Some(FrontierModel {
+                family: family.prefix.to_string(),
+                version,
+            })
+        }
+        Some(flagship_token) => {
+            // Flagship-token family (Gemini): the id must contain the flagship
+            // token and nothing else but version numbers + that token. Reject any
+            // other word (e.g. `flash`, `lite`).
+            let remainder = normalized[family.prefix.len()..].trim_matches(['-', '.', ' ']);
+            if remainder.is_empty() {
+                return None;
+            }
+            let mut version = Vec::new();
+            let mut saw_flagship_token = false;
+            for part in remainder.split(['.', '-']) {
+                if part.is_empty() {
+                    continue;
+                }
+                if part == flagship_token {
+                    saw_flagship_token = true;
+                    continue;
+                }
+                let number: u64 = part.parse().ok()?; // any other word => reject
+                version.push(number);
+            }
+            if !saw_flagship_token || version.is_empty() {
+                return None;
+            }
+            Some(FrontierModel {
+                family: family.prefix.to_string(),
+                version,
+            })
+        }
+    }
+}
+
+/// Parse a dash/dot-separated numeric version remainder (`4-8`, `5.5`) into a
+/// component vector. Returns `None` if any component is non-numeric or empty.
+fn parse_version_components(remainder: &str) -> Option<Vec<u64>> {
+    if remainder.is_empty() {
+        return None;
+    }
+    let mut version = Vec::new();
+    for part in remainder.split(['.', '-']) {
+        if part.is_empty() {
+            continue;
+        }
+        version.push(part.parse::<u64>().ok()?);
+    }
+    (!version.is_empty()).then_some(version)
+}
+
+/// Compare two version vectors component-wise (semver-like). Missing trailing
+/// components are treated as 0 so `[5]` < `[5, 1]`.
+fn version_cmp(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        match av.cmp(&bv) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Auto-detect a brand-new frontier flagship release among `routes` that is
+/// strictly newer than the curated baseline flagship for the same family, and is
+/// not already the curated #1. Returns the chosen model id, or `None` when the
+/// curated default is still the newest known flagship.
+///
+/// This is the new-release robustness layer: the day Anthropic ships
+/// `claude-opus-4-9` or OpenAI ships `gpt-5.6`, the live catalog will carry it
+/// and it auto-promotes to the post-login default without a code change, while
+/// cheaper/specialized variants are excluded by [`parse_frontier_model`].
+fn newest_frontier_release(
+    activation: &AuthActivationResult,
+    routes: &[&ModelRoute],
+) -> Option<String> {
+    let families = frontier_families(activation);
+    if families.is_empty() {
+        return None;
+    }
+
+    // Baseline: the strongest curated flagship version per family. We only
+    // auto-promote a live model that beats its family's curated baseline, so a
+    // new release must genuinely exceed what we already ship.
+    let curated_baseline = |family: &str| -> Option<Vec<u64>> {
+        let orders = provider_preferred_model_orders(activation);
+        orders
+            .iter()
+            .flat_map(|order| order.iter())
+            .filter_map(|id| parse_frontier_model(id, families))
+            .filter(|m| m.family == family)
+            .map(|m| m.version)
+            .max_by(|a, b| version_cmp(a, b))
+    };
+
+    let mut best: Option<(FrontierModel, String)> = None;
+    for route in routes {
+        let Some(parsed) = parse_frontier_model(&route.model, families) else {
+            continue;
+        };
+        // Must strictly beat the curated baseline for its family.
+        let Some(baseline) = curated_baseline(&parsed.family) else {
+            continue;
+        };
+        if version_cmp(&parsed.version, &baseline) != std::cmp::Ordering::Greater {
+            continue;
+        }
+        // Among qualifying releases, keep the highest version (preferring the
+        // strongest family by the order in `families` on ties).
+        let is_better = match &best {
+            None => true,
+            Some((current, _)) => match version_cmp(&parsed.version, &current.version) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => {
+                    // Tie on version: prefer the family listed earlier (stronger).
+                    let rank = |fam: &str| {
+                        families
+                            .iter()
+                            .position(|f| f.prefix == fam)
+                            .unwrap_or(usize::MAX)
+                    };
+                    rank(&parsed.family) < rank(&current.family)
+                }
+                std::cmp::Ordering::Less => false,
+            },
+        };
+        if is_better {
+            best = Some((parsed, route.model.clone()));
+        }
+    }
+
+    best.map(|(_, model)| model)
 }
 
 fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResult) -> bool {
@@ -1086,7 +1428,7 @@ mod tests {
         // Live Anthropic catalogs list `claude-haiku-4-5-...` before the
         // flagship, and an API-key login supplies no activated model. Plain
         // catalog order would auto-select Haiku; the flagship-first fallback
-        // must land on the curated default (`claude-fable-5`) instead.
+        // must land on the curated default (`claude-opus-4-8`) instead.
         let activation = AuthActivationResult {
             provider_id: Some("claude-api".to_string()),
             provider_label: Some("Anthropic".to_string()),
@@ -1098,13 +1440,12 @@ mod tests {
             route("claude-haiku-4-5-20251001", "Anthropic", "claude-api", true),
             route("claude-opus-4-6", "Anthropic", "claude-api", true),
             route("claude-opus-4-8", "Anthropic", "claude-api", true),
-            route("claude-fable-5", "Anthropic", "claude-api", true),
             route("claude-sonnet-4-6", "Anthropic", "claude-api", true),
         ];
 
         assert_eq!(
             provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
-            Some("claude-fable-5"),
+            Some("claude-opus-4-8"),
             "API-key login should auto-select the Anthropic flagship, not the first catalog route"
         );
     }
@@ -1121,12 +1462,11 @@ mod tests {
         let routes = vec![
             route("claude-haiku-4-5", "Anthropic", "claude-oauth", true),
             route("claude-opus-4-8", "Anthropic", "claude-oauth", true),
-            route("claude-fable-5", "Anthropic", "claude-oauth", true),
         ];
 
         assert_eq!(
             provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
-            Some("claude-fable-5")
+            Some("claude-opus-4-8")
         );
     }
 
@@ -1238,6 +1578,251 @@ mod tests {
         );
     }
 
+    #[test]
+    fn post_auth_auto_promotes_newer_frontier_release_not_yet_in_curated_list() {
+        // The day Anthropic ships a stronger Opus than the curated flagship, the
+        // live catalog carries it and it must auto-promote to the post-login
+        // default without a code change. Here `claude-opus-4-9` beats the curated
+        // baseline `claude-opus-4-8`.
+        let activation = activation_for_provider_id("claude-api");
+        let routes = vec![
+            route("claude-haiku-4-5", "Anthropic", "claude-api", true),
+            route("claude-opus-4-8", "Anthropic", "claude-api", true),
+            route("claude-opus-4-9", "Anthropic", "claude-api", true),
+            route("claude-sonnet-4-6", "Anthropic", "claude-api", true),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("claude-opus-4-9"),
+            "a newer pure Opus flagship in the live catalog should auto-promote"
+        );
+
+        // Same for OpenAI: `gpt-5.6` beats curated `gpt-5.5`.
+        let activation = activation_for_provider_id("openai");
+        let routes = vec![
+            route("gpt-5-mini", "OpenAI", "openai", true),
+            route("gpt-5.5", "OpenAI", "openai", true),
+            route("gpt-5.6", "OpenAI", "openai", true),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("gpt-5.6")
+        );
+    }
+
+    #[test]
+    fn post_auth_frontier_promotion_ignores_cheaper_and_specialized_variants() {
+        // A newer *cheaper/specialized* variant must NOT auto-promote over the
+        // curated flagship: only clean flagship ids qualify. Even though
+        // `claude-haiku-5` and `gpt-6-mini`/`gpt-6-codex` have higher version
+        // numbers, they carry non-flagship tier words and must be rejected, so
+        // selection stays on the curated flagship.
+        let activation = activation_for_provider_id("claude-api");
+        let routes = vec![
+            route("claude-haiku-5", "Anthropic", "claude-api", true),
+            route("claude-opus-4-8", "Anthropic", "claude-api", true),
+            route("claude-sonnet-5", "Anthropic", "claude-api", true),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("claude-opus-4-8"),
+            "cheaper/other-family models must not auto-promote over the curated Opus flagship"
+        );
+
+        let activation = activation_for_provider_id("openai");
+        let routes = vec![
+            route("gpt-6-mini", "OpenAI", "openai", true),
+            route("gpt-6-codex", "OpenAI", "openai", true),
+            route("gpt-5.5", "OpenAI", "openai", true),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("gpt-5.5"),
+            "mini/codex variants must not auto-promote over the clean gpt flagship"
+        );
+    }
+
+    #[test]
+    fn post_auth_frontier_promotion_no_op_when_curated_is_still_newest() {
+        // When the live catalog contains nothing newer than the curated flagship,
+        // the curated quality order decides and frontier promotion is a no-op.
+        let activation = activation_for_provider_id("claude-api");
+        let routes = vec![
+            route("claude-haiku-4-5-20251001", "Anthropic", "claude-api", true),
+            route("claude-opus-4-6", "Anthropic", "claude-api", true),
+            route("claude-opus-4-8", "Anthropic", "claude-api", true),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn post_auth_frontier_promotion_covers_bedrock_and_gemini() {
+        // Bedrock: a newer Opus 5 (vendor-prefixed + dated) auto-promotes over the
+        // curated Opus 4 baseline, and never falls back to the year-old 3.5.
+        let activation = activation_for_provider_id("bedrock");
+        let routes = vec![
+            route(
+                "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                "AWS Bedrock",
+                "bedrock",
+                true,
+            ),
+            route(
+                "anthropic.claude-opus-4-20250514-v1:0",
+                "AWS Bedrock",
+                "bedrock",
+                true,
+            ),
+            route(
+                "anthropic.claude-opus-5-20260101-v1:0",
+                "AWS Bedrock",
+                "bedrock",
+                true,
+            ),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("anthropic.claude-opus-5-20260101-v1:0"),
+            "a newer Bedrock Opus must auto-promote over the curated Opus 4"
+        );
+
+        // Gemini: a newer pro auto-promotes; a newer flash never displaces it.
+        let activation = activation_for_provider_id("gemini");
+        let routes = vec![
+            route(
+                "gemini-2.5-flash",
+                "Google Gemini",
+                "code-assist-oauth",
+                true,
+            ),
+            route(
+                "gemini-3-pro-preview",
+                "Google Gemini",
+                "code-assist-oauth",
+                true,
+            ),
+            route(
+                "gemini-4-pro-preview",
+                "Google Gemini",
+                "code-assist-oauth",
+                true,
+            ),
+            route(
+                "gemini-9-flash-preview",
+                "Google Gemini",
+                "code-assist-oauth",
+                true,
+            ),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("gemini-4-pro-preview"),
+            "the newest Gemini *pro* must win; a higher-numbered flash must not"
+        );
+    }
+
+    #[test]
+    fn frontier_version_parsing_and_compare() {
+        let fams = &[
+            FrontierFamily {
+                prefix: "claude-opus",
+                flagship_token: None,
+            },
+            FrontierFamily {
+                prefix: "gpt",
+                flagship_token: None,
+            },
+        ];
+        // Clean flagship ids parse with a version vector.
+        let opus = parse_frontier_model("claude-opus-4-8", fams).expect("opus parses");
+        assert_eq!(opus.family, "claude-opus");
+        assert_eq!(opus.version, vec![4, 8]);
+        let gpt = parse_frontier_model("gpt-5.5", fams).expect("gpt parses");
+        assert_eq!(gpt.family, "gpt");
+        assert_eq!(gpt.version, vec![5, 5]);
+        // Dated id parses on the canonical base.
+        assert_eq!(
+            parse_frontier_model("claude-opus-4-9-20260101", fams)
+                .expect("dated opus parses")
+                .version,
+            vec![4, 9]
+        );
+        // Specialized/cheap tiers and other families are rejected.
+        assert!(parse_frontier_model("claude-haiku-5", fams).is_none());
+        assert!(parse_frontier_model("gpt-6-mini", fams).is_none());
+        assert!(parse_frontier_model("gpt-5-codex", fams).is_none());
+        assert!(parse_frontier_model("claude-sonnet-5", fams).is_none());
+        // Version comparison is component-wise with zero-padding.
+        assert_eq!(version_cmp(&[4, 8], &[4, 9]), std::cmp::Ordering::Less);
+        assert_eq!(version_cmp(&[5], &[5, 1]), std::cmp::Ordering::Less);
+        assert_eq!(version_cmp(&[6], &[5, 9]), std::cmp::Ordering::Greater);
+        assert_eq!(version_cmp(&[5, 5], &[5, 5]), std::cmp::Ordering::Equal);
+
+        // Bedrock vendor-prefixed/versioned ids normalize to the bare Claude
+        // family and parse as flagship.
+        let bedrock = parse_frontier_model(
+            "us.anthropic.claude-opus-4-20250514-v1:0",
+            &[FrontierFamily {
+                prefix: "claude-opus",
+                flagship_token: None,
+            }],
+        )
+        .expect("bedrock opus parses");
+        assert_eq!(bedrock.version, vec![4]);
+
+        // Gemini flagship token: `pro` is required and `flash`/`lite` are rejected.
+        let gem_fams = &[FrontierFamily {
+            prefix: "gemini",
+            flagship_token: Some("pro"),
+        }];
+        let gpro = parse_frontier_model("gemini-3-pro-preview", gem_fams).expect("gemini pro");
+        assert_eq!(gpro.family, "gemini");
+        assert_eq!(gpro.version, vec![3]);
+        assert_eq!(
+            parse_frontier_model("gemini-3.1-pro", gem_fams)
+                .expect("gemini 3.1 pro")
+                .version,
+            vec![3, 1]
+        );
+        assert!(
+            parse_frontier_model("gemini-3-flash", gem_fams).is_none(),
+            "gemini flash is the cheap tier and must not be a frontier flagship"
+        );
+        assert!(
+            parse_frontier_model("gemini-2.5-flash-lite", gem_fams).is_none(),
+            "gemini flash-lite must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalize_model_for_preference_strips_hosted_prefixes_and_suffixes() {
+        assert_eq!(
+            normalize_model_for_preference("us.anthropic.claude-opus-4-20250514-v1:0"),
+            "claude-opus-4"
+        );
+        assert_eq!(
+            normalize_model_for_preference("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            "claude-3-5-sonnet"
+        );
+        assert_eq!(
+            normalize_model_for_preference("models/gemini-3-pro-preview"),
+            "gemini-3-pro"
+        );
+        assert_eq!(
+            normalize_model_for_preference("accounts/fireworks/models/qwen3-coder"),
+            "qwen3-coder"
+        );
+        // Non-hosted ids are unchanged apart from canonicalization.
+        assert_eq!(
+            normalize_model_for_preference("claude-haiku-4-5-20251001"),
+            "claude-haiku-4-5"
+        );
+        assert_eq!(normalize_model_for_preference("gpt-5.5"), "gpt-5.5");
+    }
+
     /// The set of canonical provider ids whose post-login fallback must apply a
     /// curated flagship-first order. These are the providers that expose
     /// Claude/OpenAI models under their bare canonical ids and report no
@@ -1251,6 +1836,10 @@ mod tests {
         "openai-api",
         "copilot",
         "cursor",
+        "bedrock",
+        "azure-openai",
+        "gemini",
+        "antigravity",
     ];
 
     fn activation_for_provider_id(provider_id: &str) -> AuthActivationResult {
@@ -1312,13 +1901,8 @@ mod tests {
                 "claude",
                 "claude-oauth",
                 "Anthropic",
-                &[
-                    "claude-haiku-4-5",
-                    "claude-sonnet-4-6",
-                    "claude-opus-4-8",
-                    "claude-fable-5",
-                ],
-                "claude-fable-5",
+                &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8"],
+                "claude-opus-4-8",
             ),
             (
                 "claude-api",
@@ -1328,9 +1912,8 @@ mod tests {
                     "claude-haiku-4-5-20251001",
                     "claude-sonnet-4-6",
                     "claude-opus-4-8",
-                    "claude-fable-5",
                 ],
-                "claude-fable-5",
+                "claude-opus-4-8",
             ),
             (
                 "openai",
@@ -1361,6 +1944,46 @@ mod tests {
                 "Cursor",
                 &["gpt-5-nano", "gpt-5.1", "gpt-5.5"],
                 "gpt-5.5",
+            ),
+            (
+                // Bedrock lists year-old Claude first; the curated order must
+                // still pick Opus 4 over claude-3-5-sonnet. Bedrock ids carry the
+                // vendor prefix + version tag, normalized away before ranking.
+                "bedrock",
+                "bedrock",
+                "AWS Bedrock",
+                &[
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "anthropic.claude-3-5-haiku-20241022-v1:0",
+                    "anthropic.claude-sonnet-4-20250514-v1:0",
+                    "anthropic.claude-opus-4-20250514-v1:0",
+                ],
+                "anthropic.claude-opus-4-20250514-v1:0",
+            ),
+            (
+                // Azure hosts the OpenAI family over the OpenRouter transport.
+                "azure-openai",
+                "openrouter",
+                "Azure OpenAI",
+                &["gpt-5-mini", "gpt-5.1", "gpt-5.5"],
+                "gpt-5.5",
+            ),
+            (
+                // Gemini's flagship tier is `pro`; a flash-first catalog must
+                // still pick the strongest pro model.
+                "gemini",
+                "code-assist-oauth",
+                "Google Gemini",
+                &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
+                "gemini-3-pro-preview",
+            ),
+            (
+                // Antigravity also serves Gemini models (https transport).
+                "antigravity",
+                "https",
+                "Antigravity",
+                &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
+                "gemini-3-pro-preview",
             ),
         ];
 

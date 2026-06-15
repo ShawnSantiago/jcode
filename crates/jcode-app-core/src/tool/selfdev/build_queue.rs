@@ -745,6 +745,155 @@ impl SelfDevTool {
         })))
     }
 
+    /// Queue a build and, once it finishes successfully, reload onto the new
+    /// binary in a single step. This is a convenience wrapper that chains
+    /// `do_build` -> wait-for-completion -> `do_reload` so the agent does not
+    /// have to manually poll the build and then issue a separate reload.
+    pub(super) async fn do_build_reload(
+        &self,
+        reason: Option<String>,
+        target: Option<String>,
+        context: Option<String>,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        // Queue the build. Disable per-task notify/wake delivery: this action
+        // waits inline for completion, so a separate completion notification
+        // would be redundant noise.
+        let build_output = self
+            .do_build(reason, target, Some(false), Some(false), ctx)
+            .await?;
+
+        let metadata = build_output.metadata.clone().unwrap_or_else(|| json!({}));
+        let task_id = metadata
+            .get("task_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        let request_id = metadata
+            .get("request_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+
+        let Some(task_id) = task_id else {
+            // Should not happen for a freshly queued build, but degrade
+            // gracefully: surface the build output and let the agent reload.
+            return Ok(ToolOutput::new(format!(
+                "{}\n\nCould not determine the build task id, so the automatic reload was skipped. Reload manually with `selfdev reload` once the build finishes.",
+                build_output.output
+            )));
+        };
+
+        // Wait inline for the build (and anything queued ahead of it) to finish.
+        let wait = std::time::Duration::from_secs(SelfDevTool::build_reload_wait_secs());
+        let wait_result = background::global().wait(&task_id, wait, false).await;
+
+        let finished = matches!(
+            wait_result.as_ref().map(|result| result.task.status.clone()),
+            Some(BackgroundTaskStatus::Completed)
+                | Some(BackgroundTaskStatus::Superseded)
+                | Some(BackgroundTaskStatus::Failed)
+        );
+
+        if !finished {
+            return Ok(ToolOutput::new(format!(
+                "{}\n\nThe build is still running after waiting {}s, so the automatic reload was not started yet. Use `bg action=\"wait\" task_id=\"{}\"` to keep waiting, then `selfdev reload` once it finishes.",
+                build_output.output,
+                wait.as_secs(),
+                task_id
+            ))
+            .with_metadata(json!({
+                "phase": "build",
+                "build_finished": false,
+                "request_id": request_id,
+                "task_id": task_id,
+            })));
+        }
+
+        // Resolve the final build outcome from the persisted request when
+        // available (it carries published version / validation), falling back
+        // to the background task status otherwise.
+        let build_request = request_id
+            .as_deref()
+            .and_then(|id| BuildRequest::load(id).ok().flatten());
+        let task_status = wait_result.as_ref().map(|result| result.task.status.clone());
+
+        let build_succeeded = match build_request.as_ref().map(|request| &request.state) {
+            Some(BuildRequestState::Completed) => true,
+            Some(_) => false,
+            None => matches!(task_status, Some(BackgroundTaskStatus::Completed)),
+        };
+
+        if !build_succeeded {
+            let detail = build_request
+                .as_ref()
+                .and_then(|request| request.error.clone())
+                .or_else(|| {
+                    wait_result
+                        .as_ref()
+                        .and_then(|result| result.task.error.clone())
+                })
+                .unwrap_or_else(|| "see build output for details".to_string());
+            let state_label = build_request
+                .as_ref()
+                .map(|request| match request.state {
+                    BuildRequestState::Superseded => "superseded",
+                    BuildRequestState::Failed => "failed",
+                    BuildRequestState::Cancelled => "cancelled",
+                    BuildRequestState::Queued => "queued",
+                    BuildRequestState::Building => "building",
+                    BuildRequestState::Attached => "attached",
+                    BuildRequestState::Completed => "completed",
+                })
+                .unwrap_or("unknown");
+            return Ok(ToolOutput::new(format!(
+                "Build did not complete successfully (state: {state_label}), so the automatic reload was skipped.\n\nReason: {detail}\n\nInspect the build with `selfdev status` or the build output, fix the issue, and retry."
+            ))
+            .with_metadata(json!({
+                "phase": "build",
+                "build_finished": true,
+                "build_succeeded": false,
+                "state": state_label,
+                "request_id": request_id,
+                "task_id": task_id,
+            })));
+        }
+
+        // Build succeeded: reload onto the freshly published binary.
+        let reload_output = self
+            .do_reload(
+                context,
+                &ctx.session_id,
+                ctx.execution_mode,
+                ctx.working_dir.as_deref(),
+            )
+            .await?;
+
+        let published_version = build_request
+            .as_ref()
+            .and_then(|request| request.published_version.clone());
+        let mut combined = String::from("Build completed successfully");
+        if let Some(version) = published_version.as_deref() {
+            combined.push_str(&format!(" (version `{version}`)"));
+        }
+        combined.push_str(", now reloading.\n\n");
+        combined.push_str(&reload_output.output);
+
+        let mut reload_metadata = reload_output.metadata.unwrap_or_else(|| json!({}));
+        if let Some(map) = reload_metadata.as_object_mut() {
+            map.insert("phase".to_string(), json!("reload"));
+            map.insert("build_finished".to_string(), json!(true));
+            map.insert("build_succeeded".to_string(), json!(true));
+            if let Some(request_id) = request_id.as_deref() {
+                map.insert("request_id".to_string(), json!(request_id));
+            }
+            map.insert("task_id".to_string(), json!(task_id));
+            if let Some(version) = published_version {
+                map.insert("published_version".to_string(), json!(version));
+            }
+        }
+
+        Ok(ToolOutput::new(combined).with_metadata(reload_metadata))
+    }
+
     pub(super) async fn do_test(
         &self,
         command: Option<String>,

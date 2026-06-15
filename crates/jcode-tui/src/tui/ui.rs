@@ -100,6 +100,8 @@ mod pinned_ui;
 mod prepare;
 #[path = "ui_smoothness.rs"]
 mod smoothness;
+#[path = "ui_todo_changes.rs"]
+mod todo_changes;
 #[path = "ui_tools.rs"]
 pub(crate) mod tools_ui;
 #[path = "ui_transitions.rs"]
@@ -185,8 +187,16 @@ pub(crate) use viewport::{
 #[cfg(not(test))]
 static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
 /// Whether the chat viewport used a native scrollbar in the most recent frame.
+///
+/// Initialized to `1` (assume visible) so the very first frame of a freshly
+/// resumed/loaded session prepares the narrow (scrollbar-reserved) width FIRST.
+/// Because narrow wraps at least as much as wide, an overflowing transcript is
+/// detected on that single narrow build and kept, avoiding a wasted wide build
+/// (~seconds on a long transcript) that would otherwise be discarded. Short
+/// transcripts that fit still fall through to a (cheap) second wide build, and
+/// the real decision is written back every frame, so steady state is unaffected.
 #[cfg(not(test))]
-static LAST_CHAT_SCROLLBAR_VISIBLE: AtomicUsize = AtomicUsize::new(0);
+static LAST_CHAT_SCROLLBAR_VISIBLE: AtomicUsize = AtomicUsize::new(1);
 /// Total line count in the pinned diff/content pane (set during render).
 #[cfg(not(test))]
 static PINNED_PANE_TOTAL_LINES: AtomicUsize = AtomicUsize::new(0);
@@ -478,8 +488,8 @@ use theme_support::{
 
 pub(crate) use jcode_tui_markdown::{CopyTargetKind, RawCopyTarget};
 pub(crate) use jcode_tui_messages::{
-    CopyTarget, EditToolRange, ImageRegion, PreparedChatFrame, PreparedMessages, PreparedSection,
-    PreparedSectionKind, WrappedLineMap,
+    CopyTarget, EditToolRange, ImageRegion, MessageBoundary, PreparedChatFrame, PreparedMessages,
+    PreparedSection, PreparedSectionKind, WrappedLineMap,
 };
 
 #[derive(Clone, Debug)]
@@ -824,6 +834,10 @@ struct BodyCacheKey {
     /// Signature of the inline image set; anchored images render inside the
     /// body, so the body must rebuild when images arrive or change.
     images_signature: (usize, u64),
+    /// Monotonic per-image expand-level version. Anchored images embed their
+    /// expand-level geometry into the body, so a level change must rebuild the
+    /// body exactly like an image-set change does.
+    expanded_images_version: u64,
 }
 
 #[derive(Clone)]
@@ -881,14 +895,13 @@ impl BodyCacheState {
     fn best_incremental_base(
         &self,
         key: &BodyCacheKey,
-        msg_count: usize,
+        _msg_count: usize,
     ) -> Option<(Arc<PreparedMessages>, usize)> {
         let regular = self
             .entries
             .iter()
             .filter(|entry| {
                 entry.msg_count > 0
-                    && msg_count > entry.msg_count
                     && entry.key.width == key.width
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
@@ -899,6 +912,7 @@ impl BodyCacheState {
                     && entry.key.pin_images == key.pin_images
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
+                    && entry.key.expanded_images_version == key.expanded_images_version
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -907,7 +921,6 @@ impl BodyCacheState {
             .iter()
             .filter(|entry| {
                 entry.msg_count > 0
-                    && msg_count > entry.msg_count
                     && entry.key.width == key.width
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
@@ -918,6 +931,7 @@ impl BodyCacheState {
                     && entry.key.pin_images == key.pin_images
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
+                    && entry.key.expanded_images_version == key.expanded_images_version
             })
             .max_by_key(|entry| entry.msg_count)
             .map(|entry| (entry.prepared.clone(), entry.msg_count));
@@ -938,7 +952,6 @@ impl BodyCacheState {
     fn take_best_incremental_base(
         &mut self,
         key: &BodyCacheKey,
-        msg_count: usize,
     ) -> Option<(Arc<PreparedMessages>, usize)> {
         let regular = self
             .entries
@@ -946,7 +959,6 @@ impl BodyCacheState {
             .enumerate()
             .filter(|(_, entry)| {
                 entry.msg_count > 0
-                    && msg_count > entry.msg_count
                     && entry.key.width == key.width
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
@@ -957,6 +969,7 @@ impl BodyCacheState {
                     && entry.key.pin_images == key.pin_images
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
+                    && entry.key.expanded_images_version == key.expanded_images_version
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (false, idx, entry.msg_count));
@@ -966,7 +979,6 @@ impl BodyCacheState {
             .enumerate()
             .filter(|(_, entry)| {
                 entry.msg_count > 0
-                    && msg_count > entry.msg_count
                     && entry.key.width == key.width
                     && entry.key.diff_mode == key.diff_mode
                     && entry.key.diagram_mode == key.diagram_mode
@@ -977,6 +989,7 @@ impl BodyCacheState {
                     && entry.key.pin_images == key.pin_images
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
+                    && entry.key.expanded_images_version == key.expanded_images_version
             })
             .max_by_key(|(_, entry)| entry.msg_count)
             .map(|(idx, entry)| (true, idx, entry.msg_count));
@@ -1068,6 +1081,9 @@ struct FullPrepCacheKey {
     inline_images_signature: (usize, u64),
     /// Whether inline images render expanded or as collapsed label stubs.
     inline_images_visible: bool,
+    /// Per-image expand-level version; anchored image geometry is embedded in
+    /// the prepared frame, so a level change must invalidate it.
+    expanded_images_version: u64,
 }
 
 #[derive(Clone)]
@@ -1414,6 +1430,25 @@ impl CopyViewportSnapshot {
             } => wrapped_line_map.get(abs_line).copied(),
             CopyViewportData::ChatFrame { prepared } => prepared.wrapped_line_map(abs_line),
         }
+    }
+
+    /// If `abs_line` is the label line of a visible inline-image region, return
+    /// that image's id. The label line sits exactly one wrapped line above the
+    /// region's first placeholder line (see `anchored_image_lines`), so we map a
+    /// click on the label row back to the image it annotates.
+    fn inline_image_id_for_label_line(&self, abs_line: usize) -> Option<u64> {
+        let prepared = match &self.data {
+            CopyViewportData::ChatFrame { prepared } => prepared,
+            CopyViewportData::Dense { .. } => return None,
+        };
+        prepared
+            .image_regions
+            .iter()
+            .find(|region| {
+                region.render == jcode_tui_messages::ImageRegionRender::Fit
+                    && region.abs_line_idx == abs_line + 1
+            })
+            .map(|region| region.hash)
     }
 }
 
@@ -1998,15 +2033,15 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
                 continue;
             }
         }
-        let line_width = line_display_width(&text);
+        let line_width = line_display_width(text);
         let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
         let start_col = if abs_line == start.abs_line {
-            clamp_display_col(&text, start.column).max(copy_start)
+            clamp_display_col(text, start.column).max(copy_start)
         } else {
             copy_start
         };
         let end_col = if abs_line == end.abs_line {
-            clamp_display_col(&text, end.column).max(copy_start)
+            clamp_display_col(text, end.column).max(copy_start)
         } else {
             line_width
         };
@@ -2015,11 +2050,11 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
             continue;
         }
 
-        let slice = display_col_slice(&text, start_col, end_col);
+        let slice = display_col_slice(text, start_col, end_col);
         if abs_line == start.abs_line {
             out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
         }
-        out.push_str(&slice);
+        out.push_str(slice);
     }
 
     Some(out)
@@ -2070,22 +2105,22 @@ pub(crate) fn copy_selection_metrics(
                 continue;
             }
         }
-        let line_width = line_display_width(&text);
+        let line_width = line_display_width(text);
         let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
         let start_col = if abs_line == start.abs_line {
-            clamp_display_col(&text, start.column).max(copy_start)
+            clamp_display_col(text, start.column).max(copy_start)
         } else {
             copy_start
         };
         let end_col = if abs_line == end.abs_line {
-            clamp_display_col(&text, end.column).max(copy_start)
+            clamp_display_col(text, end.column).max(copy_start)
         } else {
             line_width
         };
         if end_col < start_col {
             continue;
         }
-        chars += display_col_slice(&text, start_col, end_col).chars().count();
+        chars += display_col_slice(text, start_col, end_col).chars().count();
     }
 
     Some((chars, lines.max(1)))
@@ -2095,6 +2130,58 @@ pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
     let point = copy_point_from_screen(column, row)?;
     let snapshot = copy_snapshot_for_pane(point.pane)?;
     link_target_from_snapshot(&snapshot, point)
+}
+
+/// First-dot display column of the inline-image expand badge within a label
+/// line, if present. The badge is the `●○○ expand` suffix that
+/// `image_label_line` appends; we accept a click from the first dot to end of
+/// line as "hit the badge". Returns `None` when the line has no badge (e.g. a
+/// hidden/collapsed image label).
+fn expand_badge_start_col(text: &str) -> Option<usize> {
+    let byte_idx = text.find(['○', '●'])?;
+    Some(line_display_width(&text[..byte_idx]))
+}
+
+#[cfg(test)]
+mod expand_badge_hit_tests {
+    use super::expand_badge_start_col;
+
+    #[test]
+    fn returns_none_without_dots() {
+        assert_eq!(expand_badge_start_col("  🖼 600×400  hide"), None);
+    }
+
+    #[test]
+    fn locates_first_dot_display_column() {
+        // ASCII prefix: the badge starts exactly at the prefix's display width.
+        let text = "abc ●○○ expand";
+        assert_eq!(expand_badge_start_col(text), Some(4));
+    }
+
+    #[test]
+    fn accounts_for_wide_chars_before_badge() {
+        // Multi-byte chars before the badge must be measured by display width,
+        // not byte offset. unicode-width reports the picture glyph as width 1,
+        // so emoji(1) + space(1) = 2.
+        let text = "🖼 ●○○ expand";
+        assert_eq!(expand_badge_start_col(text), Some(2));
+    }
+}
+
+/// If a screen click landed on an inline-image expand badge, return the image
+/// id so the caller can cycle that image's size. Only clicks on the badge
+/// suffix of the label line count, so the rest of the label stays inert.
+pub(crate) fn inline_image_expand_target_from_screen(column: u16, row: u16) -> Option<u64> {
+    let point = copy_point_from_screen(column, row)?;
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    let image_id = snapshot.inline_image_id_for_label_line(point.abs_line)?;
+    let text = snapshot.wrapped_plain_line(point.abs_line)?;
+    let badge_start = expand_badge_start_col(text)?;
+    if point.column >= badge_start {
+        Some(image_id)
+    } else {
+        None
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
@@ -2387,6 +2474,50 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (chat_area, None)
     };
 
+    // Inline swarm gallery band: when `swarm_spawn_mode = inline`, reserve a
+    // top strip of the chat column to render a live gallery of agent viewports.
+    let swarm_gallery_lines: Vec<Line<'static>> = if app.inline_swarm_gallery_active() {
+        let members = app.inline_swarm_members();
+        // Budget a configurable share (default ~40%) of the chat height for the
+        // gallery, capped. `agents.swarm_gallery_max_pct` (1-90) lets the user
+        // shrink the band toward a thin strip or give it more room.
+        let max_pct = crate::config::config()
+            .agents
+            .swarm_gallery_max_pct
+            .map(|p| p.clamp(1, 90) as usize)
+            .unwrap_or(40);
+        let budget = ((chat_area.height as usize * max_pct) / 100).clamp(0, 18);
+        if budget >= 5 && chat_area.width >= 24 {
+            super::info_widget::swarm_gallery::render_swarm_gallery_lines(
+                &members,
+                chat_area.width as usize,
+                budget,
+            )
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let (swarm_gallery_area, chat_area) = if !swarm_gallery_lines.is_empty() {
+        let band_height = (swarm_gallery_lines.len() as u16 + 1).min(chat_area.height / 2);
+        let band = Rect {
+            x: chat_area.x,
+            y: chat_area.y,
+            width: chat_area.width,
+            height: band_height,
+        };
+        let rest = Rect {
+            x: chat_area.x,
+            y: chat_area.y + band_height,
+            width: chat_area.width,
+            height: chat_area.height.saturating_sub(band_height),
+        };
+        (Some(band), rest)
+    } else {
+        (None, chat_area)
+    };
+
     // Calculate pending messages (queued + interleave) for numbering and layout
     let pending_count = input_ui::pending_prompt_count(app);
     let queued_height = pending_count.min(3) as u16;
@@ -2538,6 +2669,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         })
         .split(chat_area);
     record_status_area(chunks[2]);
+
+    // Draw the inline swarm gallery band (above the chat) if present.
+    if let Some(band) = swarm_gallery_area {
+        clear_area(frame, band);
+        frame.render_widget(
+            Paragraph::new(swarm_gallery_lines.clone()),
+            band,
+        );
+    }
 
     // Capture layout info for visual debug
     if let Some(ref mut capture) = debug_capture {

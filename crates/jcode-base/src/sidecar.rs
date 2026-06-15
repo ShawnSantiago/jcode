@@ -47,6 +47,12 @@ const DEFAULT_MAX_TOKENS: u32 = 1024;
 enum SidecarBackend {
     OpenAI,
     Claude,
+    /// Dispatch through the live agent provider (`crate::provider::active_provider_fork`).
+    /// Used when neither OpenAI nor Claude OAuth credentials are present but the
+    /// user is running on another provider (Copilot, Antigravity, Gemini,
+    /// Cursor, Bedrock, OpenRouter). This is what makes the memory sidecar work
+    /// on ALL providers instead of only the two with dedicated HTTP clients.
+    Provider,
 }
 
 /// Lightweight client for fast sidecar calls
@@ -56,6 +62,11 @@ pub struct Sidecar {
     model: String,
     max_tokens: u32,
     backend: SidecarBackend,
+    /// Optional explicit reasoning effort override (OpenAI Responses API).
+    /// When `Some`, this effort is always sent; when `None`, the default
+    /// per-model behavior applies. Used by the memory benchmark to pin
+    /// GPT-5.5 with no thinking.
+    reasoning_override: Option<String>,
 }
 
 impl Sidecar {
@@ -76,20 +87,11 @@ impl Sidecar {
                         "Ignoring unsupported memory sidecar model override '{}'; expected an OpenAI or Claude model",
                         model
                     ));
-                    if auth::codex::load_credentials().is_ok() {
-                        (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
-                    } else {
-                        (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
-                    }
+                    Self::auto_select_backend()
                 }
             }
-        } else if auth::codex::load_credentials().is_ok() {
-            (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
-        } else if auth::claude::load_credentials().is_ok() {
-            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
         } else {
-            // Default to Claude - will fail on use with a clear error
-            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
+            Self::auto_select_backend()
         };
 
         Self {
@@ -97,6 +99,35 @@ impl Sidecar {
             model,
             max_tokens: DEFAULT_MAX_TOKENS,
             backend,
+            reasoning_override: None,
+        }
+    }
+
+    /// Pick the best available sidecar backend.
+    ///
+    /// Preference order:
+    /// 1. OpenAI codex-spark (dedicated fast/cheap OAuth path) if Codex creds exist.
+    /// 2. Claude haiku (dedicated fast/cheap OAuth path) if Claude creds exist.
+    /// 3. The live agent provider (works for EVERY provider jcode supports:
+    ///    Copilot, Antigravity, Gemini, Cursor, Bedrock, OpenRouter, and even
+    ///    OpenAI/Claude API-key setups), dispatched via `complete_simple`.
+    ///
+    /// Only when no provider is registered at all do we fall back to Claude,
+    /// which then fails on use with a clear credentials error.
+    fn auto_select_backend() -> (SidecarBackend, String) {
+        if auth::codex::load_credentials().is_ok() {
+            (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
+        } else if auth::claude::load_credentials().is_ok() {
+            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
+        } else if let Some(provider) = crate::provider::active_provider_fork() {
+            // Dispatch through whatever provider the user is running on. The
+            // model string is informational here; the provider already has the
+            // user's selected model and routes accordingly.
+            (SidecarBackend::Provider, provider.model())
+        } else {
+            // No credentials and no live provider: default to Claude so the
+            // eventual error message is actionable.
+            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
         }
     }
 
@@ -105,11 +136,38 @@ impl Sidecar {
         &self.model
     }
 
+    /// Construct a sidecar pinned to a specific Claude model (used by the
+    /// memory recall benchmark judge so the relevance labels come from a strong,
+    /// fixed model regardless of the user's configured memory model).
+    pub fn with_claude_model(model: impl Into<String>) -> Self {
+        Self {
+            client: crate::provider::shared_http_client(),
+            model: model.into(),
+            max_tokens: DEFAULT_MAX_TOKENS,
+            backend: SidecarBackend::Claude,
+            reasoning_override: None,
+        }
+    }
+
+    /// Construct a sidecar pinned to a specific OpenAI model via Codex/OpenAI
+    /// OAuth, with an optional explicit reasoning effort (e.g. "none"/"minimal"
+    /// for no-thinking). Used by the memory recall benchmark judge.
+    pub fn with_openai_model(model: impl Into<String>, reasoning_effort: Option<String>) -> Self {
+        Self {
+            client: crate::provider::shared_http_client(),
+            model: model.into(),
+            max_tokens: DEFAULT_MAX_TOKENS,
+            backend: SidecarBackend::OpenAI,
+            reasoning_override: reasoning_effort,
+        }
+    }
+
     /// Return the currently selected backend label.
     pub fn backend_name(&self) -> &'static str {
         match self.backend {
             SidecarBackend::OpenAI => "openai",
             SidecarBackend::Claude => "claude",
+            SidecarBackend::Provider => "provider",
         }
     }
 
@@ -119,7 +177,24 @@ impl Sidecar {
         match self.backend {
             SidecarBackend::OpenAI => self.complete_openai(system, user_message).await,
             SidecarBackend::Claude => self.complete_claude(system, user_message).await,
+            SidecarBackend::Provider => self.complete_via_provider(system, user_message).await,
         }
+    }
+
+    /// Complete via the live agent provider (`complete_simple`).
+    ///
+    /// This is the universal path: it works for every provider jcode supports,
+    /// because `complete_simple` is a default method on the `Provider` trait that
+    /// collects the streamed `TextDelta`s into a single string. The provider was
+    /// forked at construction time, so it carries the user's selected model.
+    async fn complete_via_provider(&self, system: &str, user_message: &str) -> Result<String> {
+        let provider = crate::provider::active_provider_fork().context(
+            "No active provider registered for sidecar; memory features require a logged-in provider",
+        )?;
+        provider
+            .complete_simple(user_message, system)
+            .await
+            .context("Sidecar completion via active provider failed")
     }
 
     /// Complete via OpenAI Responses API.
@@ -140,8 +215,12 @@ impl Sidecar {
         };
         let url = format!("{}/{}", base.trim_end_matches('/'), OPENAI_RESPONSES_PATH);
 
-        let (primary_model, primary_reasoning) =
+        let (primary_model, resolved_reasoning) =
             resolve_openai_request_model(&self.model, is_chatgpt_mode);
+        // An explicit reasoning override (e.g. benchmark judge pinning GPT-5.5
+        // to no-thinking) always wins over the per-model default.
+        let primary_reasoning: Option<&str> =
+            self.reasoning_override.as_deref().or(resolved_reasoning);
 
         match self
             .complete_openai_with_model(
@@ -872,5 +951,122 @@ mod tests {
         let spark_request =
             build_openai_request(SIDECAR_OPENAI_MODEL, "system", "hello", true, None);
         assert!(spark_request.get("reasoning").is_none());
+    }
+
+    // ---- Provider-backed sidecar (works on ALL providers) -------------------
+
+    /// Minimal provider stub that echoes a fixed reply for `complete`, so the
+    /// default `complete_simple` path the sidecar uses can be exercised without
+    /// network access. Stands in for any of the 8 real providers.
+    struct StubProvider {
+        name: &'static str,
+        reply: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for StubProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            let reply = self.reply.clone();
+            let stream = futures::stream::once(async move {
+                Ok(jcode_message_types::StreamEvent::TextDelta(reply))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn model(&self) -> String {
+            format!("{}-model", self.name)
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(StubProvider {
+                name: self.name,
+                reply: self.reply.clone(),
+            })
+        }
+    }
+
+    /// With NO OpenAI/Claude credentials, the sidecar must select the live
+    /// agent provider (the universal path) instead of failing. This is the core
+    /// guarantee that memory features work on every provider, not just two.
+    #[test]
+    fn sidecar_uses_active_provider_when_no_oauth_creds() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        // Simulate running on a non-OpenAI/Claude provider (e.g. Gemini).
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "gemini",
+            reply: "[2,1]".to_string(),
+        }));
+
+        let sidecar = Sidecar::with_configured_model(None);
+        assert_eq!(
+            sidecar.backend_name(),
+            "provider",
+            "with no OAuth creds, the sidecar must route through the active provider"
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt
+            .block_on(sidecar.complete("rank these", "1. a\n2. b"))
+            .expect("provider-backed completion should succeed");
+        assert_eq!(out, "[2,1]", "sidecar must return the provider's text");
+    }
+
+    /// Every provider jcode supports should drive the sidecar end-to-end via the
+    /// universal `complete_simple` path. We iterate over each provider label to
+    /// make the "works for ALL providers" guarantee explicit and regression-proof.
+    #[test]
+    fn sidecar_provider_path_works_for_all_providers() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for provider in [
+            "claude",
+            "openai",
+            "copilot",
+            "antigravity",
+            "gemini",
+            "cursor",
+            "bedrock",
+            "openrouter",
+        ] {
+            crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+                name: provider,
+                reply: "[1]".to_string(),
+            }));
+            let sidecar = Sidecar::with_configured_model(None);
+            assert_eq!(
+                sidecar.backend_name(),
+                "provider",
+                "{provider}: sidecar should use the provider path with no OAuth creds"
+            );
+            let out = rt
+                .block_on(sidecar.complete("sys", "user"))
+                .unwrap_or_else(|e| panic!("{provider}: provider-backed completion failed: {e}"));
+            assert_eq!(out, "[1]", "{provider}: sidecar must echo provider output");
+        }
     }
 }

@@ -27,6 +27,114 @@ pub(crate) const STREAMING_REVEAL_TAIL_SETTLE: Duration = Duration::from_millis(
 /// Clamp per-frame dt so a stalled event loop cannot teleport the reveal.
 const STREAMING_REVEAL_MAX_FRAME_DT_SECONDS: f32 = 0.1;
 
+/// Largest follow offset, in lines, the streaming auto-scroll will hold. Bursts
+/// that append more lines at once snap the excess (rare) but keep the tail
+/// smooth for the final lines.
+pub(crate) const STREAMING_FOLLOW_MAX_OFFSET_LINES: f32 = 3.0;
+/// Exponential decay time-constant for the follow offset. ~60ms reads as a
+/// quick, smooth slide rather than a snap, settling in roughly 180ms.
+const STREAMING_FOLLOW_DECAY_TAU_SECONDS: f32 = 0.06;
+/// Clamp per-frame dt so a stalled event loop cannot teleport the follow slide.
+const STREAMING_FOLLOW_MAX_FRAME_DT_SECONDS: f32 = 0.1;
+
+/// Per-frame inputs for the streaming follow-scroll motion.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StreamingFollowInput {
+    /// Total wrapped body line count for the current frame.
+    pub(crate) total_lines: usize,
+    /// True when the transcript is pinned to the bottom (not user-scrolled).
+    pub(crate) anchored_to_bottom: bool,
+    /// True while a streaming response is actively growing.
+    pub(crate) streaming_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct StreamingFollowFrame {
+    /// Extra scroll offset, in lines, to add to `smooth_scroll_lines`. Positive
+    /// holds the viewport one or more lines above the very bottom so newly
+    /// appended streaming lines slide in instead of snapping.
+    pub(crate) offset_lines: f32,
+    /// True while the slide is still settling and a redraw should be scheduled.
+    pub(crate) active: bool,
+}
+
+/// Smoothly follows streaming text growth.
+///
+/// While the transcript is bottom-anchored and a response streams, each newly
+/// wrapped body line would otherwise jump the viewport up by a full line. This
+/// motion injects a transient positive scroll offset equal to the number of
+/// lines just appended, then eases it back to zero, turning the per-line snap
+/// into a continuous slide. It does nothing when the user has scrolled up or
+/// when the transcript still has vertical slack (offset is clamped away by the
+/// viewport in that case anyway).
+#[derive(Default)]
+pub(crate) struct StreamingFollowMotion {
+    offset_lines: f32,
+    last_total_lines: Option<usize>,
+    last_update: Option<Instant>,
+}
+
+impl StreamingFollowMotion {
+    pub(crate) fn frame(
+        &mut self,
+        input: StreamingFollowInput,
+        now: Instant,
+    ) -> StreamingFollowFrame {
+        if crate::animation::desktop_reduced_motion_enabled() {
+            self.clear();
+            self.last_total_lines = Some(input.total_lines);
+            return StreamingFollowFrame::default();
+        }
+
+        let dt = self
+            .last_update
+            .map(|last| {
+                now.saturating_duration_since(last)
+                    .as_secs_f32()
+                    .min(STREAMING_FOLLOW_MAX_FRAME_DT_SECONDS)
+            })
+            .unwrap_or(0.0);
+        self.last_update = Some(now);
+        if dt > 0.0 && self.offset_lines != 0.0 {
+            self.offset_lines *= (-dt / STREAMING_FOLLOW_DECAY_TAU_SECONDS).exp();
+        }
+
+        if !input.streaming_active || !input.anchored_to_bottom {
+            // Reset the baseline so resuming follow never replays a stale delta,
+            // and never fight a user who has scrolled up.
+            self.last_total_lines = Some(input.total_lines);
+            if !input.anchored_to_bottom {
+                self.offset_lines = 0.0;
+            }
+        } else {
+            if let Some(previous) = self.last_total_lines {
+                if input.total_lines > previous {
+                    let grew = (input.total_lines - previous) as f32;
+                    self.offset_lines =
+                        (self.offset_lines + grew).min(STREAMING_FOLLOW_MAX_OFFSET_LINES);
+                } else if input.total_lines < previous {
+                    self.offset_lines = self.offset_lines.min(input.total_lines as f32).max(0.0);
+                }
+            }
+            self.last_total_lines = Some(input.total_lines);
+        }
+
+        if self.offset_lines.abs() < 0.01 {
+            self.offset_lines = 0.0;
+        }
+        StreamingFollowFrame {
+            offset_lines: self.offset_lines,
+            active: self.offset_lines > 0.0,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.offset_lines = 0.0;
+        self.last_total_lines = None;
+        self.last_update = None;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct StreamingTextRevealFrame {
     /// Byte offset (on a char boundary) of the revealed prefix.
@@ -139,6 +247,102 @@ pub(crate) fn char_floor_byte_offset(text: &str, chars: f32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn follow_input(total_lines: usize) -> StreamingFollowInput {
+        StreamingFollowInput {
+            total_lines,
+            anchored_to_bottom: true,
+            streaming_active: true,
+        }
+    }
+
+    #[test]
+    fn follow_offsets_on_growth_then_eases_to_zero() {
+        let mut motion = StreamingFollowMotion::default();
+        let mut now = Instant::now();
+        // Establish a baseline line count.
+        let baseline = motion.frame(follow_input(10), now);
+        assert_eq!(baseline.offset_lines, 0.0);
+        // One line appended -> a positive follow offset appears immediately.
+        now += Duration::from_millis(16);
+        let grew = motion.frame(follow_input(11), now);
+        assert!(grew.offset_lines > 0.0);
+        assert!(grew.offset_lines <= STREAMING_FOLLOW_MAX_OFFSET_LINES);
+        assert!(grew.active);
+        // With no further growth it eases back toward zero and settles.
+        let mut frame = grew;
+        for _ in 0..120 {
+            now += Duration::from_millis(16);
+            frame = motion.frame(follow_input(11), now);
+        }
+        assert_eq!(frame.offset_lines, 0.0);
+        assert!(!frame.active);
+    }
+
+    #[test]
+    fn follow_offset_is_clamped_for_large_bursts() {
+        let mut motion = StreamingFollowMotion::default();
+        let mut now = Instant::now();
+        motion.frame(follow_input(10), now);
+        now += Duration::from_millis(16);
+        let burst = motion.frame(follow_input(40), now);
+        assert!(burst.offset_lines <= STREAMING_FOLLOW_MAX_OFFSET_LINES + f32::EPSILON);
+    }
+
+    #[test]
+    fn follow_does_nothing_when_user_scrolled_up() {
+        let mut motion = StreamingFollowMotion::default();
+        let mut now = Instant::now();
+        motion.frame(follow_input(10), now);
+        now += Duration::from_millis(16);
+        let scrolled = motion.frame(
+            StreamingFollowInput {
+                total_lines: 11,
+                anchored_to_bottom: false,
+                streaming_active: true,
+            },
+            now,
+        );
+        assert_eq!(scrolled.offset_lines, 0.0);
+        assert!(!scrolled.active);
+    }
+
+    #[test]
+    fn follow_ignores_growth_while_idle() {
+        let mut motion = StreamingFollowMotion::default();
+        let mut now = Instant::now();
+        motion.frame(
+            StreamingFollowInput {
+                total_lines: 10,
+                anchored_to_bottom: true,
+                streaming_active: false,
+            },
+            now,
+        );
+        now += Duration::from_millis(16);
+        // Transcript grew (e.g. committed message) but no stream is active.
+        let frame = motion.frame(
+            StreamingFollowInput {
+                total_lines: 14,
+                anchored_to_bottom: true,
+                streaming_active: false,
+            },
+            now,
+        );
+        assert_eq!(frame.offset_lines, 0.0);
+    }
+
+    #[test]
+    fn follow_reduced_motion_disables_offset() {
+        let _guard = crate::animation::DesktopReducedMotionEnvGuard::set(true);
+        let mut motion = StreamingFollowMotion::default();
+        let mut now = Instant::now();
+        motion.frame(follow_input(10), now);
+        now += Duration::from_millis(16);
+        let frame = motion.frame(follow_input(20), now);
+        assert_eq!(frame.offset_lines, 0.0);
+        assert!(!frame.active);
+    }
 
     #[test]
     fn advance_is_monotonic_and_clamped() {

@@ -51,6 +51,78 @@ const MIN_IMAGE_ROWS: u16 = 3;
 /// screenshots from dominating the flow while staying resize-stable.
 const ANCHORED_MAX_ROWS: u16 = 16;
 
+/// Discrete per-image expand levels. Clicking the `expand` badge cycles an
+/// image through these caps. The caps are *fixed row counts* (not a fraction of
+/// the viewport) on purpose: anchored placeholder geometry feeds the body cache
+/// which is keyed by width only, so the expand level must stay viewport
+/// independent or it would break that invariant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ImageExpandLevel {
+    /// Default fit-to-flow size (`ANCHORED_MAX_ROWS`).
+    #[default]
+    Fit,
+    /// Roughly 2.5x taller, for a closer look without leaving the transcript.
+    Large,
+    /// Maximum inline size before the user should use the side panel.
+    Huge,
+}
+
+impl ImageExpandLevel {
+    /// Next level in the click cycle (Fit -> Large -> Huge -> Fit).
+    pub(crate) fn next(self) -> Self {
+        match self {
+            ImageExpandLevel::Fit => ImageExpandLevel::Large,
+            ImageExpandLevel::Large => ImageExpandLevel::Huge,
+            ImageExpandLevel::Huge => ImageExpandLevel::Fit,
+        }
+    }
+
+    /// Anchored row cap for this level. Stays viewport independent so the
+    /// width-keyed body cache remains valid across resizes.
+    fn anchored_cap_rows(self) -> u16 {
+        match self {
+            ImageExpandLevel::Fit => ANCHORED_MAX_ROWS,
+            ImageExpandLevel::Large => 40,
+            ImageExpandLevel::Huge => 80,
+        }
+    }
+
+    /// 0-based filled-dot count for the click-progress badge (Fit shows none).
+    fn filled_dots(self) -> usize {
+        match self {
+            ImageExpandLevel::Fit => 0,
+            ImageExpandLevel::Large => 1,
+            ImageExpandLevel::Huge => 2,
+        }
+    }
+}
+
+/// Resolve the expand level for an image id. Implemented by `App` so the lookup
+/// stays close to the persisted/live state, while this module owns the geometry.
+pub(crate) trait ImageExpandLevels {
+    fn expand_level(&self, id: u64) -> ImageExpandLevel;
+}
+
+/// A levels source that reports every image as `Fit`. Used by tests that
+/// exercise section/line building without an `App` to resolve expand state.
+#[cfg(test)]
+pub(crate) struct AllFit;
+#[cfg(test)]
+impl ImageExpandLevels for AllFit {
+    fn expand_level(&self, _id: u64) -> ImageExpandLevel {
+        ImageExpandLevel::Fit
+    }
+}
+
+/// Adapter so prepare code can resolve per-image expand levels straight from the
+/// app state without copying the whole map into this module.
+pub(crate) struct AppExpandLevels<'a>(pub &'a dyn crate::tui::TuiState);
+impl ImageExpandLevels for AppExpandLevels<'_> {
+    fn expand_level(&self, id: u64) -> ImageExpandLevel {
+        self.0.image_expand_level(id)
+    }
+}
+
 /// Ingest-time registry mapping image id -> (media_type, base64) so the draw
 /// step can materialize bytes without threading payloads through the cached
 /// prepared-frame model. Bounded; entries are cheap (two `String`s + id).
@@ -203,10 +275,10 @@ fn schedule_prewarm(id: u64, target_cols: u16, target_rows: u16) {
         target_cols,
         target_rows,
     };
-    if let Ok(mut inflight) = PREWARM_INFLIGHT.lock() {
-        if !inflight.insert(req) {
-            return;
-        }
+    if let Ok(mut inflight) = PREWARM_INFLIGHT.lock()
+        && !inflight.insert(req)
+    {
+        return;
     }
     if prewarm_sender().send(req).is_err() {
         // Worker unavailable: fall back to synchronous work on next frame.
@@ -217,18 +289,29 @@ fn schedule_prewarm(id: u64, target_cols: u16, target_rows: u16) {
     }
 }
 
-/// Resolve the app's rendered images into lazily-sized inline items. Performs
-/// only header-level work (no full decode) and registers each payload for the
-/// later draw-time materialize.
-#[cfg(test)]
-pub(crate) fn resolve_items(images: &[crate::session::RenderedImage]) -> Vec<InlineImageItem> {
-    let mut items = Vec::new();
-    for image in images {
-        if let Some(item) = resolve_item(image) {
-            items.push(item);
+/// Warm an inline image that is *not* on screen yet so it is ready to draw the
+/// instant it scrolls into view. Unlike [`ensure_drawable`], this never blocks
+/// and never draws: if the image still needs decode/scale/transmit work it is
+/// scheduled on the background prewarm worker (deduped against in-flight and
+/// already-warm state), otherwise it is a cheap no-op.
+///
+/// Callers pass the same `(target_cols, target_rows)` placeholder geometry the
+/// draw path will use, so the prewarmed Kitty fit-state matches exactly and the
+/// first on-screen frame hits the `Ready` fast path with no rescale.
+pub(crate) fn prefetch(id: u64, target_cols: u16, target_rows: u16) {
+    let readiness = if mermaid::inline_image_is_materialized(id) {
+        mermaid::inline_fit_readiness(id, target_cols, target_rows, true)
+    } else {
+        mermaid::InlineFitReadiness::NeedsPrewarm
+    };
+    match readiness {
+        // Already drawable, or a protocol that builds its state synchronously
+        // at draw time (nothing useful to prewarm ahead).
+        mermaid::InlineFitReadiness::Ready | mermaid::InlineFitReadiness::Unsupported => {}
+        mermaid::InlineFitReadiness::NeedsPrewarm => {
+            schedule_prewarm(id, target_cols, target_rows);
         }
     }
-    items
 }
 
 fn resolve_item(image: &crate::session::RenderedImage) -> Option<InlineImageItem> {
@@ -312,7 +395,7 @@ impl AnchoredInlineImages {
 }
 
 /// Resolve rendered images into anchored buckets (tool call / user prompt /
-/// unanchored). Same lazy header-only cost profile as [`resolve_items`].
+/// unanchored). Same lazy header-only cost profile as [`resolve_item`].
 pub(crate) fn resolve_anchored_items(
     images: &[crate::session::RenderedImage],
 ) -> AnchoredInlineImages {
@@ -338,9 +421,8 @@ pub(crate) fn resolve_anchored_items(
 /// signature. Resolving hashes every image payload (for ids), so body
 /// preparation must not redo it per rebuild; the signature is already cached
 /// per transcript version on the app side.
-static ANCHORED_CACHE: LazyLock<
-    Mutex<Option<((usize, u64), std::sync::Arc<AnchoredInlineImages>)>>,
-> = LazyLock::new(|| Mutex::new(None));
+type AnchoredCache = Mutex<Option<((usize, u64), std::sync::Arc<AnchoredInlineImages>)>>;
+static ANCHORED_CACHE: LazyLock<AnchoredCache> = LazyLock::new(|| Mutex::new(None));
 
 /// Resolve the app's images into anchored buckets, cached by the image-set
 /// signature. Returns an empty result without touching payloads when the app
@@ -420,11 +502,17 @@ fn fit_geometry(width: u32, height: u32, chat_width: u16, viewport_height: u16) 
     fit_geometry_with_cap(width, height, chat_width, cap_rows)
 }
 
-/// Compute `(rows, cols)` for an image anchored inside the transcript body.
-/// Uses a fixed row cap so the body's prepared lines stay independent of the
-/// viewport height (the body cache is keyed by width only).
-pub(crate) fn fit_geometry_anchored(width: u32, height: u32, chat_width: u16) -> (u16, u16) {
-    fit_geometry_with_cap(width, height, chat_width, ANCHORED_MAX_ROWS)
+/// Compute `(rows, cols)` for an image anchored inside the transcript body at a
+/// given expand level. Uses a fixed (viewport-independent) row cap so the body's
+/// prepared lines stay valid across resizes (the body cache is keyed by width
+/// only); the expand level only swaps which fixed cap applies.
+pub(crate) fn fit_geometry_anchored(
+    width: u32,
+    height: u32,
+    chat_width: u16,
+    level: ImageExpandLevel,
+) -> (u16, u16) {
+    fit_geometry_with_cap(width, height, chat_width, level.anchored_cap_rows())
 }
 
 /// Compute how many rows an inline image should occupy at `chat_width`, given a
@@ -437,8 +525,15 @@ fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u
 /// Build the dim label line shown above an inline image, e.g.
 /// `  🖼 screenshot.png  1920×1080`, with a trailing show/hide badge
 /// (`[Alt] [⇧] [I] hide` / `[Alt] [⇧] [I] show image`) so the toggle is
-/// discoverable right where the image renders.
-pub(crate) fn image_label_line(item: &InlineImageItem, images_visible: bool) -> Line<'static> {
+/// discoverable right where the image renders, plus a clickable `expand` badge
+/// that cycles the per-image size. The expand badge renders a three-dot
+/// progress indicator (`○○○` -> `●○○` -> `●●○`) reflecting the current level so
+/// clicking it feels like a multi-step zoom.
+pub(crate) fn image_label_line(
+    item: &InlineImageItem,
+    images_visible: bool,
+    level: ImageExpandLevel,
+) -> Line<'static> {
     let dims = format!("{}×{}", item.width, item.height);
     let label = if item.label.is_empty() {
         dims
@@ -455,6 +550,12 @@ pub(crate) fn image_label_line(item: &InlineImageItem, images_visible: bool) -> 
     ];
     if images_visible {
         spans.push(Span::styled("hide", dim));
+        // Clickable expand badge: dots show how far through the size cycle we
+        // are, then a verb hinting the next click's effect.
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(expand_dots(level), dim));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(expand_verb(level), dim));
     } else {
         spans.push(Span::styled(
             "show image",
@@ -462,6 +563,26 @@ pub(crate) fn image_label_line(item: &InlineImageItem, images_visible: bool) -> 
         ));
     }
     Line::from(spans)
+}
+
+/// Three-dot progress indicator for the expand badge, filled to the current
+/// level (`○○○` at Fit, `●○○` at Large, `●●○` at Huge).
+fn expand_dots(level: ImageExpandLevel) -> String {
+    const SLOTS: usize = 3;
+    let filled = level.filled_dots();
+    let mut out = String::with_capacity(SLOTS * 3);
+    for slot in 0..SLOTS {
+        out.push(if slot < filled { '●' } else { '○' });
+    }
+    out
+}
+
+/// Verb describing what the next expand-badge click does.
+fn expand_verb(level: ImageExpandLevel) -> &'static str {
+    match level {
+        ImageExpandLevel::Fit | ImageExpandLevel::Large => "expand",
+        ImageExpandLevel::Huge => "reset",
+    }
 }
 
 /// Lines for images anchored at a transcript message: per image, a leading
@@ -474,13 +595,15 @@ pub(crate) fn anchored_image_lines(
     items: &[InlineImageItem],
     width: u16,
     images_visible: bool,
+    levels: &dyn ImageExpandLevels,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for item in items {
+        let level = levels.expand_level(item.id);
         lines.push(Line::from(""));
-        lines.push(image_label_line(item, images_visible));
+        lines.push(image_label_line(item, images_visible, level));
         if images_visible {
-            let (rows, cols) = fit_geometry_anchored(item.width, item.height, width);
+            let (rows, cols) = fit_geometry_anchored(item.width, item.height, width, level);
             lines.extend(mermaid::inline_image_placeholder_lines(item.id, rows, cols));
         }
         lines.push(Line::from(""));
@@ -498,6 +621,7 @@ pub(crate) fn build_section(
     viewport_height: u16,
     prefix_blank: bool,
     images_visible: bool,
+    levels: &dyn ImageExpandLevels,
 ) -> PreparedMessages {
     use std::sync::Arc;
 
@@ -513,10 +637,24 @@ pub(crate) fn build_section(
     }
 
     for item in items {
-        lines.push(image_label_line(item, images_visible));
+        let level = levels.expand_level(item.id);
+        lines.push(image_label_line(item, images_visible, level));
 
         if images_visible {
-            let (rows, cols) = fit_geometry(item.width, item.height, width, viewport_height);
+            // The bottom (unanchored) section is rebuilt every frame, not body
+            // cached, so a viewport-relative default fit is fine here. Expanded
+            // levels use the discrete fixed caps so they grow predictably.
+            let (rows, cols) = match level {
+                ImageExpandLevel::Fit => {
+                    fit_geometry(item.width, item.height, width, viewport_height)
+                }
+                _ => fit_geometry_with_cap(
+                    item.width,
+                    item.height,
+                    width,
+                    level.anchored_cap_rows(),
+                ),
+            };
             let region_start = lines.len();
             for _ in 0..rows {
                 lines.push(Line::from(""));
@@ -553,6 +691,7 @@ pub(crate) fn build_section(
         image_regions,
         edit_tool_ranges: Vec::new(),
         copy_targets: Vec::new(),
+        message_boundaries: Vec::new(),
     }
 }
 
@@ -571,6 +710,7 @@ fn empty() -> PreparedMessages {
         image_regions: Vec::new(),
         edit_tool_ranges: Vec::new(),
         copy_targets: Vec::new(),
+        message_boundaries: Vec::new(),
     }
 }
 
@@ -602,6 +742,21 @@ mod tests {
             "presence probe should hit after materialization"
         );
         assert!(materialize_visible(id), "repeat call stays true");
+    }
+
+    #[test]
+    fn prefetch_is_noop_for_materialized_image_without_kitty() {
+        // Without a Kitty picker the fit-state path is Unsupported, so a
+        // materialized image has nothing to prewarm: prefetch must be a cheap
+        // no-op (no panic, no scheduling) and the image stays materialized.
+        let id = mermaid::inline_image_id("image/png", MATERIALIZE_PNG_B64);
+        register_payload(id, "image/png", MATERIALIZE_PNG_B64);
+        assert!(materialize_visible(id));
+        prefetch(id, 80, 10);
+        assert!(
+            mermaid::inline_image_is_materialized(id),
+            "prefetch must not disturb already-materialized state"
+        );
     }
 
     #[test]
@@ -669,7 +824,7 @@ mod tests {
     #[test]
     fn build_section_records_region_width() {
         let items = vec![item(600, 400)];
-        let section = build_section(&items, 80, 40, false, true);
+        let section = build_section(&items, 80, 40, false, true, &AllFit);
         let region = &section.image_regions[0];
         assert!(
             region.width > 2,
@@ -682,7 +837,7 @@ mod tests {
     #[test]
     fn build_section_emits_one_fit_region_per_image_with_label() {
         let items = vec![item(600, 400), item(800, 600)];
-        let section = build_section(&items, 80, 40, true, true);
+        let section = build_section(&items, 80, 40, true, true, &AllFit);
         assert_eq!(section.image_regions.len(), 2);
         for region in &section.image_regions {
             assert_eq!(region.render, ImageRegionRender::Fit);
@@ -709,7 +864,7 @@ mod tests {
 
     #[test]
     fn build_section_is_empty_for_no_items() {
-        let section = build_section(&[], 80, 40, false, true);
+        let section = build_section(&[], 80, 40, false, true, &AllFit);
         assert!(section.wrapped_lines.is_empty());
         assert!(section.image_regions.is_empty());
     }
@@ -717,7 +872,7 @@ mod tests {
     #[test]
     fn build_section_hidden_collapses_to_label_stub_with_show_badge() {
         let items = vec![item(600, 400)];
-        let section = build_section(&items, 80, 40, false, false);
+        let section = build_section(&items, 80, 40, false, false, &AllFit);
         assert!(
             section.image_regions.is_empty(),
             "hidden images must not emit drawable regions"
@@ -737,16 +892,63 @@ mod tests {
 
     #[test]
     fn visible_label_line_advertises_hide_badge() {
-        let line = image_label_line(&item(600, 400), true);
+        let line = image_label_line(&item(600, 400), true, ImageExpandLevel::Fit);
         let text = jcode_tui_render::line_plain_text(&line);
         assert!(text.contains("[⇧] [I]"), "badge keys missing: {text:?}");
         assert!(text.contains("hide"), "hide hint missing: {text:?}");
     }
 
     #[test]
+    fn expand_badge_dots_track_level() {
+        // Fit shows no filled dots; each level fills one more.
+        assert_eq!(expand_dots(ImageExpandLevel::Fit), "○○○");
+        assert_eq!(expand_dots(ImageExpandLevel::Large), "●○○");
+        assert_eq!(expand_dots(ImageExpandLevel::Huge), "●●○");
+    }
+
+    #[test]
+    fn expand_badge_verb_resets_at_max() {
+        assert_eq!(expand_verb(ImageExpandLevel::Fit), "expand");
+        assert_eq!(expand_verb(ImageExpandLevel::Large), "expand");
+        assert_eq!(expand_verb(ImageExpandLevel::Huge), "reset");
+    }
+
+    #[test]
+    fn visible_label_line_shows_expand_badge() {
+        let line = image_label_line(&item(600, 400), true, ImageExpandLevel::Large);
+        let text = jcode_tui_render::line_plain_text(&line);
+        assert!(text.contains("expand"), "expand badge missing: {text:?}");
+        assert!(text.contains("●○○"), "expand dots missing: {text:?}");
+    }
+
+    #[test]
+    fn hidden_label_line_omits_expand_badge() {
+        let line = image_label_line(&item(600, 400), false, ImageExpandLevel::Fit);
+        let text = jcode_tui_render::line_plain_text(&line);
+        assert!(text.contains("show image"), "show badge missing: {text:?}");
+        assert!(!text.contains("expand"), "hidden image must hide expand badge: {text:?}");
+    }
+
+    #[test]
+    fn expand_level_cycles_fit_large_huge() {
+        assert_eq!(ImageExpandLevel::Fit.next(), ImageExpandLevel::Large);
+        assert_eq!(ImageExpandLevel::Large.next(), ImageExpandLevel::Huge);
+        assert_eq!(ImageExpandLevel::Huge.next(), ImageExpandLevel::Fit);
+    }
+
+    #[test]
+    fn expanded_level_makes_anchored_image_taller() {
+        let fit = fit_geometry_anchored(1000, 4000, 100, ImageExpandLevel::Fit).0;
+        let large = fit_geometry_anchored(1000, 4000, 100, ImageExpandLevel::Large).0;
+        let huge = fit_geometry_anchored(1000, 4000, 100, ImageExpandLevel::Huge).0;
+        assert!(large > fit, "Large ({large}) should exceed Fit ({fit})");
+        assert!(huge > large, "Huge ({huge}) should exceed Large ({large})");
+    }
+
+    #[test]
     fn anchored_image_lines_hidden_emit_no_placeholder_markers() {
         let items = vec![item(600, 400)];
-        let lines = anchored_image_lines(&items, 80, false);
+        let lines = anchored_image_lines(&items, 80, false, &AllFit);
         assert!(
             lines
                 .iter()
@@ -847,7 +1049,7 @@ mod tests {
     #[test]
     fn anchored_image_lines_round_trip_through_region_scan() {
         let items = vec![item(600, 400)];
-        let lines = anchored_image_lines(&items, 80, true);
+        let lines = anchored_image_lines(&items, 80, true, &AllFit);
         // Find the marker line and verify its geometry parse.
         let parsed: Vec<(u64, u16, u16)> = lines
             .iter()
@@ -856,7 +1058,8 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         let (hash, rows, cols) = parsed[0];
         assert_eq!(hash, 0xABCD);
-        let (expected_rows, expected_cols) = fit_geometry_anchored(600, 400, 80);
+        let (expected_rows, expected_cols) =
+            fit_geometry_anchored(600, 400, 80, ImageExpandLevel::Fit);
         assert_eq!(rows, expected_rows);
         assert_eq!(cols, expected_cols);
         // Marker line is followed by rows-1 blank placeholder lines.
@@ -877,7 +1080,7 @@ mod tests {
     fn anchored_geometry_is_viewport_independent() {
         // The anchored fit must not depend on any viewport height so the body
         // cache (keyed by width only) stays valid across resizes.
-        let (rows, cols) = fit_geometry_anchored(1920, 1080, 100);
+        let (rows, cols) = fit_geometry_anchored(1920, 1080, 100, ImageExpandLevel::Fit);
         assert!(rows >= MIN_IMAGE_ROWS);
         assert!(rows <= ANCHORED_MAX_ROWS);
         assert!(cols <= 100);

@@ -1435,10 +1435,9 @@ mod tests {
                         let trimmed = line.trim_end();
                         if let Some(rest) =
                             trimmed.to_ascii_lowercase().strip_prefix("range: bytes=")
+                            && let Some(start) = rest.split('-').next()
                         {
-                            if let Some(start) = rest.split('-').next() {
-                                range_start = start.trim().parse().unwrap_or(0);
-                            }
+                            range_start = start.trim().parse().unwrap_or(0);
                         }
                         if trimmed.is_empty() {
                             break;

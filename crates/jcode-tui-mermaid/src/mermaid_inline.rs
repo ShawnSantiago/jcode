@@ -33,9 +33,13 @@ struct InlineDims {
     height: u32,
 }
 
+/// Cache of `id -> (width, height)` plus an insertion-order queue used to
+/// bound the map: `(by_id, eviction_order)`.
+type InlineDimsCache = (HashMap<u64, InlineDims>, VecDeque<u64>);
+
 /// Cache of `id -> (width, height)` so repeated prepare passes never re-parse
 /// the same image header. Bounded by insertion order.
-static INLINE_DIMS_CACHE: LazyLock<Mutex<(HashMap<u64, InlineDims>, VecDeque<u64>)>> =
+static INLINE_DIMS_CACHE: LazyLock<Mutex<InlineDimsCache>> =
     LazyLock::new(|| Mutex::new((HashMap::new(), VecDeque::new())));
 
 /// Stable content id for an inline image, derived from its media type and
