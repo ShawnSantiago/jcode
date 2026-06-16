@@ -623,3 +623,290 @@ fn test_mouse_click_in_wrapped_input_moves_cursor_to_second_visual_line() {
 
     assert_eq!(app.cursor_pos, 5);
 }
+
+/// End-to-end: a real left-click on an inline image's `expand` badge maps the
+/// screen point back through a recorded `ChatFrame` snapshot to the image id and
+/// cycles its expand level. This exercises the full click path
+/// (`handle_mouse_event` -> `try_cycle_image_expand_at` ->
+/// `inline_image_expand_target_from_screen` -> `cycle_image_expand`), not just
+/// the isolated helpers.
+#[test]
+fn test_click_on_inline_image_expand_badge_cycles_level() {
+    use crate::tui::ui::inline_image_ui::{
+        AllFit, ImageExpandLevel, InlineImageItem, build_section,
+    };
+    use jcode_tui_messages::PreparedChatFrame;
+
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    const IMAGE_ID: u64 = 0xFEED;
+    let chat_width: u16 = 80;
+
+    // Build a real inline-image section: a `🖼 … ●○○ expand` label line followed
+    // by Fit-rendered placeholder rows with a scanned `image_regions` entry.
+    let items = vec![InlineImageItem {
+        id: IMAGE_ID,
+        width: 600,
+        height: 400,
+        label: "shot.png".to_string(),
+    }];
+    let section = build_section(&items, chat_width, 40, false, true, &AllFit);
+
+    // Locate the badge label line (the one carrying the `expand` dots) and the
+    // column where the clickable badge begins, so we click a real cell.
+    let label_line = section
+        .wrapped_plain_lines
+        .iter()
+        .position(|line| line.contains("expand"))
+        .expect("section should contain an expand-badge label line");
+    let label_text = &section.wrapped_plain_lines[label_line];
+    let badge_byte = label_text
+        .find(['○', '●'])
+        .expect("label line should carry the expand dots");
+    let badge_col =
+        unicode_width::UnicodeWidthStr::width(&label_text[..badge_byte]) as u16;
+
+    // The Fit image region must sit exactly one line below the label line, which
+    // is how `inline_image_id_for_label_line` maps a click back to the image.
+    assert!(
+        section
+            .image_regions
+            .iter()
+            .any(|r| r.hash == IMAGE_ID && r.abs_line_idx == label_line + 1),
+        "expected a Fit image region anchored under the label line"
+    );
+
+    let prepared = std::sync::Arc::new(PreparedChatFrame::from_single(std::sync::Arc::new(section)));
+    let visible_end = prepared.wrapped_plain_line_count();
+    let content_area = Rect::new(0, 0, chat_width, visible_end as u16 + 1);
+
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_copy_viewport_frame_snapshot_for_test(
+        prepared,
+        0,
+        visible_end,
+        content_area,
+        &vec![0u16; visible_end],
+    );
+
+    assert_eq!(
+        app.image_expand_level(IMAGE_ID),
+        ImageExpandLevel::Fit,
+        "image should start at Fit"
+    );
+
+    // Click the badge cell (button up is what fires the cycle).
+    let handled = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: content_area.x + badge_col,
+        row: content_area.y + label_line as u16,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!handled, "handled click should request an immediate redraw");
+    assert_eq!(
+        app.image_expand_level(IMAGE_ID),
+        ImageExpandLevel::Large,
+        "first badge click should expand Fit -> Large"
+    );
+    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+
+    // A click to the LEFT of the badge must not cycle (badge suffix only).
+    if badge_col > 0 {
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: content_area.x,
+            row: content_area.y + label_line as u16,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert_eq!(
+            app.image_expand_level(IMAGE_ID),
+            ImageExpandLevel::Large,
+            "click left of the badge must not cycle the image"
+        );
+    }
+
+    // Two more badge clicks complete the cycle: Large -> Huge -> Fit.
+    let click_badge = |app: &mut App| {
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: content_area.x + badge_col,
+            row: content_area.y + label_line as u16,
+            modifiers: KeyModifiers::empty(),
+        });
+    };
+    click_badge(&mut app);
+    assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Huge);
+    click_badge(&mut app);
+    assert_eq!(
+        app.image_expand_level(IMAGE_ID),
+        ImageExpandLevel::Fit,
+        "cycle should wrap Huge -> Fit"
+    );
+}
+
+/// 1x1 transparent PNG: a real image header so the inline-image pipeline decodes
+/// dimensions and assigns a stable id, exactly like a `read`-tool screenshot.
+const REPRO_TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/// FULL end-to-end reproduction of the user's "clicking the expand badge does
+/// nothing" report. Unlike `test_click_on_inline_image_expand_badge_cycles_level`
+/// (which records a synthetic `ChatFrame` snapshot directly), this drives the
+/// *real* draw: a local App whose session carries a `read`-tool result image,
+/// anchored into the transcript body, rendered through `terminal.draw()`, which
+/// is what records the live copy-viewport snapshot. We then locate the rendered
+/// `expand` badge cell in the actual frame buffer and inject a real left click,
+/// asserting the image size cycles. This exercises the body-anchored image path
+/// (`render_images` -> `resolve_anchored_items` -> `anchored_image_lines`), the
+/// path actually used in production, not the isolated `build_section` helper.
+#[test]
+fn test_real_draw_click_on_body_anchored_expand_badge_cycles_level() {
+    use crate::tui::ui::inline_image_ui::ImageExpandLevel;
+    use crate::message::{ContentBlock, Role};
+
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    assert!(!app.is_remote, "repro must use the local image render path");
+
+    const TOOL_ID: &str = "read-shot-1";
+
+    // Build a real transcript: user asks, assistant calls `read`, tool result
+    // carries the screenshot image. This is exactly what produces a
+    // body-anchored inline image with a `RenderedImageAnchor::ToolCall`.
+    app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "read the screenshot".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: TOOL_ID.to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "shot.png"}),
+            thought_signature: None,
+        }],
+    );
+    app.session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: TOOL_ID.to_string(),
+                content: "read image".to_string(),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: REPRO_TINY_PNG_B64.to_string(),
+            },
+        ],
+    );
+
+    // Mirror the session into the display transcript the body renderer walks.
+    app.display_messages = vec![
+        DisplayMessage::user("read the screenshot"),
+        DisplayMessage::tool(
+            "read shot.png",
+            crate::message::ToolCall {
+                id: TOOL_ID.to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "shot.png"}),
+                intent: None,
+                thought_signature: None,
+            },
+        ),
+    ];
+    app.bump_display_messages_version();
+    app.invalidate_side_pane_images_signature();
+    app.pin_images = true;
+    app.inline_images_visible = true;
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    // Sanity: the local render path must actually surface the anchored image.
+    let images = <App as crate::tui::TuiState>::side_pane_images(&app);
+    assert_eq!(
+        images.len(),
+        1,
+        "session should render exactly one anchored tool image"
+    );
+    let image_id = {
+        let img = &images[0];
+        crate::tui::mermaid::inline_image_dims(&img.media_type, &img.data)
+            .expect("tiny png should decode")
+            .0
+    };
+
+    let backend = ratatui::backend::TestBackend::new(80, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+
+    // REAL draw: this records the live copy-viewport snapshot used by clicks.
+    let rendered = render_and_snap(&app, &mut terminal);
+    assert!(
+        rendered.contains("expand"),
+        "expand badge must render in the live frame, got:\n{rendered}"
+    );
+
+    // Find the badge in the actual buffer: scan rows for the `expand` label line,
+    // then locate the click-icon / dots column the hit-test anchors on.
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    let mut badge: Option<(u16, u16)> = None;
+    'rows: for row in 0..area.height {
+        let mut line = String::new();
+        for col in 0..area.width {
+            line.push_str(buf[(col, row)].symbol());
+        }
+        if !line.contains("expand") {
+            continue;
+        }
+        // The hit-region begins at the click icon (or its dot fallback). Find the
+        // first such cell on this row and use it as the click column.
+        let icon = crate::tui::ui::inline_image_ui::EXPAND_BADGE_CLICK_ICON;
+        for col in 0..area.width {
+            let sym = buf[(col, row)].symbol();
+            if sym == icon || sym == "○" || sym == "●" {
+                badge = Some((col, row));
+                break 'rows;
+            }
+        }
+    }
+    let (badge_col, badge_row) =
+        badge.expect("expand badge cell (click icon or dots) should be visible in the frame");
+
+    assert_eq!(
+        app.image_expand_level(image_id),
+        ImageExpandLevel::Fit,
+        "image should start at Fit before any click"
+    );
+
+    // REAL click on the rendered badge cell. A terminal delivers a *pair* of
+    // events for one physical click: `Down` then `Up`. We must replay both, just
+    // like the live event loop, or we silently skip the copy-selection state the
+    // `Down` arms (which is exactly what the user's click goes through).
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: badge_col,
+        row: badge_row,
+        modifiers: KeyModifiers::empty(),
+    });
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: badge_col,
+        row: badge_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert_eq!(
+        app.image_expand_level(image_id),
+        ImageExpandLevel::Large,
+        "clicking the rendered expand badge must cycle Fit -> Large \
+         (this is the exact path the user reported as broken)"
+    );
+    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+}

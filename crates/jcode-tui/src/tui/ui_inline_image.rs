@@ -529,6 +529,11 @@ fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u
 /// that cycles the per-image size. The expand badge renders a three-dot
 /// progress indicator (`○○○` -> `●○○` -> `●●○`) reflecting the current level so
 /// clicking it feels like a multi-step zoom.
+/// Click/cursor icon that prefixes the clickable expand badge. Doubles as the
+/// anchor cell for badge hit detection (see `expand_badge_start_col`), so any
+/// change here must stay in sync with that scanner.
+pub(crate) const EXPAND_BADGE_CLICK_ICON: &str = "🖱";
+
 pub(crate) fn image_label_line(
     item: &InlineImageItem,
     images_visible: bool,
@@ -550,9 +555,13 @@ pub(crate) fn image_label_line(
     ];
     if images_visible {
         spans.push(Span::styled("hide", dim));
-        // Clickable expand badge: dots show how far through the size cycle we
-        // are, then a verb hinting the next click's effect.
+        // Clickable expand badge: a click/cursor icon signals the badge is
+        // clickable, the dots show how far through the size cycle we are, then a
+        // verb hints the next click's effect. The icon is also the first cell of
+        // the badge hit-region (see `expand_badge_start_col`).
         spans.push(Span::raw("   "));
+        spans.push(Span::styled(EXPAND_BADGE_CLICK_ICON, dim));
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(expand_dots(level), dim));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(expand_verb(level), dim));

@@ -275,6 +275,37 @@ impl Sidecar {
                         );
                         Ok(text)
                     }
+                    Err(OpenAiSidecarError::Api { status, body })
+                        if is_openai_model_unavailable(status, &body)
+                            && auth::claude::load_credentials().is_ok() =>
+                    {
+                        // Both the codex-spark model and the gpt-5.4 OAuth
+                        // fallback are denied for this ChatGPT account. Rather
+                        // than dead-end the sidecar, fall back to Claude haiku
+                        // when Claude credentials are available.
+                        let reason = classify_openai_model_unavailable(status, &body)
+                            .unwrap_or_else(|| {
+                                format!("model denied by OpenAI API (status {})", status)
+                            });
+                        crate::provider::record_model_unavailable_for_account(
+                            SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL,
+                            &reason,
+                        );
+                        crate::logging::info(&format!(
+                            "Sidecar fallback: {} also unavailable in ChatGPT OAuth mode; falling back to Claude {} ({})",
+                            SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL,
+                            SIDECAR_CLAUDE_MODEL,
+                            reason
+                        ));
+                        let claude = Self {
+                            client: self.client.clone(),
+                            model: SIDECAR_CLAUDE_MODEL.to_string(),
+                            max_tokens: self.max_tokens,
+                            backend: SidecarBackend::Claude,
+                            reasoning_override: None,
+                        };
+                        claude.complete_claude(system, user_message).await
+                    }
                     Err(err) => Err(err.into_anyhow()),
                 }
             }

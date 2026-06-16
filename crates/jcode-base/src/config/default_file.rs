@@ -167,6 +167,10 @@ swarm = true
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context
 persist_memory_injections = false
+# Show an in-chat warning when a request misses the KV cache for a harness-caused
+# (avoidable) reason: system prompt, tool set, or message prefix changed. These
+# should essentially never happen and indicate a prefix-cache bug.
+kv_cache_miss_notices = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
@@ -294,6 +298,14 @@ swarm_spawn_mode = "visible"
 # back to hybrid-ordered surfacing. A topic change always forces a rerank. Set 1
 # to rerank every turn. Default 3.
 # memory_rerank_cadence = 3
+#
+# High-precision consensus rerank: run N independent LLM judges per fired rerank
+# and inject only memories that >= memory_rerank_min_agree of them agree on.
+# Default 2 judges / 2 agreement -> injection precision ~1.0 with ~100% clean
+# (zero memory) on no-memory turns, at 2 LLM calls per fired turn. Set votes=1
+# for the cheaper single-judge path (precision ~0.77).
+# memory_rerank_votes = 2
+# memory_rerank_min_agree = 2
 
 [terminal]
 # External command that takes over headed session spawns (swarm agents,

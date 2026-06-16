@@ -132,3 +132,50 @@ fn should_run_rerank_cadence_and_overrides() {
     assert!(should_run_rerank(4, Some(3), 1, false));
     assert!(should_run_rerank(4, Some(3), 0, false));
 }
+
+fn mem(content: &str) -> MemoryEntry {
+    MemoryEntry::new(MemoryCategory::Fact, content)
+}
+
+#[test]
+fn dynamic_gate_cuts_tail_at_score_gap() {
+    // RRF-style descending scores with a sharp gap after the second item.
+    let cands = vec![
+        (mem("a"), 0.0163_f32),
+        (mem("b"), 0.0161),
+        (mem("c"), 0.0100), // big drop -> tail cut here
+        (mem("d"), 0.0098),
+        (mem("e"), 0.0097),
+    ];
+    let out = dynamic_gate_select(cands, 5);
+    assert_eq!(out.len(), 2, "should keep only the two close-scoring items");
+    assert_eq!(out[0].0.content, "a");
+    assert_eq!(out[1].0.content, "b");
+}
+
+#[test]
+fn dynamic_gate_keeps_top1_even_when_isolated() {
+    // A lone strong candidate followed by far-weaker ones: keep exactly 1.
+    let cands = vec![
+        (mem("a"), 0.0200_f32),
+        (mem("b"), 0.0100),
+        (mem("c"), 0.0090),
+    ];
+    let out = dynamic_gate_select(cands, 5);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0.content, "a");
+}
+
+#[test]
+fn dynamic_gate_respects_max_k_on_flat_scores() {
+    // All scores ~equal: gate would keep all, but max_k caps the count.
+    let cands: Vec<_> = (0..8).map(|i| (mem(&format!("m{i}")), 0.0160_f32)).collect();
+    let out = dynamic_gate_select(cands, 5);
+    assert_eq!(out.len(), 5, "capped at max_k even when no gap appears");
+}
+
+#[test]
+fn dynamic_gate_empty_input_returns_empty() {
+    let out = dynamic_gate_select(Vec::new(), 5);
+    assert!(out.is_empty());
+}
