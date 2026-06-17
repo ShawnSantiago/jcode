@@ -164,6 +164,24 @@ pub struct PollingState {
     pub final_poll_due_at: Option<String>,
     pub next_poll_at: Option<String>,
     pub consecutive_transient_failures: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scheduled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_schedule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_schedule_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_schedule_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_schedule_due_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_schedule_observed_at: Option<String>,
+    #[serde(default)]
+    pub overdue_count: u64,
+    #[serde(default)]
+    pub duplicate_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_schedule_error: Option<String>,
 }
 
 impl Default for PollingState {
@@ -176,6 +194,15 @@ impl Default for PollingState {
             final_poll_due_at: None,
             next_poll_at: None,
             consecutive_transient_failures: 0,
+            last_scheduled_at: None,
+            last_schedule_id: None,
+            last_schedule_kind: None,
+            last_schedule_target: None,
+            last_schedule_due_at: None,
+            last_schedule_observed_at: None,
+            overdue_count: 0,
+            duplicate_count: 0,
+            last_schedule_error: None,
         }
     }
 }
@@ -238,6 +265,8 @@ pub struct ActionableItem {
     pub url: Option<String>,
     pub path: Option<String>,
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -621,6 +650,10 @@ fn normalize_v1_value(value: &Value) -> Result<PrWatchState, NormalizeError> {
                 path: item.get("path").and_then(Value::as_str).map(str::to_string),
                 status: item
                     .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                reason: item
+                    .get("reason")
                     .and_then(Value::as_str)
                     .map(str::to_string),
             })
@@ -1167,6 +1200,7 @@ mod tests {
                 url: None,
                 path: None,
                 status: None,
+                reason: Some("test".into()),
             }],
             ..CycleOutcome::default()
         });

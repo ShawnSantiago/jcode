@@ -215,6 +215,9 @@ impl Tool for EndAmbientCycleTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         });
 
         let now = Utc::now();
@@ -358,6 +361,9 @@ impl Tool for ScheduleAmbientTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         };
 
         let mut manager = AmbientManager::new()?;
@@ -893,6 +899,9 @@ impl ScheduleTool {
                 parts.push(format!("Scheduled by session: {}", ctx.session_id));
                 Some(parts.join("\n"))
             },
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         };
 
         let mut manager = AmbientManager::new()?;

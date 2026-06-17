@@ -233,6 +233,9 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         })
         .expect("schedule ambient item");
     manager
@@ -250,6 +253,9 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         })
         .expect("schedule first reminder");
     manager
@@ -267,6 +273,9 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         })
         .expect("schedule second reminder");
 

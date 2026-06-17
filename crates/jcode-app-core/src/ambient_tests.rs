@@ -37,6 +37,9 @@ fn test_scheduled_queue_push_and_pop() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     queue.push(ScheduledItem {
@@ -52,6 +55,9 @@ fn test_scheduled_queue_push_and_pop() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     assert_eq!(queue.len(), 2);
@@ -86,6 +92,9 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
     queue.push(ScheduledItem {
         id: "cancel".into(),
@@ -100,6 +109,9 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let removed = queue.remove_by_id("cancel").unwrap().unwrap();
@@ -133,6 +145,9 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     queue.push(ScheduledItem {
@@ -148,6 +163,9 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let ready = queue.pop_ready();
@@ -180,6 +198,9 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     queue.push(ScheduledItem {
@@ -197,6 +218,9 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     queue.push(ScheduledItem {
@@ -212,6 +236,9 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let ready_direct = queue.take_ready_direct_items();
@@ -244,6 +271,9 @@ fn test_ready_ambient_items_peeks_without_removing_and_excludes_direct_targets()
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
     queue.push(ScheduledItem {
         id: "ambient_due_high".into(),
@@ -258,6 +288,9 @@ fn test_ready_ambient_items_peeks_without_removing_and_excludes_direct_targets()
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
     queue.push(ScheduledItem {
         id: "ambient_future".into(),
@@ -272,6 +305,9 @@ fn test_ready_ambient_items_peeks_without_removing_and_excludes_direct_targets()
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
     queue.push(ScheduledItem {
         id: "session_due".into(),
@@ -288,6 +324,9 @@ fn test_ready_ambient_items_peeks_without_removing_and_excludes_direct_targets()
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let ready = queue.ready_ambient_items();
@@ -318,6 +357,9 @@ fn test_take_ready_ambient_items_and_remove_by_ids() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
     queue.push(ScheduledItem {
         id: "session_due".into(),
@@ -334,6 +376,9 @@ fn test_take_ready_ambient_items_and_remove_by_ids() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let ambient = queue.take_ready_ambient_items();
@@ -371,6 +416,9 @@ fn test_requeue_after_preserves_failed_direct_item() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let mut ready = queue.take_ready_direct_items();
@@ -432,6 +480,9 @@ fn test_ambient_state_record_cycle_with_schedule() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         }),
         started_at: Utc::now() - Duration::seconds(10),
         ended_at: Utc::now(),
@@ -535,6 +586,9 @@ fn test_build_ambient_system_prompt_with_data() {
         relevant_files: vec!["src/main.rs".into()],
         git_branch: Some("main".into()),
         additional_context: Some("Background: Tests were flaky yesterday".into()),
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     }];
 
     let health = MemoryGraphHealth {
@@ -613,6 +667,9 @@ fn test_scheduled_queue_items_accessor() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
     });
 
     let items = queue.items();

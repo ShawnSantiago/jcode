@@ -9,7 +9,7 @@ use jcode_pr_watch_core::{
     parse_gh_checks, parse_gh_issue_comments, parse_gh_pr_view, parse_gh_review_comments,
     parse_gh_review_threads, parse_gh_reviews,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -75,6 +75,90 @@ struct PrWatchInput {
 
 const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
 const MAX_MONITOR_MAX_RUNTIME_SECONDS: u64 = 900;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PrWatchSchedulePayload {
+    tool: String,
+    watch_id: String,
+    repo: String,
+    pr: u64,
+    action: String,
+    state_file: String,
+    poll_interval_seconds: u64,
+    quiet_cycles_required: u64,
+    max_runtime_seconds: u64,
+    readonly: bool,
+}
+
+impl PrWatchSchedulePayload {
+    fn for_action(state: &PrWatchState, action: &str, max_runtime_seconds: u64) -> Self {
+        Self {
+            tool: "pr_watch".to_string(),
+            watch_id: state.watch_id.clone(),
+            repo: state.pr.repo.clone(),
+            pr: state.pr.number,
+            action: action.to_string(),
+            state_file: state_file_for_watch(&state.watch_id),
+            poll_interval_seconds: state.polling.poll_interval_seconds,
+            quiet_cycles_required: state.polling.required_quiet_cycles,
+            max_runtime_seconds,
+            readonly: true,
+        }
+    }
+
+    fn validate_against_state(&self, state: &PrWatchState) -> Result<()> {
+        if self.tool != "pr_watch" {
+            bail!("scheduled payload tool must be pr_watch");
+        }
+        if !self.readonly {
+            bail!("scheduled pr_watch payload must be read-only");
+        }
+        if !matches!(
+            self.action.as_str(),
+            "ack_baseline" | "poll_now" | "monitor"
+        ) {
+            bail!(
+                "scheduled pr_watch action is not read-only: {}",
+                self.action
+            );
+        }
+        if self.watch_id != state.watch_id
+            || self.repo != state.pr.repo
+            || self.pr != state.pr.number
+        {
+            bail!("scheduled pr_watch payload does not match watch state");
+        }
+        Ok(())
+    }
+
+    fn from_scheduled_item(item: &ScheduledItem) -> Result<Option<Self>> {
+        let Some(value) = item.schedule_payload.clone() else {
+            return Ok(None);
+        };
+        if value.get("tool").and_then(Value::as_str) != Some("pr_watch") {
+            return Ok(None);
+        }
+        let payload: Self = serde_json::from_value(value)
+            .with_context(|| format!("invalid pr_watch schedule payload on {}", item.id))?;
+        if !payload.readonly {
+            bail!(
+                "invalid pr_watch schedule payload on {}: readonly=false",
+                item.id
+            );
+        }
+        if !matches!(
+            payload.action.as_str(),
+            "ack_baseline" | "poll_now" | "monitor"
+        ) {
+            bail!(
+                "invalid pr_watch schedule payload on {}: action={}",
+                item.id,
+                payload.action
+            );
+        }
+        Ok(Some(payload))
+    }
+}
 
 #[async_trait]
 impl Tool for PrWatchTool {
@@ -145,6 +229,14 @@ fn watch_dir(root: &Path) -> PathBuf {
 
 fn state_path(store: &Path, watch_id: &str) -> PathBuf {
     store.join(format!("{watch_id}-state.json"))
+}
+
+fn state_file_for_watch(watch_id: &str) -> String {
+    format!(".jcode/pr-feedback-watch/{watch_id}-state.json")
+}
+
+fn schedule_key_for_watch(watch_id: &str) -> String {
+    format!("pr_watch:{watch_id}:monitor")
 }
 
 fn lock_path(store: &Path, watch_id: &str) -> PathBuf {
@@ -226,7 +318,10 @@ fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<
             })?;
         file.write_all(&serde_json::to_vec_pretty(&state)?)?;
     }
-    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
+    let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
     Ok(ToolOutput::new(format!(
         "PR watch initialized: {}\nPath: {}\nMode: local state initialized. Use poll_now for read-only gh collection{}{}",
         state.watch_id,
@@ -413,11 +508,11 @@ fn reschedule_watch(
         }),
     });
     let path = state_path(store, &state.watch_id);
+    params.schedule_next = true;
+    let scheduled = maybe_schedule_next_monitor(ctx, &mut state, &params)?;
     if would_write {
         write_state_atomic(&path, &state)?;
     }
-    params.schedule_next = true;
-    let scheduled = maybe_schedule_next_monitor(ctx, &state, &params)?;
     Ok(ToolOutput::new(format!(
         "PR watch rescheduled: {}\nCanceled queued items: {}\nScheduled: {}\nNote: scheduled monitor cycles remain read-only and must not push, comment, resolve threads, or merge.{}",
         state.watch_id,
@@ -509,6 +604,70 @@ fn schedule_status_line(state: &PrWatchState) -> String {
                 .unwrap_or("not scheduled")
         ),
     }
+}
+
+fn schedule_queue_health_line(state: &PrWatchState) -> String {
+    if state.terminal {
+        return "Schedule health: terminal".to_string();
+    }
+    if !state.pending_actionable.is_empty() {
+        return format!(
+            "Schedule health: paused_action_required; run `pr_watch action=\"reschedule\" repo={} pr={} watch_id={} schedule_next=true` after remediation if continued monitoring is desired",
+            state.pr.repo, state.pr.number, state.watch_id
+        );
+    }
+    if state.last_cycle.failed_check_count > 0 {
+        return format!(
+            "Schedule health: paused_checks_failed; inspect checks, then run `pr_watch action=\"reschedule\" repo={} pr={} watch_id={} schedule_next=true` to continue monitoring",
+            state.pr.repo, state.pr.number, state.watch_id
+        );
+    }
+
+    let Ok(manager) = AmbientManager::new() else {
+        return "Schedule health: unknown; failed to load ambient queue".to_string();
+    };
+    let matches = find_existing_scheduled_watch_items(manager.queue().items(), state);
+    if matches.is_empty() {
+        if state.polling.next_poll_at.is_some() || state.polling.last_schedule_due_at.is_some() {
+            return format!(
+                "Schedule health: missing_queue_item; recover with `pr_watch action=\"reschedule\" repo={} pr={} watch_id={} schedule_next=true`",
+                state.pr.repo, state.pr.number, state.watch_id
+            );
+        }
+        return "Schedule health: unscheduled".to_string();
+    }
+    let now = Utc::now();
+    let future = matches
+        .iter()
+        .filter(|item| item.scheduled_for > now)
+        .count();
+    let overdue = matches.len().saturating_sub(future);
+    if matches.len() > 1 {
+        return format!(
+            "Schedule health: duplicate_future_items count={} future={} overdue={}; recover with `pr_watch action=\"reschedule\" repo={} pr={} watch_id={} schedule_next=true`",
+            matches.len(),
+            future,
+            overdue,
+            state.pr.repo,
+            state.pr.number,
+            state.watch_id
+        );
+    }
+    let item = matches[0];
+    if item.scheduled_for <= now {
+        return format!(
+            "Schedule health: overdue_unclaimed due_at={}; recover with `pr_watch action=\"reschedule\" repo={} pr={} watch_id={} schedule_next=true`",
+            item.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ"),
+            state.pr.repo,
+            state.pr.number,
+            state.watch_id
+        );
+    }
+    format!(
+        "Schedule health: healthy; canonical monitor {} due_at={}",
+        item.id,
+        item.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+    )
 }
 
 fn human_duration(seconds: i64) -> String {
@@ -643,77 +802,15 @@ fn timed_out_collection(max_runtime_seconds: u64) -> GhCollection {
 
 fn maybe_schedule_next(
     ctx: &ToolContext,
-    state: &PrWatchState,
+    state: &mut PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
-    if params.dry_run.unwrap_or(false) || state.terminal {
-        if state.terminal {
-            let _ = cancel_queued_watch_items(state);
-        }
-        return Ok(None);
-    }
-    if !params.schedule_next {
-        return Ok(None);
-    }
-    let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
-    let task = scheduled_poll_prompt(state);
-    let mut manager = AmbientManager::new()?;
-    if let Some(existing) =
-        find_existing_scheduled_watch_item(manager.queue().items(), state, "poll_now").or_else(
-            || find_existing_scheduled_watch_item(manager.queue().items(), state, "ack_baseline"),
-        )
-    {
-        if existing.scheduled_for > Utc::now() {
-            return Ok(Some(format!(
-                "{} at {} (already scheduled)",
-                existing.id,
-                existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
-            )));
-        }
-        let stale_id = existing.id.clone();
-        manager.cancel_schedule(&stale_id)?;
-    }
-    let target = match params.target.as_deref() {
-        Some("spawn") => ScheduleTarget::Spawn {
-            parent_session_id: ctx.session_id.clone(),
-        },
-        Some("resume") | None => ScheduleTarget::Session {
-            session_id: ctx.session_id.clone(),
-        },
-        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
-    };
-    let id = manager.schedule(ScheduleRequest {
-        wake_in_minutes: None,
-        wake_at: Some(wake_at),
-        context: task.clone(),
-        priority: Priority::Normal,
-        target,
-        created_by_session: ctx.session_id.clone(),
-        working_dir: ctx
-            .working_dir
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        task_description: Some(task),
-        relevant_files: vec![format!(
-            ".jcode/pr-feedback-watch/{}-state.json",
-            state.watch_id
-        )],
-        git_branch: None,
-        additional_context: Some(
-            "Scheduled by pr_watch schedule_next; read-only poll only.".to_string(),
-        ),
-    })?;
-    super::ambient::nudge_schedule_runner();
-    Ok(Some(format!(
-        "{} at {}",
-        id,
-        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
-    )))
+    maybe_schedule_next_monitor(ctx, state, params)
 }
 
 fn maybe_schedule_next_monitor(
     ctx: &ToolContext,
-    state: &PrWatchState,
+    state: &mut PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
     if params.dry_run.unwrap_or(false) || state.terminal {
@@ -728,17 +825,35 @@ fn maybe_schedule_next_monitor(
     let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
     let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
     let mut manager = AmbientManager::new()?;
-    if let Some(existing) =
-        find_existing_scheduled_watch_item(manager.queue().items(), state, "monitor")
-    {
-        if existing.scheduled_for > Utc::now() {
-            return Ok(Some(format!(
-                "{} at {} (already scheduled)",
-                existing.id,
-                existing.scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
-            )));
+    let existing_ids: Vec<String> =
+        find_existing_scheduled_watch_items(manager.queue().items(), state)
+            .into_iter()
+            .map(|item| item.id.clone())
+            .collect();
+    let mut future_existing = None;
+    for id in &existing_ids {
+        if let Some(item) = manager.queue().items().iter().find(|item| item.id == *id)
+            && item.scheduled_for > Utc::now()
+            && item.schedule_key.as_deref() == Some(&schedule_key_for_watch(&state.watch_id))
+        {
+            future_existing = Some((item.id.clone(), item.scheduled_for));
+            break;
         }
-        let stale_id = existing.id.clone();
+    }
+    if let Some((id, scheduled_for)) = future_existing {
+        state.polling.duplicate_count = existing_ids.len().saturating_sub(1) as u64;
+        state.polling.last_schedule_id = Some(id.clone());
+        state.polling.last_schedule_kind = Some("monitor".to_string());
+        state.polling.last_schedule_due_at =
+            Some(scheduled_for.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        state.polling.next_poll_at = state.polling.last_schedule_due_at.clone();
+        return Ok(Some(format!(
+            "{} at {} (already scheduled)",
+            id,
+            scheduled_for.format("%Y-%m-%dT%H:%M:%SZ")
+        )));
+    }
+    for stale_id in existing_ids {
         manager.cancel_schedule(&stale_id)?;
     }
     let target = match params.target.as_deref() {
@@ -750,6 +865,10 @@ fn maybe_schedule_next_monitor(
         },
         Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
     };
+    let target_summary = format_schedule_target_for_state(&target);
+    let payload =
+        PrWatchSchedulePayload::for_action(state, "monitor", monitor_max_runtime_seconds(params));
+    payload.validate_against_state(state)?;
     let id = manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(wake_at),
@@ -762,15 +881,25 @@ fn maybe_schedule_next_monitor(
             .as_ref()
             .map(|path| path.display().to_string()),
         task_description: Some(task),
-        relevant_files: vec![format!(
-            ".jcode/pr-feedback-watch/{}-state.json",
-            state.watch_id
-        )],
+        relevant_files: vec![state_file_for_watch(&state.watch_id)],
         git_branch: None,
         additional_context: Some(
-            "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string(),
+            "Scheduled by pr_watch monitor; invoke structured monitor action only. Read-only poll only.".to_string(),
         ),
+        schedule_key: Some(schedule_key_for_watch(&state.watch_id)),
+        schedule_kind: Some("pr_watch.monitor".to_string()),
+        schedule_payload: Some(serde_json::to_value(payload)?),
     })?;
+    let scheduled_at = now_iso();
+    let due_at = wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    state.polling.next_poll_at = Some(due_at.clone());
+    state.polling.last_scheduled_at = Some(scheduled_at);
+    state.polling.last_schedule_id = Some(id.clone());
+    state.polling.last_schedule_kind = Some("monitor".to_string());
+    state.polling.last_schedule_target = Some(target_summary);
+    state.polling.last_schedule_due_at = Some(due_at);
+    state.polling.duplicate_count = 0;
+    state.polling.last_schedule_error = None;
     super::ambient::nudge_schedule_runner();
     Ok(Some(format!(
         "{} at {}",
@@ -781,30 +910,56 @@ fn maybe_schedule_next_monitor(
 
 fn cancel_queued_watch_items(state: &PrWatchState) -> Result<usize> {
     let mut manager = AmbientManager::new()?;
-    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
     let ids: HashSet<String> = manager
         .queue()
         .items()
         .iter()
-        .filter(|item| {
-            let description = item.task_description.as_deref().unwrap_or(&item.context);
-            description.contains(&state.watch_id)
-                && (item.relevant_files.iter().any(|file| file == &state_file)
-                    || description.contains(&format!("watch_id={}", state.watch_id)))
-        })
+        .filter(|item| scheduled_item_matches_watch(item, state))
         .map(|item| item.id.clone())
         .collect();
     Ok(manager.remove_items_by_id(&ids))
 }
 
+fn scheduled_item_matches_watch(item: &ScheduledItem, state: &PrWatchState) -> bool {
+    if item.schedule_key.as_deref() == Some(&schedule_key_for_watch(&state.watch_id)) {
+        return true;
+    }
+    if let Ok(Some(payload)) = PrWatchSchedulePayload::from_scheduled_item(item)
+        && payload.watch_id == state.watch_id
+        && payload.repo == state.pr.repo
+        && payload.pr == state.pr.number
+    {
+        return true;
+    }
+    let state_file = state_file_for_watch(&state.watch_id);
+    let description = item.task_description.as_deref().unwrap_or(&item.context);
+    description.contains(&state.watch_id)
+        && (item.relevant_files.iter().any(|file| file == &state_file)
+            || description.contains(&format!("watch_id={}", state.watch_id)))
+}
+
+fn find_existing_scheduled_watch_items<'a>(
+    items: &'a [ScheduledItem],
+    state: &PrWatchState,
+) -> Vec<&'a ScheduledItem> {
+    items
+        .iter()
+        .filter(|item| scheduled_item_matches_watch(item, state))
+        .collect()
+}
+
+#[cfg(test)]
 fn find_existing_scheduled_watch_item<'a>(
     items: &'a [ScheduledItem],
     state: &PrWatchState,
     action: &str,
 ) -> Option<&'a ScheduledItem> {
-    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
+    let state_file = state_file_for_watch(&state.watch_id);
     let action_marker = format!("action={action}");
     items.iter().find(|item| {
+        if let Ok(Some(payload)) = PrWatchSchedulePayload::from_scheduled_item(item) {
+            return payload.watch_id == state.watch_id && payload.action == action;
+        }
         let description = item.task_description.as_deref().unwrap_or(&item.context);
         description.contains(&state.watch_id)
             && description.contains(&action_marker)
@@ -813,6 +968,15 @@ fn find_existing_scheduled_watch_item<'a>(
     })
 }
 
+fn format_schedule_target_for_state(target: &ScheduleTarget) -> String {
+    match target {
+        ScheduleTarget::Ambient => "ambient".to_string(),
+        ScheduleTarget::Session { session_id } => format!("resume:{session_id}"),
+        ScheduleTarget::Spawn { parent_session_id } => format!("spawn:{parent_session_id}"),
+    }
+}
+
+#[cfg(test)]
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
     let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
     if state.last_successful_fetch.is_empty() {
@@ -907,9 +1071,11 @@ async fn ack_baseline(
             .with_title(format!("{} stale poll", current_state.watch_id))
             .with_metadata(json!({"watch": current_state, "readiness": readiness, "written": false, "stale_poll": true})));
         }
+    }
+    let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
+    if would_write {
         write_state_atomic(&path, &state)?;
     }
-    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let text = format!(
         "PR watch baseline acknowledged: {}\nRepo: {}\nPR: #{}\nUnresolved threads: {}\nReview comments seen: {}\nIssue comments seen: {}\nReviews seen: {}\nPartial failure: {}{}{}",
         state.watch_id,
@@ -1202,9 +1368,11 @@ async fn poll_now(
             .with_title(format!("{} stale poll", current_state.watch_id))
             .with_metadata(json!({"watch": current_state, "readiness": readiness, "written": false, "stale_poll": true})));
         }
+    }
+    let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
+    if would_write {
         write_state_atomic(&path, &state)?;
     }
-    let scheduled = maybe_schedule_next(ctx, &state, &params)?;
     let readiness = state.readiness();
     let text = format!(
         "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}",
@@ -1355,14 +1523,16 @@ async fn monitor_once(
             .with_title(format!("{} stale monitor", watch_id))
             .with_metadata(json!({"watch_id": watch_id, "monitor_status": "stale", "written": false, "stale_monitor": true})));
         }
-        write_state_atomic(&path, &state)?;
     }
     let status = monitor_status_for_state(&state, partial_failure);
     let scheduled = if monitor_should_schedule_followup(status) {
-        maybe_schedule_next_monitor(ctx, &state, &params)?
+        maybe_schedule_next_monitor(ctx, &mut state, &params)?
     } else {
         None
     };
+    if would_write {
+        write_state_atomic(&path, &state)?;
+    }
     let readiness = state.readiness();
     let text = format!(
         "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
@@ -1822,6 +1992,14 @@ fn update_state_from_collection(
                         url: comment.url,
                         path: comment.path,
                         status: Some(if is_edited { "edited" } else { "new" }.to_string()),
+                        reason: Some(
+                            if is_edited {
+                                "edited_review_comment"
+                            } else {
+                                "new_review_comment"
+                            }
+                            .to_string(),
+                        ),
                     });
                 }
             }
@@ -1873,6 +2051,14 @@ fn update_state_from_collection(
                         url: comment.url,
                         path: None,
                         status: Some(if is_edited { "edited" } else { "new" }.to_string()),
+                        reason: Some(
+                            if is_edited {
+                                "edited_issue_comment"
+                            } else {
+                                "new_issue_comment"
+                            }
+                            .to_string(),
+                        ),
                     });
                 }
             }
@@ -1906,6 +2092,14 @@ fn update_state_from_collection(
                     .zip(body_hash.as_ref())
                     .map(|(old, new)| old != new)
                     .unwrap_or(false);
+                let is_known_unchanged = previous
+                    .map(|marker| {
+                        marker.updated_at == thread.updated_at
+                            && marker.resolved == thread.is_resolved
+                            && marker.outdated == thread.is_outdated
+                            && marker.body_hash == body_hash
+                    })
+                    .unwrap_or(false);
                 state.last_seen.review_threads.insert(
                     thread.id.clone(),
                     jcode_pr_watch_core::ReviewThreadMarker {
@@ -1913,11 +2107,11 @@ fn update_state_from_collection(
                         updated_at: thread.updated_at.clone(),
                         resolved: thread.is_resolved,
                         outdated: thread.is_outdated,
-                        body_hash,
+                        body_hash: body_hash.clone(),
                         url: thread.url.clone(),
                     },
                 );
-                if !thread.is_resolved && !thread.is_outdated {
+                if !thread.is_resolved && !thread.is_outdated && !is_known_unchanged {
                     pending_actionable.push(ActionableItem {
                         id: thread.id,
                         surface: "review_threads".to_string(),
@@ -1931,6 +2125,14 @@ fn update_state_from_collection(
                                 "new_reply"
                             } else {
                                 "unresolved"
+                            }
+                            .to_string(),
+                        ),
+                        reason: Some(
+                            if has_new_reply {
+                                "changed_unresolved_thread"
+                            } else {
+                                "new_unresolved_thread"
                             }
                             .to_string(),
                         ),
@@ -1976,6 +2178,7 @@ fn update_state_from_collection(
                         url: None,
                         path: None,
                         status: review.state,
+                        reason: Some("review_changes_requested".to_string()),
                     });
                 }
             }
@@ -2098,9 +2301,25 @@ fn is_automation_chatter(author: Option<&str>, body: Option<&str>) -> bool {
         || ((author.contains("vercel") || body.contains("vercel"))
             && (body.contains("deployment") || body.contains("preview"))
             && (body.contains("ready")
+                || body.contains("building")
                 || body.contains("completed")
                 || body.contains("deployed")
-                || body.contains("visit preview")))
+                || body.contains("visit preview")
+                || body.contains("queued")))
+        || ((author.contains("netlify") || body.contains("netlify"))
+            && (body.contains("deploy preview") || body.contains("deployment"))
+            && (body.contains("ready")
+                || body.contains("building")
+                || body.contains("published")
+                || body.contains("deploying")))
+        || ((author.contains("github-actions") || author.ends_with("[bot]"))
+            && (body.contains("workflow run")
+                || body.contains("check run")
+                || body.contains("deployment preview"))
+            && (body.contains("started")
+                || body.contains("queued")
+                || body.contains("in progress")
+                || body.contains("completed successfully")))
         || (body.contains("jules, reporting for duty")
             || body.contains("reporting for duty! i'm here to lend a hand"))
 }
@@ -2111,11 +2330,17 @@ fn body_contains_review_signal(body: &str) -> bool {
         || body.contains("[low]")
         || body.contains("requested changes")
         || body.contains("please fix")
+        || body.contains("please ")
         || body.contains("must fix")
+        || body.contains("needs changes")
+        || body.contains("action required")
+        || body.contains("review required")
         || body.contains("security")
         || body.contains("failing")
         || body.contains("failed")
+        || body.contains("failure")
         || body.contains("error:")
+        || body.contains(" error")
 }
 
 fn stable_body_hash(body: &str) -> String {
@@ -2134,7 +2359,9 @@ fn now_iso() -> String {
 fn status_like(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let state = load_state_for_params(store, &params)?;
     let readiness = state.readiness();
-    let text = format_status_report(&state, readiness_label(&readiness));
+    let mut text = format_status_report(&state, readiness_label(&readiness));
+    text.push('\n');
+    text.push_str(&schedule_queue_health_line(&state));
     Ok(ToolOutput::new(text)
         .with_title(format!(
             "{} {}",
@@ -2148,6 +2375,8 @@ fn readiness_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let state = load_state_for_params(store, &params)?;
     let readiness = state.readiness();
     let mut text = format_status_report(&state, readiness_label(&readiness));
+    text.push('\n');
+    text.push_str(&schedule_queue_health_line(&state));
     text.push_str("\n\nReadiness decision:\n");
     text.push_str(&format!("- {}\n", readiness_label(&readiness)));
     for reason in readiness_reasons(&state) {
@@ -2563,6 +2792,9 @@ mod tests {
             relevant_files,
             git_branch: None,
             additional_context: Some("Scheduled by pr_watch schedule_next".to_string()),
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
         }
     }
 
@@ -2618,6 +2850,42 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_watch_dedupe_uses_structured_payload() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let payload = PrWatchSchedulePayload::for_action(&state, "monitor", 540);
+        payload
+            .validate_against_state(&state)
+            .expect("valid payload");
+        let mut item = scheduled_item("sched_structured", "legacy text without markers", vec![]);
+        item.schedule_key = Some(schedule_key_for_watch(&state.watch_id));
+        item.schedule_kind = Some("pr_watch.monitor".to_string());
+        item.schedule_payload = Some(serde_json::to_value(payload).expect("payload json"));
+
+        let items = vec![item];
+        let found = find_existing_scheduled_watch_item(&items, &state, "monitor")
+            .expect("structured monitor schedule should be found");
+        assert_eq!(found.id, "sched_structured");
+    }
+
+    #[test]
+    fn scheduled_payload_rejects_write_like_actions() {
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 7,
+        });
+        let mut payload = PrWatchSchedulePayload::for_action(&state, "monitor", 540);
+        payload.action = "push".to_string();
+        assert!(payload.validate_against_state(&state).is_err());
+
+        let mut item = scheduled_item("sched_bad", "bad payload", vec![]);
+        item.schedule_payload = Some(serde_json::to_value(payload).expect("payload json"));
+        assert!(PrWatchSchedulePayload::from_scheduled_item(&item).is_err());
+    }
+
+    #[test]
     fn monitor_lock_prevents_concurrent_runs() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let first = acquire_watch_lock(temp.path(), "owner-repo-pr-7")
@@ -2664,6 +2932,7 @@ mod tests {
             url: None,
             path: None,
             status: Some("unresolved".into()),
+            reason: Some("test".into()),
         });
         assert_eq!(
             monitor_status_for_state(&state, false),
@@ -2789,6 +3058,7 @@ mod tests {
             url: Some("https://thread".into()),
             path: Some("src/lib.rs".into()),
             status: Some("unresolved".into()),
+            reason: Some("test".into()),
         });
         state.last_cycle.pending_check_count = 1;
         state.last_cycle.failed_check_count = 1;
@@ -2960,6 +3230,7 @@ mod tests {
             url: Some("https://thread".into()),
             path: Some("src/lib.rs".into()),
             status: Some("unresolved".into()),
+            reason: Some("test".into()),
         });
         let reasons = readiness_reasons(&state);
         assert!(reasons.iter().any(|reason| reason.contains("actionable")));
@@ -3124,8 +3395,33 @@ mod tests {
             }]),
         };
         update_state_from_collection(&mut state, collection, "2026-05-13T18:05:00Z");
+        assert_eq!(state.pending_actionable.len(), 0);
+
+        let updated_collection = GhCollection {
+            metadata: Err(SurfaceError::transient("metadata", "skip")),
+            checks: Ok(Vec::new()),
+            review_comments: Ok(Vec::new()),
+            issue_comments: Ok(Vec::new()),
+            reviews: Ok(Vec::new()),
+            review_threads: Ok(vec![jcode_pr_watch_core::ReviewThread {
+                id: "THREAD_BASE".into(),
+                is_resolved: false,
+                is_outdated: false,
+                path: Some("src/lib.rs".into()),
+                line: Some(2),
+                url: Some("https://thread".into()),
+                updated_at: Some("2026-05-13T18:10:00Z".into()),
+                author: Some("reviewer".into()),
+                body: Some("Existing thread with new reply".into()),
+            }]),
+        };
+        update_state_from_collection(&mut state, updated_collection, "2026-05-13T18:10:00Z");
         assert_eq!(state.pending_actionable.len(), 1);
         assert_eq!(state.pending_actionable[0].id, "THREAD_BASE");
+        assert_eq!(
+            state.pending_actionable[0].reason.as_deref(),
+            Some("changed_unresolved_thread")
+        );
     }
     #[test]
     fn unresolved_review_threads_are_actionable_and_resolved_are_not() {

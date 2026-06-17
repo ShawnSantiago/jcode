@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::PathBuf;
 
 mod directives;
@@ -130,6 +131,12 @@ pub struct ScheduledItem {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_payload: Option<Value>,
 }
 
 /// Persistent ambient state
@@ -186,6 +193,12 @@ pub struct ScheduleRequest {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_payload: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------
