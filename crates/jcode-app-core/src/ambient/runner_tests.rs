@@ -1,4 +1,5 @@
-use super::AmbientRunnerHandle;
+use super::{AmbientRunnerHandle, has_ready_direct_items};
+use crate::ambient::ScheduledQueue;
 use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
 use crate::message::{Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -34,6 +35,30 @@ impl Drop for EnvVarGuard {
 }
 
 struct TestProvider;
+
+fn scheduled_item(
+    id: &str,
+    target: ScheduleTarget,
+    scheduled_for: chrono::DateTime<chrono::Utc>,
+) -> ScheduledItem {
+    ScheduledItem {
+        id: id.to_string(),
+        scheduled_for,
+        context: "Follow up later".to_string(),
+        priority: Priority::Normal,
+        target,
+        created_by_session: "session_test".to_string(),
+        created_at: chrono::Utc::now(),
+        working_dir: None,
+        task_description: Some("Follow up later".to_string()),
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        schedule_key: None,
+        schedule_kind: None,
+        schedule_payload: None,
+    }
+}
 
 #[derive(Clone, Default)]
 struct StreamingTestProvider {
@@ -119,6 +144,44 @@ async fn runner_stays_alive_to_service_schedules_when_ambient_disabled() {
 
     task.abort();
     let _ = task.await;
+}
+
+#[test]
+fn ready_direct_detection_ignores_ambient_and_future_items() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut queue = ScheduledQueue::load(temp.path().join("queue.json"));
+    let now = chrono::Utc::now();
+
+    queue.push(scheduled_item(
+        "ambient_ready",
+        ScheduleTarget::Ambient,
+        now,
+    ));
+    queue.push(scheduled_item(
+        "spawn_future",
+        ScheduleTarget::Spawn {
+            parent_session_id: "session_parent".to_string(),
+        },
+        now + chrono::Duration::minutes(5),
+    ));
+
+    assert!(
+        !has_ready_direct_items(&queue, now),
+        "ambient-ready and future direct items should not bypass user-active pause"
+    );
+
+    queue.push(scheduled_item(
+        "spawn_ready",
+        ScheduleTarget::Spawn {
+            parent_session_id: "session_parent".to_string(),
+        },
+        now,
+    ));
+
+    assert!(
+        has_ready_direct_items(&queue, now),
+        "ready spawn/resume items must bypass user-active pause"
+    );
 }
 
 #[tokio::test]

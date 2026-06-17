@@ -9,7 +9,7 @@
 use crate::agent::Agent;
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
-    CycleStatus, ScheduleTarget, ScheduledItem,
+    CycleStatus, ScheduleTarget, ScheduledItem, ScheduledQueue,
 };
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
@@ -21,7 +21,7 @@ use crate::safety::SafetySystem;
 use crate::session::Session;
 use crate::tool;
 use crate::tool::ambient as ambient_tools;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,6 +29,13 @@ use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 const DIRECT_DELIVERY_RETRY_SECS: i64 = 300;
+
+pub(super) fn has_ready_direct_items(queue: &ScheduledQueue, now: DateTime<Utc>) -> bool {
+    queue
+        .items()
+        .iter()
+        .any(|item| item.scheduled_for <= now && item.target.is_direct_delivery())
+}
 
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
@@ -609,8 +616,14 @@ impl AmbientRunnerHandle {
                     drop(s);
                 }
 
-                // Check if we should pause
-                if scheduler.should_pause() {
+                // Check if we should pause. Direct session/spawn schedule targets
+                // are user-visible reminders and watchdog work, so they must not
+                // be blocked by the ambient-agent user-active pause.
+                let has_ready_direct_items = AmbientManager::new()
+                    .map(|mgr| has_ready_direct_items(mgr.queue(), Utc::now()))
+                    .unwrap_or(false);
+
+                if scheduler.should_pause() && !has_ready_direct_items {
                     let mut s = self.inner.state.write().await;
                     s.status = AmbientStatus::Paused {
                         reason: "user session active".to_string(),
