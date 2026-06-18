@@ -1,4 +1,4 @@
-use super::{Tool, ToolContext, ToolOutput};
+use super::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem};
 use crate::session::Session;
 use anyhow::{Context, Result, bail};
@@ -6,20 +6,23 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jcode_pr_watch_core::{
     ActionRequiredHandoffStatus, ActionableItem, AuthorizationGrant, CheckRunState, CycleOutcome,
-    Marker, PrTarget, PrWatchState, ResolutionAttemptStatus, SurfaceError, ThreadResolutionAttempt,
-    ValidationEvidence, WatchEvent, WriteScope, normalize_watch_state_json, parse_gh_checks,
-    parse_gh_issue_comments, parse_gh_pr_view, parse_gh_review_comments, parse_gh_review_threads,
-    parse_gh_reviews,
+    Marker, PrTarget, PrWatchEventMode, PrWatchState, ResolutionAttemptStatus, SurfaceError,
+    ThreadResolutionAttempt, ValidationEvidence, WatchEvent, WriteScope,
+    normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments, parse_gh_pr_view,
+    parse_gh_review_comments, parse_gh_review_threads, parse_gh_reviews,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration as StdDuration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 pub struct PrWatchTool;
@@ -46,6 +49,9 @@ enum PrWatchAction {
     Handoff,
     AckBaseline,
     ResolveAddressed,
+    WebhookStatus,
+    WebhookDoctor,
+    WebhookHeartbeat,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +95,12 @@ struct PrWatchInput {
     expected_cycle_number: Option<u64>,
     #[serde(default)]
     no_code_resolution: bool,
+    #[serde(default)]
+    event_mode: Option<PrWatchEventMode>,
+    #[serde(default)]
+    fallback_heartbeat_seconds: Option<u64>,
+    #[serde(default)]
+    webhook_url_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +125,18 @@ struct PrWatchSchedulePayload {
     poll_interval_seconds: u64,
     quiet_cycles_required: u64,
     max_runtime_seconds: u64,
+    readonly: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PrWatchWebhookHeartbeatPayload {
+    tool: String,
+    watch_id: String,
+    repo: String,
+    pr: u64,
+    action: String,
+    state_file: String,
+    heartbeat_seconds: u64,
     readonly: bool,
 }
 
@@ -184,7 +208,7 @@ impl PrWatchSchedulePayload {
         }
         if !matches!(
             self.action.as_str(),
-            "ack_baseline" | "poll_now" | "monitor"
+            "ack_baseline" | "poll_now" | "monitor" | "webhook_heartbeat"
         ) {
             bail!(
                 "scheduled pr_watch action is not read-only: {}",
@@ -217,7 +241,7 @@ impl PrWatchSchedulePayload {
         }
         if !matches!(
             payload.action.as_str(),
-            "ack_baseline" | "poll_now" | "monitor"
+            "ack_baseline" | "poll_now" | "monitor" | "webhook_heartbeat"
         ) {
             bail!(
                 "invalid pr_watch schedule payload on {}: action={}",
@@ -226,6 +250,37 @@ impl PrWatchSchedulePayload {
             );
         }
         Ok(Some(payload))
+    }
+}
+
+impl PrWatchWebhookHeartbeatPayload {
+    fn new(state: &PrWatchState, heartbeat_seconds: u64) -> Self {
+        Self {
+            tool: "pr_watch".to_string(),
+            watch_id: state.watch_id.clone(),
+            repo: state.pr.repo.clone(),
+            pr: state.pr.number,
+            action: "webhook_heartbeat".to_string(),
+            state_file: state_file_for_watch(&state.watch_id),
+            heartbeat_seconds,
+            readonly: true,
+        }
+    }
+
+    fn validate_against_state(&self, state: &PrWatchState) -> Result<()> {
+        if self.tool != "pr_watch" || self.action != "webhook_heartbeat" || !self.readonly {
+            bail!("webhook heartbeat payload must be read-only pr_watch webhook_heartbeat");
+        }
+        if self.watch_id != state.watch_id
+            || self.repo != state.pr.repo
+            || self.pr != state.pr.number
+        {
+            bail!("webhook heartbeat payload does not match watch state");
+        }
+        if self.heartbeat_seconds < 300 {
+            bail!("webhook heartbeat must be at least 300 seconds");
+        }
+        Ok(())
     }
 }
 
@@ -247,7 +302,7 @@ impl Tool for PrWatchTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "authorize", "revoke", "reschedule", "stop", "readiness", "handoff", "resolve_addressed"],
+                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "authorize", "revoke", "reschedule", "stop", "readiness", "handoff", "resolve_addressed", "webhook_status", "webhook_doctor", "webhook_heartbeat"],
                     "description": "Action. poll_now/monitor perform read-only gh CLI collection and update local state; no GitHub mutations are performed. authorize/revoke only record local grants for a separate explicit remediation workflow."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
@@ -270,6 +325,9 @@ impl Tool for PrWatchTool {
                 ,"expected_fingerprint": {"type": "string", "description": "Expected current actionable fingerprint for action=resolve_addressed; prevents resolving stale handoffs."}
                 ,"expected_cycle_number": {"type": "integer", "description": "Expected watch polling cycle number for action=resolve_addressed; prevents resolving stale handoffs."}
                 ,"no_code_resolution": {"type": "boolean", "description": "Set true only when resolving without a code commit; requires a non-empty reason and no commit_sha."}
+                ,"event_mode": {"type": "string", "enum": ["polling", "webhook", "hybrid"], "description": "Event source mode. polling keeps existing scheduled monitor behavior; webhook suppresses normal monitor polling; hybrid keeps polling and also accepts webhook wakeups."}
+                ,"fallback_heartbeat_seconds": {"type": "integer", "description": "Optional low-frequency read-only webhook heartbeat interval. Disabled when omitted."}
+                ,"webhook_url_hint": {"type": "string", "description": "Optional public webhook URL hint for status/doctor display."}
                 ,"validation": {
                     "type": "array",
                     "items": {
@@ -309,6 +367,9 @@ impl Tool for PrWatchTool {
             PrWatchAction::Readiness => readiness_report(&store, params),
             PrWatchAction::Handoff => handoff_report(&store, params),
             PrWatchAction::ResolveAddressed => resolve_addressed(&root, &store, params, &ctx).await,
+            PrWatchAction::WebhookStatus => webhook_status(&store, params),
+            PrWatchAction::WebhookDoctor => webhook_doctor(&root, &store, params),
+            PrWatchAction::WebhookHeartbeat => webhook_heartbeat(&root, &store, params, &ctx).await,
             PrWatchAction::Stop => stop_watch(&store, params),
         }
     }
@@ -326,8 +387,289 @@ fn state_file_for_watch(watch_id: &str) -> String {
     format!(".jcode/pr-feedback-watch/{watch_id}-state.json")
 }
 
+fn webhook_runtime_dir() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("pr-watch"))
+}
+
+fn webhook_index_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-index.json"))
+}
+
+fn webhook_health_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-daemon-health.json"))
+}
+
+fn webhook_pid_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-daemon.pid"))
+}
+
+fn webhook_lock_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-daemon.lock"))
+}
+
+fn webhook_deliveries_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-deliveries.json"))
+}
+
+fn webhook_delivery_log_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-deliveries.jsonl"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookWatchIndexEntry {
+    pub watch_id: String,
+    pub repo: String,
+    pub pr: u64,
+    pub root_dir: String,
+    pub state_path: String,
+    pub event_mode: PrWatchEventMode,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct WebhookWatchIndex {
+    #[serde(default)]
+    entries: Vec<WebhookWatchIndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebhookDaemonHealth {
+    status: String,
+    pid: u32,
+    bind: String,
+    port: u16,
+    updated_at: String,
+    #[serde(default)]
+    last_delivery_id: Option<String>,
+    #[serde(default)]
+    last_event: Option<String>,
+    #[serde(default)]
+    last_result: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebhookDeliveryRecord {
+    delivery_id: String,
+    event: String,
+    seen_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct WebhookDeliveryStore {
+    #[serde(default)]
+    deliveries: Vec<WebhookDeliveryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebhookDeliveryLogRecord {
+    at: String,
+    delivery_id: String,
+    event: String,
+    repo: Option<String>,
+    pr: Option<u64>,
+    result: String,
+    reason: String,
+}
+
+fn load_webhook_index() -> Result<WebhookWatchIndex> {
+    let path = webhook_index_path()?;
+    if !path.exists() {
+        return Ok(WebhookWatchIndex::default());
+    }
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read webhook index {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse webhook index {}", path.display()))
+}
+
+fn save_webhook_index(index: &WebhookWatchIndex) -> Result<()> {
+    let path = webhook_index_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(index)?)?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to atomically replace {}", path.display()))?;
+    Ok(())
+}
+
+fn register_webhook_index_entry(root: &Path, store: &Path, state: &PrWatchState) -> Result<()> {
+    if !matches!(
+        state.webhook.mode,
+        PrWatchEventMode::Webhook | PrWatchEventMode::Hybrid
+    ) {
+        return remove_webhook_index_entry(&state.watch_id);
+    }
+    let mut index = load_webhook_index()?;
+    let entry = WebhookWatchIndexEntry {
+        watch_id: state.watch_id.clone(),
+        repo: state.pr.repo.clone(),
+        pr: state.pr.number,
+        root_dir: root.display().to_string(),
+        state_path: state_path(store, &state.watch_id).display().to_string(),
+        event_mode: state.webhook.mode.clone(),
+        active: !state.terminal,
+        updated_at: now_iso(),
+    };
+    index
+        .entries
+        .retain(|candidate| candidate.watch_id != state.watch_id);
+    index.entries.push(entry);
+    index.entries.sort_by(|a, b| a.watch_id.cmp(&b.watch_id));
+    save_webhook_index(&index)
+}
+
+fn remove_webhook_index_entry(watch_id: &str) -> Result<()> {
+    let mut index = load_webhook_index()?;
+    let before = index.entries.len();
+    index.entries.retain(|entry| entry.watch_id != watch_id);
+    if index.entries.len() != before {
+        save_webhook_index(&index)?;
+    }
+    Ok(())
+}
+
+fn write_webhook_health(health: &WebhookDaemonHealth) -> Result<()> {
+    let path = webhook_health_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(health)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+fn read_webhook_pid() -> Result<Option<u32>> {
+    let path = webhook_pid_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)?;
+    Ok(text.trim().parse::<u32>().ok())
+}
+
+fn load_webhook_deliveries() -> Result<WebhookDeliveryStore> {
+    let path = webhook_deliveries_path()?;
+    if !path.exists() {
+        return Ok(WebhookDeliveryStore::default());
+    }
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read webhook deliveries {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse webhook deliveries {}", path.display()))
+}
+
+fn remember_webhook_delivery(delivery: &VerifiedGithubDelivery) -> Result<bool> {
+    let mut store = load_webhook_deliveries()?;
+    if store
+        .deliveries
+        .iter()
+        .any(|record| record.delivery_id == delivery.delivery_id)
+    {
+        return Ok(false);
+    }
+    let cutoff = Utc::now() - Duration::days(7);
+    store.deliveries.retain(|record| {
+        chrono::DateTime::parse_from_rfc3339(&record.seen_at)
+            .map(|at| at.with_timezone(&Utc) >= cutoff)
+            .unwrap_or(false)
+    });
+    store.deliveries.push(WebhookDeliveryRecord {
+        delivery_id: delivery.delivery_id.clone(),
+        event: delivery.event.clone(),
+        seen_at: now_iso(),
+    });
+    if store.deliveries.len() > 10_000 {
+        let drop_count = store.deliveries.len() - 10_000;
+        store.deliveries.drain(0..drop_count);
+    }
+    let path = webhook_deliveries_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&store)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+fn append_webhook_delivery_log(
+    delivery: &VerifiedGithubDelivery,
+    result: &str,
+    reason: &str,
+) -> Result<()> {
+    let path = webhook_delivery_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let record = WebhookDeliveryLogRecord {
+        at: now_iso(),
+        delivery_id: delivery.delivery_id.clone(),
+        event: delivery.event.clone(),
+        repo: delivery.repo.clone(),
+        pr: delivery.pr,
+        result: result.to_string(),
+        reason: reason.to_string(),
+    };
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{}", serde_json::to_string(&record)?)?;
+    Ok(())
+}
+
+fn append_rejected_webhook_delivery_log(
+    delivery_id: Option<&str>,
+    event: Option<&str>,
+    result: &str,
+    reason: &str,
+) -> Result<()> {
+    let path = webhook_delivery_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let record = WebhookDeliveryLogRecord {
+        at: now_iso(),
+        delivery_id: delivery_id.unwrap_or("unknown").to_string(),
+        event: event.unwrap_or("unknown").to_string(),
+        repo: None,
+        pr: None,
+        result: result.to_string(),
+        reason: reason.to_string(),
+    };
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{}", serde_json::to_string(&record)?)?;
+    Ok(())
+}
+
+fn read_webhook_health() -> Result<Option<WebhookDaemonHealth>> {
+    let path = webhook_health_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read webhook health {}", path.display()))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("failed to parse webhook health {}", path.display()))
+}
+
 fn schedule_key_for_watch(watch_id: &str) -> String {
     format!("pr_watch:{watch_id}:monitor")
+}
+
+fn webhook_heartbeat_schedule_key_for_watch(watch_id: &str) -> String {
+    format!("pr_watch:{watch_id}:webhook_heartbeat")
+}
+
+fn webhook_followup_schedule_key_for_watch(watch_id: &str) -> String {
+    format!("pr_watch:{watch_id}:webhook_followup")
 }
 
 fn handoff_schedule_key_for_watch(watch_id: &str) -> String {
@@ -445,6 +787,7 @@ fn start_watch(
     }
     let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
     if would_write {
+        register_webhook_index_entry(root, store, &state)?;
         write_state_atomic(&path, &state)?;
     }
     Ok(ToolOutput::new(format!(
@@ -736,9 +1079,9 @@ fn review_thread_marker_fingerprint(state: &PrWatchState, thread_ids: &[String])
 }
 
 fn ensure_resolve_freshness_matches(state: &PrWatchState, params: &PrWatchInput) -> Result<()> {
-    let expected_cycle = params
-        .expected_cycle_number
-        .context("resolve_addressed requires expected_cycle_number from the current handoff/status")?;
+    let expected_cycle = params.expected_cycle_number.context(
+        "resolve_addressed requires expected_cycle_number from the current handoff/status",
+    )?;
     if expected_cycle != state.polling.cycle_number {
         bail!(
             "resolve_addressed expected_cycle_number is stale: expected {}, current {}",
@@ -752,7 +1095,9 @@ fn ensure_resolve_freshness_matches(state: &PrWatchState, params: &PrWatchInput)
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .context("resolve_addressed requires expected_fingerprint from the current handoff/status")?;
+        .context(
+            "resolve_addressed requires expected_fingerprint from the current handoff/status",
+        )?;
     let current_actionable_fingerprint = actionable_fingerprint(&state.pending_actionable);
     if current_actionable_fingerprint.as_deref() == Some(expected_fingerprint) {
         return Ok(());
@@ -913,7 +1258,8 @@ async fn resolve_addressed(
     if !has_non_empty_commit_or_reason(&params) {
         bail!("resolve_addressed requires a non-empty commit_sha or a non-empty no-code reason");
     }
-    if !has_explicit_no_code_reason(&params) && !commit_sha_matches_current_head(&params, current_head)
+    if !has_explicit_no_code_reason(&params)
+        && !commit_sha_matches_current_head(&params, current_head)
     {
         bail!(
             "resolve_addressed commit_sha must match the watched PR head_sha ({current_head}) unless this is an explicit no-code resolution"
@@ -1020,7 +1366,8 @@ async fn resolve_addressed(
         .iter()
         .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Failed))
         .count();
-    state.last_resolution_attempts = merge_resolution_attempts(&state.last_resolution_attempts, attempts);
+    state.last_resolution_attempts =
+        merge_resolution_attempts(&state.last_resolution_attempts, attempts);
     state.last_resolution_error = (failed_count > 0)
         .then(|| "one or more thread resolutions failed; poll before retry".to_string());
     state.resolution_requires_post_poll = would_write && remote_resolved_count > 0;
@@ -1099,8 +1446,14 @@ fn reschedule_watch(
     });
     let path = state_path(store, &state.watch_id);
     params.schedule_next = true;
-    let scheduled = maybe_schedule_next_monitor(ctx, &mut state, &params)?;
+    let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
     if would_write {
+        let root = state
+            .root_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        register_webhook_index_entry(&root, store, &state)?;
         write_state_atomic(&path, &state)?;
     }
     Ok(ToolOutput::new(format!(
@@ -1115,6 +1468,21 @@ fn reschedule_watch(
 }
 
 fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
+    if let Some(mode) = &params.event_mode {
+        state.webhook.mode = mode.clone();
+        state.webhook.enabled =
+            matches!(mode, PrWatchEventMode::Webhook | PrWatchEventMode::Hybrid);
+    }
+    if let Some(seconds) = params.fallback_heartbeat_seconds {
+        state.webhook.fallback_heartbeat_seconds = Some(seconds.max(300));
+    }
+    if let Some(url) = params
+        .webhook_url_hint
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        state.webhook.webhook_url_hint = Some(url.trim().to_string());
+    }
     if let Some(seconds) = params.poll_interval_seconds {
         state.polling.poll_interval_seconds = seconds.max(60);
     }
@@ -1122,9 +1490,18 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
         state.polling.required_quiet_cycles = required.max(1);
     }
     if params.schedule_next {
-        let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
-        state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        if should_schedule_normal_monitor(state) {
+            let wake_at =
+                Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
+            state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        } else {
+            state.polling.next_poll_at = None;
+        }
     }
+}
+
+fn should_schedule_normal_monitor(state: &PrWatchState) -> bool {
+    !matches!(state.webhook.mode, PrWatchEventMode::Webhook)
 }
 
 fn parse_write_scopes(values: Option<&[String]>) -> Result<BTreeSet<WriteScope>> {
@@ -1395,7 +1772,87 @@ fn maybe_schedule_next(
     state: &mut PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
-    maybe_schedule_next_monitor(ctx, state, params)
+    if matches!(state.webhook.mode, PrWatchEventMode::Webhook) {
+        maybe_schedule_webhook_heartbeat(ctx, state, params)
+    } else {
+        maybe_schedule_next_monitor(ctx, state, params)
+    }
+}
+
+fn maybe_schedule_webhook_heartbeat(
+    ctx: &ToolContext,
+    state: &mut PrWatchState,
+    params: &PrWatchInput,
+) -> Result<Option<String>> {
+    if params.dry_run.unwrap_or(false) || state.terminal || !params.schedule_next {
+        return Ok(None);
+    }
+    let Some(seconds) = state.webhook.fallback_heartbeat_seconds else {
+        state.polling.next_poll_at = None;
+        return Ok(Some(
+            "webhook mode: normal monitor polling disabled; heartbeat disabled".to_string(),
+        ));
+    };
+    let wake_at = Utc::now() + Duration::seconds(seconds as i64);
+    let task = scheduled_webhook_heartbeat_prompt(state, monitor_max_runtime_seconds(params));
+    let mut manager = AmbientManager::new()?;
+    let key = webhook_heartbeat_schedule_key_for_watch(&state.watch_id);
+    let existing_ids: Vec<String> = manager
+        .queue()
+        .items()
+        .iter()
+        .filter(|item| item.schedule_key.as_deref() == Some(&key))
+        .map(|item| item.id.clone())
+        .collect();
+    for stale_id in existing_ids {
+        manager.cancel_schedule(&stale_id)?;
+    }
+    let target = match params.target.as_deref() {
+        Some("spawn") => ScheduleTarget::Spawn {
+            parent_session_id: ctx.session_id.clone(),
+        },
+        Some("resume") | None => ScheduleTarget::Session {
+            session_id: ctx.session_id.clone(),
+        },
+        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
+    };
+    let target_summary = format_schedule_target_for_state(&target);
+    let payload = PrWatchWebhookHeartbeatPayload::new(state, seconds);
+    payload.validate_against_state(state)?;
+    let id = manager.schedule(ScheduleRequest {
+        wake_in_minutes: None,
+        wake_at: Some(wake_at),
+        context: task.clone(),
+        priority: Priority::Normal,
+        target,
+        created_by_session: ctx.session_id.clone(),
+        working_dir: ctx
+            .working_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        task_description: Some(task),
+        relevant_files: vec![state_file_for_watch(&state.watch_id)],
+        git_branch: None,
+        additional_context: Some(
+            "Scheduled by pr_watch webhook heartbeat; invoke webhook_heartbeat only. Read-only refresh only.".to_string(),
+        ),
+        schedule_key: Some(key),
+        schedule_kind: Some("pr_watch.webhook_heartbeat".to_string()),
+        schedule_payload: Some(serde_json::to_value(payload)?),
+    })?;
+    let due_at = wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    state.polling.next_poll_at = Some(due_at.clone());
+    state.polling.last_scheduled_at = Some(now_iso());
+    state.polling.last_schedule_id = Some(id.clone());
+    state.polling.last_schedule_kind = Some("webhook_heartbeat".to_string());
+    state.polling.last_schedule_target = Some(target_summary);
+    state.polling.last_schedule_due_at = Some(due_at);
+    state.polling.last_schedule_error = None;
+    super::ambient::nudge_schedule_runner();
+    Ok(Some(format!(
+        "webhook heartbeat {id} at {}",
+        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
+    )))
 }
 
 fn normalize_handoff_summary(summary: &str) -> String {
@@ -1414,6 +1871,872 @@ fn sha256_hex(value: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value);
     format!("{:x}", hasher.finalize())
+}
+
+const WEBHOOK_MAX_BODY_BYTES: usize = 1024 * 1024;
+const WEBHOOK_DEBOUNCE_SECONDS: i64 = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedGithubDelivery {
+    delivery_id: String,
+    event: String,
+    action: Option<String>,
+    repo: Option<String>,
+    pr: Option<u64>,
+    payload: Value,
+}
+
+fn content_type_is_accepted(value: &str) -> bool {
+    let mut parts = value.split(';');
+    let Some(media_type) = parts.next().map(str::trim) else {
+        return false;
+    };
+    if !media_type.eq_ignore_ascii_case("application/json") {
+        return false;
+    }
+    parts.all(|part| {
+        let trimmed = part.trim();
+        trimmed.is_empty() || trimmed.to_ascii_lowercase().starts_with("charset=")
+    })
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn hmac_sha256(secret: &[u8], body: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut key = [0u8; BLOCK_SIZE];
+    if secret.len() > BLOCK_SIZE {
+        let mut hasher = Sha256::new();
+        hasher.update(secret);
+        let digest = hasher.finalize();
+        key[..32].copy_from_slice(&digest);
+    } else {
+        key[..secret.len()].copy_from_slice(secret);
+    }
+    let mut o_key_pad = [0x5cu8; BLOCK_SIZE];
+    let mut i_key_pad = [0x36u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        o_key_pad[i] ^= key[i];
+        i_key_pad[i] ^= key[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(i_key_pad);
+    inner.update(body);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(o_key_pad);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+fn verify_github_signature(secret: &str, body: &[u8], signature: &str) -> Result<()> {
+    let secret = secret.as_bytes();
+    if secret.is_empty() {
+        bail!("GITHUB_WEBHOOK_SECRET must be non-empty");
+    }
+    let hex_signature = signature
+        .strip_prefix("sha256=")
+        .context("missing sha256= signature prefix")?;
+    let expected = hmac_sha256(secret, body);
+    let actual = hex::decode(hex_signature).context("invalid webhook signature hex")?;
+    if !constant_time_eq(&expected, &actual) {
+        bail!("webhook signature mismatch");
+    }
+    Ok(())
+}
+
+fn verified_github_delivery_from_parts(
+    secret: &str,
+    content_type: &str,
+    event: &str,
+    delivery_id: &str,
+    signature: &str,
+    body: &[u8],
+) -> Result<VerifiedGithubDelivery> {
+    if body.len() > WEBHOOK_MAX_BODY_BYTES {
+        bail!("webhook body exceeds {} bytes", WEBHOOK_MAX_BODY_BYTES);
+    }
+    if !content_type_is_accepted(content_type) {
+        bail!("unsupported webhook content type: {content_type}");
+    }
+    if event.trim().is_empty() || delivery_id.trim().is_empty() {
+        bail!("webhook event and delivery id are required");
+    }
+    verify_github_signature(secret, body, signature)?;
+    let payload: Value = serde_json::from_slice(body).context("invalid webhook json body")?;
+    Ok(VerifiedGithubDelivery {
+        delivery_id: delivery_id.to_string(),
+        event: event.to_string(),
+        action: payload
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        repo: payload
+            .pointer("/repository/full_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        pr: payload
+            .pointer("/pull_request/number")
+            .or_else(|| payload.pointer("/issue/number"))
+            .or_else(|| payload.pointer("/check_run/pull_requests/0/number"))
+            .and_then(Value::as_u64),
+        payload,
+    })
+}
+
+pub fn run_webhook_status_command(json_output: bool) -> Result<()> {
+    let index = load_webhook_index()?;
+    let health = read_webhook_health()?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "index_path": webhook_index_path()?,
+                "health_path": webhook_health_path()?,
+                "health": health,
+                "entries": index.entries,
+            }))?
+        );
+        return Ok(());
+    }
+    println!("PR watch webhook status");
+    println!("Index: {}", webhook_index_path()?.display());
+    println!("Health: {}", webhook_health_path()?.display());
+    match health {
+        Some(health) => println!(
+            "Daemon: {} pid={} alive={} bind={}:{} updated={} last_delivery={} last_result={}",
+            health.status,
+            health.pid,
+            process_is_alive(health.pid),
+            health.bind,
+            health.port,
+            health.updated_at,
+            health.last_delivery_id.as_deref().unwrap_or("none"),
+            health.last_result.as_deref().unwrap_or("none")
+        ),
+        None => println!("Daemon: down (no health file)"),
+    }
+    println!("Indexed watches: {}", index.entries.len());
+    for entry in index.entries {
+        println!(
+            "- {} {}#{} mode={:?} active={} root={} state={}",
+            entry.watch_id,
+            entry.repo,
+            entry.pr,
+            entry.event_mode,
+            entry.active,
+            entry.root_dir,
+            entry.state_path
+        );
+    }
+    Ok(())
+}
+
+pub async fn run_webhook_doctor_command(repo: Option<&str>, json_output: bool) -> Result<()> {
+    let index = load_webhook_index()?;
+    let health = read_webhook_health()?;
+    let secret_present = std::env::var("GITHUB_WEBHOOK_SECRET")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let mut findings = Vec::new();
+    findings.push(json!({
+        "check": "daemon_health",
+        "status": if health.as_ref().map(|h| h.status.as_str()) == Some("running") { "ok" } else { "warn" },
+        "message": health.as_ref().map(|h| h.message.clone().unwrap_or_else(|| h.status.clone())).unwrap_or_else(|| "daemon_down: no health file".to_string()),
+    }));
+    findings.push(json!({
+        "check": "secret",
+        "status": if secret_present { "ok" } else { "error" },
+        "message": if secret_present { "GITHUB_WEBHOOK_SECRET is configured" } else { "GITHUB_WEBHOOK_SECRET is missing or empty" },
+    }));
+    for entry in index
+        .entries
+        .iter()
+        .filter(|entry| repo.is_none_or(|repo| repo == entry.repo))
+    {
+        let root_ok = Path::new(&entry.root_dir).is_dir();
+        let state_ok = Path::new(&entry.state_path).is_file();
+        let state_matches = if state_ok {
+            fs::read_to_string(&entry.state_path)
+                .ok()
+                .and_then(|text| normalize_watch_state_json(&text).ok())
+                .map(|state| {
+                    state.root_dir.as_deref() == Some(entry.root_dir.as_str())
+                        && state.pr.repo == entry.repo
+                        && state.pr.number == entry.pr
+                        && state.watch_id == entry.watch_id
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        findings.push(json!({
+            "check": "watch_index_entry",
+            "watch_id": entry.watch_id,
+            "repo": entry.repo,
+            "pr": entry.pr,
+            "status": if root_ok && state_ok && state_matches && entry.active { "ok" } else { "error" },
+            "root_ok": root_ok,
+            "state_ok": state_ok,
+            "state_matches_index": state_matches,
+            "active": entry.active,
+            "message": if root_ok && state_ok && state_matches && entry.active { "indexed watch is routable" } else { "indexed watch is not routable; daemon would quarantine matching deliveries" },
+        }));
+    }
+
+    let daemon_alive = health
+        .as_ref()
+        .map(|h| process_is_alive(h.pid))
+        .unwrap_or(false);
+    findings.push(json!({
+        "check": "daemon_pid_alive",
+        "status": if daemon_alive { "ok" } else { "warn" },
+        "message": if daemon_alive { "daemon PID is alive" } else { "daemon_down: no live PID from health file" },
+    }));
+
+    let gh_status = Command::new("gh").arg("auth").arg("status").output().await;
+    findings.push(json!({
+        "check": "gh_auth_status",
+        "status": if gh_status.as_ref().map(|out| out.status.success()).unwrap_or(false) { "ok" } else { "warn" },
+        "message": if gh_status.as_ref().map(|out| out.status.success()).unwrap_or(false) { "gh auth status succeeded" } else { "gh auth status failed; GitHub hook inspection may be unavailable" },
+    }));
+
+    let repos_to_check: BTreeSet<String> = if let Some(repo) = repo {
+        [repo.to_string()].into_iter().collect()
+    } else {
+        index
+            .entries
+            .iter()
+            .map(|entry| entry.repo.clone())
+            .collect()
+    };
+    for repo in repos_to_check {
+        let hook_status = Command::new("gh")
+            .args(["api", &format!("repos/{repo}/hooks")])
+            .output()
+            .await;
+        let ok = hook_status
+            .as_ref()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        let hook_message = if ok {
+            let hooks: Value = serde_json::from_slice(&hook_status.as_ref().unwrap().stdout)
+                .unwrap_or_else(|_| json!([]));
+            let failing = hooks.as_array().into_iter().flatten().find_map(|hook| {
+                let code = hook
+                    .pointer("/last_response/code")
+                    .and_then(Value::as_i64)?;
+                (!(200..300).contains(&code)).then_some(code)
+            });
+            let required_events = [
+                "pull_request",
+                "pull_request_review",
+                "pull_request_review_comment",
+                "issue_comment",
+                "check_run",
+                "check_suite",
+                "status",
+            ];
+            let missing_events = hooks.as_array().into_iter().flatten().all(|hook| {
+                let Some(events) = hook.get("events").and_then(Value::as_array) else {
+                    return true;
+                };
+                !required_events
+                    .iter()
+                    .all(|required| events.iter().any(|event| event.as_str() == Some(*required)))
+            });
+            match failing {
+                Some(code) => format!("github_hook_failing: hook last_response.code={code}"),
+                None if missing_events => {
+                    "github_hook_failing: no hook advertises all required PR watch events"
+                        .to_string()
+                }
+                None => "GitHub hooks API reachable; no non-2xx last_response found".to_string(),
+            }
+        } else {
+            "github_hook_failing_or_auth_failing: could not read hooks with gh api".to_string()
+        };
+        findings.push(json!({
+            "check": "github_hooks",
+            "repo": repo,
+            "status": if hook_message.contains("github_hook_failing") || !ok { "warn" } else { "ok" },
+            "message": hook_message,
+        }));
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "findings": findings }))?
+        );
+    } else {
+        println!("PR watch webhook doctor");
+        for finding in findings {
+            println!(
+                "- [{}] {}: {}",
+                finding
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                finding
+                    .get("check")
+                    .and_then(Value::as_str)
+                    .unwrap_or("check"),
+                finding.get("message").and_then(Value::as_str).unwrap_or("")
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_webhook_serve_command(
+    bind: String,
+    port: u16,
+    secret_env: String,
+    allow_non_local: bool,
+) -> Result<()> {
+    let local_bind = bind == "127.0.0.1" || bind == "localhost" || bind == "::1";
+    if !local_bind && !allow_non_local {
+        bail!("refusing non-local webhook bind {bind}; pass --allow-non-local explicitly");
+    }
+    let secret = std::env::var(&secret_env)
+        .with_context(|| format!("{secret_env} must be set for webhook signature verification"))?;
+    if secret.trim().is_empty() {
+        bail!("{secret_env} must be non-empty");
+    }
+    fs::create_dir_all(webhook_runtime_dir()?)?;
+    if let Some(pid) = read_webhook_pid()? {
+        if process_is_alive(pid) {
+            bail!("webhook daemon already appears alive with pid {pid}");
+        }
+        let _ = fs::remove_file(webhook_pid_path()?);
+        let _ = fs::remove_file(webhook_lock_path()?);
+    }
+    let lock_path = webhook_lock_path()?;
+    let _daemon_lock = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut file) => {
+            writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
+            Some(WatchLock { path: lock_path })
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!(
+                "webhook daemon lock already exists: {}",
+                lock_path.display()
+            )
+        }
+        Err(err) => return Err(err).context("failed to create webhook daemon lock"),
+    };
+    let listener = match TcpListener::bind(format!("{bind}:{port}")).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            let _ = write_webhook_health(&WebhookDaemonHealth {
+                status: "port_collision".to_string(),
+                pid: std::process::id(),
+                bind: bind.clone(),
+                port,
+                updated_at: now_iso(),
+                last_delivery_id: None,
+                last_event: None,
+                last_result: None,
+                message: Some(format!(
+                    "failed to bind webhook daemon on {bind}:{port}: {err}"
+                )),
+            });
+            return Err(err)
+                .with_context(|| format!("failed to bind webhook daemon on {bind}:{port}"));
+        }
+    };
+    fs::write(webhook_pid_path()?, std::process::id().to_string())?;
+    let mut health = WebhookDaemonHealth {
+        status: "running".to_string(),
+        pid: std::process::id(),
+        bind: bind.clone(),
+        port,
+        updated_at: now_iso(),
+        last_delivery_id: None,
+        last_event: None,
+        last_result: None,
+        message: Some("daemon running".to_string()),
+    };
+    write_webhook_health(&health)?;
+    println!("PR watch webhook daemon listening on http://{bind}:{port}/github");
+    loop {
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                health.status = "stopped".to_string();
+                health.updated_at = now_iso();
+                health.message = Some("stopped by signal".to_string());
+                let _ = write_webhook_health(&health);
+                break;
+            }
+            _ = async { #[cfg(unix)] { terminate.recv().await } #[cfg(not(unix))] { std::future::pending::<Option<()>>().await } } => {
+                health.status = "stopped".to_string();
+                health.updated_at = now_iso();
+                health.message = Some("stopped by SIGTERM".to_string());
+                let _ = write_webhook_health(&health);
+                break;
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                match handle_webhook_connection(stream, &secret).await {
+                    Ok((delivery, result)) => {
+                        health.last_delivery_id = Some(delivery.delivery_id);
+                        health.last_event = Some(delivery.event);
+                        health.last_result = Some(result);
+                    }
+                    Err(err) => {
+                        health.last_result = Some(format!("rejected: {}", err));
+                    }
+                }
+                health.updated_at = now_iso();
+                let _ = write_webhook_health(&health);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_webhook_connection(
+    mut stream: TcpStream,
+    secret: &str,
+) -> Result<(VerifiedGithubDelivery, String)> {
+    let mut buf = vec![0u8; WEBHOOK_MAX_BODY_BYTES + 8192];
+    let n = stream.read(&mut buf).await?;
+    let request = &buf[..n];
+    let (status, body, delivery_result) = match process_webhook_http_request(request, secret).await
+    {
+        Ok((delivery, result)) => ("200 OK", format!("{result}\n"), Ok((delivery, result))),
+        Err(err) => ("400 Bad Request", format!("{}\n", err), Err(err)),
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+    delivery_result
+}
+
+async fn process_webhook_http_request(
+    request: &[u8],
+    secret: &str,
+) -> Result<(VerifiedGithubDelivery, String)> {
+    let split = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("malformed HTTP request")?;
+    let headers_raw = std::str::from_utf8(&request[..split]).context("headers are not utf-8")?;
+    let body = &request[split + 4..];
+    let mut lines = headers_raw.lines();
+    let request_line = lines.next().context("missing request line")?;
+    if !request_line.starts_with("POST ") {
+        bail!("only POST is supported");
+    }
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .context("missing content-length")?;
+    if content_length > WEBHOOK_MAX_BODY_BYTES || content_length > body.len() {
+        bail!("invalid webhook body length");
+    }
+    let body = &body[..content_length];
+    let delivery = match verified_github_delivery_from_parts(
+        secret,
+        headers
+            .get("content-type")
+            .map(String::as_str)
+            .unwrap_or(""),
+        headers
+            .get("x-github-event")
+            .map(String::as_str)
+            .unwrap_or(""),
+        headers
+            .get("x-github-delivery")
+            .map(String::as_str)
+            .unwrap_or(""),
+        headers
+            .get("x-hub-signature-256")
+            .map(String::as_str)
+            .unwrap_or(""),
+        body,
+    ) {
+        Ok(delivery) => delivery,
+        Err(err) => {
+            let _ = append_rejected_webhook_delivery_log(
+                headers.get("x-github-delivery").map(String::as_str),
+                headers.get("x-github-event").map(String::as_str),
+                "rejected",
+                &err.to_string(),
+            );
+            return Err(err);
+        }
+    };
+    if !remember_webhook_delivery(&delivery)? {
+        return Ok((delivery, "duplicate_ignored".to_string()));
+    }
+    let result = route_verified_webhook_delivery(&delivery).await?;
+    Ok((delivery, result))
+}
+
+async fn route_verified_webhook_delivery(delivery: &VerifiedGithubDelivery) -> Result<String> {
+    if delivery.event == "ping" {
+        let _ = append_webhook_delivery_log(delivery, "accepted", "ping");
+        return Ok("ping_accepted".to_string());
+    }
+    let index = load_webhook_index()?;
+    let targets = webhook_delivery_targets(delivery, &index).await?;
+    if targets.is_empty() {
+        let reason = ignored_webhook_reason(delivery);
+        let _ = append_webhook_delivery_log(delivery, "ignored", &reason);
+        return Ok(reason);
+    }
+    let mut results = Vec::new();
+    for entry in targets {
+        let coalesced = schedule_webhook_followup_refresh(&entry, delivery)?;
+        record_webhook_delivery_on_state(&entry, delivery, coalesced)?;
+        let result = if coalesced { "coalesced" } else { "queued" };
+        let _ = append_webhook_delivery_log(delivery, result, "debounced_followup_refresh");
+        results.push(result);
+    }
+    Ok(results.join("; "))
+}
+
+fn ignored_webhook_reason(delivery: &VerifiedGithubDelivery) -> String {
+    match delivery.event.as_str() {
+        "check_suite"
+            if delivery
+                .payload
+                .pointer("/check_suite/pull_requests")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty) =>
+        {
+            "check_suite_without_pr".to_string()
+        }
+        "pull_request"
+        | "pull_request_review"
+        | "pull_request_review_comment"
+        | "issue_comment"
+        | "check_run"
+        | "check_suite"
+        | "status" => "no_indexed_watch_target".to_string(),
+        _ => "unknown_event".to_string(),
+    }
+}
+
+async fn webhook_delivery_targets(
+    delivery: &VerifiedGithubDelivery,
+    index: &WebhookWatchIndex,
+) -> Result<Vec<WebhookWatchIndexEntry>> {
+    let repo = delivery
+        .repo
+        .as_deref()
+        .context("delivery has no repository")?;
+    let mut prs = BTreeSet::new();
+    match delivery.event.as_str() {
+        "pull_request" | "pull_request_review" | "pull_request_review_comment" => {
+            if let Some(pr) = delivery
+                .payload
+                .pointer("/pull_request/number")
+                .and_then(Value::as_u64)
+            {
+                prs.insert(pr);
+            }
+        }
+        "issue_comment" => {
+            if delivery.payload.pointer("/issue/pull_request").is_some() {
+                if let Some(pr) = delivery
+                    .payload
+                    .pointer("/issue/number")
+                    .and_then(Value::as_u64)
+                {
+                    prs.insert(pr);
+                }
+            }
+        }
+        "check_run" => {
+            if let Some(values) = delivery
+                .payload
+                .pointer("/check_run/pull_requests")
+                .and_then(Value::as_array)
+            {
+                for value in values {
+                    if let Some(pr) = value.get("number").and_then(Value::as_u64) {
+                        prs.insert(pr);
+                    }
+                }
+            }
+        }
+        "check_suite" => {
+            if let Some(values) = delivery
+                .payload
+                .pointer("/check_suite/pull_requests")
+                .and_then(Value::as_array)
+            {
+                for value in values {
+                    if let Some(pr) = value.get("number").and_then(Value::as_u64) {
+                        prs.insert(pr);
+                    }
+                }
+            }
+        }
+        "status" => {
+            if let Some(sha) = delivery.payload.get("sha").and_then(Value::as_str) {
+                for pr in resolve_status_sha_prs(repo, sha).await? {
+                    prs.insert(pr);
+                }
+            }
+        }
+        _ => return Ok(Vec::new()),
+    }
+    Ok(index
+        .entries
+        .iter()
+        .filter(|entry| entry.active && entry.repo == repo && prs.contains(&entry.pr))
+        .cloned()
+        .collect())
+}
+
+async fn resolve_status_sha_prs(repo: &str, sha: &str) -> Result<Vec<u64>> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{repo}/commits/{sha}/pulls"),
+            "-H",
+            "Accept: application/vnd.github+json",
+        ])
+        .output()
+        .await
+        .context("failed to run gh api for status sha PR lookup")?;
+    if !output.status.success() {
+        bail!("gh api status sha PR lookup failed");
+    }
+    let value: Value =
+        serde_json::from_slice(&output.stdout).context("invalid gh status PR lookup json")?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|pr| pr.get("number").and_then(Value::as_u64))
+        .collect())
+}
+
+#[allow(dead_code)]
+async fn webhook_refresh_watch(
+    entry: &WebhookWatchIndexEntry,
+    delivery: &VerifiedGithubDelivery,
+) -> Result<String> {
+    let root = PathBuf::from(&entry.root_dir);
+    let store = watch_dir(&root);
+    let _lock = match acquire_watch_lock(&store, &entry.watch_id)? {
+        Some(lock) => lock,
+        None => {
+            let _ = schedule_webhook_followup_refresh(entry, delivery)?;
+            return Ok(format!("locked_followup_requested {}", entry.watch_id));
+        }
+    };
+    let mut state = load_state_for_params(&store, &webhook_refresh_params(entry, true))?;
+    if state.root_dir.as_deref() != Some(entry.root_dir.as_str())
+        || state.pr.repo != entry.repo
+        || state.pr.number != entry.pr
+        || state.watch_id != entry.watch_id
+        || state.terminal
+    {
+        bail!(
+            "indexed watch {} failed webhook refresh validation; refusing write",
+            entry.watch_id
+        );
+    }
+    let ctx = ToolContext {
+        session_id: "pr-watch-webhook-daemon".to_string(),
+        message_id: delivery.delivery_id.clone(),
+        tool_call_id: format!("webhook-{}", delivery.delivery_id),
+        working_dir: Some(root.clone()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    let collected_at = now_iso();
+    let result = collect_with_gh(&root, &state.pr.repo, state.pr.number).await;
+    let outcome = update_state_from_collection(&mut state, result, &collected_at);
+    if review_threads_fetch_succeeded_at(&state, &collected_at) {
+        state.resolution_requires_post_poll = false;
+    }
+    apply_schedule_fields(
+        &mut state,
+        &webhook_refresh_params(entry, !matches!(entry.event_mode, PrWatchEventMode::Hybrid)),
+    );
+    let handoff = if !state.pending_actionable.is_empty() {
+        maybe_schedule_action_required_handoff(&store, &mut state, &ctx)?
+    } else {
+        clear_action_required_handoff(&store, &mut state)?
+    };
+    if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
+        && state.pending_actionable.is_empty()
+        && state.last_cycle.pending_check_count == 0
+        && state.last_cycle.failed_check_count == 0
+        && !outcome.partial_failure
+    {
+        state.terminal = true;
+        state.stop_reason = Some("quiet_cycles_satisfied".to_string());
+        state.polling.next_poll_at = None;
+    }
+    let scheduled = maybe_schedule_next(
+        &ctx,
+        &mut state,
+        &webhook_refresh_params(entry, !matches!(entry.event_mode, PrWatchEventMode::Hybrid)),
+    )?;
+    state.webhook.last_delivery_id = Some(delivery.delivery_id.clone());
+    state.webhook.last_delivery_at = Some(now_iso());
+    state.webhook.last_event_type = Some(delivery.event.clone());
+    state.webhook.last_event_action = delivery.action.clone();
+    state.webhook.last_delivery_status = Some(if outcome.partial_failure {
+        "refresh_partial_failure".to_string()
+    } else {
+        "routed".to_string()
+    });
+    write_state_atomic(&state_path(&store, &entry.watch_id), &state)?;
+    Ok(format!(
+        "routed {} partial_failure={} scheduled={} handoff={}",
+        entry.watch_id,
+        outcome.partial_failure,
+        scheduled.unwrap_or_else(|| "none".to_string()),
+        handoff.unwrap_or_else(|| "none".to_string())
+    ))
+}
+
+fn schedule_webhook_followup_refresh(
+    entry: &WebhookWatchIndexEntry,
+    delivery: &VerifiedGithubDelivery,
+) -> Result<bool> {
+    let mut manager = AmbientManager::new()?;
+    let key = webhook_followup_schedule_key_for_watch(&entry.watch_id);
+    let existing = manager
+        .queue()
+        .items()
+        .iter()
+        .any(|item| item.schedule_key.as_deref() == Some(&key));
+    if existing {
+        return Ok(true);
+    }
+    let state_file = state_file_for_watch(&entry.watch_id);
+    let payload = json!({
+        "tool": "pr_watch",
+        "watch_id": entry.watch_id,
+        "repo": entry.repo,
+        "pr": entry.pr,
+        "action": "webhook_heartbeat",
+        "state_file": state_file,
+        "heartbeat_seconds": 300,
+        "readonly": true,
+    });
+    manager.schedule(ScheduleRequest {
+        wake_in_minutes: None,
+        wake_at: Some(Utc::now() + Duration::seconds(WEBHOOK_DEBOUNCE_SECONDS)),
+        context: format!(
+            "Webhook follow-up refresh for PR watch {} after lock contention. Run `pr_watch action=webhook_heartbeat repo={} pr={} watch_id={}` only. Read-only refresh only. Delivery {} event {} triggered this follow-up. Never push, comment, resolve threads, or merge.",
+            entry.watch_id, entry.repo, entry.pr, entry.watch_id, delivery.delivery_id, delivery.event
+        ),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: "pr-watch-webhook-daemon".to_string(),
+        },
+        created_by_session: "pr-watch-webhook-daemon".to_string(),
+        working_dir: Some(entry.root_dir.clone()),
+        task_description: Some("PR watch webhook follow-up refresh".to_string()),
+        relevant_files: vec![state_file],
+        git_branch: None,
+        additional_context: Some("Scheduled by pr_watch webhook lock contention; read-only refresh only.".to_string()),
+        schedule_key: Some(key),
+        schedule_kind: Some("pr_watch.webhook_followup".to_string()),
+        schedule_payload: Some(payload),
+    })?;
+    super::ambient::nudge_schedule_runner();
+    Ok(false)
+}
+
+fn record_webhook_delivery_on_state(
+    entry: &WebhookWatchIndexEntry,
+    delivery: &VerifiedGithubDelivery,
+    coalesced: bool,
+) -> Result<()> {
+    let root = PathBuf::from(&entry.root_dir);
+    let store = watch_dir(&root);
+    let Some(_lock) = acquire_watch_lock(&store, &entry.watch_id)? else {
+        return Ok(());
+    };
+    let mut state = load_state_for_params(&store, &webhook_refresh_params(entry, false))?;
+    if state.root_dir.as_deref() != Some(entry.root_dir.as_str())
+        || state.pr.repo != entry.repo
+        || state.pr.number != entry.pr
+        || state.watch_id != entry.watch_id
+    {
+        bail!(
+            "indexed watch {} failed webhook delivery metadata validation",
+            entry.watch_id
+        );
+    }
+    state.webhook.last_delivery_id = Some(delivery.delivery_id.clone());
+    state.webhook.last_delivery_at = Some(now_iso());
+    state.webhook.last_event_type = Some(delivery.event.clone());
+    state.webhook.last_event_action = delivery.action.clone();
+    state.webhook.last_delivery_status =
+        Some(if coalesced { "coalesced" } else { "queued" }.to_string());
+    if coalesced {
+        state.webhook.collapsed_event_count = state.webhook.collapsed_event_count.saturating_add(1);
+    }
+    write_state_atomic(&state_path(&store, &entry.watch_id), &state)
+}
+
+fn webhook_refresh_params(entry: &WebhookWatchIndexEntry, schedule_next: bool) -> PrWatchInput {
+    PrWatchInput {
+        action: PrWatchAction::PollNow,
+        repo: Some(entry.repo.clone()),
+        pr: Some(entry.pr),
+        watch_id: Some(entry.watch_id.clone()),
+        dry_run: Some(false),
+        schedule_next,
+        poll_interval_seconds: None,
+        quiet_cycles_required: None,
+        max_runtime_seconds: None,
+        target: None,
+        scopes: None,
+        reason: None,
+        expires_in_minutes: None,
+        single_use: None,
+        grant_id: None,
+        thread_ids: Vec::new(),
+        head_sha: None,
+        commit_sha: None,
+        validation: Vec::new(),
+        expected_fingerprint: None,
+        expected_cycle_number: None,
+        no_code_resolution: false,
+        event_mode: Some(entry.event_mode.clone()),
+        fallback_heartbeat_seconds: None,
+        webhook_url_hint: None,
+    }
 }
 
 fn actionable_fingerprint(items: &[ActionableItem]) -> Option<String> {
@@ -1915,6 +3238,58 @@ fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> S
     )
 }
 
+fn scheduled_webhook_heartbeat_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> String {
+    let state_file = format!(".jcode/pr-feedback-watch/{}-state.json", state.watch_id);
+    format!(
+        "Run the low-frequency read-only webhook heartbeat for {}. State file: {}. Use pr_watch with action=webhook_heartbeat, repo={}, pr={}, watch_id={}, schedule_next=true, max_runtime_seconds={}. This heartbeat is a safety net for webhook-mode watches only: do not push, comment, resolve threads, or merge.",
+        state.watch_id,
+        state_file,
+        state.pr.repo,
+        state.pr.number,
+        state.watch_id,
+        max_runtime_seconds,
+    )
+}
+
+async fn webhook_heartbeat(
+    root: &Path,
+    store: &Path,
+    mut params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    params.event_mode.get_or_insert(PrWatchEventMode::Webhook);
+    let state = load_state_for_params(store, &params)?;
+    let entry = WebhookWatchIndexEntry {
+        watch_id: state.watch_id.clone(),
+        repo: state.pr.repo.clone(),
+        pr: state.pr.number,
+        root_dir: state
+            .root_dir
+            .clone()
+            .unwrap_or_else(|| root.display().to_string()),
+        state_path: state_path(store, &state.watch_id).display().to_string(),
+        event_mode: state.webhook.mode.clone(),
+        active: !state.terminal,
+        updated_at: now_iso(),
+    };
+    let delivery = VerifiedGithubDelivery {
+        delivery_id: format!("heartbeat-{}", now_iso()),
+        event: "webhook_heartbeat".to_string(),
+        action: Some("heartbeat".to_string()),
+        repo: Some(entry.repo.clone()),
+        pr: Some(entry.pr),
+        payload: json!({"source":"webhook_heartbeat"}),
+    };
+    let result = webhook_refresh_watch(&entry, &delivery).await?;
+    let refreshed = load_state_for_params(store, &params)?;
+    Ok(ToolOutput::new(format!(
+        "PR watch webhook heartbeat: {}\nRepo: {}\nPR: #{}\nResult: {}",
+        refreshed.watch_id, refreshed.pr.repo, refreshed.pr.number, result
+    ))
+    .with_title("webhook heartbeat".to_string())
+    .with_metadata(json!({"watch": refreshed, "result": result, "ctx_session": ctx.session_id})))
+}
+
 async fn ack_baseline(
     root: &Path,
     store: &Path,
@@ -2125,7 +3500,7 @@ fn apply_baseline_from_collection(
         }
     }
 
- 	    match collection.reviews {
+    match collection.reviews {
         Ok(reviews) => {
             state.baseline.review_count = reviews.len();
             state
@@ -2446,7 +3821,7 @@ async fn monitor_once(
     }
     let status = monitor_status_for_state(&state, partial_failure);
     let scheduled = if monitor_should_schedule_followup(status) {
-        maybe_schedule_next_monitor(ctx, &mut state, &params)?
+        maybe_schedule_next(ctx, &mut state, &params)?
     } else {
         None
     };
@@ -3181,7 +4556,7 @@ fn update_state_from_collection(
             partial_failure = true;
             state.push_event(surface_error_event(collected_at, err));
         }
- 	    }
+    }
 
     if review_threads_fetch_succeeded_at(state, collected_at) {
         requeue_failed_resolution_threads(state, &mut pending_actionable);
@@ -3369,6 +4744,162 @@ fn status_like(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
         .with_metadata(json!({"watch": state, "readiness": readiness})))
 }
 
+fn webhook_status(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+    let state = load_state_for_params(store, &params)?;
+    let mut text = format!(
+        "PR watch webhook status: {}\nRepo: {}\nPR: #{}\nEvent source: {:?}\nWebhook enabled: {}\nLast delivery: {}\nLast delivery result: {}\nLast event: {} {}\nCollapsed events: {}\nDropped events: {}\nFallback heartbeat: {}\nWebhook URL hint: {}",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        state.webhook.mode,
+        state.webhook.enabled,
+        state.webhook.last_delivery_at.as_deref().unwrap_or("none"),
+        state
+            .webhook
+            .last_delivery_status
+            .as_deref()
+            .unwrap_or("none"),
+        state.webhook.last_event_type.as_deref().unwrap_or("none"),
+        state.webhook.last_event_action.as_deref().unwrap_or(""),
+        state.webhook.collapsed_event_count,
+        state.webhook.dropped_event_count,
+        state
+            .webhook
+            .fallback_heartbeat_seconds
+            .map(|seconds| format!("{}s", seconds))
+            .unwrap_or_else(|| "disabled".to_string()),
+        state.webhook.webhook_url_hint.as_deref().unwrap_or("none"),
+    );
+    text.push_str("\nMutation policy: webhook deliveries are read-only wake signals and do not grant push/comment/resolve permissions.");
+    match read_webhook_health()? {
+        Some(health) => text.push_str(&format!(
+            "\nWebhook daemon: {} pid={} alive={} bind={}:{} last_result={}",
+            health.status,
+            health.pid,
+            process_is_alive(health.pid),
+            health.bind,
+            health.port,
+            health.last_result.as_deref().unwrap_or("none")
+        )),
+        None => text.push_str("\nWebhook daemon: daemon_down (no health file)"),
+    }
+    Ok(ToolOutput::new(text)
+        .with_title(format!("webhook status {}", state.watch_id))
+        .with_metadata(json!({"watch": state, "webhook_status": "reported"})))
+}
+
+fn webhook_doctor(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+    let state = load_state_for_params(store, &params)?;
+    let path = state_path(store, &state.watch_id);
+    let mut checks = Vec::new();
+    checks.push(("state_path_readable", path.is_file()));
+    checks.push((
+        "root_dir_matches",
+        state
+            .root_dir
+            .as_deref()
+            .map(|recorded| recorded == root.display().to_string())
+            .unwrap_or(false),
+    ));
+    checks.push(("webhook_enabled", state.webhook.enabled));
+    checks.push((
+        "secret_env_present",
+        std::env::var("GITHUB_WEBHOOK_SECRET")
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
+    ));
+    checks.push((
+        "normal_monitor_suppressed",
+        !matches!(state.webhook.mode, PrWatchEventMode::Webhook)
+            || state.polling.last_schedule_kind.as_deref() != Some("monitor"),
+    ));
+    let health = read_webhook_health()?;
+    let daemon_alive = health
+        .as_ref()
+        .map(|h| process_is_alive(h.pid))
+        .unwrap_or(false);
+    checks.push(("daemon_pid_alive", daemon_alive));
+    let hook_output = StdCommand::new("gh")
+        .args(["api", &format!("repos/{}/hooks", state.pr.repo)])
+        .output();
+    let mut hook_signal = "github_hook_unknown".to_string();
+    let mut hook_ok = false;
+    if let Ok(output) = hook_output {
+        if output.status.success() {
+            let hooks: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!([]));
+            let failing = hooks.as_array().into_iter().flatten().find_map(|hook| {
+                let code = hook
+                    .pointer("/last_response/code")
+                    .and_then(Value::as_i64)?;
+                (!(200..300).contains(&code)).then_some(code)
+            });
+            let required_events = [
+                "pull_request",
+                "pull_request_review",
+                "pull_request_review_comment",
+                "issue_comment",
+                "check_run",
+                "check_suite",
+                "status",
+            ];
+            let missing_events = hooks.as_array().into_iter().flatten().all(|hook| {
+                let Some(events) = hook.get("events").and_then(Value::as_array) else {
+                    return true;
+                };
+                !required_events
+                    .iter()
+                    .all(|required| events.iter().any(|event| event.as_str() == Some(*required)))
+            });
+            if let Some(code) = failing {
+                hook_signal = format!("github_hook_failing last_response.code={code}");
+            } else if missing_events {
+                hook_signal = "github_hook_failing missing_required_events".to_string();
+            } else {
+                hook_ok = true;
+                hook_signal = "github_hooks_reachable".to_string();
+            }
+        } else {
+            hook_signal = "github_hook_failing_or_auth_failing".to_string();
+        }
+    }
+    checks.push(("github_hook_last_response_ok", hook_ok));
+    let tunnel_signal = match state.webhook.webhook_url_hint.as_deref() {
+        Some(url) if daemon_alive && hook_signal.contains("github_hook_failing") => {
+            format!("tunnel_down_or_hook_misrouted public_url={url}")
+        }
+        Some(url) => format!("public_url_configured {url}"),
+        None => "tunnel_unknown no webhook_url_hint configured".to_string(),
+    };
+    let mut text = format!(
+        "PR watch webhook doctor: {}\nRepo: {}\nPR: #{}\nState path: {}\nCurrent root: {}\n",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        path.display(),
+        root.display(),
+    );
+    for (name, ok) in &checks {
+        text.push_str(&format!(
+            "- {}: {}\n",
+            name,
+            if *ok { "ok" } else { "problem" }
+        ));
+    }
+    text.push_str(&format!(
+        "- daemon_signal: {}\n- hook_signal: {}\n- tunnel_signal: {}\nSignals: daemon_down means missing/stale health or dead pid; tunnel_down is suspected when daemon is alive but GitHub hook last_response is non-2xx/404; github_hook_failing reports hook API failures, missing required events, or non-2xx last responses.\n",
+        if daemon_alive { "daemon_alive" } else { "daemon_down" },
+        hook_signal,
+        tunnel_signal
+    ));
+    let ok = checks.iter().all(|(_, ok)| *ok);
+    Ok(ToolOutput::new(text)
+        .with_title(format!(
+            "webhook doctor {}",
+            if ok { "ok" } else { "problem" }
+        ))
+        .with_metadata(json!({"watch": state, "doctor_ok": ok})))
+}
+
 fn readiness_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let state = load_state_for_params(store, &params)?;
     let readiness = state.readiness();
@@ -3519,6 +5050,20 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
             state.last_resolution_error.as_deref().unwrap_or("none")
         ));
     }
+    text.push_str(&format!(
+        "\nWebhook: mode={:?} enabled={} last_delivery={} status={} heartbeat={} collapsed={} dropped={}",
+        state.webhook.mode,
+        state.webhook.enabled,
+        state.webhook.last_delivery_at.as_deref().unwrap_or("none"),
+        state.webhook.last_delivery_status.as_deref().unwrap_or("none"),
+        state
+            .webhook
+            .fallback_heartbeat_seconds
+            .map(|seconds| format!("{}s", seconds))
+            .unwrap_or_else(|| "disabled".to_string()),
+        state.webhook.collapsed_event_count,
+        state.webhook.dropped_event_count,
+    ));
     text
 }
 
@@ -3652,6 +5197,7 @@ fn stop_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let path = state_path(store, &state.watch_id);
     if would_write {
         write_state_atomic(&path, &state)?;
+        remove_webhook_index_entry(&state.watch_id)?;
     }
     Ok(ToolOutput::new(format!(
         "PR watch stopped: {}{}",
@@ -3763,9 +5309,18 @@ mod tests {
         assert!(actions.iter().any(|value| value == "revoke"));
         assert!(actions.iter().any(|value| value == "reschedule"));
         assert!(actions.iter().any(|value| value == "resolve_addressed"));
+        assert!(actions.iter().any(|value| value == "webhook_status"));
+        assert!(actions.iter().any(|value| value == "webhook_doctor"));
+        assert!(actions.iter().any(|value| value == "webhook_heartbeat"));
         assert!(!actions.iter().any(|value| value == "merge"));
         assert!(schema.pointer("/properties/scopes").is_some());
         assert!(schema.pointer("/properties/thread_ids").is_some());
+        assert!(schema.pointer("/properties/event_mode").is_some());
+        assert!(
+            schema
+                .pointer("/properties/fallback_heartbeat_seconds")
+                .is_some()
+        );
         let validation = schema
             .pointer("/properties/validation")
             .expect("validation schema should be advertised");
@@ -3774,6 +5329,44 @@ mod tests {
         assert_eq!(
             validation["items"]["properties"]["command"]["type"],
             json!("string")
+        );
+    }
+
+    #[test]
+    fn webhook_content_type_accepts_json_charset_only() {
+        assert!(content_type_is_accepted("application/json"));
+        assert!(content_type_is_accepted("application/json; charset=utf-8"));
+        assert!(!content_type_is_accepted("text/plain"));
+        assert!(!content_type_is_accepted("application/json; boundary=x"));
+    }
+
+    #[test]
+    fn webhook_signature_verification_requires_valid_hmac() {
+        let body = br#"{"action":"opened","repository":{"full_name":"owner/repo"},"pull_request":{"number":7}}"#;
+        let digest = hmac_sha256(b"secret", body);
+        let signature = format!("sha256={}", hex::encode(digest));
+        let delivery = verified_github_delivery_from_parts(
+            "secret",
+            "application/json",
+            "pull_request",
+            "delivery-1",
+            &signature,
+            body,
+        )
+        .expect("valid delivery");
+        assert_eq!(delivery.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(delivery.pr, Some(7));
+        assert_eq!(delivery.action.as_deref(), Some("opened"));
+        assert!(
+            verified_github_delivery_from_parts(
+                "wrong",
+                "application/json",
+                "pull_request",
+                "delivery-1",
+                &signature,
+                body,
+            )
+            .is_err()
         );
     }
 
@@ -3830,6 +5423,9 @@ mod tests {
             expected_fingerprint: None,
             expected_cycle_number: None,
             no_code_resolution: false,
+            event_mode: None,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
         }
     }
 
@@ -4541,6 +6137,9 @@ mod tests {
             expected_fingerprint: None,
             expected_cycle_number: None,
             no_code_resolution: false,
+            event_mode: None,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
@@ -4572,6 +6171,9 @@ mod tests {
             expected_fingerprint: None,
             expected_cycle_number: None,
             no_code_resolution: false,
+            event_mode: None,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
         };
         assert!(!has_non_empty_commit_or_reason(&params));
 
@@ -4614,6 +6216,9 @@ mod tests {
             expected_fingerprint: None,
             expected_cycle_number: None,
             no_code_resolution: false,
+            event_mode: None,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
         };
 
         assert!(!has_explicit_no_code_reason(&params));
@@ -4672,6 +6277,9 @@ mod tests {
             expected_fingerprint: None,
             expected_cycle_number: None,
             no_code_resolution: false,
+            event_mode: None,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
         };
 
         let attempt = skipped_resolution_attempt("THREAD_B", "head", &params);
@@ -4866,16 +6474,18 @@ mod tests {
             repo: "owner/repo".into(),
             number: 12,
         });
-        state.last_resolution_attempts.push(ThreadResolutionAttempt {
-            thread_id: "THREAD_FAILED".into(),
-            attempted_at: "2026-06-18T18:00:00Z".into(),
-            status: ResolutionAttemptStatus::Failed,
-            head_sha: Some("head".into()),
-            commit_sha: Some("fixsha".into()),
-            validation: Vec::new(),
-            reason: "retry failed".into(),
-            error: Some("GitHub response reported isResolved=false".into()),
-        });
+        state
+            .last_resolution_attempts
+            .push(ThreadResolutionAttempt {
+                thread_id: "THREAD_FAILED".into(),
+                attempted_at: "2026-06-18T18:00:00Z".into(),
+                status: ResolutionAttemptStatus::Failed,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "retry failed".into(),
+                error: Some("GitHub response reported isResolved=false".into()),
+            });
         state.last_seen.review_threads.insert(
             "THREAD_FAILED".into(),
             ReviewThreadMarker {
@@ -4892,7 +6502,10 @@ mod tests {
         requeue_failed_resolution_threads(&state, &mut pending);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "THREAD_FAILED");
-        assert_eq!(pending[0].reason.as_deref(), Some("failed_resolution_retry"));
+        assert_eq!(
+            pending[0].reason.as_deref(),
+            Some("failed_resolution_retry")
+        );
 
         state
             .last_seen
@@ -4929,19 +6542,17 @@ mod tests {
             "2026-06-18T18:00:00Z"
         ));
 
-        state.last_successful_fetch.insert(
-            "metadata".into(),
-            "2026-06-18T18:00:00Z".into(),
-        );
+        state
+            .last_successful_fetch
+            .insert("metadata".into(), "2026-06-18T18:00:00Z".into());
         assert!(!review_threads_fetch_succeeded_at(
             &state,
             "2026-06-18T18:00:00Z"
         ));
 
-        state.last_successful_fetch.insert(
-            "review_threads".into(),
-            "2026-06-18T18:00:00Z".into(),
-        );
+        state
+            .last_successful_fetch
+            .insert("review_threads".into(), "2026-06-18T18:00:00Z".into());
         assert!(review_threads_fetch_succeeded_at(
             &state,
             "2026-06-18T18:00:00Z"
@@ -4992,14 +6603,19 @@ mod tests {
             expected_fingerprint: Some(fingerprint.clone()),
             expected_cycle_number: Some(7),
             no_code_resolution: false,
+            event_mode: None,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
         };
         assert!(ensure_resolve_freshness_matches(&state, &params).is_ok());
 
         params.expected_cycle_number = Some(6);
-        assert!(ensure_resolve_freshness_matches(&state, &params)
-            .unwrap_err()
-            .to_string()
-            .contains("expected_cycle_number is stale"));
+        assert!(
+            ensure_resolve_freshness_matches(&state, &params)
+                .unwrap_err()
+                .to_string()
+                .contains("expected_cycle_number is stale")
+        );
 
         state.last_seen.review_threads.insert(
             "THREAD_A".into(),
@@ -5014,10 +6630,12 @@ mod tests {
         );
         params.expected_cycle_number = Some(7);
         params.expected_fingerprint = Some("stale".into());
-        assert!(ensure_resolve_freshness_matches(&state, &params)
-            .unwrap_err()
-            .to_string()
-            .contains("expected_fingerprint is stale"));
+        assert!(
+            ensure_resolve_freshness_matches(&state, &params)
+                .unwrap_err()
+                .to_string()
+                .contains("expected_fingerprint is stale")
+        );
 
         state.pending_actionable.clear();
         params.expected_fingerprint = Some(

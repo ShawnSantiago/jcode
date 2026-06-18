@@ -258,6 +258,10 @@ pub(crate) enum Command {
         wait: bool,
     },
 
+    /// PR watch helper commands
+    #[command(subcommand)]
+    PrWatch(PrWatchCommand),
+
     /// Authentication status and validation helpers
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -511,6 +515,53 @@ pub(crate) enum ServerCommand {
         force: bool,
 
         /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PrWatchCommand {
+    /// Native PR watch webhook service commands
+    #[command(subcommand)]
+    Webhook(PrWatchWebhookCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PrWatchWebhookCommand {
+    /// Serve GitHub webhook deliveries on a local HTTP endpoint
+    Serve {
+        /// Local TCP port to bind.
+        #[arg(long, default_value_t = 9000)]
+        port: u16,
+
+        /// Bind address. Defaults to localhost; non-local binds require --allow-non-local.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+
+        /// Environment variable containing the GitHub webhook secret.
+        #[arg(long, default_value = "GITHUB_WEBHOOK_SECRET")]
+        secret_env: String,
+
+        /// Allow binding to a non-local address.
+        #[arg(long)]
+        allow_non_local: bool,
+    },
+
+    /// Show native PR watch webhook daemon/index status
+    Status {
+        /// Emit JSON instead of plain text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Diagnose native PR watch webhook setup for a repo or all indexed watches
+    Doctor {
+        /// Optional repository in OWNER/REPO form.
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Emit JSON instead of plain text.
         #[arg(long)]
         json: bool,
     },

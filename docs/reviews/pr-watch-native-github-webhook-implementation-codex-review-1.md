@@ -1,0 +1,17 @@
+verdict: ITERATE
+
+blockers:
+- `crates/jcode-app-core/src/tool/pr_watch.rs:1801-1805`, `2088-2101`: webhook routing only extracts one PR number from `pull_request`, `issue.number`, or the first `check_run.pull_requests[0]`. It does not verify `issue.pull_request`, does not route all associated check-run PRs, does not handle `check_suite`, and does not resolve `status` SHA to indexed watched PRs. This violates the plan’s event authorization/routing constraints and can route a plain issue comment to a watched PR with the same number.
+- `crates/jcode-app-core/src/tool/pr_watch.rs:1975`, `2077-2080`, `2080`: dedupe is process-local `HashSet` only, then immediately routes to refresh. There is no persistent 10,000-ID/7-day delivery store, no debounce/coalescing, no bounded per-watch follow-up, no concurrency cap, and no retry/backoff path. This violates the approved dedupe/debounce/backpressure requirements.
+- `crates/jcode-app-core/src/tool/pr_watch.rs:2140-2192`, `3019-3046`, `3036-3040`: the webhook refresh path relies on `poll_now`, which loads state before acquiring the lock and does not re-read state after lock acquisition before collection. If lock acquisition fails, `poll_now` returns a locked output, but `webhook_refresh_watch` still reloads state and writes `last_delivery_status=routed` instead of recording one bounded follow-up refresh. The final metadata write also lacks a version check. This violates the shared refresh boundary and lock-contention safety requirements.
+- `crates/jcode-app-core/src/tool/pr_watch.rs:1957-1975`, `1976-2000`, `1827-1839`, `1900-1914`, `4252`: daemon lifecycle and observability are not implemented to plan. PID is written before bind, there is no daemon lock/stale PID handling, no port-collision non-running health record, no SIGTERM handling, no structured delivery log, status does not verify PID liveness, and doctor only checks whether `gh api repos/:repo/hooks` succeeds rather than surfacing hook last-response/events/tunnel state. This fails the status/doctor acceptance criteria, including surfacing the 404/dead tunnel class.
+- `crates/jcode-app-core/src/tool/pr_watch.rs:173-185`, `189-211`, `229-239`, `1632-1657`: `webhook_heartbeat` reuses the generic polling schedule payload and has no distinct `heartbeat_seconds` field or heartbeat-specific validation beyond `readonly=true`. The plan requires a distinct read-only heartbeat payload, schedule kind/key semantics, and validation proving heartbeat cannot drift into mutation-capable scheduling.
+- Working tree has unrelated untracked artifacts: `membership-desktop-starter-cad.png`, `membership-desktop-usd.png`, and `membership-mobile-starter-cad.png`. These are outside the PR watch webhook plan and should not be included in this implementation branch.
+
+non_blocking:
+- `VerifiedGithubDelivery` is internal and not deserializable from tool input, which is the right trust-boundary direction.
+- Webhook-triggered refresh currently calls the existing read-only `poll_now` path and does not directly call `resolve_addressed` or grant write scopes.
+- The added model fields in `jcode-pr-watch-core` are backward-compatible defaults for existing state JSON.
+
+validation_reviewed:
+- Reported validations reviewed: `scripts/dev_cargo.sh test -p jcode-pr-watch-core -p jcode-app-core pr_watch --lib`, `scripts/dev_cargo.sh check -p jcode --bin jcode`. I did not treat those as sufficient because the blockers are plan/safety gaps not covered by the reported compile/test pass.
