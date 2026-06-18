@@ -1,6 +1,12 @@
-use super::{AmbientRunnerHandle, has_ready_direct_items};
+use super::{
+    AmbientRunnerHandle, compute_post_cycle_sleep_secs, compute_sleep_secs_until_next_check,
+    has_ready_direct_items, persist_scheduled_wake,
+};
 use crate::ambient::ScheduledQueue;
-use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
+use crate::ambient::{
+    AmbientManager, AmbientState, AmbientStatus, Priority, ScheduleRequest, ScheduleTarget,
+    ScheduledItem,
+};
 use crate::message::{Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::session::Session;
@@ -181,6 +187,123 @@ fn ready_direct_detection_ignores_ambient_and_future_items() {
     assert!(
         has_ready_direct_items(&queue, now),
         "ready spawn/resume items must bypass user-active pause"
+    );
+}
+
+#[test]
+fn direct_due_clamps_ambient_allowed_sleep() {
+    let now = chrono::Utc::now();
+    let direct_due = now + chrono::Duration::seconds(300);
+
+    let sleep_secs = compute_sleep_secs_until_next_check(now, true, 7200, Some(direct_due));
+
+    assert_eq!(sleep_secs, 300);
+}
+
+#[test]
+fn overdue_direct_item_wakes_in_one_second() {
+    let now = chrono::Utc::now();
+    let direct_due = now - chrono::Duration::seconds(30);
+
+    let sleep_secs = compute_sleep_secs_until_next_check(now, true, 7200, Some(direct_due));
+
+    assert_eq!(sleep_secs, 1);
+}
+
+#[test]
+fn no_direct_item_preserves_adaptive_floor() {
+    let now = chrono::Utc::now();
+
+    assert_eq!(
+        compute_sleep_secs_until_next_check(now, true, 7200, None),
+        7200
+    );
+    assert_eq!(compute_sleep_secs_until_next_check(now, true, 5, None), 30);
+}
+
+#[test]
+fn ambient_disabled_sleep_preserves_poll_cap_but_respects_direct_due() {
+    let now = chrono::Utc::now();
+
+    assert_eq!(
+        compute_sleep_secs_until_next_check(
+            now,
+            false,
+            7200,
+            Some(now + chrono::Duration::seconds(300))
+        ),
+        30
+    );
+    assert_eq!(
+        compute_sleep_secs_until_next_check(
+            now,
+            false,
+            7200,
+            Some(now + chrono::Duration::seconds(10))
+        ),
+        10
+    );
+    assert_eq!(
+        compute_sleep_secs_until_next_check(now, false, 7200, None),
+        30
+    );
+}
+
+#[test]
+fn post_cycle_sleep_uses_fresh_direct_queue_and_persists_clamped_wake() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let now = chrono::Utc::now();
+    let direct_due = now + chrono::Duration::seconds(240);
+
+    let mut manager = AmbientManager::new().expect("ambient manager");
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: None,
+            wake_at: Some(direct_due),
+            context: "Follow up later".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "session_parent".to_string(),
+            },
+            created_by_session: "session_test".to_string(),
+            working_dir: None,
+            task_description: Some("Follow up later".to_string()),
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            schedule_key: None,
+            schedule_kind: None,
+            schedule_payload: None,
+        })
+        .expect("schedule direct item");
+
+    let sleep_secs = compute_post_cycle_sleep_secs(now, true, 7200);
+    assert_eq!(sleep_secs, 240);
+
+    let mut state = AmbientState {
+        status: AmbientStatus::Idle,
+        ..Default::default()
+    };
+    let next_wake = now + chrono::Duration::seconds(sleep_secs as i64);
+    persist_scheduled_wake(next_wake, &mut state).expect("persist scheduled wake");
+
+    let reloaded = AmbientState::load().expect("load ambient state");
+    let AmbientStatus::Scheduled { next_wake } = reloaded.status else {
+        panic!("expected scheduled wake state");
+    };
+    assert!(
+        next_wake <= direct_due + chrono::Duration::seconds(1),
+        "next_wake {next_wake} should be at or just after direct due {direct_due}"
+    );
+    assert!(
+        next_wake < now + chrono::Duration::seconds(7200),
+        "clamped next wake should be far earlier than adaptive interval"
+    );
+    assert!(
+        next_wake > now,
+        "post-cycle sleep should not persist an immediate or past wake for future direct items"
     );
 }
 

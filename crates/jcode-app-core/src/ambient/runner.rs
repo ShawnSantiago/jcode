@@ -37,6 +37,60 @@ pub(super) fn has_ready_direct_items(queue: &ScheduledQueue, now: DateTime<Utc>)
         .any(|item| item.scheduled_for <= now && item.target.is_direct_delivery())
 }
 
+fn next_direct_due(queue: &ScheduledQueue) -> Option<DateTime<Utc>> {
+    queue
+        .items()
+        .iter()
+        .filter(|item| item.target.is_direct_delivery())
+        .map(|item| item.scheduled_for)
+        .min()
+}
+
+fn compute_sleep_secs_until_next_check(
+    now: DateTime<Utc>,
+    ambient_allowed: bool,
+    adaptive_secs: u64,
+    next_direct_due: Option<DateTime<Utc>>,
+) -> u64 {
+    if ambient_allowed {
+        let interval = adaptive_secs.max(MAX_IDLE_POLL_SECS);
+        let next_direct_secs = next_direct_due
+            .map(|next| (next - now).num_seconds().max(0) as u64)
+            .unwrap_or(interval);
+        interval.min(next_direct_secs.max(1))
+    } else {
+        next_direct_due
+            .map(|next| (next - now).num_seconds().max(0) as u64)
+            .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
+            .unwrap_or(MAX_IDLE_POLL_SECS)
+    }
+}
+
+fn compute_post_cycle_sleep_secs(
+    now: DateTime<Utc>,
+    ambient_allowed: bool,
+    adaptive_secs: u64,
+) -> u64 {
+    let next_direct_due = AmbientManager::new()
+        .ok()
+        .and_then(|mgr| next_direct_due(mgr.queue()));
+    compute_sleep_secs_until_next_check(now, ambient_allowed, adaptive_secs, next_direct_due)
+}
+
+fn persist_scheduled_wake(
+    next_wake: DateTime<Utc>,
+    state: &mut AmbientState,
+) -> anyhow::Result<()> {
+    if matches!(
+        state.status,
+        AmbientStatus::Running { .. } | AmbientStatus::Idle
+    ) {
+        state.status = AmbientStatus::Scheduled { next_wake };
+        state.save()?;
+    }
+    Ok(())
+}
+
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
 pub struct AmbientRunnerHandle {
@@ -671,13 +725,7 @@ impl AmbientRunnerHandle {
                         } else {
                             Vec::new()
                         };
-                        let next_direct_due = mgr
-                            .queue()
-                            .items()
-                            .iter()
-                            .filter(|item| item.target.is_direct_delivery())
-                            .map(|item| item.scheduled_for)
-                            .min();
+                        let next_direct_due = next_direct_due(mgr.queue());
                         // Update queue info for widget
                         {
                             let mut qc = self.inner.queue_count.write().await;
@@ -710,21 +758,12 @@ impl AmbientRunnerHandle {
             }
 
             if !should_run {
-                let sleep_secs = if ambient_allowed {
-                    let interval = scheduler
-                        .calculate_interval(None)
-                        .as_secs()
-                        .max(MAX_IDLE_POLL_SECS);
-                    let next_direct_secs = next_direct_due
-                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .unwrap_or(interval);
-                    interval.min(next_direct_secs.max(1))
-                } else {
-                    next_direct_due
-                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
-                        .unwrap_or(MAX_IDLE_POLL_SECS)
-                };
+                let sleep_secs = compute_sleep_secs_until_next_check(
+                    Utc::now(),
+                    ambient_allowed,
+                    scheduler.calculate_interval(None).as_secs(),
+                    next_direct_due,
+                );
 
                 logging::info(&format!(
                     "Ambient runner: not time to run, sleeping {}s",
@@ -857,9 +896,16 @@ impl AmbientRunnerHandle {
             // Release lock
             let _ = lock.release();
 
-            // Calculate next sleep interval
-            let interval = scheduler.calculate_interval(None);
-            let sleep_secs = interval.as_secs().max(30);
+            // Calculate next sleep interval. Reload the queue after the cycle
+            // has recorded results because scheduled monitor cycles can enqueue
+            // their next direct Session/Spawn poll while the cycle is running.
+            let now = Utc::now();
+            let sleep_secs = compute_post_cycle_sleep_secs(
+                now,
+                ambient_allowed,
+                scheduler.calculate_interval(None).as_secs(),
+            );
+            let next_wake = now + chrono::Duration::seconds(sleep_secs as i64);
 
             // Update state with scheduled wake
             {
@@ -868,10 +914,7 @@ impl AmbientRunnerHandle {
                     s.status,
                     AmbientStatus::Running { .. } | AmbientStatus::Idle
                 ) {
-                    s.status = AmbientStatus::Scheduled {
-                        next_wake: Utc::now() + chrono::Duration::seconds(sleep_secs as i64),
-                    };
-                    let _ = s.save();
+                    let _ = persist_scheduled_wake(next_wake, &mut s);
                 }
             }
 
