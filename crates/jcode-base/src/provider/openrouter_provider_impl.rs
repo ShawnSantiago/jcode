@@ -296,6 +296,17 @@ impl Provider for OpenRouterProvider {
             anyhow::bail!("OpenRouter/OpenAI-compatible model cannot be empty");
         }
 
+        // Session restore persists the model as `<provider-key>:<model>` so the
+        // right slot can be reconstructed (see
+        // `MultiProvider::model_switch_request_for_session_*`). `MultiProvider`
+        // strips this prefix when routing, but the standalone `OpenRouterProvider`
+        // used for a named OpenAI-compatible profile does not, so the prefixed
+        // string would leak to the upstream API and be rejected as an invalid
+        // model id. Normalize the session-routing prefix back to the bare model
+        // id here, while leaving built-in routing prefixes (claude:, openai:, ...)
+        // untouched so cross-provider switches from a saved session still work.
+        let trimmed = self.strip_session_profile_prefix(trimmed);
+
         let (model_id, provider) = if self.supports_provider_features {
             let (model_id, provider) = parse_model_spec(trimmed);
             let model_id = if provider.is_some() {

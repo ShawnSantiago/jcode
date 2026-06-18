@@ -1851,6 +1851,77 @@ fn custom_compatible_provider_preserves_at_sign_model_ids() {
 }
 
 #[test]
+fn named_profile_set_model_strips_own_session_routing_prefix() {
+    // Session restore persists `<profile>:<model>`; the standalone provider
+    // must normalize its own profile prefix back to the bare model id so the
+    // upstream API never sees `tokenrouter:MiniMax-M3` (issues #382/#383/#363).
+    let provider = OpenRouterProvider {
+        profile_id: Some("tokenrouter".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    provider.set_model("tokenrouter:MiniMax-M3").unwrap();
+    assert_eq!(provider.model(), "MiniMax-M3");
+
+    // Bare ids still work unchanged.
+    provider.set_model("MiniMax-M3").unwrap();
+    assert_eq!(provider.model(), "MiniMax-M3");
+}
+
+#[test]
+fn named_profile_set_model_strips_other_known_profile_prefix() {
+    // A session saved under one built-in OpenAI-compatible profile and
+    // reattached under another must still normalize to the bare model id.
+    let provider = OpenRouterProvider {
+        profile_id: Some("tokenrouter".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    provider.set_model("kimi:kimi-for-coding").unwrap();
+    assert_eq!(provider.model(), "kimi-for-coding");
+}
+
+#[test]
+fn named_profile_set_model_keeps_builtin_routing_prefixes() {
+    // Built-in provider routing prefixes must round-trip verbatim so a user can
+    // switch the active provider from a saved session.
+    let provider = OpenRouterProvider {
+        profile_id: Some("tokenrouter".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    for spec in [
+        "claude-oauth:claude-opus-4-8",
+        "openai-api:gpt-5.4",
+        "copilot:gpt-5.4",
+    ] {
+        provider.set_model(spec).unwrap();
+        assert_eq!(provider.model(), spec, "spec {spec} must be preserved");
+    }
+}
+
+#[test]
+fn named_profile_set_model_keeps_unknown_prefix_with_colon() {
+    // A `:`-bearing id whose prefix is neither this profile nor a known
+    // built-in profile must be preserved verbatim (it may be a real model id).
+    let provider = OpenRouterProvider {
+        profile_id: Some("tokenrouter".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    provider.set_model("some-vendor:weird-model").unwrap();
+    assert_eq!(provider.model(), "some-vendor:weird-model");
+}
+
+#[test]
 fn openrouter_provider_normalizes_bare_pinned_model_ids() {
     let provider = make_provider();
 
