@@ -1813,8 +1813,12 @@ fn maybe_schedule_webhook_heartbeat(
     for stale_id in existing_ids {
         manager.cancel_schedule(&stale_id)?;
     }
+    let daemon_originated = ctx.session_id == "pr-watch-webhook-daemon";
     let target = match params.target.as_deref() {
         Some("spawn") => ScheduleTarget::Spawn {
+            parent_session_id: ctx.session_id.clone(),
+        },
+        None if daemon_originated => ScheduleTarget::Spawn {
             parent_session_id: ctx.session_id.clone(),
         },
         Some("resume") | None => ScheduleTarget::Session {
