@@ -1895,6 +1895,7 @@ fn sha256_hex(value: &[u8]) -> String {
 
 const WEBHOOK_MAX_BODY_BYTES: usize = 1024 * 1024;
 const WEBHOOK_DEBOUNCE_SECONDS: i64 = 10;
+const WEBHOOK_CONNECTION_TIMEOUT_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VerifiedGithubDelivery {
@@ -2313,7 +2314,16 @@ pub async fn run_webhook_serve_command(
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                match handle_webhook_connection(stream, &secret).await {
+                match tokio::time::timeout(
+                    StdDuration::from_secs(WEBHOOK_CONNECTION_TIMEOUT_SECONDS),
+                    handle_webhook_connection(stream, &secret),
+                ).await {
+                    Err(_) => {
+                        health.last_result = Some(format!(
+                            "rejected: webhook connection timed out after {WEBHOOK_CONNECTION_TIMEOUT_SECONDS}s"
+                        ));
+                    }
+                    Ok(result) => match result {
                     Ok((delivery, result)) => {
                         health.last_delivery_id = Some(delivery.delivery_id);
                         health.last_event = Some(delivery.event);
@@ -2322,6 +2332,7 @@ pub async fn run_webhook_serve_command(
                     Err(err) => {
                         health.last_result = Some(format!("rejected: {}", err));
                     }
+                    },
                 }
                 health.updated_at = now_iso();
                 let _ = write_webhook_health(&health);
@@ -3923,6 +3934,9 @@ async fn monitor_once(
         clear_action_required_handoff(store, &mut state)?
     };
     if would_write {
+        if state.terminal {
+            remove_webhook_index_entry(&state.watch_id)?;
+        }
         write_state_atomic(&path, &state)?;
     }
     drop(lock);
