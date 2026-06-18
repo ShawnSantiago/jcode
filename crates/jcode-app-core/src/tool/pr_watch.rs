@@ -702,6 +702,28 @@ fn review_threads_fetch_succeeded_at(state: &PrWatchState, collected_at: &str) -
         .is_some_and(|value| value == collected_at)
 }
 
+fn review_thread_marker_fingerprint(state: &PrWatchState, thread_ids: &[String]) -> Result<String> {
+    let mut canonical = Vec::new();
+    for id in thread_ids {
+        let marker = state
+            .last_seen
+            .review_threads
+            .get(id)
+            .with_context(|| format!("unknown review thread id for freshness check: {id}"))?;
+        canonical.push(json!({
+            "id": id,
+            "updated_at": marker.updated_at,
+            "resolved": marker.resolved,
+            "outdated": marker.outdated,
+            "body_hash": marker.body_hash,
+            "url": marker.url,
+        }));
+    }
+    serde_json::to_vec(&canonical)
+        .map(|bytes| sha256_hex(&bytes))
+        .context("failed to serialize review thread freshness markers")
+}
+
 fn ensure_resolve_freshness_matches(state: &PrWatchState, params: &PrWatchInput) -> Result<()> {
     let expected_cycle = params
         .expected_cycle_number
@@ -720,13 +742,17 @@ fn ensure_resolve_freshness_matches(state: &PrWatchState, params: &PrWatchInput)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .context("resolve_addressed requires expected_fingerprint from the current handoff/status")?;
-    let current_fingerprint = actionable_fingerprint(&state.pending_actionable)
-        .context("resolve_addressed requires current actionable items; poll first if none remain")?;
-    if expected_fingerprint != current_fingerprint {
+    let current_actionable_fingerprint = actionable_fingerprint(&state.pending_actionable);
+    if current_actionable_fingerprint.as_deref() == Some(expected_fingerprint) {
+        return Ok(());
+    }
+    let current_thread_fingerprint = review_thread_marker_fingerprint(state, &params.thread_ids)?;
+    if current_thread_fingerprint != expected_fingerprint {
         bail!(
-            "resolve_addressed expected_fingerprint is stale: expected {}, current {}",
+            "resolve_addressed expected_fingerprint is stale: expected {}, current actionable {}, current thread {}",
             expected_fingerprint,
-            current_fingerprint
+            current_actionable_fingerprint.as_deref().unwrap_or("none"),
+            current_thread_fingerprint
         );
     }
     Ok(())
@@ -3616,6 +3642,7 @@ fn load_all_states(store: &Path) -> Result<Vec<(PathBuf, PrWatchState)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jcode_pr_watch_core::ReviewThreadMarker;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -4810,12 +4837,30 @@ mod tests {
             .to_string()
             .contains("expected_cycle_number is stale"));
 
+        state.last_seen.review_threads.insert(
+            "THREAD_A".into(),
+            ReviewThreadMarker {
+                id: "THREAD_A".into(),
+                updated_at: Some("2026-06-18T18:00:00Z".into()),
+                resolved: false,
+                outdated: false,
+                body_hash: Some("hash:abc".into()),
+                url: Some("https://thread".into()),
+            },
+        );
         params.expected_cycle_number = Some(7);
         params.expected_fingerprint = Some("stale".into());
         assert!(ensure_resolve_freshness_matches(&state, &params)
             .unwrap_err()
             .to_string()
             .contains("expected_fingerprint is stale"));
+
+        state.pending_actionable.clear();
+        params.expected_fingerprint = Some(
+            review_thread_marker_fingerprint(&state, &params.thread_ids)
+                .expect("thread marker fingerprint"),
+        );
+        assert!(ensure_resolve_freshness_matches(&state, &params).is_ok());
     }
 
     #[test]
