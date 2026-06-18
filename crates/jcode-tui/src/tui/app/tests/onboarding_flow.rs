@@ -173,7 +173,7 @@ fn login_openai_phase_is_default_when_no_imports() {
 }
 
 #[test]
-fn login_openai_no_opens_provider_picker() {
+fn login_openai_no_finishes_onboarding_with_login_hint() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.onboarding_flow = None;
@@ -184,9 +184,24 @@ fn login_openai_no_opens_provider_picker() {
             };
         }
         assert!(app.inline_interactive_state.is_none());
-        // 'n' opens the full provider picker so the user can choose another.
+        let before = app.display_messages().len();
+        // 'n' exits onboarding straight to the normal screen (no flaky inline
+        // provider picker) and tells the user to run /login when ready.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
-        assert!(app.inline_interactive_state.is_some());
+        // No inline picker is opened.
+        assert!(app.inline_interactive_state.is_none());
+        // Onboarding is finished (Done phase is inactive, so the accessor
+        // reports no active phase).
+        assert!(app.onboarding_phase().is_none());
+        assert!(!app.onboarding_flow_active());
+        // A system message guides the user to /login.
+        let messages = app.display_messages();
+        assert_eq!(messages.len(), before + 1, "exactly one guidance message");
+        assert!(
+            messages.last().unwrap().content.contains("/login"),
+            "guidance message should mention /login: {:?}",
+            messages.last().unwrap().content
+        );
     });
 }
 
@@ -288,6 +303,80 @@ fn pending_login_entry_is_not_intercepted_by_onboarding_login_phase() {
         // Letters that double as Yes/No navigation must also fall through.
         assert!(!app.handle_onboarding_continue_prompt_key(KeyCode::Char('y')));
         assert!(!app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
+    });
+}
+
+#[test]
+fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
+    // End-to-end regression for the OpenRouter login loop, driven through the
+    // real production key dispatch (`handle_key`) instead of calling the
+    // onboarding helper directly. This reproduces exactly what the user does:
+    // they are mid-onboarding (Login phase still active), a pending API-key
+    // login prompt is showing, and they type a key like "sk-or-..." then press
+    // Enter. Before the fix, the onboarding welcome handler intercepted the
+    // typed characters (y/n/h/l/j/k as Yes/No nav) and Enter (re-opening the
+    // provider picker), creating the infinite loop. Now every keystroke must
+    // flow to the input buffer and Enter must submit the key.
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.onboarding_flow = None;
+        app.begin_onboarding_flow_at_login();
+        if let Some(flow) = app.onboarding_flow.as_mut() {
+            flow.phase = OnboardingPhase::Login { import: None };
+        }
+        // Simulate having chosen OpenRouter from the picker: the picker is closed
+        // and a pending API-key login prompt is active.
+        app.inline_interactive_state = None;
+        app.start_login_provider(
+            crate::provider_catalog::resolve_login_provider("openrouter").unwrap(),
+        );
+        assert!(app.pending_login.is_some());
+        assert!(app.inline_interactive_state.is_none());
+
+        // Type a fake key. It deliberately contains characters that doubled as
+        // Yes/No navigation in the buggy code path (k, n, l, y) to prove they
+        // are no longer swallowed.
+        let key = "sk-or-key-no-loop";
+        for ch in key.chars() {
+            app.handle_key(KeyCode::Char(ch), KeyModifiers::NONE).unwrap();
+            // The picker must never re-open while typing.
+            assert!(
+                app.inline_interactive_state.is_none(),
+                "picker re-opened while typing '{ch}'"
+            );
+        }
+        assert_eq!(app.input, key, "every typed character must reach the input buffer");
+
+        // Pressing Enter submits the key to the pending-login handler instead of
+        // re-opening the provider picker (the old loop).
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(
+            app.pending_login.is_none(),
+            "Enter must consume the pending login, not bounce back to the picker"
+        );
+        assert!(
+            app.inline_interactive_state.is_none(),
+            "Enter must not re-open the provider picker"
+        );
+        assert!(app.input.is_empty(), "input buffer should clear after submit");
+
+        // Crucially: the key must actually be *persisted*, not just "not loop".
+        // It is written to $JCODE_HOME/config/jcode/openrouter.env and exported
+        // to OPENROUTER_API_KEY so the provider can authenticate.
+        let env_file = crate::storage::app_config_dir().unwrap().join("openrouter.env");
+        let contents = std::fs::read_to_string(&env_file)
+            .unwrap_or_else(|e| panic!("openrouter.env should exist at {env_file:?}: {e}"));
+        assert!(
+            contents.contains(&format!("OPENROUTER_API_KEY={key}")),
+            "saved env file must contain the typed key, got:\n{contents}"
+        );
+        assert_eq!(
+            std::env::var("OPENROUTER_API_KEY").ok().as_deref(),
+            Some(key),
+            "key must be exported to the process env for immediate use"
+        );
     });
 }
 
