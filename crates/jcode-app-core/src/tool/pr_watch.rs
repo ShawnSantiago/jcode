@@ -629,6 +629,30 @@ fn has_non_empty_commit_or_reason(params: &PrWatchInput) -> bool {
             .is_some()
 }
 
+fn has_explicit_no_code_reason(params: &PrWatchInput) -> bool {
+    params
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && params
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn commit_sha_matches_current_head(params: &PrWatchInput, current_head: &str) -> bool {
+    params
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|commit_sha| commit_sha == current_head)
+}
+
 fn skipped_resolution_attempt(
     thread_id: &str,
     expected_head: &str,
@@ -653,6 +677,23 @@ fn review_thread_had_prior_resolution_attempt(state: &PrWatchState, thread_id: &
         .last_resolution_attempts
         .iter()
         .any(|attempt| attempt.thread_id == thread_id)
+}
+
+fn review_thread_had_successful_resolution_attempt(state: &PrWatchState, thread_id: &str) -> bool {
+    state.last_resolution_attempts.iter().any(|attempt| {
+        attempt.thread_id == thread_id
+            && matches!(
+                attempt.status,
+                ResolutionAttemptStatus::Resolved | ResolutionAttemptStatus::AlreadyResolved
+            )
+    })
+}
+
+fn review_threads_fetch_succeeded_at(state: &PrWatchState, collected_at: &str) -> bool {
+    state
+        .last_successful_fetch
+        .get("review_threads")
+        .is_some_and(|value| value == collected_at)
 }
 
 fn validation_status_is_passing(status: &str) -> bool {
@@ -747,6 +788,12 @@ async fn resolve_addressed(
     if !has_non_empty_commit_or_reason(&params) {
         bail!("resolve_addressed requires a non-empty commit_sha or a non-empty no-code reason");
     }
+    if !has_explicit_no_code_reason(&params) && !commit_sha_matches_current_head(&params, current_head)
+    {
+        bail!(
+            "resolve_addressed commit_sha must match the watched PR head_sha ({current_head}) unless this is an explicit no-code resolution"
+        );
+    }
     let grant = active_grant_for_scope(&state, WriteScope::ResolveThreads, &ctx.session_id)
         .cloned()
         .context("resolve_addressed requires an active resolve_threads grant for this session")?;
@@ -757,6 +804,9 @@ async fn resolve_addressed(
             bail!("resolve_addressed unknown review thread id: {id}");
         };
         if marker.resolved {
+            if review_thread_had_successful_resolution_attempt(&state, id) {
+                continue;
+            }
             bail!("resolve_addressed thread is already resolved in watch state: {id}");
         }
         if !state.pending_actionable.iter().any(|item| item.id == *id)
@@ -2053,7 +2103,9 @@ async fn poll_now(
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
-    state.resolution_requires_post_poll = false;
+    if review_threads_fetch_succeeded_at(&state, &collected_at) {
+        state.resolution_requires_post_poll = false;
+    }
     apply_schedule_fields(&mut state, &params);
     let handoff = if !state.pending_actionable.is_empty() && would_write {
         maybe_schedule_action_required_handoff(store, &mut state, ctx)?
@@ -2193,7 +2245,9 @@ async fn monitor_once(
             mode = "baseline";
         } else {
             let outcome = update_state_from_collection(&mut state, collection, &collected_at);
-            state.resolution_requires_post_poll = false;
+            if review_threads_fetch_succeeded_at(&state, &collected_at) {
+                state.resolution_requires_post_poll = false;
+            }
             partial_failure = outcome.partial_failure;
             mode = "poll";
         }
@@ -4389,6 +4443,42 @@ mod tests {
     }
 
     #[test]
+    fn code_fix_commit_sha_must_match_current_head_unless_no_code() {
+        let mut params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some("owner~2frepo-pr-12".into()),
+            dry_run: Some(false),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: Some("addressed by code fix".into()),
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD".into()],
+            head_sha: Some("head".into()),
+            commit_sha: Some("other".into()),
+            validation: Vec::new(),
+        };
+
+        assert!(!has_explicit_no_code_reason(&params));
+        assert!(!commit_sha_matches_current_head(&params, "head"));
+
+        params.commit_sha = Some("head".into());
+        assert!(commit_sha_matches_current_head(&params, "head"));
+
+        params.commit_sha = None;
+        params.reason = Some("no-code resolution because reviewer asked for verification".into());
+        assert!(has_explicit_no_code_reason(&params));
+        assert!(!commit_sha_matches_current_head(&params, "head"));
+    }
+
+    #[test]
     fn skipped_resolution_attempt_records_complete_audit_context() {
         let params = PrWatchInput {
             action: PrWatchAction::ResolveAddressed,
@@ -4458,6 +4548,25 @@ mod tests {
         ));
         assert!(!review_thread_had_prior_resolution_attempt(
             &state, "THREAD_B"
+        ));
+        assert!(!review_thread_had_successful_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+
+        state
+            .last_resolution_attempts
+            .push(ThreadResolutionAttempt {
+                thread_id: "THREAD_A".into(),
+                attempted_at: "2026-06-18T18:01:00Z".into(),
+                status: ResolutionAttemptStatus::Resolved,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "second attempt resolved".into(),
+                error: None,
+            });
+        assert!(review_thread_had_successful_resolution_attempt(
+            &state, "THREAD_A"
         ));
     }
 
@@ -4562,6 +4671,40 @@ mod tests {
         state.resolution_requires_post_poll = true;
         let err = ensure_post_resolution_poll_cleared(&state).unwrap_err();
         assert!(err.to_string().contains("post-resolution poll"));
+    }
+
+    #[test]
+    fn post_resolution_poll_clears_only_after_review_thread_refresh() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        assert!(!review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:00:00Z"
+        ));
+
+        state.last_successful_fetch.insert(
+            "metadata".into(),
+            "2026-06-18T18:00:00Z".into(),
+        );
+        assert!(!review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:00:00Z"
+        ));
+
+        state.last_successful_fetch.insert(
+            "review_threads".into(),
+            "2026-06-18T18:00:00Z".into(),
+        );
+        assert!(review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:00:00Z"
+        ));
+        assert!(!review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:01:00Z"
+        ));
     }
 
     #[test]
