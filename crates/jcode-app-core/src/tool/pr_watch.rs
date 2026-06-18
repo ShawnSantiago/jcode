@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jcode_pr_watch_core::{
     ActionRequiredHandoffStatus, ActionableItem, AuthorizationGrant, CheckRunState, CycleOutcome,
-    Marker, PrTarget, PrWatchState, SurfaceError, WatchEvent, WriteScope,
-    normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments, parse_gh_pr_view,
-    parse_gh_review_comments, parse_gh_review_threads, parse_gh_reviews,
+    Marker, PrTarget, PrWatchState, ResolutionAttemptStatus, SurfaceError, ThreadResolutionAttempt,
+    ValidationEvidence, WatchEvent, WriteScope, normalize_watch_state_json, parse_gh_checks,
+    parse_gh_issue_comments, parse_gh_pr_view, parse_gh_review_comments, parse_gh_review_threads,
+    parse_gh_reviews,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -44,6 +45,7 @@ enum PrWatchAction {
     Readiness,
     Handoff,
     AckBaseline,
+    ResolveAddressed,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +75,28 @@ struct PrWatchInput {
     single_use: Option<bool>,
     #[serde(default)]
     grant_id: Option<String>,
+    #[serde(default)]
+    thread_ids: Vec<String>,
+    #[serde(default)]
+    head_sha: Option<String>,
+    #[serde(default)]
+    commit_sha: Option<String>,
+    #[serde(default)]
+    validation: Vec<ValidationEvidence>,
+    #[serde(default)]
+    expected_fingerprint: Option<String>,
+    #[serde(default)]
+    expected_cycle_number: Option<u64>,
+    #[serde(default)]
+    no_code_resolution: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolveReviewThreadOutcome {
+    Resolved,
+    AlreadyResolved,
+    NotResolved,
+    MalformedResponse(String),
 }
 
 const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
@@ -212,7 +236,7 @@ impl Tool for PrWatchTool {
     }
 
     fn description(&self) -> &str {
-        "PR feedback watch state. Start a local watch, run read-only gh collection, schedule follow-up polls, list watches, show status, or compute readiness. No pushes, comments, thread resolution, or merges are performed."
+        "PR feedback watch state. Start a local watch, run read-only gh collection, schedule follow-up polls, list watches, show status, compute readiness, or resolve addressed review threads only via the grant-gated resolve_addressed action. Polling and monitor actions remain read-only: no pushes, comments, thread resolution, or merges are performed by watch cycles."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -223,7 +247,7 @@ impl Tool for PrWatchTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "authorize", "revoke", "reschedule", "stop", "readiness", "handoff"],
+                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "authorize", "revoke", "reschedule", "stop", "readiness", "handoff", "resolve_addressed"],
                     "description": "Action. poll_now/monitor perform read-only gh CLI collection and update local state; no GitHub mutations are performed. authorize/revoke only record local grants for a separate explicit remediation workflow."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
@@ -240,6 +264,27 @@ impl Tool for PrWatchTool {
                 "expires_in_minutes": {"type": "integer", "description": "Grant lifetime for action=authorize. Defaults to 120, capped at 1440."},
                 "single_use": {"type": "boolean", "description": "Whether the grant is intended for one remediation use."},
                 "grant_id": {"type": "string", "description": "Specific grant id for action=revoke."}
+                ,"thread_ids": {"type": "array", "items": {"type": "string"}, "description": "Review thread IDs to resolve for action=resolve_addressed."}
+                ,"head_sha": {"type": "string", "description": "Expected current PR head SHA for action=resolve_addressed."}
+                ,"commit_sha": {"type": "string", "description": "Commit SHA containing the addressed fix for action=resolve_addressed."}
+                ,"expected_fingerprint": {"type": "string", "description": "Expected current actionable fingerprint for action=resolve_addressed; prevents resolving stale handoffs."}
+                ,"expected_cycle_number": {"type": "integer", "description": "Expected watch polling cycle number for action=resolve_addressed; prevents resolving stale handoffs."}
+                ,"no_code_resolution": {"type": "boolean", "description": "Set true only when resolving without a code commit; requires a non-empty reason and no commit_sha."}
+                ,"validation": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["at", "command", "status"],
+                        "properties": {
+                            "at": {"type": "string", "description": "Timestamp for the validation run."},
+                            "command": {"type": "string", "description": "Validation command or check name."},
+                            "status": {"type": "string", "description": "Validation status, for example passed or failed."},
+                            "summary": {"type": ["string", "null"], "description": "Optional concise validation result summary."}
+                        },
+                        "additionalProperties": false
+                    },
+                    "description": "Validation evidence for action=resolve_addressed."
+                }
             }
         })
     }
@@ -252,7 +297,7 @@ impl Tool for PrWatchTool {
             .unwrap_or_else(|| PathBuf::from("."));
         let store = watch_dir(&root);
         match params.action {
-            PrWatchAction::Start => start_watch(&store, params, &ctx),
+            PrWatchAction::Start => start_watch(&root, &store, params, &ctx),
             PrWatchAction::List => list_watches(&store),
             PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx).await,
             PrWatchAction::Monitor => monitor_once(&root, &store, params, &ctx).await,
@@ -263,6 +308,7 @@ impl Tool for PrWatchTool {
             PrWatchAction::Status => status_like(&store, params),
             PrWatchAction::Readiness => readiness_report(&store, params),
             PrWatchAction::Handoff => handoff_report(&store, params),
+            PrWatchAction::ResolveAddressed => resolve_addressed(&root, &store, params, &ctx).await,
             PrWatchAction::Stop => stop_watch(&store, params),
         }
     }
@@ -370,10 +416,16 @@ fn target_from_params(params: &PrWatchInput) -> Result<PrTarget> {
     Ok(PrTarget { repo, number })
 }
 
-fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<ToolOutput> {
+fn start_watch(
+    root: &Path,
+    store: &Path,
+    params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let target = target_from_params(&params)?;
     let mut state = PrWatchState::new(target);
     state.origin_session_id = Some(ctx.session_id.clone());
+    state.root_dir = Some(root.display().to_string());
     let path = state_path(store, &state.watch_id);
     apply_schedule_fields(&mut state, &params);
     let would_write = !params.dry_run.unwrap_or(false);
@@ -547,6 +599,471 @@ fn revoke_watch_grant(
     ))
     .with_title(format!("revoked {}", state.watch_id))
     .with_metadata(json!({"watch": state, "revoked_count": revoked, "written": would_write})))
+}
+
+fn active_grant_for_scope<'a>(
+    state: &'a PrWatchState,
+    scope: WriteScope,
+    session_id: &str,
+) -> Option<&'a AuthorizationGrant> {
+    let now = now_iso();
+    state
+        .authorization
+        .active_grants
+        .iter()
+        .find(|grant| grant.grants(scope, &now, session_id))
+}
+
+fn consume_single_use_grant(state: &mut PrWatchState, grant_id: &str) -> bool {
+    let before = state.authorization.active_grants.len();
+    state
+        .authorization
+        .active_grants
+        .retain(|grant| !(grant.single_use && grant.grant_id == grant_id));
+    before != state.authorization.active_grants.len()
+}
+
+fn has_non_empty_commit_or_reason(params: &PrWatchInput) -> bool {
+    params
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || params
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn has_explicit_no_code_reason(params: &PrWatchInput) -> bool {
+    if !params.no_code_resolution {
+        return false;
+    }
+    params
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && params
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn has_duplicate_thread_ids(thread_ids: &[String]) -> bool {
+    let mut seen = HashSet::new();
+    thread_ids.iter().any(|id| !seen.insert(id))
+}
+
+fn commit_sha_matches_current_head(params: &PrWatchInput, current_head: &str) -> bool {
+    params
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|commit_sha| commit_sha == current_head)
+}
+
+fn skipped_resolution_attempt(
+    thread_id: &str,
+    expected_head: &str,
+    params: &PrWatchInput,
+) -> ThreadResolutionAttempt {
+    ThreadResolutionAttempt {
+        thread_id: thread_id.to_string(),
+        attempted_at: now_iso(),
+        status: ResolutionAttemptStatus::Skipped,
+        head_sha: Some(expected_head.to_string()),
+        commit_sha: params.commit_sha.clone(),
+        validation: params.validation.clone(),
+        reason: params.reason.clone().unwrap_or_else(|| {
+            "resolved after validated fix for addressed review feedback".to_string()
+        }),
+        error: Some("skipped due to previous failure in batch".to_string()),
+    }
+}
+
+fn review_thread_had_prior_resolution_attempt(state: &PrWatchState, thread_id: &str) -> bool {
+    state
+        .last_resolution_attempts
+        .iter()
+        .any(|attempt| attempt.thread_id == thread_id)
+}
+
+fn review_thread_had_successful_resolution_attempt(state: &PrWatchState, thread_id: &str) -> bool {
+    state.last_resolution_attempts.iter().any(|attempt| {
+        attempt.thread_id == thread_id
+            && matches!(
+                attempt.status,
+                ResolutionAttemptStatus::Resolved | ResolutionAttemptStatus::AlreadyResolved
+            )
+    })
+}
+
+fn review_threads_fetch_succeeded_at(state: &PrWatchState, collected_at: &str) -> bool {
+    state
+        .last_successful_fetch
+        .get("review_threads")
+        .is_some_and(|value| value == collected_at)
+}
+
+fn review_thread_marker_fingerprint(state: &PrWatchState, thread_ids: &[String]) -> Result<String> {
+    let mut canonical = Vec::new();
+    for id in thread_ids {
+        let marker = state
+            .last_seen
+            .review_threads
+            .get(id)
+            .with_context(|| format!("unknown review thread id for freshness check: {id}"))?;
+        canonical.push(json!({
+            "id": id,
+            "updated_at": marker.updated_at,
+            "resolved": marker.resolved,
+            "outdated": marker.outdated,
+            "body_hash": marker.body_hash,
+            "url": marker.url,
+        }));
+    }
+    serde_json::to_vec(&canonical)
+        .map(|bytes| sha256_hex(&bytes))
+        .context("failed to serialize review thread freshness markers")
+}
+
+fn ensure_resolve_freshness_matches(state: &PrWatchState, params: &PrWatchInput) -> Result<()> {
+    let expected_cycle = params
+        .expected_cycle_number
+        .context("resolve_addressed requires expected_cycle_number from the current handoff/status")?;
+    if expected_cycle != state.polling.cycle_number {
+        bail!(
+            "resolve_addressed expected_cycle_number is stale: expected {}, current {}",
+            expected_cycle,
+            state.polling.cycle_number
+        );
+    }
+
+    let expected_fingerprint = params
+        .expected_fingerprint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("resolve_addressed requires expected_fingerprint from the current handoff/status")?;
+    let current_actionable_fingerprint = actionable_fingerprint(&state.pending_actionable);
+    if current_actionable_fingerprint.as_deref() == Some(expected_fingerprint) {
+        return Ok(());
+    }
+    let current_thread_fingerprint = review_thread_marker_fingerprint(state, &params.thread_ids)?;
+    if current_thread_fingerprint != expected_fingerprint {
+        bail!(
+            "resolve_addressed expected_fingerprint is stale: expected {}, current actionable {}, current thread {}",
+            expected_fingerprint,
+            current_actionable_fingerprint.as_deref().unwrap_or("none"),
+            current_thread_fingerprint
+        );
+    }
+    Ok(())
+}
+
+fn validation_status_is_passing(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "pass" | "passed" | "success" | "succeeded" | "successful" | "ok"
+    )
+}
+
+fn all_validation_evidence_is_passing(validation: &[ValidationEvidence]) -> bool {
+    validation
+        .iter()
+        .all(|evidence| validation_status_is_passing(&evidence.status))
+}
+
+fn ensure_post_resolution_poll_cleared(state: &PrWatchState) -> Result<()> {
+    if state.resolution_requires_post_poll {
+        bail!(
+            "resolve_addressed requires a post-resolution poll before retrying; run pr_watch action=poll_now first"
+        );
+    }
+    Ok(())
+}
+
+fn merge_resolution_attempts(
+    previous: &[ThreadResolutionAttempt],
+    current: Vec<ThreadResolutionAttempt>,
+) -> Vec<ThreadResolutionAttempt> {
+    let current_thread_ids: HashSet<&str> = current
+        .iter()
+        .map(|attempt| attempt.thread_id.as_str())
+        .collect();
+    let mut merged: Vec<ThreadResolutionAttempt> = previous
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.status,
+                ResolutionAttemptStatus::Resolved | ResolutionAttemptStatus::AlreadyResolved
+            ) && !current_thread_ids.contains(attempt.thread_id.as_str())
+        })
+        .cloned()
+        .collect();
+    merged.extend(current);
+    merged
+}
+
+fn requeue_failed_resolution_threads(state: &PrWatchState, pending: &mut Vec<ActionableItem>) {
+    let mut pending_ids: HashSet<String> = pending.iter().map(|item| item.id.clone()).collect();
+    for attempt in &state.last_resolution_attempts {
+        if !matches!(attempt.status, ResolutionAttemptStatus::Failed) {
+            continue;
+        }
+        let Some(marker) = state.last_seen.review_threads.get(&attempt.thread_id) else {
+            continue;
+        };
+        if marker.resolved || marker.outdated || !pending_ids.insert(attempt.thread_id.clone()) {
+            continue;
+        }
+        pending.push(ActionableItem {
+            id: attempt.thread_id.clone(),
+            surface: "review_threads".to_string(),
+            summary: attempt.error.clone().unwrap_or_else(|| {
+                "Review thread resolution failed; retry or inspect manually".to_string()
+            }),
+            url: marker.url.clone(),
+            path: None,
+            status: Some("resolution_failed".to_string()),
+            reason: Some("failed_resolution_retry".to_string()),
+        });
+    }
+}
+
+async fn resolve_addressed(
+    root: &Path,
+    store: &Path,
+    params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let mut state = load_state_for_params(store, &params)?;
+    if let Some(expected_root) = state.root_dir.as_deref() {
+        let current_root = root.display().to_string();
+        if expected_root != current_root {
+            bail!(
+                "Watch state root mismatch for {}. Expected root: {}. Current root: {}. Refusing mutating resolve_addressed.",
+                state.watch_id,
+                expected_root,
+                current_root
+            );
+        }
+    }
+    if params.thread_ids.is_empty() {
+        bail!("resolve_addressed requires at least one thread_id");
+    }
+    if has_duplicate_thread_ids(&params.thread_ids) {
+        bail!("resolve_addressed rejects duplicate thread_ids");
+    }
+    if params.validation.is_empty() && !params.dry_run.unwrap_or(false) {
+        bail!("resolve_addressed requires validation evidence");
+    }
+    if !params.validation.is_empty() && !all_validation_evidence_is_passing(&params.validation) {
+        bail!("resolve_addressed requires all validation evidence statuses to be passing");
+    }
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "resolve_addressed")),
+        }
+    } else {
+        None
+    };
+    if would_write {
+        state = load_state_for_params(store, &params)?;
+        if let Some(expected_root) = state.root_dir.as_deref() {
+            let current_root = root.display().to_string();
+            if expected_root != current_root {
+                bail!(
+                    "Watch state root mismatch for {}. Expected root: {}. Current root: {}. Refusing mutating resolve_addressed.",
+                    state.watch_id,
+                    expected_root,
+                    current_root
+                );
+            }
+        }
+        ensure_post_resolution_poll_cleared(&state)?;
+        ensure_resolve_freshness_matches(&state, &params)?;
+    }
+    let expected_head = params
+        .head_sha
+        .as_deref()
+        .context("resolve_addressed requires head_sha")?;
+    let current_head = state
+        .pr
+        .head_sha
+        .as_deref()
+        .context("watch state has no current PR head_sha; poll first")?;
+    if expected_head != current_head {
+        bail!(
+            "resolve_addressed head_sha is stale: expected {}, current {}",
+            expected_head,
+            current_head
+        );
+    }
+    if !has_non_empty_commit_or_reason(&params) {
+        bail!("resolve_addressed requires a non-empty commit_sha or a non-empty no-code reason");
+    }
+    if !has_explicit_no_code_reason(&params) && !commit_sha_matches_current_head(&params, current_head)
+    {
+        bail!(
+            "resolve_addressed commit_sha must match the watched PR head_sha ({current_head}) unless this is an explicit no-code resolution"
+        );
+    }
+    let grant = active_grant_for_scope(&state, WriteScope::ResolveThreads, &ctx.session_id)
+        .cloned()
+        .context("resolve_addressed requires an active resolve_threads grant for this session")?;
+
+    let mut prevalidated = Vec::new();
+    for id in &params.thread_ids {
+        let Some(marker) = state.last_seen.review_threads.get(id) else {
+            bail!("resolve_addressed unknown review thread id: {id}");
+        };
+        if marker.resolved {
+            if review_thread_had_successful_resolution_attempt(&state, id) {
+                continue;
+            }
+            bail!("resolve_addressed thread is already resolved in watch state: {id}");
+        }
+        if !state.pending_actionable.iter().any(|item| item.id == *id)
+            && params.reason.as_deref().map(|reason| reason.contains(id)) != Some(true)
+        {
+            bail!(
+                "resolve_addressed thread is not pending actionable and reason does not explicitly link it: {id}"
+            );
+        }
+        prevalidated.push(id.clone());
+    }
+
+    let mut attempts = Vec::new();
+    let mut failed = false;
+    for id in prevalidated {
+        if failed {
+            attempts.push(skipped_resolution_attempt(&id, expected_head, &params));
+            continue;
+        }
+        let attempted_at = now_iso();
+        let outcome = if would_write {
+            run_gh_resolve_review_thread(root, &id).await
+        } else {
+            Ok(ResolveReviewThreadOutcome::Resolved)
+        };
+        let (status, error) = match outcome {
+            Ok(ResolveReviewThreadOutcome::Resolved) => (ResolutionAttemptStatus::Resolved, None),
+            Ok(ResolveReviewThreadOutcome::AlreadyResolved) => {
+                if review_thread_had_prior_resolution_attempt(&state, &id) {
+                    (ResolutionAttemptStatus::AlreadyResolved, None)
+                } else {
+                    failed = true;
+                    (
+                        ResolutionAttemptStatus::Failed,
+                        Some(
+                            "GitHub reported thread already resolved while watch state still marks it unresolved; poll before retry"
+                                .to_string(),
+                        ),
+                    )
+                }
+            }
+            Ok(ResolveReviewThreadOutcome::NotResolved) => {
+                failed = true;
+                (
+                    ResolutionAttemptStatus::Failed,
+                    Some("GitHub response reported isResolved=false".to_string()),
+                )
+            }
+            Ok(ResolveReviewThreadOutcome::MalformedResponse(message)) => {
+                failed = true;
+                (ResolutionAttemptStatus::Failed, Some(message))
+            }
+            Err(err) => {
+                failed = true;
+                (ResolutionAttemptStatus::Failed, Some(err.to_string()))
+            }
+        };
+        attempts.push(ThreadResolutionAttempt {
+            thread_id: id,
+            attempted_at,
+            status,
+            head_sha: Some(expected_head.to_string()),
+            commit_sha: params.commit_sha.clone(),
+            validation: params.validation.clone(),
+            reason: params.reason.clone().unwrap_or_else(|| {
+                "resolved after validated fix for addressed review feedback".to_string()
+            }),
+            error,
+        });
+    }
+
+    let resolved_count = attempts
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.status,
+                ResolutionAttemptStatus::Resolved | ResolutionAttemptStatus::AlreadyResolved
+            )
+        })
+        .count();
+    let remote_resolved_count = attempts
+        .iter()
+        .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
+        .count();
+    let failed_count = attempts
+        .iter()
+        .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Failed))
+        .count();
+    state.last_resolution_attempts = merge_resolution_attempts(&state.last_resolution_attempts, attempts);
+    state.last_resolution_error = (failed_count > 0)
+        .then(|| "one or more thread resolutions failed; poll before retry".to_string());
+    state.resolution_requires_post_poll = would_write && remote_resolved_count > 0;
+    if grant.single_use && would_write && remote_resolved_count > 0 {
+        let consumed = consume_single_use_grant(&mut state, &grant.grant_id);
+        state.push_event(WatchEvent {
+            at: now_iso(),
+            kind: "grant_consumed".to_string(),
+            data: json!({"grant_id": grant.grant_id, "consumed": consumed, "scope": "resolve_threads", "remote_resolved_count": remote_resolved_count}),
+        });
+    }
+    state.updated_at = Some(now_iso());
+    state.push_event(WatchEvent {
+        at: now_iso(),
+        kind: "resolve_addressed_completed".to_string(),
+        data: json!({
+            "resolved_count": resolved_count,
+            "remote_resolved_count": remote_resolved_count,
+            "failed_count": failed_count,
+            "requires_post_poll": state.resolution_requires_post_poll,
+        }),
+    });
+    if would_write {
+        write_state_atomic(&state_path(store, &state.watch_id), &state)?;
+    }
+    let status = if failed_count > 0 {
+        "partial_failure"
+    } else {
+        "resolved"
+    };
+    Ok(ToolOutput::new(format!(
+        "PR watch resolve_addressed: {}\nRepo: {}\nPR: #{}\nStatus: {}\nResolved/already-resolved: {}\nFailed: {}\nPost-mutation poll required: {}{}",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        status,
+        resolved_count,
+        failed_count,
+        state.resolution_requires_post_poll,
+        if would_write { "" } else { "\nDry run: no GitHub mutation performed" }
+    ))
+    .with_title(format!("{} resolve_addressed {status}", state.watch_id))
+    .with_metadata(json!({"watch": state, "written": would_write, "resolved_count": resolved_count, "failed_count": failed_count})))
 }
 
 fn reschedule_watch(
@@ -936,8 +1453,16 @@ fn actionable_fingerprint(items: &[ActionableItem]) -> Option<String> {
 fn handoff_prompt(state: &PrWatchState, fingerprint: &str) -> String {
     let state_file = state_file_for_watch(&state.watch_id);
     format!(
-        "Action required for PR watch {}. State file: {}. First run/read `pr_watch action=handoff repo={} pr={} watch_id={}` or inspect the state, and verify current actionable fingerprint `{}` still matches before remediation. If stale or no actionable items remain, report no-op. Do not call `pr_watch monitor` from this handoff. If current, inspect pending_actionable and remediate only if the current user workflow or active grants authorize local remediation. No push without an active push grant. No comment without an active comment grant. No review-thread resolution without an active resolve_threads grant. Never merge.",
-        state.watch_id, state_file, state.pr.repo, state.pr.number, state.watch_id, fingerprint,
+        "Action required for PR watch {}. State file: {}. First run/read `pr_watch action=handoff repo={} pr={} watch_id={}` or inspect the state, and verify current actionable fingerprint `{}` still matches before remediation. Current cycle number is `{}`. If stale or no actionable items remain, report no-op. Do not call `pr_watch monitor` from this handoff. If current, inspect pending_actionable and remediate only if the current user workflow or active grants authorize local remediation. No push without an active push grant. No comment without an active comment grant. No review-thread resolution without an active resolve_threads grant. If a review thread is addressed and resolve_threads is granted, completion requires calling `pr_watch action=resolve_addressed` with the addressed thread IDs, current head_sha, expected_fingerprint `{}`, expected_cycle_number `{}`, validation evidence, and commit_sha matching the watched head or explicit no-code reason; otherwise record the blocked reason. Poll after any successful resolution. Never merge.",
+        state.watch_id,
+        state_file,
+        state.pr.repo,
+        state.pr.number,
+        state.watch_id,
+        fingerprint,
+        state.polling.cycle_number,
+        fingerprint,
+        state.polling.cycle_number,
     )
 }
 
@@ -1600,7 +2125,7 @@ fn apply_baseline_from_collection(
         }
     }
 
-    match collection.reviews {
+ 	    match collection.reviews {
         Ok(reviews) => {
             state.baseline.review_count = reviews.len();
             state
@@ -1711,6 +2236,9 @@ async fn poll_now(
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
+    if review_threads_fetch_succeeded_at(&state, &collected_at) {
+        state.resolution_requires_post_poll = false;
+    }
     apply_schedule_fields(&mut state, &params);
     let handoff = if !state.pending_actionable.is_empty() && would_write {
         maybe_schedule_action_required_handoff(store, &mut state, ctx)?
@@ -1850,6 +2378,9 @@ async fn monitor_once(
             mode = "baseline";
         } else {
             let outcome = update_state_from_collection(&mut state, collection, &collected_at);
+            if review_threads_fetch_succeeded_at(&state, &collected_at) {
+                state.resolution_requires_post_poll = false;
+            }
             partial_failure = outcome.partial_failure;
             mode = "poll";
         }
@@ -2204,6 +2735,68 @@ query($threadId:ID!) {{
 
 async fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
     run_gh_allow_exit(root, args, &[]).await
+}
+
+async fn run_gh_resolve_review_thread(
+    root: &Path,
+    thread_id: &str,
+) -> Result<ResolveReviewThreadOutcome> {
+    let mutation = "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }";
+    let variable = format!("threadId={thread_id}");
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={mutation}"),
+            "-f",
+            &variable,
+        ])
+        .current_dir(root)
+        .output()
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to run gh: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.to_ascii_lowercase().contains("already resolved") {
+            return Ok(ResolveReviewThreadOutcome::AlreadyResolved);
+        }
+        bail!("gh resolveReviewThread failed: {stderr}");
+    }
+    parse_resolve_review_thread_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_resolve_review_thread_output(output: &str) -> Result<ResolveReviewThreadOutcome> {
+    let value: Value = serde_json::from_str(output)
+        .map_err(|err| anyhow::anyhow!("malformed resolveReviewThread JSON: {err}"))?;
+    if let Some(errors) = value.get("errors").and_then(Value::as_array)
+        && !errors.is_empty()
+    {
+        let text = errors
+            .iter()
+            .filter_map(|error| error.get("message").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if text.to_ascii_lowercase().contains("already resolved") {
+            return Ok(ResolveReviewThreadOutcome::AlreadyResolved);
+        }
+        return Ok(ResolveReviewThreadOutcome::MalformedResponse(format!(
+            "GitHub GraphQL errors: {text}"
+        )));
+    }
+    let Some(is_resolved) = value
+        .pointer("/data/resolveReviewThread/thread/isResolved")
+        .and_then(Value::as_bool)
+    else {
+        return Ok(ResolveReviewThreadOutcome::MalformedResponse(
+            "missing data.resolveReviewThread.thread.isResolved".to_string(),
+        ));
+    };
+    if is_resolved {
+        Ok(ResolveReviewThreadOutcome::Resolved)
+    } else {
+        Ok(ResolveReviewThreadOutcome::NotResolved)
+    }
 }
 
 async fn run_gh_pr_checks(root: &Path, repo: &str, pr: u64) -> Result<String, SurfaceError> {
@@ -2588,6 +3181,10 @@ fn update_state_from_collection(
             partial_failure = true;
             state.push_event(surface_error_event(collected_at, err));
         }
+ 	    }
+
+    if review_threads_fetch_succeeded_at(state, collected_at) {
+        requeue_failed_resolution_threads(state, &mut pending_actionable);
     }
 
     if partial_failure && !any_surface_success {
@@ -2914,6 +3511,14 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
             "\nGrant note: pr_watch watch actions remain read-only even with active grants.",
         );
     }
+    if state.resolution_requires_post_poll || !state.last_resolution_attempts.is_empty() {
+        text.push_str(&format!(
+            "\nResolution: attempts={} post_poll_required={} error={}",
+            state.last_resolution_attempts.len(),
+            state.resolution_requires_post_poll,
+            state.last_resolution_error.as_deref().unwrap_or("none")
+        ));
+    }
     text
 }
 
@@ -3103,6 +3708,7 @@ fn load_all_states(store: &Path) -> Result<Vec<(PathBuf, PrWatchState)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jcode_pr_watch_core::ReviewThreadMarker;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -3156,7 +3762,48 @@ mod tests {
         assert!(actions.iter().any(|value| value == "authorize"));
         assert!(actions.iter().any(|value| value == "revoke"));
         assert!(actions.iter().any(|value| value == "reschedule"));
+        assert!(actions.iter().any(|value| value == "resolve_addressed"));
+        assert!(!actions.iter().any(|value| value == "merge"));
         assert!(schema.pointer("/properties/scopes").is_some());
+        assert!(schema.pointer("/properties/thread_ids").is_some());
+        let validation = schema
+            .pointer("/properties/validation")
+            .expect("validation schema should be advertised");
+        assert_eq!(validation["type"], json!("array"));
+        assert_eq!(validation["items"]["type"], json!("object"));
+        assert_eq!(
+            validation["items"]["properties"]["command"]["type"],
+            json!("string")
+        );
+    }
+
+    #[test]
+    fn parse_resolve_review_thread_output_classifies_outcomes() {
+        let resolved =
+            r#"{"data":{"resolveReviewThread":{"thread":{"id":"T","isResolved":true}}}}"#;
+        assert_eq!(
+            parse_resolve_review_thread_output(resolved).expect("resolved json"),
+            ResolveReviewThreadOutcome::Resolved
+        );
+
+        let not_resolved =
+            r#"{"data":{"resolveReviewThread":{"thread":{"id":"T","isResolved":false}}}}"#;
+        assert_eq!(
+            parse_resolve_review_thread_output(not_resolved).expect("not resolved json"),
+            ResolveReviewThreadOutcome::NotResolved
+        );
+
+        let already = r#"{"errors":[{"message":"Review thread already resolved"}]}"#;
+        assert_eq!(
+            parse_resolve_review_thread_output(already).expect("already resolved json"),
+            ResolveReviewThreadOutcome::AlreadyResolved
+        );
+
+        let malformed = r#"{"data":{"resolveReviewThread":{"thread":{"id":"T"}}}}"#;
+        assert!(matches!(
+            parse_resolve_review_thread_output(malformed).expect("malformed classified"),
+            ResolveReviewThreadOutcome::MalformedResponse(_)
+        ));
     }
 
     fn monitor_params(max_runtime_seconds: Option<u64>) -> PrWatchInput {
@@ -3176,6 +3823,13 @@ mod tests {
             expires_in_minutes: None,
             single_use: None,
             grant_id: None,
+            thread_ids: Vec::new(),
+            head_sha: None,
+            commit_sha: None,
+            validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
+            no_code_resolution: false,
         }
     }
 
@@ -3880,10 +4534,497 @@ mod tests {
             expires_in_minutes: None,
             single_use: None,
             grant_id: None,
+            thread_ids: Vec::new(),
+            head_sha: None,
+            commit_sha: None,
+            validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
+            no_code_resolution: false,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
         assert!(state.polling.next_poll_at.is_some());
+    }
+
+    #[test]
+    fn resolve_addressed_requires_non_empty_commit_or_reason() {
+        let mut params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some("owner~2frepo-pr-12".into()),
+            dry_run: Some(true),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: None,
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD".into()],
+            head_sha: Some("head".into()),
+            commit_sha: None,
+            validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
+            no_code_resolution: false,
+        };
+        assert!(!has_non_empty_commit_or_reason(&params));
+
+        params.commit_sha = Some("   ".into());
+        assert!(!has_non_empty_commit_or_reason(&params));
+
+        params.reason = Some("\t".into());
+        assert!(!has_non_empty_commit_or_reason(&params));
+
+        params.commit_sha = Some("abc123".into());
+        assert!(has_non_empty_commit_or_reason(&params));
+
+        params.commit_sha = None;
+        params.reason = Some("no-code resolution because reviewer asked for verification".into());
+        assert!(has_non_empty_commit_or_reason(&params));
+    }
+
+    #[test]
+    fn code_fix_commit_sha_must_match_current_head_unless_no_code() {
+        let mut params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some("owner~2frepo-pr-12".into()),
+            dry_run: Some(false),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: Some("addressed by code fix".into()),
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD".into()],
+            head_sha: Some("head".into()),
+            commit_sha: Some("other".into()),
+            validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
+            no_code_resolution: false,
+        };
+
+        assert!(!has_explicit_no_code_reason(&params));
+        assert!(!commit_sha_matches_current_head(&params, "head"));
+
+        params.commit_sha = Some("head".into());
+        assert!(commit_sha_matches_current_head(&params, "head"));
+
+        params.commit_sha = None;
+        params.reason = Some("no-code resolution because reviewer asked for verification".into());
+        assert!(!has_explicit_no_code_reason(&params));
+        params.no_code_resolution = true;
+        assert!(has_explicit_no_code_reason(&params));
+        assert!(!commit_sha_matches_current_head(&params, "head"));
+    }
+
+    #[test]
+    fn resolve_addressed_rejects_duplicate_thread_ids() {
+        assert!(!has_duplicate_thread_ids(&[
+            "THREAD_A".to_string(),
+            "THREAD_B".to_string(),
+        ]));
+        assert!(has_duplicate_thread_ids(&[
+            "THREAD_A".to_string(),
+            "THREAD_A".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn skipped_resolution_attempt_records_complete_audit_context() {
+        let params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some("owner~2frepo-pr-12".into()),
+            dry_run: Some(false),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: Some("addressed by fix".into()),
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD_A".into(), "THREAD_B".into()],
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: vec![ValidationEvidence {
+                at: "2026-06-18T18:00:00Z".into(),
+                command: "cargo test".into(),
+                status: "passed".into(),
+                summary: Some("unit tests passed".into()),
+            }],
+            expected_fingerprint: None,
+            expected_cycle_number: None,
+            no_code_resolution: false,
+        };
+
+        let attempt = skipped_resolution_attempt("THREAD_B", "head", &params);
+        assert_eq!(attempt.thread_id, "THREAD_B");
+        assert_eq!(attempt.status, ResolutionAttemptStatus::Skipped);
+        assert_eq!(attempt.head_sha.as_deref(), Some("head"));
+        assert_eq!(attempt.commit_sha.as_deref(), Some("fixsha"));
+        assert_eq!(attempt.validation.len(), 1);
+        assert_eq!(attempt.reason, "addressed by fix");
+        assert_eq!(
+            attempt.error.as_deref(),
+            Some("skipped due to previous failure in batch")
+        );
+    }
+
+    #[test]
+    fn prior_resolution_attempt_detection_is_thread_specific() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        assert!(!review_thread_had_prior_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+
+        state
+            .last_resolution_attempts
+            .push(ThreadResolutionAttempt {
+                thread_id: "THREAD_A".into(),
+                attempted_at: "2026-06-18T18:00:00Z".into(),
+                status: ResolutionAttemptStatus::Failed,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "first attempt failed".into(),
+                error: Some("already resolved race".into()),
+            });
+
+        assert!(review_thread_had_prior_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+        assert!(!review_thread_had_prior_resolution_attempt(
+            &state, "THREAD_B"
+        ));
+        assert!(!review_thread_had_successful_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+
+        state
+            .last_resolution_attempts
+            .push(ThreadResolutionAttempt {
+                thread_id: "THREAD_A".into(),
+                attempted_at: "2026-06-18T18:01:00Z".into(),
+                status: ResolutionAttemptStatus::Resolved,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "second attempt resolved".into(),
+                error: None,
+            });
+        assert!(review_thread_had_successful_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+    }
+
+    #[test]
+    fn tool_description_names_grant_gated_resolve_action() {
+        let tool = PrWatchTool::new();
+        let description = tool.description();
+        assert!(description.contains("resolve_addressed"));
+        assert!(description.contains("grant-gated"));
+        assert!(description.contains("watch cycles"));
+    }
+
+    #[test]
+    fn validation_evidence_requires_passing_statuses() {
+        assert!(validation_status_is_passing("passed"));
+        assert!(validation_status_is_passing(" SUCCESS "));
+        assert!(validation_status_is_passing("ok"));
+        assert!(!validation_status_is_passing("failed"));
+        assert!(!validation_status_is_passing(""));
+
+        let passing = vec![
+            ValidationEvidence {
+                at: "2026-06-18T18:00:00Z".into(),
+                command: "cargo test".into(),
+                status: "passed".into(),
+                summary: None,
+            },
+            ValidationEvidence {
+                at: "2026-06-18T18:01:00Z".into(),
+                command: "cargo check".into(),
+                status: "success".into(),
+                summary: None,
+            },
+        ];
+        assert!(all_validation_evidence_is_passing(&passing));
+
+        let mut failing = passing;
+        failing.push(ValidationEvidence {
+            at: "2026-06-18T18:02:00Z".into(),
+            command: "cargo fmt --check".into(),
+            status: "failed".into(),
+            summary: Some("format failed".into()),
+        });
+        assert!(!all_validation_evidence_is_passing(&failing));
+    }
+
+    #[test]
+    fn single_use_resolution_grants_consume_after_remote_success_only() {
+        let remote_success = vec![
+            ThreadResolutionAttempt {
+                thread_id: "THREAD_A".into(),
+                attempted_at: "2026-06-18T18:00:00Z".into(),
+                status: ResolutionAttemptStatus::Resolved,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "addressed".into(),
+                error: None,
+            },
+            ThreadResolutionAttempt {
+                thread_id: "THREAD_B".into(),
+                attempted_at: "2026-06-18T18:00:01Z".into(),
+                status: ResolutionAttemptStatus::Failed,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "addressed".into(),
+                error: Some("later failure".into()),
+            },
+        ];
+        let remote_resolved_count = remote_success
+            .iter()
+            .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
+            .count();
+        assert_eq!(remote_resolved_count, 1);
+
+        let already_resolved_only = vec![ThreadResolutionAttempt {
+            thread_id: "THREAD_C".into(),
+            attempted_at: "2026-06-18T18:00:02Z".into(),
+            status: ResolutionAttemptStatus::AlreadyResolved,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "addressed".into(),
+            error: None,
+        }];
+        let remote_resolved_count = already_resolved_only
+            .iter()
+            .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
+            .count();
+        assert_eq!(remote_resolved_count, 0);
+    }
+
+    #[test]
+    fn merge_resolution_attempts_retains_prior_successes() {
+        let prior = vec![ThreadResolutionAttempt {
+            thread_id: "THREAD_A".into(),
+            attempted_at: "2026-06-18T18:00:00Z".into(),
+            status: ResolutionAttemptStatus::Resolved,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "addressed".into(),
+            error: None,
+        }];
+        let current = vec![ThreadResolutionAttempt {
+            thread_id: "THREAD_B".into(),
+            attempted_at: "2026-06-18T18:01:00Z".into(),
+            status: ResolutionAttemptStatus::Failed,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "retry failed".into(),
+            error: Some("still failed".into()),
+        }];
+
+        let merged = merge_resolution_attempts(&prior, current);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|attempt| {
+            attempt.thread_id == "THREAD_A" && attempt.status == ResolutionAttemptStatus::Resolved
+        }));
+        assert!(merged.iter().any(|attempt| {
+            attempt.thread_id == "THREAD_B" && attempt.status == ResolutionAttemptStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn failed_resolution_attempts_remain_actionable_until_resolved() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        state.last_resolution_attempts.push(ThreadResolutionAttempt {
+            thread_id: "THREAD_FAILED".into(),
+            attempted_at: "2026-06-18T18:00:00Z".into(),
+            status: ResolutionAttemptStatus::Failed,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "retry failed".into(),
+            error: Some("GitHub response reported isResolved=false".into()),
+        });
+        state.last_seen.review_threads.insert(
+            "THREAD_FAILED".into(),
+            ReviewThreadMarker {
+                id: "THREAD_FAILED".into(),
+                updated_at: Some("2026-06-18T18:00:00Z".into()),
+                resolved: false,
+                outdated: false,
+                body_hash: Some("hash:failed".into()),
+                url: Some("https://thread-failed".into()),
+            },
+        );
+
+        let mut pending = Vec::new();
+        requeue_failed_resolution_threads(&state, &mut pending);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "THREAD_FAILED");
+        assert_eq!(pending[0].reason.as_deref(), Some("failed_resolution_retry"));
+
+        state
+            .last_seen
+            .review_threads
+            .get_mut("THREAD_FAILED")
+            .unwrap()
+            .resolved = true;
+        let mut pending = Vec::new();
+        requeue_failed_resolution_threads(&state, &mut pending);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn resolve_addressed_retry_requires_post_resolution_poll_to_be_cleared() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        assert!(ensure_post_resolution_poll_cleared(&state).is_ok());
+
+        state.resolution_requires_post_poll = true;
+        let err = ensure_post_resolution_poll_cleared(&state).unwrap_err();
+        assert!(err.to_string().contains("post-resolution poll"));
+    }
+
+    #[test]
+    fn post_resolution_poll_clears_only_after_review_thread_refresh() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        assert!(!review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:00:00Z"
+        ));
+
+        state.last_successful_fetch.insert(
+            "metadata".into(),
+            "2026-06-18T18:00:00Z".into(),
+        );
+        assert!(!review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:00:00Z"
+        ));
+
+        state.last_successful_fetch.insert(
+            "review_threads".into(),
+            "2026-06-18T18:00:00Z".into(),
+        );
+        assert!(review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:00:00Z"
+        ));
+        assert!(!review_threads_fetch_succeeded_at(
+            &state,
+            "2026-06-18T18:01:00Z"
+        ));
+    }
+
+    #[test]
+    fn resolve_addressed_requires_current_fingerprint_and_cycle() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        state.polling.cycle_number = 7;
+        state.pending_actionable.push(ActionableItem {
+            id: "THREAD_A".into(),
+            surface: "review_threads".into(),
+            summary: "Please fix stale handoff resolution".into(),
+            url: Some("https://thread".into()),
+            path: Some("src/lib.rs".into()),
+            status: Some("unresolved".into()),
+            reason: Some("new_unresolved_thread".into()),
+        });
+        let fingerprint = actionable_fingerprint(&state.pending_actionable).unwrap();
+        let mut params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some(state.watch_id.clone()),
+            dry_run: Some(false),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: Some("addressed".into()),
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD_A".into()],
+            head_sha: Some("head".into()),
+            commit_sha: Some("head".into()),
+            validation: Vec::new(),
+            expected_fingerprint: Some(fingerprint.clone()),
+            expected_cycle_number: Some(7),
+            no_code_resolution: false,
+        };
+        assert!(ensure_resolve_freshness_matches(&state, &params).is_ok());
+
+        params.expected_cycle_number = Some(6);
+        assert!(ensure_resolve_freshness_matches(&state, &params)
+            .unwrap_err()
+            .to_string()
+            .contains("expected_cycle_number is stale"));
+
+        state.last_seen.review_threads.insert(
+            "THREAD_A".into(),
+            ReviewThreadMarker {
+                id: "THREAD_A".into(),
+                updated_at: Some("2026-06-18T18:00:00Z".into()),
+                resolved: false,
+                outdated: false,
+                body_hash: Some("hash:abc".into()),
+                url: Some("https://thread".into()),
+            },
+        );
+        params.expected_cycle_number = Some(7);
+        params.expected_fingerprint = Some("stale".into());
+        assert!(ensure_resolve_freshness_matches(&state, &params)
+            .unwrap_err()
+            .to_string()
+            .contains("expected_fingerprint is stale"));
+
+        state.pending_actionable.clear();
+        params.expected_fingerprint = Some(
+            review_thread_marker_fingerprint(&state, &params.thread_ids)
+                .expect("thread marker fingerprint"),
+        );
+        assert!(ensure_resolve_freshness_matches(&state, &params).is_ok());
     }
 
     #[test]

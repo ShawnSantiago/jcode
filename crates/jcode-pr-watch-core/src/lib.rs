@@ -279,6 +279,28 @@ pub struct ValidationEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ResolutionAttemptStatus {
+    Planned,
+    Skipped,
+    AlreadyResolved,
+    Resolved,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadResolutionAttempt {
+    pub thread_id: String,
+    pub attempted_at: String,
+    pub status: ResolutionAttemptStatus,
+    pub head_sha: Option<String>,
+    pub commit_sha: Option<String>,
+    pub validation: Vec<ValidationEvidence>,
+    pub reason: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionRequiredHandoffStatus {
     Missing,
     Queued,
@@ -320,6 +342,8 @@ pub struct PrWatchState {
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_dir: Option<String>,
     pub terminal: bool,
     pub stop_reason: Option<String>,
     pub pr: PrIdentity,
@@ -334,6 +358,12 @@ pub struct PrWatchState {
     pub pending_actionable: Vec<ActionableItem>,
     #[serde(default)]
     pub action_required_handoff: ActionRequiredHandoffState,
+    #[serde(default)]
+    pub last_resolution_attempts: Vec<ThreadResolutionAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resolution_error: Option<String>,
+    #[serde(default)]
+    pub resolution_requires_post_poll: bool,
     pub last_validation: Vec<ValidationEvidence>,
     pub events: Vec<WatchEvent>,
 }
@@ -347,6 +377,7 @@ impl PrWatchState {
             created_at: None,
             updated_at: None,
             origin_session_id: None,
+            root_dir: None,
             terminal: false,
             stop_reason: None,
             pr: PrIdentity {
@@ -370,6 +401,9 @@ impl PrWatchState {
             last_cycle: CycleSummary::default(),
             pending_actionable: Vec::new(),
             action_required_handoff: ActionRequiredHandoffState::default(),
+            last_resolution_attempts: Vec::new(),
+            last_resolution_error: None,
+            resolution_requires_post_poll: false,
             last_validation: Vec::new(),
             events: Vec::new(),
         }
@@ -1132,6 +1166,39 @@ mod tests {
         let json = serde_json::to_value(&state.policy).unwrap();
         assert!(json.get("merge").is_none());
         assert_eq!(state.watch_id, "owner~2frepo-pr-7");
+        assert!(state.root_dir.is_none());
+        assert!(state.last_resolution_attempts.is_empty());
+        assert!(!state.resolution_requires_post_poll);
+    }
+
+    #[test]
+    fn v2_state_defaults_new_resolution_fields_when_missing() {
+        let json = r#"{
+            "schema_version": 2,
+            "watch_id": "owner~2frepo-pr-1",
+            "created_at": null,
+            "updated_at": null,
+            "terminal": false,
+            "stop_reason": null,
+            "pr": {"repo":"owner/repo","number":1,"url":null,"state":null,"base_ref":null,"head_ref":null,"head_sha":null,"merge_state":null,"review_decision":null},
+            "policy": {"local_fix":true,"commit":false,"push":false,"comment":false,"resolve_threads":false},
+            "authorization": {"active_grants":[]},
+            "polling": {"cycle_number":0,"quiet_cycles":0,"required_quiet_cycles":3,"poll_interval_seconds":300,"final_poll_due_at":null,"next_poll_at":null,"consecutive_transient_failures":0},
+            "baseline": {"head_sha":null,"established_at":null,"unresolved_thread_ids":[],"review_comment_count":0,"issue_comment_count":0,"review_count":0},
+            "last_seen": {"review_threads":{},"review_comments":{},"issue_comments":{},"reviews":{},"timeline":{}},
+            "last_checks_for_sha": {"head_sha":null,"runs":[]},
+            "last_successful_fetch": {},
+            "last_cycle": {"completed_at":null,"status":"collecting","surfaces_checked":[],"surface_counts":{},"actionable_count":0,"pending_check_count":0,"failed_check_count":0},
+            "pending_actionable": [],
+            "action_required_handoff": {"status":"missing"},
+            "last_validation": [],
+            "events": []
+        }"#;
+        let state = normalize_watch_state_json(json).expect("v2 state should default new fields");
+        assert!(state.root_dir.is_none());
+        assert!(state.last_resolution_attempts.is_empty());
+        assert!(state.last_resolution_error.is_none());
+        assert!(!state.resolution_requires_post_poll);
     }
 
     #[test]
