@@ -19,7 +19,6 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 use std::time::Duration as StdDuration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -368,7 +367,7 @@ impl Tool for PrWatchTool {
             PrWatchAction::Handoff => handoff_report(&store, params),
             PrWatchAction::ResolveAddressed => resolve_addressed(&root, &store, params, &ctx).await,
             PrWatchAction::WebhookStatus => webhook_status(&store, params),
-            PrWatchAction::WebhookDoctor => webhook_doctor(&root, &store, params),
+            PrWatchAction::WebhookDoctor => webhook_doctor(&root, &store, params).await,
             PrWatchAction::WebhookHeartbeat => webhook_heartbeat(&root, &store, params, &ctx).await,
             PrWatchAction::Stop => stop_watch(&store, params),
         }
@@ -580,6 +579,13 @@ fn load_webhook_deliveries() -> Result<WebhookDeliveryStore> {
         .with_context(|| format!("failed to read webhook deliveries {}", path.display()))?;
     serde_json::from_str(&text)
         .with_context(|| format!("failed to parse webhook deliveries {}", path.display()))
+}
+
+fn delivery_already_seen(delivery: &VerifiedGithubDelivery) -> Result<bool> {
+    Ok(load_webhook_deliveries()?
+        .deliveries
+        .iter()
+        .any(|record| record.delivery_id == delivery.delivery_id))
 }
 
 fn remember_webhook_delivery(delivery: &VerifiedGithubDelivery) -> Result<bool> {
@@ -2253,7 +2259,7 @@ pub async fn run_webhook_serve_command(
         }
         Err(err) => return Err(err).context("failed to create webhook daemon lock"),
     };
-    let listener = match TcpListener::bind(format!("{bind}:{port}")).await {
+    let listener = match TcpListener::bind((bind.as_str(), port)).await {
         Ok(listener) => listener,
         Err(err) => {
             let _ = write_webhook_health(&WebhookDaemonHealth {
@@ -2287,10 +2293,9 @@ pub async fn run_webhook_serve_command(
     };
     write_webhook_health(&health)?;
     println!("PR watch webhook daemon listening on http://{bind}:{port}/github");
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
-        #[cfg(unix)]
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 health.status = "stopped".to_string();
@@ -2462,10 +2467,11 @@ async fn process_webhook_http_request(
             return Err(err);
         }
     };
-    if !remember_webhook_delivery(&delivery)? {
+    if delivery_already_seen(&delivery)? {
         return Ok((delivery, "duplicate_ignored".to_string()));
     }
     let result = route_verified_webhook_delivery(&delivery).await?;
+    remember_webhook_delivery(&delivery)?;
     Ok((delivery, result))
 }
 
@@ -4857,7 +4863,7 @@ fn webhook_status(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
         .with_metadata(json!({"watch": state, "webhook_status": "reported"})))
 }
 
-fn webhook_doctor(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
+async fn webhook_doctor(root: &Path, store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let state = load_state_for_params(store, &params)?;
     let path = state_path(store, &state.watch_id);
     let mut checks = Vec::new();
@@ -4888,9 +4894,10 @@ fn webhook_doctor(root: &Path, store: &Path, params: PrWatchInput) -> Result<Too
         .map(|h| process_is_alive(h.pid))
         .unwrap_or(false);
     checks.push(("daemon_pid_alive", daemon_alive));
-    let hook_output = StdCommand::new("gh")
+    let hook_output = Command::new("gh")
         .args(["api", &format!("repos/{}/hooks", state.pr.repo)])
-        .output();
+        .output()
+        .await;
     let mut hook_signal = "github_hook_unknown".to_string();
     let mut hook_ok = false;
     if let Ok(output) = hook_output {
