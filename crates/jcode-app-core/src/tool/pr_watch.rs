@@ -230,7 +230,7 @@ impl Tool for PrWatchTool {
     }
 
     fn description(&self) -> &str {
-        "PR feedback watch state. Start a local watch, run read-only gh collection, schedule follow-up polls, list watches, show status, or compute readiness. No pushes, comments, thread resolution, or merges are performed."
+        "PR feedback watch state. Start a local watch, run read-only gh collection, schedule follow-up polls, list watches, show status, compute readiness, or resolve addressed review threads only via the grant-gated resolve_addressed action. Polling and monitor actions remain read-only: no pushes, comments, thread resolution, or merges are performed by watch cycles."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -648,6 +648,13 @@ fn skipped_resolution_attempt(
     }
 }
 
+fn review_thread_had_prior_resolution_attempt(state: &PrWatchState, thread_id: &str) -> bool {
+    state
+        .last_resolution_attempts
+        .iter()
+        .any(|attempt| attempt.thread_id == thread_id)
+}
+
 async fn resolve_addressed(
     root: &Path,
     store: &Path,
@@ -671,6 +678,29 @@ async fn resolve_addressed(
     }
     if params.validation.is_empty() && !params.dry_run.unwrap_or(false) {
         bail!("resolve_addressed requires validation evidence");
+    }
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "resolve_addressed")),
+        }
+    } else {
+        None
+    };
+    if would_write {
+        state = load_state_for_params(store, &params)?;
+        if let Some(expected_root) = state.root_dir.as_deref() {
+            let current_root = root.display().to_string();
+            if expected_root != current_root {
+                bail!(
+                    "Watch state root mismatch for {}. Expected root: {}. Current root: {}. Refusing mutating resolve_addressed.",
+                    state.watch_id,
+                    expected_root,
+                    current_root
+                );
+            }
+        }
     }
     let expected_head = params
         .head_sha
@@ -713,16 +743,6 @@ async fn resolve_addressed(
         prevalidated.push(id.clone());
     }
 
-    let would_write = !params.dry_run.unwrap_or(false);
-    let _lock = if would_write {
-        match acquire_watch_lock(store, &state.watch_id)? {
-            Some(lock) => Some(lock),
-            None => return Ok(watch_locked_output(store, &state, "resolve_addressed")),
-        }
-    } else {
-        None
-    };
-
     let mut attempts = Vec::new();
     let mut failed = false;
     for id in prevalidated {
@@ -739,7 +759,18 @@ async fn resolve_addressed(
         let (status, error) = match outcome {
             Ok(ResolveReviewThreadOutcome::Resolved) => (ResolutionAttemptStatus::Resolved, None),
             Ok(ResolveReviewThreadOutcome::AlreadyResolved) => {
-                (ResolutionAttemptStatus::AlreadyResolved, None)
+                if review_thread_had_prior_resolution_attempt(&state, &id) {
+                    (ResolutionAttemptStatus::AlreadyResolved, None)
+                } else {
+                    failed = true;
+                    (
+                        ResolutionAttemptStatus::Failed,
+                        Some(
+                            "GitHub reported thread already resolved while watch state still marks it unresolved; poll before retry"
+                                .to_string(),
+                        ),
+                    )
+                }
             }
             Ok(ResolveReviewThreadOutcome::NotResolved) => {
                 failed = true;
@@ -4366,6 +4397,46 @@ mod tests {
             attempt.error.as_deref(),
             Some("skipped due to previous failure in batch")
         );
+    }
+
+    #[test]
+    fn prior_resolution_attempt_detection_is_thread_specific() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        assert!(!review_thread_had_prior_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+
+        state
+            .last_resolution_attempts
+            .push(ThreadResolutionAttempt {
+                thread_id: "THREAD_A".into(),
+                attempted_at: "2026-06-18T18:00:00Z".into(),
+                status: ResolutionAttemptStatus::Failed,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "first attempt failed".into(),
+                error: Some("already resolved race".into()),
+            });
+
+        assert!(review_thread_had_prior_resolution_attempt(
+            &state, "THREAD_A"
+        ));
+        assert!(!review_thread_had_prior_resolution_attempt(
+            &state, "THREAD_B"
+        ));
+    }
+
+    #[test]
+    fn tool_description_names_grant_gated_resolve_action() {
+        let tool = PrWatchTool::new();
+        let description = tool.description();
+        assert!(description.contains("resolve_addressed"));
+        assert!(description.contains("grant-gated"));
+        assert!(description.contains("watch cycles"));
     }
 
     #[test]
