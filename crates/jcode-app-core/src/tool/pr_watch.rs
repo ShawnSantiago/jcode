@@ -83,6 +83,10 @@ struct PrWatchInput {
     commit_sha: Option<String>,
     #[serde(default)]
     validation: Vec<ValidationEvidence>,
+    #[serde(default)]
+    expected_fingerprint: Option<String>,
+    #[serde(default)]
+    expected_cycle_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +265,8 @@ impl Tool for PrWatchTool {
                 ,"thread_ids": {"type": "array", "items": {"type": "string"}, "description": "Review thread IDs to resolve for action=resolve_addressed."}
                 ,"head_sha": {"type": "string", "description": "Expected current PR head SHA for action=resolve_addressed."}
                 ,"commit_sha": {"type": "string", "description": "Commit SHA containing the addressed fix for action=resolve_addressed."}
+                ,"expected_fingerprint": {"type": "string", "description": "Expected current actionable fingerprint for action=resolve_addressed; prevents resolving stale handoffs."}
+                ,"expected_cycle_number": {"type": "integer", "description": "Expected watch polling cycle number for action=resolve_addressed; prevents resolving stale handoffs."}
                 ,"validation": {
                     "type": "array",
                     "items": {
@@ -696,6 +702,36 @@ fn review_threads_fetch_succeeded_at(state: &PrWatchState, collected_at: &str) -
         .is_some_and(|value| value == collected_at)
 }
 
+fn ensure_resolve_freshness_matches(state: &PrWatchState, params: &PrWatchInput) -> Result<()> {
+    let expected_cycle = params
+        .expected_cycle_number
+        .context("resolve_addressed requires expected_cycle_number from the current handoff/status")?;
+    if expected_cycle != state.polling.cycle_number {
+        bail!(
+            "resolve_addressed expected_cycle_number is stale: expected {}, current {}",
+            expected_cycle,
+            state.polling.cycle_number
+        );
+    }
+
+    let expected_fingerprint = params
+        .expected_fingerprint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("resolve_addressed requires expected_fingerprint from the current handoff/status")?;
+    let current_fingerprint = actionable_fingerprint(&state.pending_actionable)
+        .context("resolve_addressed requires current actionable items; poll first if none remain")?;
+    if expected_fingerprint != current_fingerprint {
+        bail!(
+            "resolve_addressed expected_fingerprint is stale: expected {}, current {}",
+            expected_fingerprint,
+            current_fingerprint
+        );
+    }
+    Ok(())
+}
+
 fn validation_status_is_passing(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
@@ -768,6 +804,7 @@ async fn resolve_addressed(
             }
         }
         ensure_post_resolution_poll_cleared(&state)?;
+        ensure_resolve_freshness_matches(&state, &params)?;
     }
     let expected_head = params
         .head_sha
@@ -1328,8 +1365,16 @@ fn actionable_fingerprint(items: &[ActionableItem]) -> Option<String> {
 fn handoff_prompt(state: &PrWatchState, fingerprint: &str) -> String {
     let state_file = state_file_for_watch(&state.watch_id);
     format!(
-        "Action required for PR watch {}. State file: {}. First run/read `pr_watch action=handoff repo={} pr={} watch_id={}` or inspect the state, and verify current actionable fingerprint `{}` still matches before remediation. If stale or no actionable items remain, report no-op. Do not call `pr_watch monitor` from this handoff. If current, inspect pending_actionable and remediate only if the current user workflow or active grants authorize local remediation. No push without an active push grant. No comment without an active comment grant. No review-thread resolution without an active resolve_threads grant. If a review thread is addressed and resolve_threads is granted, completion requires calling `pr_watch action=resolve_addressed` with the addressed thread IDs, current head_sha, validation evidence, and commit_sha or explicit no-code reason; otherwise record the blocked reason. Poll after any successful resolution. Never merge.",
-        state.watch_id, state_file, state.pr.repo, state.pr.number, state.watch_id, fingerprint,
+        "Action required for PR watch {}. State file: {}. First run/read `pr_watch action=handoff repo={} pr={} watch_id={}` or inspect the state, and verify current actionable fingerprint `{}` still matches before remediation. Current cycle number is `{}`. If stale or no actionable items remain, report no-op. Do not call `pr_watch monitor` from this handoff. If current, inspect pending_actionable and remediate only if the current user workflow or active grants authorize local remediation. No push without an active push grant. No comment without an active comment grant. No review-thread resolution without an active resolve_threads grant. If a review thread is addressed and resolve_threads is granted, completion requires calling `pr_watch action=resolve_addressed` with the addressed thread IDs, current head_sha, expected_fingerprint `{}`, expected_cycle_number `{}`, validation evidence, and commit_sha matching the watched head or explicit no-code reason; otherwise record the blocked reason. Poll after any successful resolution. Never merge.",
+        state.watch_id,
+        state_file,
+        state.pr.repo,
+        state.pr.number,
+        state.watch_id,
+        fingerprint,
+        state.polling.cycle_number,
+        fingerprint,
+        state.polling.cycle_number,
     )
 }
 
@@ -3689,6 +3734,8 @@ mod tests {
             head_sha: None,
             commit_sha: None,
             validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
         }
     }
 
@@ -4397,6 +4444,8 @@ mod tests {
             head_sha: None,
             commit_sha: None,
             validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
@@ -4425,6 +4474,8 @@ mod tests {
             head_sha: Some("head".into()),
             commit_sha: None,
             validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
         };
         assert!(!has_non_empty_commit_or_reason(&params));
 
@@ -4464,6 +4515,8 @@ mod tests {
             head_sha: Some("head".into()),
             commit_sha: Some("other".into()),
             validation: Vec::new(),
+            expected_fingerprint: None,
+            expected_cycle_number: None,
         };
 
         assert!(!has_explicit_no_code_reason(&params));
@@ -4505,6 +4558,8 @@ mod tests {
                 status: "passed".into(),
                 summary: Some("unit tests passed".into()),
             }],
+            expected_fingerprint: None,
+            expected_cycle_number: None,
         };
 
         let attempt = skipped_resolution_attempt("THREAD_B", "head", &params);
@@ -4705,6 +4760,62 @@ mod tests {
             &state,
             "2026-06-18T18:01:00Z"
         ));
+    }
+
+    #[test]
+    fn resolve_addressed_requires_current_fingerprint_and_cycle() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        state.polling.cycle_number = 7;
+        state.pending_actionable.push(ActionableItem {
+            id: "THREAD_A".into(),
+            surface: "review_threads".into(),
+            summary: "Please fix stale handoff resolution".into(),
+            url: Some("https://thread".into()),
+            path: Some("src/lib.rs".into()),
+            status: Some("unresolved".into()),
+            reason: Some("new_unresolved_thread".into()),
+        });
+        let fingerprint = actionable_fingerprint(&state.pending_actionable).unwrap();
+        let mut params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some(state.watch_id.clone()),
+            dry_run: Some(false),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: Some("addressed".into()),
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD_A".into()],
+            head_sha: Some("head".into()),
+            commit_sha: Some("head".into()),
+            validation: Vec::new(),
+            expected_fingerprint: Some(fingerprint.clone()),
+            expected_cycle_number: Some(7),
+        };
+        assert!(ensure_resolve_freshness_matches(&state, &params).is_ok());
+
+        params.expected_cycle_number = Some(6);
+        assert!(ensure_resolve_freshness_matches(&state, &params)
+            .unwrap_err()
+            .to_string()
+            .contains("expected_cycle_number is stale"));
+
+        params.expected_cycle_number = Some(7);
+        params.expected_fingerprint = Some("stale".into());
+        assert!(ensure_resolve_freshness_matches(&state, &params)
+            .unwrap_err()
+            .to_string()
+            .contains("expected_fingerprint is stale"));
     }
 
     #[test]
