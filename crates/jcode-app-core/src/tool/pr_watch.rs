@@ -2729,12 +2729,20 @@ fn schedule_webhook_followup_refresh(
         "heartbeat_seconds": 300,
         "readonly": true,
     });
+    let followup_command = format!(
+        "pr_watch action=webhook_heartbeat repo={} pr={} watch_id={}",
+        entry.repo, entry.pr, entry.watch_id
+    );
+    let followup_instructions = format!(
+        "Run `{followup_command}` only. Read-only refresh only. Delivery {} event {} triggered this follow-up. Never push, comment, resolve threads, or merge.",
+        delivery.delivery_id, delivery.event
+    );
     manager.schedule(ScheduleRequest {
         wake_in_minutes: None,
         wake_at: Some(Utc::now() + Duration::seconds(WEBHOOK_DEBOUNCE_SECONDS)),
         context: format!(
-            "Webhook follow-up refresh for PR watch {} after lock contention. Run `pr_watch action=webhook_heartbeat repo={} pr={} watch_id={}` only. Read-only refresh only. Delivery {} event {} triggered this follow-up. Never push, comment, resolve threads, or merge.",
-            entry.watch_id, entry.repo, entry.pr, entry.watch_id, delivery.delivery_id, delivery.event
+            "Webhook follow-up refresh for PR watch {} after lock contention. {}",
+            entry.watch_id, followup_instructions
         ),
         priority: Priority::Normal,
         target: ScheduleTarget::Spawn {
@@ -2742,10 +2750,14 @@ fn schedule_webhook_followup_refresh(
         },
         created_by_session: "pr-watch-webhook-daemon".to_string(),
         working_dir: Some(entry.root_dir.clone()),
-        task_description: Some("PR watch webhook follow-up refresh".to_string()),
+        task_description: Some(format!(
+            "PR watch webhook follow-up refresh: {followup_command}"
+        )),
         relevant_files: vec![state_file],
         git_branch: None,
-        additional_context: Some("Scheduled by pr_watch webhook lock contention; read-only refresh only.".to_string()),
+        additional_context: Some(format!(
+            "Scheduled by pr_watch webhook lock contention. {followup_instructions}"
+        )),
         schedule_key: Some(key),
         schedule_kind: Some("pr_watch.webhook_followup".to_string()),
         schedule_payload: Some(payload),
