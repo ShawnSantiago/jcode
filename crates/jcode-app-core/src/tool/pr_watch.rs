@@ -2691,6 +2691,9 @@ async fn webhook_refresh_watch(
     } else {
         "routed".to_string()
     });
+    if state.terminal {
+        remove_webhook_index_entry(&state.watch_id)?;
+    }
     write_state_atomic(&state_path(&store, &entry.watch_id), &state)?;
     Ok(format!(
         "routed {} partial_failure={} scheduled={} handoff={}",
