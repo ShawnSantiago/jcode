@@ -614,6 +614,40 @@ fn consume_single_use_grant(state: &mut PrWatchState, grant_id: &str) -> bool {
     before != state.authorization.active_grants.len()
 }
 
+fn has_non_empty_commit_or_reason(params: &PrWatchInput) -> bool {
+    params
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || params
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn skipped_resolution_attempt(
+    thread_id: &str,
+    expected_head: &str,
+    params: &PrWatchInput,
+) -> ThreadResolutionAttempt {
+    ThreadResolutionAttempt {
+        thread_id: thread_id.to_string(),
+        attempted_at: now_iso(),
+        status: ResolutionAttemptStatus::Skipped,
+        head_sha: Some(expected_head.to_string()),
+        commit_sha: params.commit_sha.clone(),
+        validation: params.validation.clone(),
+        reason: params.reason.clone().unwrap_or_else(|| {
+            "resolved after validated fix for addressed review feedback".to_string()
+        }),
+        error: Some("skipped due to previous failure in batch".to_string()),
+    }
+}
+
 async fn resolve_addressed(
     root: &Path,
     store: &Path,
@@ -654,15 +688,8 @@ async fn resolve_addressed(
             current_head
         );
     }
-    if params.commit_sha.is_none()
-        && params
-            .reason
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-    {
-        bail!("resolve_addressed requires commit_sha or a non-empty no-code reason");
+    if !has_non_empty_commit_or_reason(&params) {
+        bail!("resolve_addressed requires a non-empty commit_sha or a non-empty no-code reason");
     }
     let grant = active_grant_for_scope(&state, WriteScope::ResolveThreads, &ctx.session_id)
         .cloned()
@@ -699,6 +726,10 @@ async fn resolve_addressed(
     let mut attempts = Vec::new();
     let mut failed = false;
     for id in prevalidated {
+        if failed {
+            attempts.push(skipped_resolution_attempt(&id, expected_head, &params));
+            continue;
+        }
         let attempted_at = now_iso();
         let outcome = if would_write {
             run_gh_resolve_review_thread(root, &id).await
@@ -738,9 +769,6 @@ async fn resolve_addressed(
             }),
             error,
         });
-        if failed {
-            break;
-        }
     }
 
     let resolved_count = attempts
@@ -4257,6 +4285,87 @@ mod tests {
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
         assert!(state.polling.next_poll_at.is_some());
+    }
+
+    #[test]
+    fn resolve_addressed_requires_non_empty_commit_or_reason() {
+        let mut params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some("owner~2frepo-pr-12".into()),
+            dry_run: Some(true),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: None,
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD".into()],
+            head_sha: Some("head".into()),
+            commit_sha: None,
+            validation: Vec::new(),
+        };
+        assert!(!has_non_empty_commit_or_reason(&params));
+
+        params.commit_sha = Some("   ".into());
+        assert!(!has_non_empty_commit_or_reason(&params));
+
+        params.reason = Some("\t".into());
+        assert!(!has_non_empty_commit_or_reason(&params));
+
+        params.commit_sha = Some("abc123".into());
+        assert!(has_non_empty_commit_or_reason(&params));
+
+        params.commit_sha = None;
+        params.reason = Some("no-code resolution because reviewer asked for verification".into());
+        assert!(has_non_empty_commit_or_reason(&params));
+    }
+
+    #[test]
+    fn skipped_resolution_attempt_records_complete_audit_context() {
+        let params = PrWatchInput {
+            action: PrWatchAction::ResolveAddressed,
+            repo: None,
+            pr: None,
+            watch_id: Some("owner~2frepo-pr-12".into()),
+            dry_run: Some(false),
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
+            target: None,
+            scopes: None,
+            reason: Some("addressed by fix".into()),
+            expires_in_minutes: None,
+            single_use: None,
+            grant_id: None,
+            thread_ids: vec!["THREAD_A".into(), "THREAD_B".into()],
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: vec![ValidationEvidence {
+                at: "2026-06-18T18:00:00Z".into(),
+                command: "cargo test".into(),
+                status: "passed".into(),
+                summary: Some("unit tests passed".into()),
+            }],
+        };
+
+        let attempt = skipped_resolution_attempt("THREAD_B", "head", &params);
+        assert_eq!(attempt.thread_id, "THREAD_B");
+        assert_eq!(attempt.status, ResolutionAttemptStatus::Skipped);
+        assert_eq!(attempt.head_sha.as_deref(), Some("head"));
+        assert_eq!(attempt.commit_sha.as_deref(), Some("fixsha"));
+        assert_eq!(attempt.validation.len(), 1);
+        assert_eq!(attempt.reason, "addressed by fix");
+        assert_eq!(
+            attempt.error.as_deref(),
+            Some("skipped due to previous failure in batch")
+        );
     }
 
     #[test]
