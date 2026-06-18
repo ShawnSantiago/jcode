@@ -87,6 +87,8 @@ struct PrWatchInput {
     expected_fingerprint: Option<String>,
     #[serde(default)]
     expected_cycle_number: Option<u64>,
+    #[serde(default)]
+    no_code_resolution: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +269,7 @@ impl Tool for PrWatchTool {
                 ,"commit_sha": {"type": "string", "description": "Commit SHA containing the addressed fix for action=resolve_addressed."}
                 ,"expected_fingerprint": {"type": "string", "description": "Expected current actionable fingerprint for action=resolve_addressed; prevents resolving stale handoffs."}
                 ,"expected_cycle_number": {"type": "integer", "description": "Expected watch polling cycle number for action=resolve_addressed; prevents resolving stale handoffs."}
+                ,"no_code_resolution": {"type": "boolean", "description": "Set true only when resolving without a code commit; requires a non-empty reason and no commit_sha."}
                 ,"validation": {
                     "type": "array",
                     "items": {
@@ -636,6 +639,9 @@ fn has_non_empty_commit_or_reason(params: &PrWatchInput) -> bool {
 }
 
 fn has_explicit_no_code_reason(params: &PrWatchInput) -> bool {
+    if !params.no_code_resolution {
+        return false;
+    }
     params
         .commit_sha
         .as_deref()
@@ -648,6 +654,11 @@ fn has_explicit_no_code_reason(params: &PrWatchInput) -> bool {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_some()
+}
+
+fn has_duplicate_thread_ids(thread_ids: &[String]) -> bool {
+    let mut seen = HashSet::new();
+    thread_ids.iter().any(|id| !seen.insert(id))
 }
 
 fn commit_sha_matches_current_head(params: &PrWatchInput, current_head: &str) -> bool {
@@ -800,6 +811,9 @@ async fn resolve_addressed(
     }
     if params.thread_ids.is_empty() {
         bail!("resolve_addressed requires at least one thread_id");
+    }
+    if has_duplicate_thread_ids(&params.thread_ids) {
+        bail!("resolve_addressed rejects duplicate thread_ids");
     }
     if params.validation.is_empty() && !params.dry_run.unwrap_or(false) {
         bail!("resolve_addressed requires validation evidence");
@@ -3763,6 +3777,7 @@ mod tests {
             validation: Vec::new(),
             expected_fingerprint: None,
             expected_cycle_number: None,
+            no_code_resolution: false,
         }
     }
 
@@ -4473,6 +4488,7 @@ mod tests {
             validation: Vec::new(),
             expected_fingerprint: None,
             expected_cycle_number: None,
+            no_code_resolution: false,
         };
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
@@ -4503,6 +4519,7 @@ mod tests {
             validation: Vec::new(),
             expected_fingerprint: None,
             expected_cycle_number: None,
+            no_code_resolution: false,
         };
         assert!(!has_non_empty_commit_or_reason(&params));
 
@@ -4544,6 +4561,7 @@ mod tests {
             validation: Vec::new(),
             expected_fingerprint: None,
             expected_cycle_number: None,
+            no_code_resolution: false,
         };
 
         assert!(!has_explicit_no_code_reason(&params));
@@ -4554,8 +4572,22 @@ mod tests {
 
         params.commit_sha = None;
         params.reason = Some("no-code resolution because reviewer asked for verification".into());
+        assert!(!has_explicit_no_code_reason(&params));
+        params.no_code_resolution = true;
         assert!(has_explicit_no_code_reason(&params));
         assert!(!commit_sha_matches_current_head(&params, "head"));
+    }
+
+    #[test]
+    fn resolve_addressed_rejects_duplicate_thread_ids() {
+        assert!(!has_duplicate_thread_ids(&[
+            "THREAD_A".to_string(),
+            "THREAD_B".to_string(),
+        ]));
+        assert!(has_duplicate_thread_ids(&[
+            "THREAD_A".to_string(),
+            "THREAD_A".to_string(),
+        ]));
     }
 
     #[test]
@@ -4587,6 +4619,7 @@ mod tests {
             }],
             expected_fingerprint: None,
             expected_cycle_number: None,
+            no_code_resolution: false,
         };
 
         let attempt = skipped_resolution_attempt("THREAD_B", "head", &params);
@@ -4828,6 +4861,7 @@ mod tests {
             validation: Vec::new(),
             expected_fingerprint: Some(fingerprint.clone()),
             expected_cycle_number: Some(7),
+            no_code_resolution: false,
         };
         assert!(ensure_resolve_freshness_matches(&state, &params).is_ok());
 
