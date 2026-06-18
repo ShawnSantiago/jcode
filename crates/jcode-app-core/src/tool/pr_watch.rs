@@ -791,6 +791,54 @@ fn ensure_post_resolution_poll_cleared(state: &PrWatchState) -> Result<()> {
     Ok(())
 }
 
+fn merge_resolution_attempts(
+    previous: &[ThreadResolutionAttempt],
+    current: Vec<ThreadResolutionAttempt>,
+) -> Vec<ThreadResolutionAttempt> {
+    let current_thread_ids: HashSet<&str> = current
+        .iter()
+        .map(|attempt| attempt.thread_id.as_str())
+        .collect();
+    let mut merged: Vec<ThreadResolutionAttempt> = previous
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.status,
+                ResolutionAttemptStatus::Resolved | ResolutionAttemptStatus::AlreadyResolved
+            ) && !current_thread_ids.contains(attempt.thread_id.as_str())
+        })
+        .cloned()
+        .collect();
+    merged.extend(current);
+    merged
+}
+
+fn requeue_failed_resolution_threads(state: &PrWatchState, pending: &mut Vec<ActionableItem>) {
+    let mut pending_ids: HashSet<String> = pending.iter().map(|item| item.id.clone()).collect();
+    for attempt in &state.last_resolution_attempts {
+        if !matches!(attempt.status, ResolutionAttemptStatus::Failed) {
+            continue;
+        }
+        let Some(marker) = state.last_seen.review_threads.get(&attempt.thread_id) else {
+            continue;
+        };
+        if marker.resolved || marker.outdated || !pending_ids.insert(attempt.thread_id.clone()) {
+            continue;
+        }
+        pending.push(ActionableItem {
+            id: attempt.thread_id.clone(),
+            surface: "review_threads".to_string(),
+            summary: attempt.error.clone().unwrap_or_else(|| {
+                "Review thread resolution failed; retry or inspect manually".to_string()
+            }),
+            url: marker.url.clone(),
+            path: None,
+            status: Some("resolution_failed".to_string()),
+            reason: Some("failed_resolution_retry".to_string()),
+        });
+    }
+}
+
 async fn resolve_addressed(
     root: &Path,
     store: &Path,
@@ -972,10 +1020,10 @@ async fn resolve_addressed(
         .iter()
         .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Failed))
         .count();
-    state.last_resolution_attempts = attempts;
+    state.last_resolution_attempts = merge_resolution_attempts(&state.last_resolution_attempts, attempts);
     state.last_resolution_error = (failed_count > 0)
         .then(|| "one or more thread resolutions failed; poll before retry".to_string());
-    state.resolution_requires_post_poll = would_write;
+    state.resolution_requires_post_poll = would_write && remote_resolved_count > 0;
     if grant.single_use && would_write && remote_resolved_count > 0 {
         let consumed = consume_single_use_grant(&mut state, &grant.grant_id);
         state.push_event(WatchEvent {
@@ -2077,7 +2125,7 @@ fn apply_baseline_from_collection(
         }
     }
 
-    match collection.reviews {
+ 	    match collection.reviews {
         Ok(reviews) => {
             state.baseline.review_count = reviews.len();
             state
@@ -3133,6 +3181,10 @@ fn update_state_from_collection(
             partial_failure = true;
             state.push_event(surface_error_event(collected_at, err));
         }
+ 	    }
+
+    if review_threads_fetch_succeeded_at(state, collected_at) {
+        requeue_failed_resolution_threads(state, &mut pending_actionable);
     }
 
     if partial_failure && !any_surface_success {
@@ -4773,6 +4825,84 @@ mod tests {
             .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
             .count();
         assert_eq!(remote_resolved_count, 0);
+    }
+
+    #[test]
+    fn merge_resolution_attempts_retains_prior_successes() {
+        let prior = vec![ThreadResolutionAttempt {
+            thread_id: "THREAD_A".into(),
+            attempted_at: "2026-06-18T18:00:00Z".into(),
+            status: ResolutionAttemptStatus::Resolved,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "addressed".into(),
+            error: None,
+        }];
+        let current = vec![ThreadResolutionAttempt {
+            thread_id: "THREAD_B".into(),
+            attempted_at: "2026-06-18T18:01:00Z".into(),
+            status: ResolutionAttemptStatus::Failed,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "retry failed".into(),
+            error: Some("still failed".into()),
+        }];
+
+        let merged = merge_resolution_attempts(&prior, current);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|attempt| {
+            attempt.thread_id == "THREAD_A" && attempt.status == ResolutionAttemptStatus::Resolved
+        }));
+        assert!(merged.iter().any(|attempt| {
+            attempt.thread_id == "THREAD_B" && attempt.status == ResolutionAttemptStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn failed_resolution_attempts_remain_actionable_until_resolved() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        state.last_resolution_attempts.push(ThreadResolutionAttempt {
+            thread_id: "THREAD_FAILED".into(),
+            attempted_at: "2026-06-18T18:00:00Z".into(),
+            status: ResolutionAttemptStatus::Failed,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "retry failed".into(),
+            error: Some("GitHub response reported isResolved=false".into()),
+        });
+        state.last_seen.review_threads.insert(
+            "THREAD_FAILED".into(),
+            ReviewThreadMarker {
+                id: "THREAD_FAILED".into(),
+                updated_at: Some("2026-06-18T18:00:00Z".into()),
+                resolved: false,
+                outdated: false,
+                body_hash: Some("hash:failed".into()),
+                url: Some("https://thread-failed".into()),
+            },
+        );
+
+        let mut pending = Vec::new();
+        requeue_failed_resolution_threads(&state, &mut pending);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "THREAD_FAILED");
+        assert_eq!(pending[0].reason.as_deref(), Some("failed_resolution_retry"));
+
+        state
+            .last_seen
+            .review_threads
+            .get_mut("THREAD_FAILED")
+            .unwrap()
+            .resolved = true;
+        let mut pending = Vec::new();
+        requeue_failed_resolution_threads(&state, &mut pending);
+        assert!(pending.is_empty());
     }
 
     #[test]
