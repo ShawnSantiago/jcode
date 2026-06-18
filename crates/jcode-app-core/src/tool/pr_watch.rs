@@ -655,6 +655,28 @@ fn review_thread_had_prior_resolution_attempt(state: &PrWatchState, thread_id: &
         .any(|attempt| attempt.thread_id == thread_id)
 }
 
+fn validation_status_is_passing(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "pass" | "passed" | "success" | "succeeded" | "successful" | "ok"
+    )
+}
+
+fn all_validation_evidence_is_passing(validation: &[ValidationEvidence]) -> bool {
+    validation
+        .iter()
+        .all(|evidence| validation_status_is_passing(&evidence.status))
+}
+
+fn ensure_post_resolution_poll_cleared(state: &PrWatchState) -> Result<()> {
+    if state.resolution_requires_post_poll {
+        bail!(
+            "resolve_addressed requires a post-resolution poll before retrying; run pr_watch action=poll_now first"
+        );
+    }
+    Ok(())
+}
+
 async fn resolve_addressed(
     root: &Path,
     store: &Path,
@@ -679,6 +701,9 @@ async fn resolve_addressed(
     if params.validation.is_empty() && !params.dry_run.unwrap_or(false) {
         bail!("resolve_addressed requires validation evidence");
     }
+    if !params.validation.is_empty() && !all_validation_evidence_is_passing(&params.validation) {
+        bail!("resolve_addressed requires all validation evidence statuses to be passing");
+    }
     let would_write = !params.dry_run.unwrap_or(false);
     let _lock = if would_write {
         match acquire_watch_lock(store, &state.watch_id)? {
@@ -701,6 +726,7 @@ async fn resolve_addressed(
                 );
             }
         }
+        ensure_post_resolution_poll_cleared(&state)?;
     }
     let expected_head = params
         .head_sha
@@ -811,6 +837,10 @@ async fn resolve_addressed(
             )
         })
         .count();
+    let remote_resolved_count = attempts
+        .iter()
+        .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
+        .count();
     let failed_count = attempts
         .iter()
         .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Failed))
@@ -819,12 +849,12 @@ async fn resolve_addressed(
     state.last_resolution_error = (failed_count > 0)
         .then(|| "one or more thread resolutions failed; poll before retry".to_string());
     state.resolution_requires_post_poll = would_write;
-    if grant.single_use && would_write && failed_count == 0 {
+    if grant.single_use && would_write && remote_resolved_count > 0 {
         let consumed = consume_single_use_grant(&mut state, &grant.grant_id);
         state.push_event(WatchEvent {
             at: now_iso(),
             kind: "grant_consumed".to_string(),
-            data: json!({"grant_id": grant.grant_id, "consumed": consumed, "scope": "resolve_threads"}),
+            data: json!({"grant_id": grant.grant_id, "consumed": consumed, "scope": "resolve_threads", "remote_resolved_count": remote_resolved_count}),
         });
     }
     state.updated_at = Some(now_iso());
@@ -833,6 +863,7 @@ async fn resolve_addressed(
         kind: "resolve_addressed_completed".to_string(),
         data: json!({
             "resolved_count": resolved_count,
+            "remote_resolved_count": remote_resolved_count,
             "failed_count": failed_count,
             "requires_post_poll": state.resolution_requires_post_poll,
         }),
@@ -4437,6 +4468,100 @@ mod tests {
         assert!(description.contains("resolve_addressed"));
         assert!(description.contains("grant-gated"));
         assert!(description.contains("watch cycles"));
+    }
+
+    #[test]
+    fn validation_evidence_requires_passing_statuses() {
+        assert!(validation_status_is_passing("passed"));
+        assert!(validation_status_is_passing(" SUCCESS "));
+        assert!(validation_status_is_passing("ok"));
+        assert!(!validation_status_is_passing("failed"));
+        assert!(!validation_status_is_passing(""));
+
+        let passing = vec![
+            ValidationEvidence {
+                at: "2026-06-18T18:00:00Z".into(),
+                command: "cargo test".into(),
+                status: "passed".into(),
+                summary: None,
+            },
+            ValidationEvidence {
+                at: "2026-06-18T18:01:00Z".into(),
+                command: "cargo check".into(),
+                status: "success".into(),
+                summary: None,
+            },
+        ];
+        assert!(all_validation_evidence_is_passing(&passing));
+
+        let mut failing = passing;
+        failing.push(ValidationEvidence {
+            at: "2026-06-18T18:02:00Z".into(),
+            command: "cargo fmt --check".into(),
+            status: "failed".into(),
+            summary: Some("format failed".into()),
+        });
+        assert!(!all_validation_evidence_is_passing(&failing));
+    }
+
+    #[test]
+    fn single_use_resolution_grants_consume_after_remote_success_only() {
+        let remote_success = vec![
+            ThreadResolutionAttempt {
+                thread_id: "THREAD_A".into(),
+                attempted_at: "2026-06-18T18:00:00Z".into(),
+                status: ResolutionAttemptStatus::Resolved,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "addressed".into(),
+                error: None,
+            },
+            ThreadResolutionAttempt {
+                thread_id: "THREAD_B".into(),
+                attempted_at: "2026-06-18T18:00:01Z".into(),
+                status: ResolutionAttemptStatus::Failed,
+                head_sha: Some("head".into()),
+                commit_sha: Some("fixsha".into()),
+                validation: Vec::new(),
+                reason: "addressed".into(),
+                error: Some("later failure".into()),
+            },
+        ];
+        let remote_resolved_count = remote_success
+            .iter()
+            .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
+            .count();
+        assert_eq!(remote_resolved_count, 1);
+
+        let already_resolved_only = vec![ThreadResolutionAttempt {
+            thread_id: "THREAD_C".into(),
+            attempted_at: "2026-06-18T18:00:02Z".into(),
+            status: ResolutionAttemptStatus::AlreadyResolved,
+            head_sha: Some("head".into()),
+            commit_sha: Some("fixsha".into()),
+            validation: Vec::new(),
+            reason: "addressed".into(),
+            error: None,
+        }];
+        let remote_resolved_count = already_resolved_only
+            .iter()
+            .filter(|attempt| matches!(attempt.status, ResolutionAttemptStatus::Resolved))
+            .count();
+        assert_eq!(remote_resolved_count, 0);
+    }
+
+    #[test]
+    fn resolve_addressed_retry_requires_post_resolution_poll_to_be_cleared() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 12,
+        });
+        assert!(ensure_post_resolution_poll_cleared(&state).is_ok());
+
+        state.resolution_requires_post_poll = true;
+        let err = ensure_post_resolution_poll_cleared(&state).unwrap_err();
+        assert!(err.to_string().contains("post-resolution poll"));
     }
 
     #[test]
