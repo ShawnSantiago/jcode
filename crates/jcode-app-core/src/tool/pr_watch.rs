@@ -544,21 +544,7 @@ fn write_webhook_health(health: &WebhookDaemonHealth) -> Result<()> {
 }
 
 fn process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // `kill(pid, 0)` is the portable Unix liveness probe: it does not send a
-        // signal, but returns success when the process exists and EPERM when it
-        // exists but belongs to another user. This keeps webhook daemon status
-        // useful on macOS and other Unix platforms where `/proc` is absent.
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-    #[cfg(not(unix))]
-    {
-        // The previous `/proc` check remains the conservative fallback for
-        // platforms where a better native process probe has not been wired in.
-        Path::new("/proc").join(pid.to_string()).exists()
-    }
+    jcode_base::platform::is_process_running(pid)
 }
 
 fn read_webhook_pid() -> Result<Option<u32>> {
