@@ -545,7 +545,21 @@ fn write_webhook_health(health: &WebhookDaemonHealth) -> Result<()> {
 }
 
 fn process_is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+    #[cfg(unix)]
+    {
+        // `kill(pid, 0)` is the portable Unix liveness probe: it does not send a
+        // signal, but returns success when the process exists and EPERM when it
+        // exists but belongs to another user. This keeps webhook daemon status
+        // useful on macOS and other Unix platforms where `/proc` is absent.
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        // The previous `/proc` check remains the conservative fallback for
+        // platforms where a better native process probe has not been wired in.
+        Path::new("/proc").join(pid.to_string()).exists()
+    }
 }
 
 fn read_webhook_pid() -> Result<Option<u32>> {
@@ -2316,10 +2330,8 @@ async fn handle_webhook_connection(
     mut stream: TcpStream,
     secret: &str,
 ) -> Result<(VerifiedGithubDelivery, String)> {
-    let mut buf = vec![0u8; WEBHOOK_MAX_BODY_BYTES + 8192];
-    let n = stream.read(&mut buf).await?;
-    let request = &buf[..n];
-    let (status, body, delivery_result) = match process_webhook_http_request(request, secret).await
+    let request = read_webhook_http_request(&mut stream).await?;
+    let (status, body, delivery_result) = match process_webhook_http_request(&request, secret).await
     {
         Ok((delivery, result)) => ("200 OK", format!("{result}\n"), Ok((delivery, result))),
         Err(err) => ("400 Bad Request", format!("{}\n", err), Err(err)),
@@ -2331,6 +2343,63 @@ async fn handle_webhook_connection(
     );
     stream.write_all(response.as_bytes()).await?;
     delivery_result
+}
+
+async fn read_webhook_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    const WEBHOOK_MAX_HEADER_BYTES: usize = 8192;
+    let mut request = Vec::with_capacity(WEBHOOK_MAX_HEADER_BYTES);
+    let mut header_end = None;
+
+    while header_end.is_none() {
+        let mut chunk = [0u8; 1024];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4);
+        if header_end.is_none() && request.len() > WEBHOOK_MAX_HEADER_BYTES {
+            bail!("webhook headers exceed {WEBHOOK_MAX_HEADER_BYTES} bytes");
+        }
+    }
+
+    let header_end = header_end.context("malformed HTTP request")?;
+    if header_end > WEBHOOK_MAX_HEADER_BYTES {
+        bail!("webhook headers exceed {WEBHOOK_MAX_HEADER_BYTES} bytes");
+    }
+    let headers_raw =
+        std::str::from_utf8(&request[..header_end - 4]).context("headers are not utf-8")?;
+    let content_length = headers_raw
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .context("missing content-length")?;
+    if content_length > WEBHOOK_MAX_BODY_BYTES {
+        bail!("webhook body exceeds {} bytes", WEBHOOK_MAX_BODY_BYTES);
+    }
+
+    let expected_len = header_end
+        .checked_add(content_length)
+        .context("webhook request length overflow")?;
+    while request.len() < expected_len {
+        let remaining = expected_len - request.len();
+        let mut chunk = vec![0u8; remaining.min(8192)];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            bail!("incomplete webhook body read");
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    request.truncate(expected_len);
+    Ok(request)
 }
 
 async fn process_webhook_http_request(
