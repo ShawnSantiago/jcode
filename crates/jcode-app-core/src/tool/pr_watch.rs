@@ -32,7 +32,7 @@ impl PrWatchTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PrWatchAction {
     Start,
@@ -348,6 +348,7 @@ impl Tool for PrWatchTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: PrWatchInput = serde_json::from_value(input)?;
+        validate_event_mode_change_action(&params)?;
         let root = ctx
             .working_dir
             .clone()
@@ -372,6 +373,20 @@ impl Tool for PrWatchTool {
             PrWatchAction::Stop => stop_watch(&store, params),
         }
     }
+}
+
+fn validate_event_mode_change_action(params: &PrWatchInput) -> Result<()> {
+    if params.event_mode.is_some()
+        && !matches!(
+            params.action,
+            PrWatchAction::Start | PrWatchAction::Reschedule
+        )
+    {
+        bail!(
+            "event_mode can only be changed by start or reschedule so the webhook index stays in sync"
+        );
+    }
+    Ok(())
 }
 
 fn watch_dir(root: &Path) -> PathBuf {
