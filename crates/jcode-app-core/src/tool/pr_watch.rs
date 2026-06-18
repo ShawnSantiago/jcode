@@ -261,7 +261,21 @@ impl Tool for PrWatchTool {
                 ,"thread_ids": {"type": "array", "items": {"type": "string"}, "description": "Review thread IDs to resolve for action=resolve_addressed."}
                 ,"head_sha": {"type": "string", "description": "Expected current PR head SHA for action=resolve_addressed."}
                 ,"commit_sha": {"type": "string", "description": "Commit SHA containing the addressed fix for action=resolve_addressed."}
-                ,"validation": {"type": "array", "description": "Validation evidence for action=resolve_addressed."}
+                ,"validation": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["at", "command", "status"],
+                        "properties": {
+                            "at": {"type": "string", "description": "Timestamp for the validation run."},
+                            "command": {"type": "string", "description": "Validation command or check name."},
+                            "status": {"type": "string", "description": "Validation status, for example passed or failed."},
+                            "summary": {"type": ["string", "null"], "description": "Optional concise validation result summary."}
+                        },
+                        "additionalProperties": false
+                    },
+                    "description": "Validation evidence for action=resolve_addressed."
+                }
             }
         })
     }
@@ -3470,7 +3484,15 @@ mod tests {
         assert!(!actions.iter().any(|value| value == "merge"));
         assert!(schema.pointer("/properties/scopes").is_some());
         assert!(schema.pointer("/properties/thread_ids").is_some());
-        assert!(schema.pointer("/properties/validation").is_some());
+        let validation = schema
+            .pointer("/properties/validation")
+            .expect("validation schema should be advertised");
+        assert_eq!(validation["type"], json!("array"));
+        assert_eq!(validation["items"]["type"], json!("object"));
+        assert_eq!(
+            validation["items"]["properties"]["command"]["type"],
+            json!("string")
+        );
     }
 
     #[test]
