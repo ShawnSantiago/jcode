@@ -278,11 +278,48 @@ pub struct ValidationEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRequiredHandoffStatus {
+    Missing,
+    Queued,
+    DeliveredUnknown,
+    Superseded,
+    Error,
+    MissingOrigin,
+    OriginUnavailable,
+    SelfTargetGuard,
+}
+
+impl Default for ActionRequiredHandoffStatus {
+    fn default() -> Self {
+        Self::Missing
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ActionRequiredHandoffState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub status: ActionRequiredHandoffStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrWatchState {
     pub schema_version: u32,
     pub watch_id: String,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session_id: Option<String>,
     pub terminal: bool,
     pub stop_reason: Option<String>,
     pub pr: PrIdentity,
@@ -295,6 +332,8 @@ pub struct PrWatchState {
     pub last_successful_fetch: BTreeMap<String, String>,
     pub last_cycle: CycleSummary,
     pub pending_actionable: Vec<ActionableItem>,
+    #[serde(default)]
+    pub action_required_handoff: ActionRequiredHandoffState,
     pub last_validation: Vec<ValidationEvidence>,
     pub events: Vec<WatchEvent>,
 }
@@ -307,6 +346,7 @@ impl PrWatchState {
             watch_id,
             created_at: None,
             updated_at: None,
+            origin_session_id: None,
             terminal: false,
             stop_reason: None,
             pr: PrIdentity {
@@ -329,6 +369,7 @@ impl PrWatchState {
             last_successful_fetch: BTreeMap::new(),
             last_cycle: CycleSummary::default(),
             pending_actionable: Vec::new(),
+            action_required_handoff: ActionRequiredHandoffState::default(),
             last_validation: Vec::new(),
             events: Vec::new(),
         }

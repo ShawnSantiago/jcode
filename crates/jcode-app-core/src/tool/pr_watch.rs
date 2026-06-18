@@ -1,16 +1,18 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget, ScheduledItem};
+use crate::session::Session;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jcode_pr_watch_core::{
-    ActionableItem, AuthorizationGrant, CheckRunState, CycleOutcome, Marker, PrTarget,
-    PrWatchState, SurfaceError, WatchEvent, WriteScope, normalize_watch_state_json,
-    parse_gh_checks, parse_gh_issue_comments, parse_gh_pr_view, parse_gh_review_comments,
-    parse_gh_review_threads, parse_gh_reviews,
+    ActionRequiredHandoffStatus, ActionableItem, AuthorizationGrant, CheckRunState, CycleOutcome,
+    Marker, PrTarget, PrWatchState, SurfaceError, WatchEvent, WriteScope,
+    normalize_watch_state_json, parse_gh_checks, parse_gh_issue_comments, parse_gh_pr_view,
+    parse_gh_review_comments, parse_gh_review_threads, parse_gh_reviews,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
@@ -88,6 +90,49 @@ struct PrWatchSchedulePayload {
     quiet_cycles_required: u64,
     max_runtime_seconds: u64,
     readonly: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PrWatchHandoffPayload {
+    tool: String,
+    watch_id: String,
+    repo: String,
+    pr: u64,
+    action: String,
+    state_file: String,
+    fingerprint: String,
+    cycle_number: u64,
+    readonly: bool,
+}
+
+impl PrWatchHandoffPayload {
+    fn new(state: &PrWatchState, fingerprint: String) -> Self {
+        Self {
+            tool: "pr_watch".to_string(),
+            watch_id: state.watch_id.clone(),
+            repo: state.pr.repo.clone(),
+            pr: state.pr.number,
+            action: "handoff".to_string(),
+            state_file: state_file_for_watch(&state.watch_id),
+            fingerprint,
+            cycle_number: state.polling.cycle_number,
+            readonly: false,
+        }
+    }
+
+    fn from_scheduled_item(item: &ScheduledItem) -> Result<Option<Self>> {
+        let Some(value) = item.schedule_payload.clone() else {
+            return Ok(None);
+        };
+        if value.get("tool").and_then(Value::as_str) != Some("pr_watch")
+            || value.get("action").and_then(Value::as_str) != Some("handoff")
+        {
+            return Ok(None);
+        }
+        serde_json::from_value(value)
+            .map(Some)
+            .with_context(|| format!("invalid pr_watch handoff payload on {}", item.id))
+    }
 }
 
 impl PrWatchSchedulePayload {
@@ -239,8 +284,16 @@ fn schedule_key_for_watch(watch_id: &str) -> String {
     format!("pr_watch:{watch_id}:monitor")
 }
 
+fn handoff_schedule_key_for_watch(watch_id: &str) -> String {
+    format!("pr_watch:{watch_id}:action_required_handoff")
+}
+
 fn lock_path(store: &Path, watch_id: &str) -> PathBuf {
     store.join(format!("{watch_id}.lock"))
+}
+
+fn handoff_lock_path(store: &Path, watch_id: &str) -> PathBuf {
+    store.join(format!("{watch_id}-handoff.lock"))
 }
 
 struct WatchLock {
@@ -260,6 +313,25 @@ fn acquire_watch_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>>
         Ok(mut file) => {
             let lock = WatchLock { path: path.clone() };
             writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
+            Ok(Some(lock))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
+    }
+}
+
+fn acquire_handoff_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>> {
+    fs::create_dir_all(store)?;
+    let path = handoff_lock_path(store, watch_id);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            let lock = WatchLock { path: path.clone() };
+            writeln!(
+                file,
+                "pid={} at={} purpose=action_required_handoff",
+                std::process::id(),
+                now_iso()
+            )?;
             Ok(Some(lock))
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
@@ -301,6 +373,7 @@ fn target_from_params(params: &PrWatchInput) -> Result<PrTarget> {
 fn start_watch(store: &Path, params: PrWatchInput, ctx: &ToolContext) -> Result<ToolOutput> {
     let target = target_from_params(&params)?;
     let mut state = PrWatchState::new(target);
+    state.origin_session_id = Some(ctx.session_id.clone());
     let path = state_path(store, &state.watch_id);
     apply_schedule_fields(&mut state, &params);
     let would_write = !params.dry_run.unwrap_or(false);
@@ -806,6 +879,311 @@ fn maybe_schedule_next(
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
     maybe_schedule_next_monitor(ctx, state, params)
+}
+
+fn normalize_handoff_summary(summary: &str) -> String {
+    summary
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value);
+    format!("{:x}", hasher.finalize())
+}
+
+fn actionable_fingerprint(items: &[ActionableItem]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut canonical: Vec<Value> = items
+        .iter()
+        .map(|item| {
+            json!({
+                "surface": item.surface,
+                "id": item.id,
+                "reason": item.reason,
+                "status": item.status,
+                "url": item.url,
+                "path": item.path,
+                "summary_hash": sha256_hex(normalize_handoff_summary(&item.summary).as_bytes()),
+            })
+        })
+        .collect();
+    canonical.sort_by_key(|value| {
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            value.get("surface").and_then(Value::as_str).unwrap_or(""),
+            value.get("id").and_then(Value::as_str).unwrap_or(""),
+            value.get("url").and_then(Value::as_str).unwrap_or(""),
+            value.get("path").and_then(Value::as_str).unwrap_or(""),
+            value.get("reason").and_then(Value::as_str).unwrap_or(""),
+            value.get("status").and_then(Value::as_str).unwrap_or(""),
+        )
+    });
+    serde_json::to_vec(&canonical)
+        .ok()
+        .map(|bytes| sha256_hex(&bytes))
+}
+
+fn handoff_prompt(state: &PrWatchState, fingerprint: &str) -> String {
+    let state_file = state_file_for_watch(&state.watch_id);
+    format!(
+        "Action required for PR watch {}. State file: {}. First run/read `pr_watch action=handoff repo={} pr={} watch_id={}` or inspect the state, and verify current actionable fingerprint `{}` still matches before remediation. If stale or no actionable items remain, report no-op. Do not call `pr_watch monitor` from this handoff. If current, inspect pending_actionable and remediate only if the current user workflow or active grants authorize local remediation. No push without an active push grant. No comment without an active comment grant. No review-thread resolution without an active resolve_threads grant. Never merge.",
+        state.watch_id, state_file, state.pr.repo, state.pr.number, state.watch_id, fingerprint,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct QueuedHandoffItem {
+    id: String,
+    created_at: chrono::DateTime<Utc>,
+    payload: Option<PrWatchHandoffPayload>,
+}
+
+fn handoff_items_for_key(items: &[ScheduledItem], key: &str) -> Vec<QueuedHandoffItem> {
+    items
+        .iter()
+        .filter(|item| item.schedule_key.as_deref() == Some(key))
+        .map(|item| {
+            let payload = PrWatchHandoffPayload::from_scheduled_item(item)
+                .ok()
+                .flatten();
+            QueuedHandoffItem {
+                id: item.id.clone(),
+                created_at: item.created_at,
+                payload,
+            }
+        })
+        .collect()
+}
+
+fn cancel_queued_handoff_ids(manager: &mut AmbientManager, ids: &HashSet<String>) -> usize {
+    manager.remove_items_by_id(ids)
+}
+
+fn set_handoff_state(
+    state: &mut PrWatchState,
+    status: ActionRequiredHandoffStatus,
+    schedule_id: Option<String>,
+    target: Option<String>,
+    fingerprint: Option<String>,
+    error: Option<String>,
+) {
+    state.action_required_handoff.status = status;
+    state.action_required_handoff.schedule_id = schedule_id;
+    state.action_required_handoff.target = target;
+    state.action_required_handoff.fingerprint = fingerprint;
+    state.action_required_handoff.error = error;
+    state.action_required_handoff.updated_at = Some(now_iso());
+}
+
+fn infer_origin_session_id(state: &PrWatchState) -> Option<String> {
+    state.origin_session_id.clone().or_else(|| {
+        state
+            .polling
+            .last_schedule_target
+            .as_deref()
+            .and_then(|target| {
+                target
+                    .strip_prefix("spawn:")
+                    .or_else(|| target.strip_prefix("resume:"))
+                    .map(ToString::to_string)
+            })
+    })
+}
+
+fn clear_action_required_handoff(store: &Path, state: &mut PrWatchState) -> Result<Option<String>> {
+    let key = handoff_schedule_key_for_watch(&state.watch_id);
+    let Some(_lock) = acquire_handoff_lock(store, &state.watch_id)? else {
+        set_handoff_state(
+            state,
+            ActionRequiredHandoffStatus::Error,
+            state.action_required_handoff.schedule_id.clone(),
+            state.action_required_handoff.target.clone(),
+            state.action_required_handoff.fingerprint.clone(),
+            Some("handoff queue lock busy during cleanup".to_string()),
+        );
+        return Ok(Some("handoff cleanup lock busy".to_string()));
+    };
+    let mut manager = AmbientManager::new()?;
+    let ids: HashSet<String> = handoff_items_for_key(manager.queue().items(), &key)
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    let removed = cancel_queued_handoff_ids(&mut manager, &ids);
+    set_handoff_state(
+        state,
+        if removed > 0 {
+            ActionRequiredHandoffStatus::Superseded
+        } else {
+            ActionRequiredHandoffStatus::Missing
+        },
+        None,
+        None,
+        None,
+        None,
+    );
+    Ok((removed > 0).then(|| format!("cleared {removed} queued handoff(s)")))
+}
+
+fn maybe_schedule_action_required_handoff(
+    store: &Path,
+    state: &mut PrWatchState,
+    ctx: &ToolContext,
+) -> Result<Option<String>> {
+    let Some(fingerprint) = actionable_fingerprint(&state.pending_actionable) else {
+        return clear_action_required_handoff(store, state);
+    };
+    if state.origin_session_id.is_none() {
+        state.origin_session_id = infer_origin_session_id(state);
+    }
+    let Some(origin_session_id) = state.origin_session_id.clone() else {
+        set_handoff_state(
+            state,
+            ActionRequiredHandoffStatus::MissingOrigin,
+            None,
+            None,
+            Some(fingerprint),
+            Some(
+                "watch has no origin_session_id; restart/rebind watch from a live session"
+                    .to_string(),
+            ),
+        );
+        return Ok(Some("action handoff missing origin_session_id".to_string()));
+    };
+    if origin_session_id != ctx.session_id && Session::load(&origin_session_id).is_err() {
+        set_handoff_state(
+            state,
+            ActionRequiredHandoffStatus::OriginUnavailable,
+            None,
+            Some(format!("resume:{origin_session_id}")),
+            Some(fingerprint),
+            Some(
+                "origin session is unavailable; rebind/restart watch from a live session"
+                    .to_string(),
+            ),
+        );
+        return Ok(Some("action handoff origin unavailable".to_string()));
+    }
+    if origin_session_id == ctx.session_id
+        && state
+            .polling
+            .last_schedule_target
+            .as_deref()
+            .is_some_and(|target| target.starts_with("spawn:"))
+    {
+        set_handoff_state(
+            state,
+            ActionRequiredHandoffStatus::SelfTargetGuard,
+            None,
+            Some(format!("resume:{origin_session_id}")),
+            Some(fingerprint),
+            Some("scheduled monitor child would target itself; refusing handoff".to_string()),
+        );
+        return Ok(Some("action handoff self-target guard".to_string()));
+    }
+
+    let Some(_handoff_lock) = acquire_handoff_lock(store, &state.watch_id)? else {
+        set_handoff_state(
+            state,
+            ActionRequiredHandoffStatus::Error,
+            state.action_required_handoff.schedule_id.clone(),
+            Some(format!("resume:{origin_session_id}")),
+            Some(fingerprint),
+            Some("handoff queue lock busy".to_string()),
+        );
+        return Ok(Some("action handoff queue lock busy".to_string()));
+    };
+
+    let key = handoff_schedule_key_for_watch(&state.watch_id);
+    let mut manager = AmbientManager::new()?;
+    let existing = handoff_items_for_key(manager.queue().items(), &key);
+    let mut same: Vec<QueuedHandoffItem> = existing
+        .iter()
+        .filter_map(|item| {
+            item.payload
+                .as_ref()
+                .filter(|payload| payload.fingerprint == fingerprint)
+                .map(|_| item.clone())
+        })
+        .collect();
+    same.sort_by_key(|item| item.created_at);
+    if let Some(keep) = same.first() {
+        let duplicate_ids: HashSet<String> =
+            same.iter().skip(1).map(|item| item.id.clone()).collect();
+        let removed = cancel_queued_handoff_ids(&mut manager, &duplicate_ids);
+        set_handoff_state(
+            state,
+            ActionRequiredHandoffStatus::Queued,
+            Some(keep.id.clone()),
+            Some(format!("resume:{origin_session_id}")),
+            Some(fingerprint),
+            None,
+        );
+        return Ok(Some(if removed > 0 {
+            format!(
+                "action handoff reused {} and removed {removed} duplicate(s)",
+                keep.id
+            )
+        } else {
+            format!("action handoff reused {}", keep.id)
+        }));
+    }
+
+    let payload = PrWatchHandoffPayload::new(state, fingerprint.clone());
+    let id = manager.schedule(ScheduleRequest {
+        wake_in_minutes: None,
+        wake_at: Some(Utc::now()),
+        context: handoff_prompt(state, &fingerprint),
+        priority: Priority::High,
+        target: ScheduleTarget::Session {
+            session_id: origin_session_id.clone(),
+        },
+        created_by_session: ctx.session_id.clone(),
+        working_dir: ctx
+            .working_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        task_description: Some(handoff_prompt(state, &fingerprint)),
+        relevant_files: vec![state_file_for_watch(&state.watch_id)],
+        git_branch: None,
+        additional_context: Some("Scheduled by pr_watch ActionRequired handoff; re-check state and grants before remediation.".to_string()),
+        schedule_key: Some(key.clone()),
+        schedule_kind: Some("pr_watch.action_required_handoff".to_string()),
+        schedule_payload: Some(serde_json::to_value(payload)?),
+    })?;
+    let superseded: HashSet<String> = existing
+        .iter()
+        .filter_map(|item| {
+            item.payload
+                .as_ref()
+                .filter(|payload| payload.fingerprint != fingerprint)
+                .map(|_| item.id.clone())
+        })
+        .collect();
+    let removed = cancel_queued_handoff_ids(&mut manager, &superseded);
+    set_handoff_state(
+        state,
+        ActionRequiredHandoffStatus::Queued,
+        Some(id.clone()),
+        Some(format!("resume:{origin_session_id}")),
+        Some(fingerprint),
+        None,
+    );
+    super::ambient::nudge_schedule_runner();
+    Ok(Some(if removed > 0 {
+        format!("action handoff scheduled {id}; superseded {removed} older handoff(s)")
+    } else {
+        format!("action handoff scheduled {id}")
+    }))
 }
 
 fn maybe_schedule_next_monitor(
@@ -1334,6 +1712,13 @@ async fn poll_now(
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
     apply_schedule_fields(&mut state, &params);
+    let handoff = if !state.pending_actionable.is_empty() && would_write {
+        maybe_schedule_action_required_handoff(store, &mut state, ctx)?
+    } else if would_write {
+        clear_action_required_handoff(store, &mut state)?
+    } else {
+        None
+    };
     if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
         && state.pending_actionable.is_empty()
         && state.last_cycle.pending_check_count == 0
@@ -1375,7 +1760,7 @@ async fn poll_now(
     }
     let readiness = state.readiness();
     let text = format!(
-        "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}",
+        "PR watch polled: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {:?}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nFailed surfaces: {}{}{}{}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -1391,6 +1776,10 @@ async fn poll_now(
         scheduled
             .as_deref()
             .map(|s| format!("\nScheduled: {s}"))
+            .unwrap_or_default(),
+        handoff
+            .as_deref()
+            .map(|s| format!("\nAction handoff: {s}"))
             .unwrap_or_default(),
         if would_write {
             ""
@@ -1414,7 +1803,7 @@ async fn monitor_once(
         None => target_from_params(&params)?.watch_id(),
     };
     let path = state_path(store, &watch_id);
-    let Some(_lock) = acquire_watch_lock(store, &watch_id)? else {
+    let Some(lock) = acquire_watch_lock(store, &watch_id)? else {
         return Ok(ToolOutput::new(format!(
             "PR watch monitor already running: {watch_id}\nLock: {}\nNo state was changed.",
             lock_path(store, &watch_id).display()
@@ -1530,12 +1919,20 @@ async fn monitor_once(
     } else {
         None
     };
+    let handoff = if status == MonitorStatus::ActionRequired && would_write {
+        maybe_schedule_action_required_handoff(store, &mut state, ctx)?
+    } else if !state.pending_actionable.is_empty() || !would_write {
+        None
+    } else {
+        clear_action_required_handoff(store, &mut state)?
+    };
     if would_write {
         write_state_atomic(&path, &state)?;
     }
+    drop(lock);
     let readiness = state.readiness();
     let text = format!(
-        "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
+        "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}{}",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -1554,6 +1951,10 @@ async fn monitor_once(
         scheduled
             .as_deref()
             .map(|s| format!("\nScheduled: {s}"))
+            .unwrap_or_default(),
+        handoff
+            .as_deref()
+            .map(|s| format!("\nAction handoff: {s}"))
             .unwrap_or_default(),
         if would_write {
             ""
@@ -2452,7 +2853,7 @@ fn handoff_report(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
 
 fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
     let mut text = format!(
-        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\n{}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={} (legacy display only; remote mutation requires a separate grant-consuming remediation workflow)",
+        "PR watch: {}\nRepo: {}\nPR: #{}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nUnresolved threads: {}\nNext poll: {}\n{}\nHandoff: status={:?} schedule_id={} target={} fingerprint={} error={}\nPolicy: local_fix={}, commit={}, push={}, comment={}, resolve_threads={} (legacy display only; remote mutation requires a separate grant-consuming remediation workflow)",
         state.watch_id,
         state.pr.repo,
         state.pr.number,
@@ -2470,6 +2871,27 @@ fn format_status_report(state: &PrWatchState, readiness: &str) -> String {
             .as_deref()
             .unwrap_or("not scheduled"),
         schedule_status_line(state),
+        state.action_required_handoff.status,
+        state
+            .action_required_handoff
+            .schedule_id
+            .as_deref()
+            .unwrap_or("none"),
+        state
+            .action_required_handoff
+            .target
+            .as_deref()
+            .unwrap_or("none"),
+        state
+            .action_required_handoff
+            .fingerprint
+            .as_deref()
+            .unwrap_or("none"),
+        state
+            .action_required_handoff
+            .error
+            .as_deref()
+            .unwrap_or("none"),
         state.policy.local_fix,
         state.policy.commit,
         state.policy.push,
@@ -2681,6 +3103,29 @@ fn load_all_states(store: &Path) -> Result<Vec<(PathBuf, PrWatchState)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let prev = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                crate::env::set_var(self.key, prev);
+            } else {
+                crate::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn state_path_uses_watch_id() {
@@ -2898,6 +3343,160 @@ mod tests {
             .expect("third lock")
             .expect("lock reacquired");
         drop(third);
+    }
+
+    #[test]
+    fn handoff_lock_prevents_concurrent_queue_phase() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first = acquire_handoff_lock(temp.path(), "owner-repo-pr-7")
+            .expect("first lock")
+            .expect("handoff lock acquired");
+        let second = acquire_handoff_lock(temp.path(), "owner-repo-pr-7").expect("second lock");
+        assert!(second.is_none());
+        drop(first);
+        let third = acquire_handoff_lock(temp.path(), "owner-repo-pr-7")
+            .expect("third lock")
+            .expect("handoff lock reacquired");
+        drop(third);
+    }
+
+    fn actionable(id: &str, summary: &str) -> ActionableItem {
+        ActionableItem {
+            id: id.to_string(),
+            surface: "review_comments".to_string(),
+            summary: summary.to_string(),
+            url: Some(format!("https://example.test/{id}")),
+            path: Some("src/lib.rs".to_string()),
+            status: Some("new".to_string()),
+            reason: Some("new_review_comment".to_string()),
+        }
+    }
+
+    #[test]
+    fn actionable_fingerprint_is_deterministic_and_content_sensitive() {
+        let a = actionable("a", "Fix this\r\nplease  ");
+        let b = actionable("b", "Also fix this");
+        let first = actionable_fingerprint(&[a.clone(), b.clone()]).expect("fingerprint");
+        let reordered = actionable_fingerprint(&[b, a.clone()]).expect("fingerprint");
+        assert_eq!(first, reordered);
+
+        let changed = actionable_fingerprint(&[actionable("a", "Fix something else")])
+            .expect("changed fingerprint");
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn handoff_payload_round_trips_and_uses_distinct_kind() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pending_actionable.push(actionable("a", "Fix this"));
+        let fingerprint = actionable_fingerprint(&state.pending_actionable).expect("fingerprint");
+        let payload = PrWatchHandoffPayload::new(&state, fingerprint.clone());
+        let mut item = scheduled_item("sched_handoff", "handoff", vec![]);
+        item.schedule_key = Some(handoff_schedule_key_for_watch(&state.watch_id));
+        item.schedule_kind = Some("pr_watch.action_required_handoff".to_string());
+        item.schedule_payload = Some(serde_json::to_value(&payload).expect("payload json"));
+
+        let parsed = PrWatchHandoffPayload::from_scheduled_item(&item)
+            .expect("parse payload")
+            .expect("payload present");
+        assert_eq!(parsed.fingerprint, fingerprint);
+        assert_eq!(
+            item.schedule_kind.as_deref(),
+            Some("pr_watch.action_required_handoff")
+        );
+        assert!(PrWatchSchedulePayload::from_scheduled_item(&item).is_err());
+    }
+
+    #[test]
+    fn handoff_prompt_contains_grant_gated_safety_language() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pending_actionable.push(actionable("a", "Fix this"));
+        let fingerprint = actionable_fingerprint(&state.pending_actionable).expect("fingerprint");
+        let prompt = handoff_prompt(&state, &fingerprint);
+        assert!(prompt.contains("Do not call `pr_watch monitor`"));
+        assert!(prompt.contains("No push without an active push grant"));
+        assert!(prompt.contains("No comment without an active comment grant"));
+        assert!(
+            prompt.contains("No review-thread resolution without an active resolve_threads grant")
+        );
+        assert!(prompt.contains("Never merge"));
+    }
+
+    #[test]
+    fn status_report_includes_handoff_health_fields() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.action_required_handoff.status = ActionRequiredHandoffStatus::Queued;
+        state.action_required_handoff.schedule_id = Some("sched_123".to_string());
+        state.action_required_handoff.target = Some("resume:session_origin".to_string());
+        state.action_required_handoff.fingerprint = Some("abc".to_string());
+        let report = format_status_report(&state, "not_ready_action_required");
+        assert!(report.contains("Handoff: status=Queued"));
+        assert!(report.contains("schedule_id=sched_123"));
+        assert!(report.contains("target=resume:session_origin"));
+        assert!(report.contains("fingerprint=abc"));
+    }
+
+    #[test]
+    fn action_required_handoff_schedules_once_for_direct_origin() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let work = temp.path().join("repo");
+        fs::create_dir_all(&work).expect("work dir");
+        let store = watch_dir(&work);
+        let ctx = ToolContext {
+            session_id: "session_origin".to_string(),
+            message_id: "message".to_string(),
+            tool_call_id: "tool".to_string(),
+            working_dir: Some(work.clone()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::Direct,
+        };
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.origin_session_id = Some(ctx.session_id.clone());
+        state.pending_actionable.push(actionable("a", "Fix this"));
+
+        let first = maybe_schedule_action_required_handoff(&store, &mut state, &ctx)
+            .expect("schedule handoff")
+            .expect("handoff message");
+        assert!(first.contains("action handoff scheduled"));
+        assert_eq!(
+            state.action_required_handoff.status,
+            ActionRequiredHandoffStatus::Queued
+        );
+        let first_id = state
+            .action_required_handoff
+            .schedule_id
+            .clone()
+            .expect("schedule id");
+
+        let second = maybe_schedule_action_required_handoff(&store, &mut state, &ctx)
+            .expect("reuse handoff")
+            .expect("reuse message");
+        assert!(second.contains("action handoff reused"));
+        assert_eq!(
+            state.action_required_handoff.schedule_id.as_deref(),
+            Some(first_id.as_str())
+        );
+
+        let manager = AmbientManager::new().expect("ambient manager");
+        let key = handoff_schedule_key_for_watch(&state.watch_id);
+        let queued = handoff_items_for_key(manager.queue().items(), &key);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, first_id);
     }
 
     #[test]
