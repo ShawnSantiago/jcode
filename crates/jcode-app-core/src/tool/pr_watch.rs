@@ -1810,6 +1810,10 @@ fn maybe_schedule_webhook_heartbeat(
     }
     let Some(seconds) = state.webhook.fallback_heartbeat_seconds else {
         state.polling.next_poll_at = None;
+        state.polling.last_schedule_due_at = None;
+        state.polling.last_schedule_id = None;
+        state.polling.last_schedule_kind = None;
+        state.polling.last_schedule_target = None;
         return Ok(Some(
             "webhook mode: normal monitor polling disabled; heartbeat disabled".to_string(),
         ));
@@ -3765,6 +3769,9 @@ async fn poll_now(
     }
     let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
     if would_write {
+        if state.terminal {
+            remove_webhook_index_entry(&state.watch_id)?;
+        }
         write_state_atomic(&path, &state)?;
     }
     let readiness = state.readiness();
