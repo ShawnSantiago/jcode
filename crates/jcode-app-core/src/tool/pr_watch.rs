@@ -590,6 +590,17 @@ fn repos_match(index_repo: &str, payload_repo: &str) -> bool {
     index_repo.eq_ignore_ascii_case(payload_repo)
 }
 
+fn active_webhook_entries_for_repo<'a>(
+    index: &'a WebhookWatchIndex,
+    repo: &str,
+) -> Vec<&'a WebhookWatchIndexEntry> {
+    index
+        .entries
+        .iter()
+        .filter(|entry| entry.active && repos_match(&entry.repo, repo))
+        .collect()
+}
+
 fn write_webhook_health(health: &WebhookDaemonHealth) -> Result<()> {
     let path = webhook_health_path()?;
     if let Some(parent) = path.parent() {
@@ -2603,6 +2614,10 @@ async fn webhook_delivery_targets(
         .repo
         .as_deref()
         .context("delivery has no repository")?;
+    let active_repo_entries = active_webhook_entries_for_repo(index, repo);
+    if active_repo_entries.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut prs = BTreeSet::new();
     match delivery.event.as_str() {
         "pull_request" | "pull_request_review" | "pull_request_review_comment" => {
@@ -2660,10 +2675,9 @@ async fn webhook_delivery_targets(
         }
         _ => return Ok(Vec::new()),
     }
-    Ok(index
-        .entries
-        .iter()
-        .filter(|entry| entry.active && repos_match(&entry.repo, repo) && prs.contains(&entry.pr))
+    Ok(active_repo_entries
+        .into_iter()
+        .filter(|entry| prs.contains(&entry.pr))
         .cloned()
         .collect())
 }
@@ -6348,6 +6362,28 @@ mod tests {
         assert!(repos_match("Owner/Repo", "owner/repo"));
         assert!(repos_match("owner/repo", "Owner/Repo"));
         assert!(!repos_match("owner/repo", "owner/other"));
+    }
+
+    #[test]
+    fn active_webhook_entries_for_repo_filters_before_status_lookup() {
+        let index = WebhookWatchIndex {
+            entries: vec![WebhookWatchIndexEntry {
+                watch_id: "owner~2frepo-pr-12".to_string(),
+                repo: "Owner/Repo".to_string(),
+                pr: 12,
+                root_dir: "/tmp/repo".to_string(),
+                state_path: "/tmp/state.json".to_string(),
+                event_mode: PrWatchEventMode::Webhook,
+                active: true,
+                updated_at: "2026-06-19T00:00:00Z".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            active_webhook_entries_for_repo(&index, "owner/repo").len(),
+            1
+        );
+        assert!(active_webhook_entries_for_repo(&index, "other/repo").is_empty());
     }
 
     #[test]
