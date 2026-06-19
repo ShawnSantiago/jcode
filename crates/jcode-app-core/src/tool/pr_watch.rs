@@ -2845,7 +2845,7 @@ fn webhook_refresh_params(entry: &WebhookWatchIndexEntry, schedule_next: bool) -
         expected_fingerprint: None,
         expected_cycle_number: None,
         no_code_resolution: false,
-        event_mode: Some(entry.event_mode.clone()),
+        event_mode: None,
         fallback_heartbeat_seconds: None,
         webhook_url_hint: None,
     }
@@ -6269,6 +6269,25 @@ mod tests {
         params.poll_interval_seconds = None;
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.webhook.fallback_heartbeat_seconds, None);
+    }
+
+    #[test]
+    fn webhook_refresh_params_do_not_clear_existing_heartbeat() {
+        let entry = WebhookWatchIndexEntry {
+            watch_id: "owner~2frepo-pr-12".to_string(),
+            repo: "owner/repo".to_string(),
+            pr: 12,
+            root_dir: "/tmp/repo".to_string(),
+            state_path: "/tmp/state.json".to_string(),
+            event_mode: PrWatchEventMode::Webhook,
+            active: true,
+            updated_at: "2026-06-19T00:00:00Z".to_string(),
+        };
+        let params = webhook_refresh_params(&entry, true);
+
+        assert_eq!(params.action, PrWatchAction::PollNow);
+        assert_eq!(params.event_mode, None);
+        assert_eq!(params.fallback_heartbeat_seconds, None);
     }
 
     #[test]
