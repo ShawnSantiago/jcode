@@ -24,7 +24,7 @@ mod memory;
 mod multiedit;
 mod open;
 mod patch;
-mod pr_watch;
+pub mod pr_watch;
 mod read;
 pub mod selfdev;
 pub(crate) mod serde_coerce;

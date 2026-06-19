@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
-    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
-    TranscriptModeArg,
+    ModelCommand, PrWatchCommand, PrWatchWebhookCommand, ProviderCommand, RestartCommand,
+    ServerCommand, SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -186,6 +186,31 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             debug::run_debug_command(&command, &arg, session, socket, wait).await?;
         }
+        Some(Command::PrWatch(subcmd)) => match subcmd {
+            PrWatchCommand::Webhook(action) => match action {
+                PrWatchWebhookCommand::Serve {
+                    port,
+                    bind,
+                    secret_env,
+                    allow_non_local,
+                } => {
+                    crate::tool::pr_watch::run_webhook_serve_command(
+                        bind,
+                        port,
+                        secret_env,
+                        allow_non_local,
+                    )
+                    .await?;
+                }
+                PrWatchWebhookCommand::Status { json } => {
+                    crate::tool::pr_watch::run_webhook_status_command(json)?;
+                }
+                PrWatchWebhookCommand::Doctor { repo, json } => {
+                    crate::tool::pr_watch::run_webhook_doctor_command(repo.as_deref(), json)
+                        .await?;
+                }
+            },
+        },
         Some(Command::Auth(subcmd)) => match subcmd {
             AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
             AuthCommand::Doctor {

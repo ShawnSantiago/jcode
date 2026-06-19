@@ -184,6 +184,65 @@ pub struct PollingState {
     pub last_schedule_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrWatchEventMode {
+    Polling,
+    Webhook,
+    Hybrid,
+}
+
+impl Default for PrWatchEventMode {
+    fn default() -> Self {
+        Self::Polling
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookWatchState {
+    pub enabled: bool,
+    pub mode: PrWatchEventMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_status: Option<String>,
+    #[serde(default)]
+    pub consecutive_delivery_failures: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_heartbeat_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_url_hint: Option<String>,
+    #[serde(default)]
+    pub collapsed_event_count: u64,
+    #[serde(default)]
+    pub dropped_event_count: u64,
+}
+
+impl Default for WebhookWatchState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: PrWatchEventMode::Polling,
+            last_delivery_id: None,
+            last_delivery_at: None,
+            last_event_type: None,
+            last_event_action: None,
+            last_delivery_status: None,
+            consecutive_delivery_failures: 0,
+            fallback_heartbeat_seconds: None,
+            webhook_url_hint: None,
+            collapsed_event_count: 0,
+            dropped_event_count: 0,
+        }
+    }
+}
+
 impl Default for PollingState {
     fn default() -> Self {
         Self {
@@ -350,6 +409,8 @@ pub struct PrWatchState {
     pub policy: WritePolicy,
     pub authorization: AuthorizationState,
     pub polling: PollingState,
+    #[serde(default)]
+    pub webhook: WebhookWatchState,
     pub baseline: Baseline,
     pub last_seen: LastSeen,
     pub last_checks_for_sha: LastChecksForSha,
@@ -394,6 +455,7 @@ impl PrWatchState {
             policy: WritePolicy::default(),
             authorization: AuthorizationState::default(),
             polling: PollingState::default(),
+            webhook: WebhookWatchState::default(),
             baseline: Baseline::default(),
             last_seen: LastSeen::default(),
             last_checks_for_sha: LastChecksForSha::default(),
@@ -1169,6 +1231,8 @@ mod tests {
         assert!(state.root_dir.is_none());
         assert!(state.last_resolution_attempts.is_empty());
         assert!(!state.resolution_requires_post_poll);
+        assert_eq!(state.webhook.mode, PrWatchEventMode::Polling);
+        assert!(!state.webhook.enabled);
     }
 
     #[test]
@@ -1199,6 +1263,8 @@ mod tests {
         assert!(state.last_resolution_attempts.is_empty());
         assert!(state.last_resolution_error.is_none());
         assert!(!state.resolution_requires_post_poll);
+        assert_eq!(state.webhook.mode, PrWatchEventMode::Polling);
+        assert!(!state.webhook.enabled);
     }
 
     #[test]

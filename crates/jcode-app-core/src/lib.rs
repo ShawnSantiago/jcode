@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![allow(
     unknown_lints,
     clippy::collapsible_match,
