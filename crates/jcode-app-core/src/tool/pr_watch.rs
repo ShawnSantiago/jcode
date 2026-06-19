@@ -421,6 +421,10 @@ fn webhook_lock_path() -> Result<PathBuf> {
     Ok(webhook_runtime_dir()?.join("webhook-daemon.lock"))
 }
 
+fn webhook_index_lock_path() -> Result<PathBuf> {
+    Ok(webhook_runtime_dir()?.join("webhook-index.lock"))
+}
+
 fn webhook_deliveries_path() -> Result<PathBuf> {
     Ok(webhook_runtime_dir()?.join("webhook-deliveries.json"))
 }
@@ -513,6 +517,37 @@ fn save_webhook_index(index: &WebhookWatchIndex) -> Result<()> {
     Ok(())
 }
 
+fn acquire_webhook_index_lock() -> Result<WatchLock> {
+    let path = webhook_index_lock_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    for _ in 0..50 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let lock = WatchLock { path: path.clone() };
+                writeln!(
+                    file,
+                    "pid={} at={} purpose=webhook_index",
+                    std::process::id(),
+                    now_iso()
+                )?;
+                return Ok(lock);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to create {}", path.display()));
+            }
+        }
+    }
+    bail!(
+        "timed out waiting for webhook index lock {}",
+        path.display()
+    )
+}
+
 fn register_webhook_index_entry(root: &Path, store: &Path, state: &PrWatchState) -> Result<()> {
     if !matches!(
         state.webhook.mode,
@@ -520,6 +555,7 @@ fn register_webhook_index_entry(root: &Path, store: &Path, state: &PrWatchState)
     ) {
         return remove_webhook_index_entry(&state.watch_id);
     }
+    let _lock = acquire_webhook_index_lock()?;
     let mut index = load_webhook_index()?;
     let entry = WebhookWatchIndexEntry {
         watch_id: state.watch_id.clone(),
@@ -540,6 +576,7 @@ fn register_webhook_index_entry(root: &Path, store: &Path, state: &PrWatchState)
 }
 
 fn remove_webhook_index_entry(watch_id: &str) -> Result<()> {
+    let _lock = acquire_webhook_index_lock()?;
     let mut index = load_webhook_index()?;
     let before = index.entries.len();
     index.entries.retain(|entry| entry.watch_id != watch_id);
@@ -547,6 +584,10 @@ fn remove_webhook_index_entry(watch_id: &str) -> Result<()> {
         save_webhook_index(&index)?;
     }
     Ok(())
+}
+
+fn repos_match(index_repo: &str, payload_repo: &str) -> bool {
+    index_repo.eq_ignore_ascii_case(payload_repo)
 }
 
 fn write_webhook_health(health: &WebhookDaemonHealth) -> Result<()> {
@@ -2610,7 +2651,7 @@ async fn webhook_delivery_targets(
     Ok(index
         .entries
         .iter()
-        .filter(|entry| entry.active && entry.repo == repo && prs.contains(&entry.pr))
+        .filter(|entry| entry.active && repos_match(&entry.repo, repo) && prs.contains(&entry.pr))
         .cloned()
         .collect())
 }
@@ -6288,6 +6329,13 @@ mod tests {
         assert_eq!(params.action, PrWatchAction::PollNow);
         assert_eq!(params.event_mode, None);
         assert_eq!(params.fallback_heartbeat_seconds, None);
+    }
+
+    #[test]
+    fn webhook_repo_matching_is_case_insensitive() {
+        assert!(repos_match("Owner/Repo", "owner/repo"));
+        assert!(repos_match("owner/repo", "Owner/Repo"));
+        assert!(!repos_match("owner/repo", "owner/other"));
     }
 
     #[test]
