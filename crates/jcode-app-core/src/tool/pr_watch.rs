@@ -1848,7 +1848,19 @@ fn maybe_schedule_webhook_heartbeat(
     state: &mut PrWatchState,
     params: &PrWatchInput,
 ) -> Result<Option<String>> {
-    if params.dry_run.unwrap_or(false) || state.terminal || !params.schedule_next {
+    if params.dry_run.unwrap_or(false) {
+        return Ok(None);
+    }
+    if state.terminal {
+        let _ = cancel_queued_watch_items(state);
+        state.polling.next_poll_at = None;
+        state.polling.last_schedule_due_at = None;
+        state.polling.last_schedule_id = None;
+        state.polling.last_schedule_kind = None;
+        state.polling.last_schedule_target = None;
+        return Ok(None);
+    }
+    if !params.schedule_next {
         return Ok(None);
     }
     let Some(seconds) = state.webhook.fallback_heartbeat_seconds else {
