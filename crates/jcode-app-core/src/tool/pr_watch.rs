@@ -601,6 +601,16 @@ fn active_webhook_entries_for_repo<'a>(
         .collect()
 }
 
+fn ensure_state_root_dir(state: &mut PrWatchState) -> PathBuf {
+    let root = state
+        .root_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    state.root_dir = Some(root.display().to_string());
+    root
+}
+
 fn write_webhook_health(health: &WebhookDaemonHealth) -> Result<()> {
     let path = webhook_health_path()?;
     if let Some(parent) = path.parent() {
@@ -1521,11 +1531,7 @@ fn reschedule_watch(
     params.schedule_next = true;
     let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
     if would_write {
-        let root = state
-            .root_dir
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let root = ensure_state_root_dir(&mut state);
         register_webhook_index_entry(&root, store, &state)?;
         write_state_atomic(&path, &state)?;
     }
@@ -6384,6 +6390,19 @@ mod tests {
             1
         );
         assert!(active_webhook_entries_for_repo(&index, "other/repo").is_empty());
+    }
+
+    #[test]
+    fn ensure_state_root_dir_persists_legacy_missing_root() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".to_string(),
+            number: 12,
+        });
+        state.root_dir = None;
+
+        let root = ensure_state_root_dir(&mut state);
+
+        assert_eq!(state.root_dir, Some(root.display().to_string()));
     }
 
     #[test]
