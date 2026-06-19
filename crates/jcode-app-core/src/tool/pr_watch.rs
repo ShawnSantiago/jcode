@@ -601,12 +601,12 @@ fn active_webhook_entries_for_repo<'a>(
         .collect()
 }
 
-fn ensure_state_root_dir(state: &mut PrWatchState) -> PathBuf {
+fn ensure_state_root_dir(state: &mut PrWatchState, fallback_root: &Path) -> PathBuf {
     let root = state
         .root_dir
         .as_deref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .unwrap_or_else(|| fallback_root.to_path_buf());
     state.root_dir = Some(root.display().to_string());
     root
 }
@@ -1531,7 +1531,8 @@ fn reschedule_watch(
     params.schedule_next = true;
     let scheduled = maybe_schedule_next(ctx, &mut state, &params)?;
     if would_write {
-        let root = ensure_state_root_dir(&mut state);
+        let fallback_root = ctx.working_dir.as_deref().unwrap_or_else(|| Path::new("."));
+        let root = ensure_state_root_dir(&mut state, fallback_root);
         register_webhook_index_entry(&root, store, &state)?;
         write_state_atomic(&path, &state)?;
     }
@@ -6400,9 +6401,10 @@ mod tests {
         });
         state.root_dir = None;
 
-        let root = ensure_state_root_dir(&mut state);
+        let root = ensure_state_root_dir(&mut state, Path::new("/tmp/session-root"));
 
-        assert_eq!(state.root_dir, Some(root.display().to_string()));
+        assert_eq!(root, PathBuf::from("/tmp/session-root"));
+        assert_eq!(state.root_dir, Some("/tmp/session-root".to_string()));
     }
 
     #[test]
