@@ -1496,6 +1496,8 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     }
     if let Some(seconds) = params.fallback_heartbeat_seconds {
         state.webhook.fallback_heartbeat_seconds = Some(seconds.max(300));
+    } else if params.event_mode.is_some() {
+        state.webhook.fallback_heartbeat_seconds = None;
     }
     if let Some(url) = params
         .webhook_url_hint
@@ -6231,7 +6233,7 @@ mod tests {
             repo: "owner/repo".into(),
             number: 12,
         });
-        let params = PrWatchInput {
+        let mut params = PrWatchInput {
             action: PrWatchAction::PollNow,
             repo: None,
             pr: None,
@@ -6261,6 +6263,12 @@ mod tests {
         apply_schedule_fields(&mut state, &params);
         assert_eq!(state.polling.poll_interval_seconds, 60);
         assert!(state.polling.next_poll_at.is_some());
+
+        state.webhook.fallback_heartbeat_seconds = Some(900);
+        params.event_mode = Some(PrWatchEventMode::Webhook);
+        params.poll_interval_seconds = None;
+        apply_schedule_fields(&mut state, &params);
+        assert_eq!(state.webhook.fallback_heartbeat_seconds, None);
     }
 
     #[test]
