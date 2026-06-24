@@ -32,8 +32,9 @@ use macos_terminal::launch_script_for_macos_terminal;
 use macos_terminal::load_preferred_macos_terminal;
 #[cfg(any(test, target_os = "macos"))]
 use macos_terminal::{
-    MacTerminalKind, effective_macos_terminal, escape_applescript_text, escape_shell_single_quotes,
-    launch_command_for_macos_terminal, paused_jcode_shell_command, save_preferred_macos_terminal,
+    HotkeyTarget, MacTerminalKind, effective_macos_terminal, escape_applescript_text,
+    escape_shell_single_quotes, hotkey_shell_command, launch_command_for_macos_terminal,
+    paused_jcode_shell_command, save_preferred_macos_terminal,
 };
 #[cfg(windows)]
 use windows_setup::{
@@ -74,6 +75,12 @@ pub struct SetupHintsState {
     /// never nagged about the same conflicts on every launch.
     #[serde(default)]
     pub keymap_conflict_signature: String,
+    /// Whether we've shown the one-time "glyph-safe mode is active" disclosure
+    /// for fragile-glyph terminals (macOS VS Code integrated terminal / Apple
+    /// Terminal). We surface the tradeoff once per install so the user knows
+    /// colors are quantized to 256 to avoid the terminal's glyph corruption.
+    #[serde(default)]
+    pub glyph_safe_notice_shown: bool,
 }
 
 /// Current macOS hotkey listener implementation version.
@@ -87,8 +94,12 @@ pub struct SetupHintsState {
 ///   process is actually eligible to receive `RegisterEventHotKey` events.
 ///   Version 1 still never fired because the process had no window-server
 ///   connection.
+/// - 3: register three launch hotkeys instead of one. `Cmd+;` opens jcode in
+///   `$HOME`, `Cmd+'` opens it in the last project directory, and `Cmd+Shift+'`
+///   opens a self-dev session in the last jcode repo. Existing users are
+///   migrated so the extra scripts/registrations are installed on update.
 #[cfg(any(test, target_os = "macos"))]
-pub const HOTKEY_LISTENER_VERSION: u32 = 2;
+pub const HOTKEY_LISTENER_VERSION: u32 = 3;
 
 /// Maximum number of times we will ever show the terminal/setup nudge prompt
 /// to a user (across all launches and platforms). After this many nudges we stop
@@ -176,9 +187,76 @@ impl SetupHintsState {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn mac_hotkey_support_dir() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("hotkey"))
+}
+
+/// File holding the last project directory jcode was launched from. The `Cmd+'`
+/// global hotkey reads this at fire time to reopen jcode there.
+#[cfg(any(test, target_os = "macos"))]
+fn mac_hotkey_last_dir_file() -> Result<PathBuf> {
+    Ok(mac_hotkey_support_dir()?.join("last_dir"))
+}
+
+/// File holding the last jcode *repository* directory the user worked in. The
+/// `Cmd+Shift+'` global hotkey reads this to open a self-dev session there.
+#[cfg(any(test, target_os = "macos"))]
+fn mac_hotkey_last_repo_file() -> Result<PathBuf> {
+    Ok(mac_hotkey_support_dir()?.join("last_repo"))
+}
+
+/// Record the directories the global launch hotkeys should reopen.
+///
+/// Called once per interactive launch with the process's working directory.
+/// `$HOME` launches are ignored for the "last project" file so the `Cmd+'`
+/// hotkey keeps pointing at a real project rather than home (which already has
+/// its own `Cmd+;` hotkey). When `dir` is inside a jcode repo, the repo root is
+/// recorded for the self-dev hotkey.
+///
+/// Best-effort and side-effect-only: failures are logged, never propagated, so
+/// this can be dropped onto the startup path without risk.
+pub fn record_launch_dirs(dir: &std::path::Path, repo_dir: Option<&std::path::Path>) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(err) = record_launch_dirs_inner(dir, repo_dir) {
+            jcode_logging::warn(&format!("failed to record launch dirs for hotkeys: {err}"));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dir, repo_dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn record_launch_dirs_inner(
+    dir: &std::path::Path,
+    repo_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let support_dir = mac_hotkey_support_dir()?;
+    std::fs::create_dir_all(&support_dir)?;
+
+    if should_record_last_dir(dir, dirs::home_dir().as_deref()) {
+        std::fs::write(mac_hotkey_last_dir_file()?, format!("{}\n", dir.display()))?;
+    }
+
+    if let Some(repo) = repo_dir {
+        std::fs::write(
+            mac_hotkey_last_repo_file()?,
+            format!("{}\n", repo.display()),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Whether `dir` should be recorded as the "last project" directory for the
+/// `Cmd+'` hotkey. Home is skipped because it already has its own `Cmd+;`
+/// hotkey, so recording it would make `Cmd+'` redundant with `Cmd+;`.
+#[cfg(any(test, target_os = "macos"))]
+fn should_record_last_dir(dir: &std::path::Path, home: Option<&std::path::Path>) -> bool {
+    home != Some(dir)
 }
 
 #[cfg(target_os = "macos")]
@@ -231,6 +309,89 @@ fn mac_hotkey_launch_agent_plist(
     )
 }
 
+/// Launch a new jcode window in the user's preferred macOS terminal, passing
+/// `extra_args` (e.g. `["--resume", "<session-id>"]`) to the jcode invocation.
+///
+/// This reuses the same terminal detection as the global Cmd+; hotkey, but
+/// deliberately avoids AppleScript automation: callers like the menu bar
+/// helper run as background processes that cannot present the "control
+/// Terminal" TCC prompt, so `osascript` would fail. Terminals that support
+/// `open -na <App> --args ...` are launched directly; for the rest we write
+/// the launch command to an executable `.command` file and `open` it, which
+/// Terminal/iTerm run in a new window without any automation permission.
+#[cfg(target_os = "macos")]
+pub fn launch_jcode_in_macos_terminal(extra_args: &[String]) -> Result<()> {
+    let terminal = effective_macos_terminal();
+    let exe = std::env::current_exe()?;
+    let exe_path = exe.to_string_lossy().into_owned();
+    let shell_command = macos_terminal::paused_jcode_shell_command_with_args(&exe_path, extra_args);
+
+    let command = match macos_terminal::no_automation_launch(terminal, &shell_command) {
+        macos_terminal::NoAutomationLaunch::Shell(command) => command,
+        macos_terminal::NoAutomationLaunch::CommandFile { app } => {
+            let dir = storage::jcode_dir()?.join("launcher");
+            std::fs::create_dir_all(&dir)?;
+            let script_path = dir.join("open_session.command");
+            std::fs::write(
+                &script_path,
+                format!("#!/bin/bash\nclear\n{shell_command}\n"),
+            )?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+            }
+            let target =
+                macos_terminal::escape_shell_single_quotes(script_path.to_string_lossy().as_ref());
+            match app {
+                Some(app) => format!("/usr/bin/open -a {app} '{target}'"),
+                None => format!("/usr/bin/open '{target}'"),
+            }
+        }
+    };
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .status()
+        .context("failed to launch terminal for jcode")?;
+    if !status.success() {
+        anyhow::bail!(
+            "terminal launch command exited with status {:?}",
+            status.code()
+        );
+    }
+    Ok(())
+}
+
+/// Write the three per-target launch scripts into `hotkey_dir` and mark them
+/// executable. Extracted from [`install_macos_hotkey_listener`] so the script
+/// set can be verified in tests without invoking `launchctl`.
+#[cfg(target_os = "macos")]
+fn write_hotkey_launch_scripts(
+    hotkey_dir: &std::path::Path,
+    terminal: MacTerminalKind,
+    exe_path: &str,
+    last_dir_file: &str,
+    last_repo_file: &str,
+) -> Result<()> {
+    for target in HotkeyTarget::ALL {
+        let shell_command =
+            hotkey_shell_command(exe_path, target, last_dir_file, last_repo_file);
+        let script_path = hotkey_dir.join(target.script_file_name());
+        std::fs::write(
+            &script_path,
+            launch_script_for_macos_terminal(terminal, &shell_command),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn install_macos_hotkey_listener(
     preferred_terminal: Option<MacTerminalKind>,
@@ -241,18 +402,16 @@ fn install_macos_hotkey_listener(
 
     let exe = std::env::current_exe()?;
     let exe_path = exe.to_string_lossy().into_owned();
-    let shell_command = paused_jcode_shell_command(&exe_path);
 
-    let launch_script_path = hotkey_dir.join("launch_jcode.sh");
-    std::fs::write(
-        &launch_script_path,
-        launch_script_for_macos_terminal(terminal, &shell_command),
+    let last_dir_file = mac_hotkey_last_dir_file()?;
+    let last_repo_file = mac_hotkey_last_repo_file()?;
+    write_hotkey_launch_scripts(
+        &hotkey_dir,
+        terminal,
+        &exe_path,
+        &last_dir_file.to_string_lossy(),
+        &last_repo_file.to_string_lossy(),
     )?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&launch_script_path, std::fs::Permissions::from_mode(0o755))?;
-    }
 
     let plist_path = mac_hotkey_launch_agent_path()?;
     if let Some(parent) = plist_path.parent() {
@@ -291,7 +450,7 @@ fn startup_hints_for_launch(state: &SetupHintsState) -> Option<StartupHints> {
         None
     } else {
         Some(format!(
-            "Cmd+; launches a new jcode from anywhere, system-wide (opens in {}).",
+            "Cmd+; launches a new jcode in your home directory from anywhere, system-wide (opens in {}). Cmd+' reopens your last project; Cmd+Shift+' opens a self-dev session.",
             effective_macos_terminal().label()
         ))
     };
@@ -407,7 +566,7 @@ pub fn run_setup_hotkey(_listen_macos_hotkey: bool) -> Result<()> {
         eprintln!();
         eprintln!("  Preferred terminal: {}", terminal.label());
         eprintln!(
-            "  Installing a LaunchAgent so Cmd+; launches a new jcode from anywhere, system-wide."
+            "  Installing a LaunchAgent with three system-wide jcode launch hotkeys."
         );
         eprintln!();
 
@@ -418,13 +577,19 @@ pub fn run_setup_hotkey(_listen_macos_hotkey: bool) -> Result<()> {
                 state.hotkey_listener_version = HOTKEY_LISTENER_VERSION;
                 let _ = state.save();
                 eprintln!(
-                    "  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mCmd+;\x1b[0m) → {} + jcode",
+                    "  \x1b[32m✓\x1b[0m Created launch hotkeys → {} + jcode",
                     installed_terminal.label()
                 );
                 eprintln!();
+                eprintln!("  Press these anywhere, system-wide:");
                 eprintln!(
-                    "  Press \x1b[1mCmd+;\x1b[0m anywhere, system-wide, to launch a new jcode in {}.",
-                    installed_terminal.label()
+                    "    \x1b[1mCmd+;\x1b[0m       new jcode in your home directory"
+                );
+                eprintln!(
+                    "    \x1b[1mCmd+'\x1b[0m       new jcode in your last project directory"
+                );
+                eprintln!(
+                    "    \x1b[1mCmd+Shift+'\x1b[0m new jcode self-dev session (last jcode repo)"
                 );
                 return Ok(());
             }
@@ -537,7 +702,6 @@ mod macos_run_loop {
 
 #[cfg(target_os = "macos")]
 fn run_macos_hotkey_listener() -> Result<()> {
-    use global_hotkey::hotkey::{Code, HotKey, Modifiers};
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use std::process::Command;
 
@@ -563,44 +727,91 @@ fn run_macos_hotkey_listener() -> Result<()> {
     // normal startup path, so initialize logging here. Diagnostics land in the
     // standard jcode log plus the plist's StandardOut/ErrorPath.
     jcode_logging::init();
-    macos_hotkey_log("starting macOS Cmd+; hotkey listener");
+    macos_hotkey_log("starting macOS jcode launch hotkey listener");
 
     let status = macos_run_loop::promote_to_ui_element();
     if status != 0 {
         macos_hotkey_log(&format!(
             "warning: TransformProcessType returned status {status}; \
-             Cmd+; may not be delivered to this process"
+             hotkeys may not be delivered to this process"
         ));
     }
 
-    let launch_script = mac_hotkey_support_dir()?.join("launch_jcode.sh");
+    let hotkey_dir = mac_hotkey_support_dir()?;
     let manager =
         GlobalHotKeyManager::new().context("failed to initialize global hotkey manager")?;
-    let hotkey = HotKey::new(Some(Modifiers::META), Code::Semicolon);
-    manager
-        .register(hotkey)
-        .context("failed to register Cmd+; hotkey")?;
 
-    let hotkey_id = hotkey.id();
+    // Register the three launch hotkeys, mapping each registration id to the
+    // launch script it should run. `Cmd+;` → home, `Cmd+'` → last project dir,
+    // `Cmd+Shift+'` → self-dev in the last jcode repo.
+    let mut script_for_id: std::collections::HashMap<u32, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    for (target, hotkey) in macos_launch_hotkeys() {
+        match manager.register(hotkey) {
+            Ok(()) => {
+                script_for_id.insert(hotkey.id(), hotkey_dir.join(target.script_file_name()));
+                macos_hotkey_log(&format!(
+                    "registered {} → {}",
+                    target.chord_label(),
+                    target.description()
+                ));
+            }
+            Err(err) => macos_hotkey_log(&format!(
+                "failed to register {} hotkey: {err}",
+                target.chord_label()
+            )),
+        }
+    }
+
+    if script_for_id.is_empty() {
+        anyhow::bail!("failed to register any jcode launch hotkey");
+    }
+
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-        if event.id == hotkey_id && event.state == HotKeyState::Pressed {
-            macos_hotkey_log("Cmd+; pressed; launching new jcode");
-            match Command::new("sh").arg(&launch_script).spawn() {
+        if event.state != HotKeyState::Pressed {
+            return;
+        }
+        if let Some(script) = script_for_id.get(&event.id) {
+            macos_hotkey_log(&format!("hotkey pressed; launching {}", script.display()));
+            match Command::new("sh").arg(script).spawn() {
                 Ok(_) => {}
                 Err(err) => macos_hotkey_log(&format!("failed to launch jcode: {err}")),
             }
         }
     }));
 
-    macos_hotkey_log("macOS Cmd+; hotkey listener registered; entering event loop");
+    macos_hotkey_log("macOS jcode launch hotkeys registered; entering event loop");
     // Keep the manager alive for the lifetime of the event loop so the hotkey
     // registration and event handler stay installed.
     let _manager = manager;
     // Hand the main thread to the Carbon event loop so hotkey events are
     // delivered. This normally never returns for our long-lived listener.
     macos_run_loop::run_forever();
-    macos_hotkey_log("macOS Cmd+; hotkey event loop exited");
+    macos_hotkey_log("macOS jcode launch hotkey event loop exited");
     Ok(())
+}
+
+/// The global launch hotkeys to register, paired with their target.
+///
+/// Kept as a standalone function so the chord set is the single source of truth
+/// shared between the listener and tests.
+#[cfg(target_os = "macos")]
+fn macos_launch_hotkeys() -> [(HotkeyTarget, global_hotkey::hotkey::HotKey); 3] {
+    use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+    [
+        (
+            HotkeyTarget::Home,
+            HotKey::new(Some(Modifiers::META), Code::Semicolon),
+        ),
+        (
+            HotkeyTarget::LastDir,
+            HotKey::new(Some(Modifiers::META), Code::Quote),
+        ),
+        (
+            HotkeyTarget::SelfDev,
+            HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::Quote),
+        ),
+    ]
 }
 
 /// Log a hotkey-listener diagnostic to both the jcode log and stderr.
@@ -819,6 +1030,75 @@ pub(crate) fn keymap_conflict_hint_for(
             (hint, true)
         }
     }
+}
+
+/// Whether the current terminal triggers jcode's glyph-safe color quantization
+/// (macOS VS Code integrated terminal / Apple Terminal). Mirrors the detection
+/// in `jcode-tui-style`'s color module and `jcode-app-core::perf` so the
+/// disclosure fires exactly when the behavior is active. Overridable with
+/// `JCODE_GLYPH_SAFE_MODE=on|off`.
+fn glyph_safe_mode_active() -> bool {
+    if let Ok(raw) = std::env::var("JCODE_GLYPH_SAFE_MODE") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    match std::env::var("TERM_PROGRAM") {
+        Ok(tp) => {
+            let tp = tp.to_ascii_lowercase();
+            tp == "vscode" || tp == "apple_terminal"
+        }
+        Err(_) => false,
+    }
+}
+
+/// One-time disclosure that glyph-safe mode (256-color quantization) is active,
+/// shown the first time jcode launches in a fragile-glyph terminal. Discloses
+/// the tradeoff (slightly reduced color fidelity) and how to opt out.
+pub fn maybe_show_glyph_safe_notice() -> Option<StartupHints> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return None;
+    }
+    let mut state = SetupHintsState::load();
+    let (hint, changed) = glyph_safe_notice_for(glyph_safe_mode_active(), &mut state);
+    if changed {
+        let _ = state.save();
+    }
+    hint
+}
+
+/// Core of [`maybe_show_glyph_safe_notice`], split out for unit testing.
+/// Returns the optional notice and whether `state` was mutated.
+pub(crate) fn glyph_safe_notice_for(
+    active: bool,
+    state: &mut SetupHintsState,
+) -> (Option<StartupHints>, bool) {
+    if !active || state.glyph_safe_notice_shown {
+        return (None, false);
+    }
+    state.glyph_safe_notice_shown = true;
+    let status =
+        "Glyph-safe mode: colors quantized to 256 to avoid this terminal's glyph corruption."
+            .to_string();
+    let display = "This terminal (VS Code integrated terminal / Apple Terminal on macOS) corrupts \
+its glyph cache under jcode's full-color animations, rendering letters as boxes. \
+jcode automatically quantizes colors to the 256-palette here to keep text readable; \
+the only tradeoff is slightly reduced color fidelity. Animations still run. \
+For full color, use Ghostty, iTerm2, kitty, or WezTerm, or set JCODE_GLYPH_SAFE_MODE=off."
+        .to_string();
+    (
+        Some(StartupHints::with_status_and_display(
+            status,
+            "Display",
+            display,
+        )),
+        true,
+    )
 }
 
 /// Manual `jcode setup-launcher` command.

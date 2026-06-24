@@ -80,6 +80,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_INFO_WIDGET_TOGGLE_KEY") {
             self.keybindings.info_widget_toggle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_NEW_TERMINAL_KEY") {
+            self.keybindings.new_terminal = v;
+        }
 
         // Dictation
         if let Ok(v) = std::env::var("JCODE_DICTATION_COMMAND") {
@@ -308,6 +311,33 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.agents.memory_sidecar_enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BACKEND") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.agents.memory_embedding_backend = trimmed.to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_MODEL") {
+            let trimmed = v.trim();
+            self.agents.memory_embedding_model = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BASE_URL") {
+            let trimmed = v.trim();
+            self.agents.memory_embedding_base_url = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_DIM") {
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                self.agents.memory_embedding_dim = Some(parsed);
             }
         }
 

@@ -21,7 +21,7 @@ pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
 pub mod info_widget_stability;
-mod keybind;
+pub mod keybind;
 mod layout_utils;
 pub mod login_picker;
 pub mod markdown;
@@ -717,9 +717,22 @@ pub enum OnboardingWelcomeKind {
     ///
     /// When `import` is `Some`, we detected importable external logins and are
     /// walking the user through them one at a time (a yes/no prompt per login).
-    /// When `None`, there was nothing to import and the card points the user at
-    /// the provider picker.
-    Login { import: Option<LoginImportPrompt> },
+    /// When `None` and `importing` is false, there was nothing to import and the
+    /// card points the user at the provider picker. When `None` and `importing`
+    /// is true, the user just committed the import and it is running, so the card
+    /// shows an "Importing your logins..." progress state. When `error` is
+    /// `Some`, a prior import failed and the recovery copy explains what went
+    /// wrong plus the concrete next step.
+    Login {
+        import: Option<LoginImportPrompt>,
+        importing: bool,
+        error: Option<String>,
+        /// When a prior import failed and we detected a coding agent the user
+        /// recently used, its display label (e.g. "Codex"). The recovery screen
+        /// offers "Press H to have <label> help fix this". `None` hides that
+        /// option.
+        repair_agent_label: Option<String>,
+    },
     /// Ask the user whether to log in to OpenAI (no detected imports). A
     /// highlightable Yes/No selector; `yes_highlighted` reflects the current
     /// choice. Yes starts the OpenAI sign-in, No skips login and finishes
@@ -736,23 +749,34 @@ pub enum OnboardingWelcomeKind {
     Suggestions,
 }
 
-/// Render-friendly snapshot of the current step in the per-candidate login
-/// import walkthrough. Describes which detected login is being reviewed and
-/// which Yes/No option is currently highlighted.
+/// Render-friendly snapshot of the single-screen login-import checkbox list.
+/// Carries every detected login plus which ones are checked and which row the
+/// cursor is on, so the welcome card can draw the whole list at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginImportPrompt {
+    /// One entry per detected login, in display order.
+    pub rows: Vec<LoginImportRow>,
+    /// Index of the row the cursor is currently on.
+    pub cursor: usize,
+    /// When `true`, the navigable "Continue" pill (above and below the list) is
+    /// focused instead of a login row, so it renders highlighted and Enter
+    /// commits the import.
+    pub continue_focused: bool,
+    /// How many rows are currently checked for import.
+    pub checked_count: usize,
+    /// Seconds left before the screen auto-imports all checked logins.
+    pub seconds_left: u64,
+}
+
+/// One row in the login-import checkbox list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginImportRow {
     /// Human-readable provider summary (e.g. "OpenAI/Codex").
     pub provider_summary: String,
     /// Where the credentials came from (e.g. "Codex auth.json").
     pub source_name: String,
-    /// 1-based position of this candidate.
-    pub position: usize,
-    /// Total number of detected candidates.
-    pub total: usize,
-    /// Whether the "Yes" option is currently highlighted (vs. "No").
-    pub yes_highlighted: bool,
-    /// Seconds left before this candidate auto-commits its default.
-    pub seconds_left: u64,
+    /// Whether this login is checked for import.
+    pub checked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1290,10 +1314,24 @@ fn idle_donut_active_with_policy(
     policy.enable_decorative_animations
         && crate::config::config().display.idle_animation
         && policy.tier.idle_animation_enabled()
-        && state.display_messages().is_empty()
+        && !has_started_conversation(state)
         && !state.is_processing()
         && state.streaming_text().is_empty()
         && state.queued_messages().is_empty()
+}
+
+/// Whether the transcript contains any real conversation yet (a user prompt or
+/// an assistant/tool/reasoning reply). A fresh screen that only holds
+/// non-conversational notices (e.g. the "run /login when you're ready" system
+/// message left after onboarding is declined) is still "idle", so the decorative
+/// donut should keep spinning until the user actually starts chatting.
+fn has_started_conversation(state: &dyn TuiState) -> bool {
+    state.display_messages().iter().any(|m| {
+        matches!(
+            m.role.as_str(),
+            "user" | "assistant" | "tool" | "reasoning"
+        )
+    })
 }
 
 pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
@@ -1493,6 +1531,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         && state.streaming_text().is_empty()
         && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
+        && !state.chat_overscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()

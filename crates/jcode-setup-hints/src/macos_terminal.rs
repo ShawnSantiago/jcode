@@ -141,10 +141,110 @@ pub(super) fn escape_applescript_text(input: &str) -> String {
 }
 
 pub(super) fn paused_jcode_shell_command(exe_path: &str) -> String {
+    paused_jcode_shell_command_with_args(exe_path, &[])
+}
+
+/// Like [`paused_jcode_shell_command`] but passes extra CLI args (each
+/// single-quoted) to the jcode invocation, e.g. `--resume <session-id>`.
+pub(super) fn paused_jcode_shell_command_with_args(exe_path: &str, args: &[String]) -> String {
     let escaped_exe = escape_shell_single_quotes(exe_path);
+    let mut arg_str = String::new();
+    for arg in args {
+        arg_str.push_str(" '");
+        arg_str.push_str(&escape_shell_single_quotes(arg));
+        arg_str.push('\'');
+    }
     format!(
-        r#"if [ ! -x '{exe}' ]; then printf 'jcode executable not found.\n'; exit 127; fi; '{exe}'; status=$?; if [ "$status" -ne 0 ]; then printf '\nJcode exited with status %s.\n' "$status"; printf 'Press Enter to close... '; read -r _; fi; exit "$status""#,
+        r#"if [ ! -x '{exe}' ]; then printf 'jcode executable not found.\n'; exit 127; fi; '{exe}'{args}; status=$?; if [ "$status" -ne 0 ]; then printf '\nJcode exited with status %s.\n' "$status"; printf 'Press Enter to close... '; read -r _; fi; exit "$status""#,
         exe = escaped_exe,
+        args = arg_str,
+    )
+}
+
+/// Which global launch hotkey a generated script/registration serves.
+///
+/// The three system-wide hotkeys open a fresh jcode in a different working
+/// directory:
+/// - [`HotkeyTarget::Home`] (`Cmd+;`): the user's home directory.
+/// - [`HotkeyTarget::LastDir`] (`Cmd+'`): the last project directory jcode was
+///   launched from (recorded on each non-home launch).
+/// - [`HotkeyTarget::SelfDev`] (`Cmd+Shift+'`): a self-dev session in the last
+///   jcode repository the user worked in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HotkeyTarget {
+    Home,
+    LastDir,
+    SelfDev,
+}
+
+impl HotkeyTarget {
+    pub(super) const ALL: [HotkeyTarget; 3] =
+        [HotkeyTarget::Home, HotkeyTarget::LastDir, HotkeyTarget::SelfDev];
+
+    /// File name of the per-target launch script written into the hotkey
+    /// support dir and executed by the listener when the chord fires.
+    pub(super) fn script_file_name(self) -> &'static str {
+        match self {
+            Self::Home => "launch_jcode_home.sh",
+            Self::LastDir => "launch_jcode_last_dir.sh",
+            Self::SelfDev => "launch_jcode_selfdev.sh",
+        }
+    }
+
+    /// Human-readable chord label for notices and CLI output.
+    pub(super) fn chord_label(self) -> &'static str {
+        match self {
+            Self::Home => "Cmd+;",
+            Self::LastDir => "Cmd+'",
+            Self::SelfDev => "Cmd+Shift+'",
+        }
+    }
+
+    /// Short description of what the hotkey opens.
+    pub(super) fn description(self) -> &'static str {
+        match self {
+            Self::Home => "a new jcode in your home directory",
+            Self::LastDir => "a new jcode in your last project directory",
+            Self::SelfDev => "a new jcode self-dev session",
+        }
+    }
+}
+
+/// Shell snippet (run inside the freshly opened terminal) that `cd`s into the
+/// directory stored in `dir_file`, falling back to `$HOME` when the file is
+/// missing or points at a directory that no longer exists.
+///
+/// Reading the directory at launch time (rather than baking it into the script)
+/// means the "last project" / "self-dev" hotkeys always open the most recent
+/// directory without rewriting the scripts on every jcode launch.
+fn cd_from_dir_file_prefix(dir_file: &str) -> String {
+    let escaped = escape_shell_single_quotes(dir_file);
+    format!(
+        "__jc_dir=\"$(cat '{escaped}' 2>/dev/null)\"; if [ -n \"$__jc_dir\" ] && [ -d \"$__jc_dir\" ]; then cd \"$__jc_dir\"; else cd \"$HOME\"; fi; "
+    )
+}
+
+/// Build the shell command (executed inside the new terminal window) for a
+/// global launch hotkey. `last_dir_file`/`last_repo_file` are paths to the
+/// plaintext files the launch scripts read at fire time.
+pub(super) fn hotkey_shell_command(
+    exe_path: &str,
+    target: HotkeyTarget,
+    last_dir_file: &str,
+    last_repo_file: &str,
+) -> String {
+    let cd_prefix = match target {
+        HotkeyTarget::Home => "cd \"$HOME\"; ".to_string(),
+        HotkeyTarget::LastDir => cd_from_dir_file_prefix(last_dir_file),
+        HotkeyTarget::SelfDev => cd_from_dir_file_prefix(last_repo_file),
+    };
+    let args: Vec<String> = match target {
+        HotkeyTarget::SelfDev => vec!["self-dev".to_string()],
+        HotkeyTarget::Home | HotkeyTarget::LastDir => Vec::new(),
+    };
+    format!(
+        "{cd_prefix}{}",
+        paused_jcode_shell_command_with_args(exe_path, &args)
     )
 }
 
@@ -198,6 +298,36 @@ pub(super) fn launch_script_for_macos_terminal(
     )
 }
 
+/// How to launch a shell command in a new terminal window without Apple
+/// Events automation. Background helpers (the menu bar app, launchd agents)
+/// cannot reliably get the "control Terminal" TCC permission that the
+/// AppleScript launch path needs, so they use this strategy instead.
+pub(super) enum NoAutomationLaunch {
+    /// Run this shell command directly (terminals launchable via
+    /// `open -na <App> --args ...`).
+    Shell(String),
+    /// Write the shell command to an executable `.command` file and open it
+    /// with the named app (`None` = system default handler, Terminal.app).
+    CommandFile { app: Option<&'static str> },
+}
+
+pub(super) fn no_automation_launch(
+    terminal: MacTerminalKind,
+    shell_command: &str,
+) -> NoAutomationLaunch {
+    if let Some((app_name, app_args)) = terminal.open_command_app_and_args() {
+        return NoAutomationLaunch::Shell(open_command_for_terminal(
+            app_name,
+            app_args,
+            shell_command,
+        ));
+    }
+    match terminal {
+        MacTerminalKind::Iterm2 => NoAutomationLaunch::CommandFile { app: Some("iTerm") },
+        _ => NoAutomationLaunch::CommandFile { app: None },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -223,6 +353,28 @@ mod tests {
                 "start --always-new-process -- /bin/bash -lc",
                 shell_command,
             )
+        );
+    }
+
+    #[test]
+    fn paused_shell_command_quotes_extra_args() {
+        let cmd = super::paused_jcode_shell_command_with_args(
+            "/usr/local/bin/jcode",
+            &["--resume".to_string(), "session_fox_123_abc".to_string()],
+        );
+        assert!(cmd.contains("'/usr/local/bin/jcode' '--resume' 'session_fox_123_abc';"));
+
+        // Single quotes in args must be escaped, not break out of quoting.
+        let cmd = super::paused_jcode_shell_command_with_args(
+            "/usr/local/bin/jcode",
+            &["it's".to_string()],
+        );
+        assert!(cmd.contains(r#"'it'\''s'"#));
+
+        // No args matches the plain command.
+        assert_eq!(
+            super::paused_jcode_shell_command_with_args("/usr/local/bin/jcode", &[]),
+            super::paused_jcode_shell_command("/usr/local/bin/jcode"),
         );
     }
 

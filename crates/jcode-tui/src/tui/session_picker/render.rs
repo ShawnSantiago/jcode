@@ -69,6 +69,80 @@ impl SessionPicker {
         }
     }
 
+    /// Normalized search tokens used for highlighting, or an empty vec when there
+    /// is no active search. Mirrors the matcher's tokenization so highlighting and
+    /// filtering agree on what counts as a match.
+    pub(super) fn active_highlight_tokens(&self) -> Vec<String> {
+        super::loading::search_query_tokens(&self.search_query)
+    }
+
+    /// Split `text` into spans, applying `base` to non-matching segments and a
+    /// distinct highlight style to case-insensitive occurrences of any of the
+    /// `tokens`. Tokens are matched independently (logical OR for highlighting),
+    /// matching the AND-token filter's notion of "this word matched". Overlapping
+    /// or adjacent matches are merged via a per-character highlight mask.
+    pub(super) fn highlight_spans(
+        text: &str,
+        tokens: &[String],
+        base: Style,
+    ) -> Vec<Span<'static>> {
+        if tokens.is_empty() || text.is_empty() {
+            return vec![Span::styled(text.to_string(), base)];
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        let lower: String = text.to_lowercase();
+        // Map lowercased byte offsets back to char indices so multi-byte and
+        // case-folding-width changes can't desync the mask.
+        let lower_chars: Vec<char> = lower.chars().collect();
+
+        let mut mask = vec![false; lower_chars.len()];
+        let mut any = false;
+        for token in tokens {
+            if token.is_empty() || token.chars().count() > lower_chars.len() {
+                continue;
+            }
+            let needle: Vec<char> = token.chars().collect();
+            let mut i = 0;
+            while i + needle.len() <= lower_chars.len() {
+                if lower_chars[i..i + needle.len()] == needle[..] {
+                    for slot in mask.iter_mut().skip(i).take(needle.len()) {
+                        *slot = true;
+                    }
+                    any = true;
+                    i += needle.len();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        if !any {
+            return vec![Span::styled(text.to_string(), base)];
+        }
+
+        // The lowercase char count can differ from the original char count when
+        // case folding changes length (rare); fall back to no highlight rather
+        // than risk a slice mismatch.
+        if mask.len() != chars.len() {
+            return vec![Span::styled(text.to_string(), base)];
+        }
+
+        let highlight = base.fg(rgb(255, 214, 90)).add_modifier(Modifier::BOLD);
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut idx = 0;
+        while idx < chars.len() {
+            let hot = mask[idx];
+            let start = idx;
+            while idx < chars.len() && mask[idx] == hot {
+                idx += 1;
+            }
+            let segment: String = chars[start..idx].iter().collect();
+            spans.push(Span::styled(segment, if hot { highlight } else { base }));
+        }
+        spans
+    }
+
     fn primary_title_display(session: &SessionInfo) -> String {
         let title = session.title.trim();
         let short_name = session.short_name.trim();
@@ -96,6 +170,7 @@ impl SessionPicker {
         let is_marked = self.selected_session_ids.contains(&session.id);
         let same_dir = self.session_in_current_dir(session);
         let same_dir_clr: Color = rgb(120, 200, 140);
+        let highlight_tokens = self.active_highlight_tokens();
 
         let name_style = if is_selected {
             Style::default()
@@ -108,7 +183,7 @@ impl SessionPicker {
         let canary_marker = if session.is_canary { " 🔬" } else { "" };
         let debug_marker = if session.is_debug { " 🧪" } else { "" };
         let saved_marker = if session.saved { " 📌" } else { "" };
-        let selection_marker = if is_marked { "[x] " } else { "[ ] " };
+        let selection_marker = if is_marked { "● " } else { "○ " };
         let selection_style = if is_marked {
             Style::default()
                 .fg(rgb(140, 220, 160))
@@ -139,8 +214,12 @@ impl SessionPicker {
                 format!("{} ", session.icon),
                 Style::default().fg(rgb(110, 210, 255)),
             ),
-            Span::styled(primary_title, name_style),
         ];
+        line1_spans.extend(Self::highlight_spans(
+            &primary_title,
+            &highlight_tokens,
+            name_style,
+        ));
         line1_spans.extend([
             Span::styled(canary_marker, Style::default().fg(rgb(255, 193, 7))),
             Span::styled(debug_marker, Style::default().fg(rgb(180, 180, 180))),
@@ -152,10 +231,14 @@ impl SessionPicker {
             Span::styled(format!("  {}", time_label), Style::default().fg(dim)),
         ]);
         if let Some(ref label) = session.save_label {
-            line1_spans.push(Span::styled(
-                format!("  \"{}\"", label),
-                Style::default().fg(rgb(255, 200, 140)),
+            let label_style = Style::default().fg(rgb(255, 200, 140));
+            line1_spans.push(Span::styled("  \"".to_string(), label_style));
+            line1_spans.extend(Self::highlight_spans(
+                label,
+                &highlight_tokens,
+                label_style,
             ));
+            line1_spans.push(Span::styled("\"".to_string(), label_style));
         }
         if let Some(source_badge) = session.source.badge() {
             line1_spans.push(Span::styled(
@@ -236,17 +319,22 @@ impl SessionPicker {
         } else {
             String::new()
         };
-        let line3 = Line::from(vec![
+        let dir_style = Style::default().fg(if same_dir { same_dir_clr } else { dimmer });
+        let mut line3_spans = vec![
             Span::styled("     ", Style::default()),
             Span::styled(
                 format!("created: {}", created_ago),
                 Style::default().fg(dimmer),
             ),
-            Span::styled(
-                dir_part,
-                Style::default().fg(if same_dir { same_dir_clr } else { dimmer }),
-            ),
-        ]);
+        ];
+        if !dir_part.is_empty() {
+            line3_spans.extend(Self::highlight_spans(
+                &dir_part,
+                &highlight_tokens,
+                dir_style,
+            ));
+        }
+        let line3 = Line::from(line3_spans);
 
         let mut rows = vec![line1, line2];
         if let Some(prompt) = session.first_user_prompt.as_deref().map(str::trim)
@@ -258,11 +346,16 @@ impl SessionPicker {
             } else {
                 prompt
             };
-            rows.push(Line::from(vec![
+            let mut prompt_spans = vec![
                 Span::styled("     ", Style::default()),
                 Span::styled("prompt: ", Style::default().fg(dimmer)),
-                Span::styled(prompt_display, Style::default().fg(rgb(180, 180, 220))),
-            ]));
+            ];
+            prompt_spans.extend(Self::highlight_spans(
+                &prompt_display,
+                &highlight_tokens,
+                Style::default().fg(rgb(180, 180, 220)),
+            ));
+            rows.push(Line::from(prompt_spans));
         }
         rows.push(line3);
         if let Some(reason_line) = Self::crash_reason_line(session) {

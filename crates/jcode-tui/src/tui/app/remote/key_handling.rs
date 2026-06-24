@@ -321,6 +321,16 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.new_terminal_key_matches(code, modifiers) {
+        app.handle_new_terminal_hotkey();
+        return Ok(());
+    }
+
+    if app.open_resume_key_matches(code, modifiers) {
+        app.open_session_picker();
+        return Ok(());
+    }
+
     if handle_workspace_navigation_key(app, code, modifiers, remote).await? {
         return Ok(());
     }
@@ -381,7 +391,12 @@ async fn handle_remote_key_internal(
                 app.cursor_pos = app.find_word_boundary_back();
                 return Ok(());
             }
-            KeyCode::Char('f') => {
+            // Alt/Option+Left/Right move by word, matching Alt+B / Alt+F.
+            KeyCode::Left => {
+                app.cursor_pos = app.find_word_boundary_back();
+                return Ok(());
+            }
+            KeyCode::Char('f') | KeyCode::Right => {
                 app.cursor_pos = app.find_word_boundary_forward();
                 return Ok(());
             }
@@ -550,7 +565,7 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('e') => {
-                input::edit_input_in_external_editor(app);
+                app.cursor_pos = app.input.len();
                 return Ok(());
             }
             KeyCode::Char('f') => {
@@ -655,7 +670,7 @@ async fn handle_remote_key_internal(
     }
 
     if code == KeyCode::Enter
-        && modifiers.contains(KeyModifiers::CONTROL)
+        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
         && !app.input.trim().starts_with('/')
     {
         if app.activate_picker_from_preview() {
@@ -1045,9 +1060,10 @@ async fn handle_remote_key_internal(
                         })
                         .collect();
                     app.push_display_message(DisplayMessage::system(format!(
-                        "Reasoning effort: {}\nAvailable: {}\nUse /effort <level> or Alt+Left / Alt+Right to change.",
+                        "Reasoning effort: {}\nAvailable: {}\nUse /effort <level> or {} to change.",
                         label,
-                        list.join(" · ")
+                        list.join(" · "),
+                        crate::tui::keybind::effort_switch_keys_label()
                     )));
                     return Ok(());
                 }
@@ -1614,6 +1630,7 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
                     app.open_session_picker();
+                    app.hint_resume_shortcut();
                     return Ok(());
                 }
 

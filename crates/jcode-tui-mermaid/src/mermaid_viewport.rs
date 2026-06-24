@@ -1152,3 +1152,127 @@ pub fn invalidate_render_state(hash: u64) {
         last_render.remove(&hash);
     }
 }
+
+#[cfg(test)]
+mod kitty_viewport_leak_tests {
+    //! Confirming test for the "image renders above its tag line" report.
+    //!
+    //! Static analysis of the draw path (`ui_viewport.rs`) showed both image
+    //! branches keep Kitty placeholder cells strictly inside the image region,
+    //! which sits one wrapped line *below* the label/tag. The lowest-level
+    //! emitter is [`render_kitty_virtual_viewport`]: it is the only place that
+    //! writes the `U+10EEEE` placeholder char into buffer cells. If the in-buffer
+    //! geometry were the culprit, this emitter would have to paint a placeholder
+    //! on a row above its `area`. This test drives it directly across a sweep of
+    //! `scroll_y`/partial-visibility values and asserts that never happens, which
+    //! pins the real defect to terminal-side ghosting rather than buffer layout.
+
+    use super::*;
+
+    const PLACEHOLDER: char = '\u{10EEEE}';
+
+    /// Seed `KITTY_VIEWPORT_STATE` with a fit entry so the emitter has an id to
+    /// address without needing a real terminal/transmit.
+    fn seed_state(hash: u64, full_cols: u16, full_rows: u16) {
+        let mut cache = KITTY_VIEWPORT_STATE.lock().unwrap();
+        cache.insert(
+            hash,
+            KittyViewportState {
+                source_path: std::path::PathBuf::from("/test/leak.png"),
+                zoom_percent: 100,
+                font_size: (8, 16),
+                unique_id: 0x00AABBCC,
+                full_cols,
+                full_rows,
+                pending_transmit: Some(String::from("\x1b_Gtransmit\x1b\\")),
+                fit_target: Some((full_cols, full_rows)),
+            },
+        );
+    }
+
+    /// True if any cell at row `y` carries a Kitty placeholder char.
+    fn row_has_placeholder(buf: &Buffer, y: u16) -> bool {
+        let area = *buf.area();
+        (area.left()..area.right()).any(|x| {
+            buf.cell((x, y))
+                .is_some_and(|c| c.symbol().contains(PLACEHOLDER))
+        })
+    }
+
+    /// The emitter must never paint placeholders above its own `area`, for any
+    /// scroll position or partial-visibility height. The buffer has sentinel
+    /// rows above the image area that stand in for the label/tag line.
+    #[test]
+    fn placeholders_never_leak_above_image_area() {
+        let hash = 0xDEAD_BEEF_u64;
+        let full_cols = 20;
+        let full_rows = 30;
+        seed_state(hash, full_cols, full_rows);
+
+        // Buffer taller/wider than the image area, with several "tag" rows on top.
+        let buf_w = full_cols + 4;
+        let buf_h = full_rows + 8;
+        let label_rows = 3u16; // rows 0..3 stand in for blank + label + spacer
+
+        // Sweep: how many of the image's top rows are scrolled off (skip_rows),
+        // which also drives the visible height that the draw path would request.
+        for skip_rows in 0..full_rows {
+            // Re-seed each iteration: render consumes pending_transmit.
+            seed_state(hash, full_cols, full_rows);
+            let visible_height = full_rows - skip_rows;
+
+            let mut buf = Buffer::empty(Rect::new(0, 0, buf_w, buf_h));
+            // Mark the label/tag region with a sentinel so any overwrite is loud.
+            for y in 0..label_rows {
+                for x in 0..buf_w {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_symbol("T");
+                    }
+                }
+            }
+
+            let image_area = Rect {
+                x: 1,
+                y: label_rows,
+                width: full_cols,
+                height: visible_height,
+            };
+
+            let ok = render_kitty_virtual_viewport(
+                hash,
+                image_area,
+                &mut buf,
+                0,
+                skip_rows,
+                full_cols.min(image_area.width),
+                visible_height,
+            );
+            assert!(ok, "viewport render failed for skip_rows={skip_rows}");
+
+            // No placeholder may sit on any row above the image area.
+            for y in 0..label_rows {
+                assert!(
+                    !row_has_placeholder(&buf, y),
+                    "placeholder leaked onto tag row {y} (skip_rows={skip_rows})"
+                );
+            }
+            // The label/tag sentinel cells must be untouched.
+            for y in 0..label_rows {
+                for x in 0..buf_w {
+                    let sym = buf.cell((x, y)).map(|c| c.symbol().to_string());
+                    assert_eq!(
+                        sym.as_deref(),
+                        Some("T"),
+                        "tag cell ({x},{y}) overwritten (skip_rows={skip_rows})"
+                    );
+                }
+            }
+            // Sanity: the first image row should actually carry a placeholder, so
+            // the test is exercising the real emission and not a no-op.
+            assert!(
+                row_has_placeholder(&buf, image_area.y),
+                "expected placeholders on first image row (skip_rows={skip_rows})"
+            );
+        }
+    }
+}

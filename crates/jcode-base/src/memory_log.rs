@@ -362,6 +362,28 @@ pub fn log_candidate_filter(
     );
 }
 
+/// Log the terminal judge decision for a memory surfacing turn. This is the
+/// per-session attribution record backing the no-LLM conversion metric (see
+/// `memory_judge_metrics`).
+pub fn log_judge_decision(
+    session_id: &str,
+    decision: &str,
+    no_llm: bool,
+    degradation: bool,
+    candidate_count: usize,
+) {
+    write_log(
+        "judge_decision",
+        Some(serde_json::json!({
+            "target_session": session_id,
+            "decision": decision,
+            "no_llm": no_llm,
+            "degradation": degradation,
+            "candidate_count": candidate_count,
+        })),
+    );
+}
+
 /// Remove `memory-events-*.jsonl` files older than the documented 14-day
 /// retention window. The general log rotation deliberately leaves these files
 /// alone (they are analysis data, not debug logs), so this is the only place

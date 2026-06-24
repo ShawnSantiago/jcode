@@ -1937,3 +1937,127 @@ fn test_current_dir_highlight_absent_without_current_dir() {
     // No current_dir set: nothing is highlighted.
     assert!(!picker.session_in_current_dir(&session));
 }
+
+#[test]
+fn highlight_spans_marks_query_occurrences() {
+    let base = Style::default().fg(Color::White);
+    let tokens = vec!["resume".to_string()];
+    let spans = SessionPicker::highlight_spans("Fix the Resume bug", &tokens, base);
+    let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(combined, "Fix the Resume bug");
+
+    let highlighted: Vec<&str> = spans
+        .iter()
+        .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert_eq!(highlighted, vec!["Resume"], "match should be highlighted case-insensitively");
+}
+
+#[test]
+fn highlight_spans_marks_each_token_independently() {
+    // Multi-word queries highlight every token (order independent), matching the
+    // AND-token filter semantics.
+    let base = Style::default().fg(Color::White);
+    let tokens = vec!["resume".to_string(), "bug".to_string()];
+    let spans = SessionPicker::highlight_spans("Fix the Resume bug now", &tokens, base);
+    let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(combined, "Fix the Resume bug now");
+    let highlighted: Vec<&str> = spans
+        .iter()
+        .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert_eq!(highlighted, vec!["Resume", "bug"], "every token should be highlighted");
+}
+
+#[test]
+fn highlight_spans_without_query_returns_single_span() {
+    let base = Style::default().fg(Color::White);
+    let spans = SessionPicker::highlight_spans("hello world", &[], base);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content.as_ref(), "hello world");
+}
+
+#[test]
+fn search_highlights_matching_title_in_rendered_rows() {
+    let session = make_session("abc", "deploy pipeline", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![session]);
+    // make_session sets title = "Test session"; search a substring of the title.
+    picker.search_query = "sess".to_string();
+    let rows = picker.render_session_item_lines(picker.all_sessions.first().unwrap(), false);
+    let has_highlight = rows[0]
+        .spans
+        .iter()
+        .any(|s| s.content.as_ref() == "sess" && s.style.add_modifier.contains(Modifier::BOLD));
+    assert!(has_highlight, "query substring in title should be highlighted");
+}
+
+#[test]
+fn search_highlights_match_in_preview_and_scrolls_to_it() {
+    // A long transcript where a distinctive term ("flibbertigibbet") appears only
+    // in an early message. Searching for it should both highlight the match in the
+    // preview pane and scroll the preview to the match rather than to the bottom.
+    let mut session = make_session_with_many_turns("long", 60);
+    // Inject the unique term near the top of the transcript.
+    session.messages_preview[4].content = "the magic flibbertigibbet token".to_string();
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.focus = PaneFocus::Preview;
+
+    let w = 100u16;
+    let h = 16u16;
+
+    // Baseline: no search -> auto-scrolls to bottom.
+    let _ = buffer_text(&mut picker, w, h);
+    let bottom_scroll = picker.scroll_offset;
+    assert!(bottom_scroll > 0, "long preview should scroll to bottom by default");
+
+    // Now search for the unique early term. Reset auto-scroll like a keystroke would.
+    picker.search_query = "flibbertigibbet".to_string();
+    picker.auto_scroll_preview = true;
+    let text = buffer_text(&mut picker, w, h);
+
+    // The preview should have scrolled to the match (near the top), not the bottom.
+    assert!(
+        picker.scroll_offset < bottom_scroll,
+        "preview should scroll up to the match (got {}, bottom was {})",
+        picker.scroll_offset,
+        bottom_scroll
+    );
+    assert!(
+        text.contains("flibbertigibbet"),
+        "matched term should be visible in the preview after scrolling"
+    );
+
+    // The match should be highlighted (bold) in the cached wrapped lines.
+    let highlighted = picker
+        .preview_cache
+        .as_ref()
+        .expect("preview cache built")
+        .wrapped_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|s| {
+            s.content.to_lowercase().contains("flibbertigibbet")
+                && s.style.add_modifier.contains(Modifier::BOLD)
+        });
+    assert!(highlighted, "matched term in preview body should be highlighted");
+}
+
+#[test]
+fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
+    let session = make_session_with_many_turns("nosrch", 60);
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.focus = PaneFocus::Preview;
+    let _ = buffer_text(&mut picker, 100, 16);
+    assert!(picker.scroll_offset > 0, "should scroll to bottom without search");
+    let any_highlight = picker
+        .preview_cache
+        .as_ref()
+        .expect("preview cache built")
+        .wrapped_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|s| s.style.add_modifier.contains(Modifier::BOLD) && s.style.fg == Some(rgb(255, 214, 90)));
+    assert!(!any_highlight, "no search means no highlight color in preview");
+}

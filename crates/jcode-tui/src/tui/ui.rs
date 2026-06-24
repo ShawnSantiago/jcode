@@ -1,37 +1,12 @@
 #![cfg_attr(
     test,
-    allow(
-        clippy::bind_instead_of_map,
-        clippy::clone_on_copy,
-        clippy::collapsible_if,
-        clippy::if_same_then_else,
-        clippy::implicit_saturating_sub,
+    expect(
         clippy::items_after_test_module,
-        clippy::large_enum_variant,
         clippy::let_and_return,
-        clippy::manual_abs_diff,
-        clippy::manual_div_ceil,
-        clippy::manual_find,
-        clippy::manual_is_multiple_of,
-        clippy::manual_pattern_char_comparison,
-        clippy::manual_repeat_n,
-        clippy::manual_strip,
-        clippy::map_entry,
         clippy::missing_const_for_thread_local,
         clippy::needless_borrow,
-        clippy::needless_borrows_for_generic_args,
-        clippy::needless_lifetimes,
-        clippy::needless_range_loop,
         clippy::needless_return,
-        clippy::question_mark,
-        clippy::redundant_closure,
-        clippy::too_many_arguments,
-        clippy::type_complexity,
-        clippy::unnecessary_cast,
-        clippy::unnecessary_lazy_evaluations,
-        clippy::unnecessary_map_or,
-        clippy::unwrap_or_default,
-        clippy::while_let_loop
+        clippy::too_many_arguments
     )
 )]
 
@@ -2581,10 +2556,31 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         })
     };
 
-    // The first-run onboarding welcome screen draws its own (prominent,
-    // top-positioned) donut, so suppress the default bottom idle donut while it
-    // is active to avoid two donuts on screen.
     let onboarding_welcome = app.onboarding_welcome_active();
+
+    // The guided onboarding phases (login import, OpenAI prompt, continue prompt)
+    // are entirely key-driven and own the whole chat column: they render their own
+    // telemetry header, a prominent donut, and the welcome body. Suppress the
+    // normal chat chrome (status line, input box, notification, idle hint) so the
+    // screen stays focused and the donut gets the full height. The resting
+    // Suggestions screen keeps the input box so the user can type to start.
+    let onboarding_takes_over = onboarding_welcome
+        && !matches!(
+            app.onboarding_welcome_kind(),
+            crate::tui::OnboardingWelcomeKind::Suggestions
+        );
+    if onboarding_takes_over {
+        onboarding::draw_onboarding_welcome(frame, app, chat_area);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            prep_start.elapsed(),
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
     let donut_height: u16 = if show_donut { 14 } else { 0 };
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };

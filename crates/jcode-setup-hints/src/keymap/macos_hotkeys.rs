@@ -242,6 +242,7 @@ pub fn hotkeys_to_bindings(raw: &[RawHotkey]) -> Vec<DiscoveredBinding> {
             source: KeySource::MacosSystem,
             action: action_name(hk.id),
             raw: format!("symbolichotkey #{}", hk.id),
+            tool: String::new(),
         });
     }
     out

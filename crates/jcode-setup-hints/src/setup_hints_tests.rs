@@ -68,6 +68,115 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     assert!(message.contains("Cmd+;"));
     // The notice should make clear the hotkey works globally, not just inside jcode.
     assert!(message.contains("system-wide"));
+    // All three launch hotkeys should be mentioned.
+    assert!(message.contains("Cmd+'"));
+    assert!(message.contains("Cmd+Shift+'"));
+}
+
+#[test]
+fn home_hotkey_shell_command_cds_home_with_no_args() {
+    let cmd = macos_terminal::hotkey_shell_command(
+        "/usr/local/bin/jcode",
+        macos_terminal::HotkeyTarget::Home,
+        "/home/u/.jcode/hotkey/last_dir",
+        "/home/u/.jcode/hotkey/last_repo",
+    );
+    assert!(cmd.starts_with("cd \"$HOME\"; "));
+    // Home launch passes no extra subcommand to jcode.
+    assert!(!cmd.contains("self-dev"));
+    assert!(cmd.contains("'/usr/local/bin/jcode';"));
+}
+
+#[test]
+fn last_dir_hotkey_shell_command_reads_dir_file_at_launch() {
+    let cmd = macos_terminal::hotkey_shell_command(
+        "/usr/local/bin/jcode",
+        macos_terminal::HotkeyTarget::LastDir,
+        "/home/u/.jcode/hotkey/last_dir",
+        "/home/u/.jcode/hotkey/last_repo",
+    );
+    // Reads the recorded directory at fire time, falls back to $HOME.
+    assert!(cmd.contains("cat '/home/u/.jcode/hotkey/last_dir'"));
+    assert!(cmd.contains("cd \"$__jc_dir\""));
+    assert!(cmd.contains("cd \"$HOME\""));
+    assert!(!cmd.contains("self-dev"));
+}
+
+#[test]
+fn selfdev_hotkey_shell_command_reads_repo_file_and_passes_self_dev() {
+    let cmd = macos_terminal::hotkey_shell_command(
+        "/usr/local/bin/jcode",
+        macos_terminal::HotkeyTarget::SelfDev,
+        "/home/u/.jcode/hotkey/last_dir",
+        "/home/u/.jcode/hotkey/last_repo",
+    );
+    assert!(cmd.contains("cat '/home/u/.jcode/hotkey/last_repo'"));
+    // Self-dev launch invokes the `self-dev` subcommand.
+    assert!(cmd.contains("'/usr/local/bin/jcode' 'self-dev';"));
+}
+
+#[test]
+fn should_record_last_dir_skips_home_only() {
+    use std::path::Path;
+    let home = Path::new("/Users/jeremy");
+    // Home itself is skipped (Cmd+; already covers home).
+    assert!(!super::should_record_last_dir(home, Some(home)));
+    // Any other project dir is recorded for Cmd+'.
+    assert!(super::should_record_last_dir(
+        Path::new("/Users/jeremy/projects/foo"),
+        Some(home)
+    ));
+    // With no known home, always record.
+    assert!(super::should_record_last_dir(home, None));
+}
+
+#[test]
+fn hotkey_targets_have_distinct_scripts_and_chords() {
+    use macos_terminal::HotkeyTarget;
+    let scripts: Vec<&str> = HotkeyTarget::ALL
+        .iter()
+        .map(|t| t.script_file_name())
+        .collect();
+    let chords: Vec<&str> = HotkeyTarget::ALL.iter().map(|t| t.chord_label()).collect();
+    // No two targets share a script file or a chord label.
+    for i in 0..scripts.len() {
+        for j in (i + 1)..scripts.len() {
+            assert_ne!(scripts[i], scripts[j], "scripts must be unique");
+            assert_ne!(chords[i], chords[j], "chords must be unique");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_writes_all_three_executable_launch_scripts() {
+    use macos_terminal::HotkeyTarget;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    super::write_hotkey_launch_scripts(
+        dir.path(),
+        MacTerminalKind::Ghostty,
+        "/usr/local/bin/jcode",
+        "/home/u/.jcode/hotkey/last_dir",
+        "/home/u/.jcode/hotkey/last_repo",
+    )
+    .expect("scripts should write");
+
+    for target in HotkeyTarget::ALL {
+        let path = dir.path().join(target.script_file_name());
+        let body = std::fs::read_to_string(&path).expect("script exists");
+        assert!(body.starts_with("#!/bin/bash"), "{target:?} is a bash script");
+        // Executable bit set so the listener can `sh script` / `open` it.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "{target:?} should be executable");
+    }
+
+    // Only the self-dev script invokes the self-dev subcommand.
+    let selfdev = std::fs::read_to_string(dir.path().join("launch_jcode_selfdev.sh")).unwrap();
+    assert!(selfdev.contains("self-dev"));
+    let home = std::fs::read_to_string(dir.path().join("launch_jcode_home.sh")).unwrap();
+    assert!(!home.contains("self-dev"));
 }
 
 #[test]
@@ -305,6 +414,7 @@ fn keymap_conflict_hint_full_path_debounces_and_persists_signature() {
             source: KeySource::Terminal,
             action: action.to_string(),
             raw: format!("{keys}={action}"),
+            tool: String::new(),
         }
     }
 
@@ -332,4 +442,33 @@ fn keymap_conflict_hint_full_path_debounces_and_persists_signature() {
     assert!(hint3.is_none(), "resolved conflicts show nothing");
     assert!(changed3, "signature should be cleared");
     assert!(state.keymap_conflict_signature.is_empty());
+}
+
+#[test]
+fn glyph_safe_notice_shows_once_then_debounces() {
+    let mut state = SetupHintsState::default();
+
+    // First launch in a fragile terminal: disclose the tradeoff and persist.
+    let (hint, changed) = glyph_safe_notice_for(true, &mut state);
+    assert!(hint.is_some(), "should disclose glyph-safe mode on first launch");
+    assert!(changed, "state should be marked shown");
+    assert!(state.glyph_safe_notice_shown);
+    let (title, body) = hint.unwrap().display_message.unwrap();
+    assert_eq!(title, "Display");
+    assert!(body.contains("quantizes colors"));
+    assert!(body.contains("JCODE_GLYPH_SAFE_MODE=off"));
+
+    // Subsequent launches: debounced, no repeat.
+    let (hint2, changed2) = glyph_safe_notice_for(true, &mut state);
+    assert!(hint2.is_none(), "must not re-disclose on later launches");
+    assert!(!changed2);
+}
+
+#[test]
+fn glyph_safe_notice_silent_on_robust_terminals() {
+    let mut state = SetupHintsState::default();
+    let (hint, changed) = glyph_safe_notice_for(false, &mut state);
+    assert!(hint.is_none(), "no disclosure when glyph-safe mode is inactive");
+    assert!(!changed);
+    assert!(!state.glyph_safe_notice_shown);
 }

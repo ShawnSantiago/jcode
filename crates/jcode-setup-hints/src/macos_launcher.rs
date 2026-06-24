@@ -172,7 +172,25 @@ fn should_refresh_macos_app_launcher_paths(
 ) -> bool {
     !state.desktop_shortcut_created
         || !macos_app_launcher_is_valid(app_dir)
-        || legacy_app_dir.exists()
+        || path_exists_with_exact_name(legacy_app_dir)
+}
+
+/// Check that `path` exists under its exact byte-for-byte file name.
+///
+/// macOS system volumes are case-insensitive by default, so a plain
+/// `Path::exists()` on `jcode.app` also matches `Jcode.app`. The legacy-bundle
+/// check needs an exact-name match or the launcher would refresh itself on
+/// every launch once the new bundle exists.
+fn path_exists_with_exact_name(path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return path.exists();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.file_name() == name)
 }
 
 fn macos_launcher_script(terminal: MacTerminalKind, exe_path: &str, app_dir: &Path) -> String {

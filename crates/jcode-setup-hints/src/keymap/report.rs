@@ -25,15 +25,31 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
 
     let term_count = snapshot.from_source(KeySource::Terminal).count();
     let sys_count = snapshot.from_source(KeySource::MacosSystem).count();
+    let app_count = snapshot.from_source(KeySource::ExternalApp).count();
     out.push_str(&format!(
-        "Discovered bindings: {term_count} terminal, {sys_count} macOS system\n",
+        "Discovered bindings: {term_count} terminal, {sys_count} macOS system, {app_count} app\n",
     ));
 
-    if term_count == 0 && sys_count == 0 {
+    if app_count > 0 {
+        let mut tools: Vec<&str> = snapshot
+            .from_source(KeySource::ExternalApp)
+            .map(|b| b.tool.as_str())
+            .filter(|t| !t.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tools.dedup();
+        if !tools.is_empty() {
+            out.push_str(&format!("Apps scanned: {}\n", tools.join(", ")));
+        }
+    }
+
+    if term_count == 0 && sys_count == 0 && app_count == 0 {
         out.push_str(
-            "\nNo machine bindings were discovered. jcode can read Ghostty bindings and macOS\n\
-             system shortcuts; other terminals are not yet inspected, so conflicts there will\n\
-             not be detected.\n",
+            "\nNo machine bindings were discovered. jcode can read Ghostty bindings, macOS\n\
+             system shortcuts, and a few window managers (OmniWM, AeroSpace, skhd); other\n\
+             terminals and tools are not yet inspected, so conflicts there will not be\n\
+             detected.\n",
         );
     }
 
@@ -52,9 +68,10 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
             out.push('\n');
         }
         out.push_str(
-            "These keys may be captured by your terminal or macOS before jcode sees them.\n\
+            "These keys may be captured by your terminal, macOS, or another app (window\n\
+             manager, launcher) before jcode sees them.\n\
              To fix: rebind the jcode action in ~/.jcode/config.toml under [keybindings],\n\
-             or change the conflicting shortcut in your terminal / macOS settings.\n",
+             or change the conflicting shortcut in the other app's settings.\n",
         );
     }
 
@@ -69,6 +86,18 @@ fn render_conflict_block(c: &Conflict) -> String {
                 "terminal action".to_string()
             } else {
                 format!("terminal: {}", c.interceptor.action)
+            }
+        }
+        KeySource::ExternalApp => {
+            let tool = if c.interceptor.tool.is_empty() {
+                "app"
+            } else {
+                c.interceptor.tool.as_str()
+            };
+            if c.interceptor.action.is_empty() {
+                tool.to_string()
+            } else {
+                format!("{tool}: {}", c.interceptor.action)
             }
         }
     };
@@ -96,7 +125,7 @@ pub fn render_status_line(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) ->
         .into_iter()
         .collect();
     Some(format!(
-        "Keybinding conflict: {} may be intercepted by your terminal/OS. Run /keys for details.",
+        "Keybinding conflict: {} may be intercepted by your terminal/OS/apps. Run /keys for details.",
         keys.join(", ")
     ))
 }
@@ -124,6 +153,7 @@ mod tests {
             source: KeySource::Terminal,
             action: action.to_string(),
             raw: format!("{keys}={action}"),
+            tool: String::new(),
         }
     }
 

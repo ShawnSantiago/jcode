@@ -507,10 +507,48 @@ fn test_handle_key_super_left_right_move_to_edges() {
     let mut app = create_test_app();
     app.set_input_for_test("hello world");
 
-    app.handle_key(KeyCode::Left, KeyModifiers::SUPER).unwrap();
+    if cfg!(target_os = "macos") {
+        // On macOS, Cmd+Left/Right default to effort cycling, so the cursor
+        // must NOT move; Home/End still jump to the edges.
+        let before = app.cursor_pos();
+        app.handle_key(KeyCode::Left, KeyModifiers::SUPER).unwrap();
+        assert_eq!(app.cursor_pos(), before);
+
+        app.handle_key(KeyCode::Home, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.cursor_pos(), 0);
+
+        app.handle_key(KeyCode::End, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.cursor_pos(), "hello world".len());
+    } else {
+        app.handle_key(KeyCode::Left, KeyModifiers::SUPER).unwrap();
+        assert_eq!(app.cursor_pos(), 0);
+
+        app.handle_key(KeyCode::Right, KeyModifiers::SUPER).unwrap();
+        assert_eq!(app.cursor_pos(), "hello world".len());
+    }
+}
+
+#[test]
+fn test_handle_key_alt_left_right_move_by_word() {
+    // On non-macOS platforms Alt+Left/Right default to effort cycling, so the
+    // word-move behavior only applies where Cmd+Left/Right own effort cycling.
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world");
+
+    app.handle_key(KeyCode::Left, KeyModifiers::ALT).unwrap();
+    assert_eq!(app.cursor_pos(), "hello ".len());
+
+    app.handle_key(KeyCode::Left, KeyModifiers::ALT).unwrap();
     assert_eq!(app.cursor_pos(), 0);
 
-    app.handle_key(KeyCode::Right, KeyModifiers::SUPER).unwrap();
+    // Forward lands at the start of the next word, matching Alt+F.
+    app.handle_key(KeyCode::Right, KeyModifiers::ALT).unwrap();
+    assert_eq!(app.cursor_pos(), "hello ".len());
+
+    app.handle_key(KeyCode::Right, KeyModifiers::ALT).unwrap();
     assert_eq!(app.cursor_pos(), "hello world".len());
 }
 
@@ -910,6 +948,34 @@ fn test_ctrl_enter_opposite_send_mode() {
 }
 
 #[test]
+fn test_cmd_enter_opposite_send_mode() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+
+    // Default immediate mode: Cmd+Enter should queue, matching Ctrl+Enter
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::SUPER).unwrap();
+
+    assert_eq!(app.queued_count(), 1);
+    assert_eq!(app.interleave_message.as_deref(), None);
+    assert!(app.input().is_empty());
+
+    // Queue mode: Cmd+Enter should interleave (sets interleave_message, not queued)
+    app.queue_mode = true;
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::SUPER).unwrap();
+
+    assert_eq!(app.queued_count(), 1); // Still just "hi" in queue
+    assert_eq!(app.interleave_message.as_deref(), Some("yo")); // "yo" is for interleave
+}
+
+#[test]
 fn test_typing_during_processing() {
     let mut app = create_test_app();
     app.is_processing = true;
@@ -1072,6 +1138,37 @@ fn test_retrieve_pending_message_edits_queued_message() {
     assert_eq!(app.queued_count(), 0);
     assert_eq!(app.input(), "hello");
     assert_eq!(app.cursor_pos(), 5); // Cursor at end
+}
+
+#[test]
+fn test_retrieve_pending_message_with_alt_and_super_up() {
+    // Ctrl+Up, Alt(Option)+Up and Cmd(Super)+Up must all recall a queued message
+    // so the gesture works regardless of which modifier the terminal forwards.
+    for modifier in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+    ] {
+        let mut app = create_test_app();
+        app.queue_mode = true;
+        app.is_processing = true;
+
+        for c in "hello".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        assert_eq!(app.queued_count(), 1, "modifier {modifier:?}");
+        assert!(app.input().is_empty(), "modifier {modifier:?}");
+
+        app.handle_key(KeyCode::Up, modifier).unwrap();
+
+        assert_eq!(app.queued_count(), 0, "modifier {modifier:?}");
+        assert_eq!(app.input(), "hello", "modifier {modifier:?}");
+        assert_eq!(app.cursor_pos(), 5, "modifier {modifier:?}");
+    }
 }
 
 #[test]

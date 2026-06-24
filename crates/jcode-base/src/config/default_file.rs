@@ -30,8 +30,10 @@ model_switch_next = "ctrl+tab"
 model_switch_prev = "ctrl+shift+tab"
 
 # Reasoning effort switching (OpenAI models)
-effort_increase = "alt+right"
-effort_decrease = "alt+left"
+# Defaults: cmd+right / cmd+left on macOS, alt+right / alt+left elsewhere.
+# Alt/Option+Left/Right move by word in the input box.
+effort_increase = "@EFFORT_INCREASE@"
+effort_decrease = "@EFFORT_DECREASE@"
 
 # Centered mode toggle key
 centered_toggle = "alt+c"
@@ -64,6 +66,20 @@ diagram_pane_toggle = "alt+t"
 typing_scroll_lock_toggle = "alt+s"
 diff_mode_cycle = "alt+g"
 info_widget_toggle = "alt+i"
+
+# Spawn a fresh jcode session in a new terminal window, reusing the current
+# session's working directory. Companion to the system-wide launch hotkeys.
+# On macOS, `jcode setup-hotkey` installs three global launch hotkeys:
+#   Cmd+;        new jcode in your home directory
+#   Cmd+'        new jcode in your last project directory
+#   Cmd+Shift+'  new jcode self-dev session (last jcode repo)
+# Default: Cmd+Shift+; on macOS, Alt+Shift+; elsewhere. Set "" to disable.
+# Note: some macOS terminals intercept Cmd combos; if so, pick another binding.
+# new_terminal = "cmd+shift+;"
+
+# Open the /resume session picker.
+# Default: Cmd+R on macOS, Alt+R on Windows/Linux. Set "" to disable.
+# open_resume = "cmd+r"
 
 # /resume picker Enter behavior. Options: "current-terminal" or "new-terminal".
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
@@ -290,8 +306,12 @@ swarm_spawn_mode = "visible"
 # Env override: JCODE_MEMORY_MODEL
 # memory_model = "claude-haiku-4"
 #
-# Whether the memory sidecar handles relevance/extraction.
-# memory_sidecar_enabled = false
+# Whether the memory sidecar (LLM precision judge) handles relevance/extraction.
+# Default true: the LLM precision-judge path is the only reliably productive
+# memory mode. Set false only to opt into the lower-precision no-LLM hybrid path.
+# When this is true but no LLM backend is reachable (logged out), memory goes
+# dormant instead of degrading to the no-LLM path. Env: JCODE_MEMORY_SIDECAR_ENABLED
+# memory_sidecar_enabled = true
 #
 # Minimum turns between Mode-2 memory reranks (cadence floor). The expensive
 # listwise LLM rerank runs at most once per this many turns; skipped turns fall
@@ -306,6 +326,17 @@ swarm_spawn_mode = "visible"
 # for the cheaper single-judge path (precision ~0.77).
 # memory_rerank_votes = 2
 # memory_rerank_min_agree = 2
+#
+# Embedding backend for memory dense-retrieval. "local" (default) uses the
+# bundled all-MiniLM-L6-v2 ONNX model (no network); "openai" uses a remote
+# OpenAI / OpenAI-compatible /v1/embeddings endpoint (requires OPENAI_API_KEY;
+# silently falls back to local when no key is found). Vectors from different
+# models live in separate spaces and are never compared, so switching is safe.
+# Env override: JCODE_MEMORY_EMBEDDING_BACKEND
+# memory_embedding_backend = "local"
+# memory_embedding_model = "text-embedding-3-small"
+# memory_embedding_base_url = "https://api.openai.com/v1"
+# memory_embedding_dim = 1536
 
 [terminal]
 # External command that takes over headed session spawns (swarm agents,
@@ -339,6 +370,27 @@ swarm_spawn_mode = "visible"
 # Example:
 #   focus_hook = "~/bin/jcode-focus-router"
 # focus_hook = ""
+
+[notifications]
+# Desktop notifications for interactive sessions (macOS Notification Center /
+# Linux notify-send). Separate from [safety], which covers ambient-mode
+# ntfy/email/channel notifications.
+#
+# Notify when an agent turn finishes. Fires only for long turns and, by
+# default, only while the terminal window is unfocused. The notification is a
+# compact summary: session name, duration, todo progress, and a snippet of the
+# final assistant message.
+# turn_complete = true
+# Minimum turn duration (seconds) before notifying (default: 120)
+# turn_complete_min_secs = 120
+# Lower threshold (seconds) when the session has todos, since todos indicate
+# task-style work worth reporting sooner (default: 30)
+# turn_complete_todo_min_secs = 30
+# Only notify while the terminal window is unfocused (default: true)
+# turn_complete_only_when_unfocused = true
+# macOS Notification Center sound played on completion (e.g. "Glass", "Ping",
+# "Hero"). Empty string disables the sound. Ignored on non-macOS. (default: "Glass")
+# turn_complete_sound = "Glass"
 
 [hooks]
 # Lifecycle hooks: external commands jcode runs at well-defined points so other
@@ -469,6 +521,16 @@ desktop_notifications = true
 # jade_relay_launch_enabled = false  # Allow cloud device commands to open headed local sessions.
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
 	"#;
+
+        // Substitute platform-specific defaults from the keybinding registry.
+        let p = jcode_config_types::KeybindingPlatform::current();
+        let effort_increase =
+            jcode_config_types::default_binding("effort_increase", p).unwrap_or("alt+right");
+        let effort_decrease =
+            jcode_config_types::default_binding("effort_decrease", p).unwrap_or("alt+left");
+        let default_content = default_content
+            .replace("@EFFORT_INCREASE@", effort_increase)
+            .replace("@EFFORT_DECREASE@", effort_decrease);
 
         std::fs::write(&path, default_content)?;
         Ok(path)

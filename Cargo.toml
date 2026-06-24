@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.30.2"
+version = "0.31.2"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -74,8 +74,6 @@ members = [
     "crates/jcode-terminal-image",
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
-    "crates/jcode-mobile-core",
-    "crates/jcode-mobile-sim",
     "crates/jcode-desktop",
     "crates/jcode-render-core",
 ]
@@ -246,7 +244,7 @@ jcode-side-panel-types = { path = "crates/jcode-side-panel-types" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.2" }
+agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.3" }
 qrcode = { version = "0.14.1", default-features = false }
 aws-config = "1.8.16"
 aws-credential-types = "1.2.14"
@@ -286,6 +284,38 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSThread",
+    "NSRunLoop",
+    "NSDate",
+    "NSTimer",
+    "NSUserDefaults",
+    "NSValue",
+    "NSAttributedString",
+    "NSDictionary",
+    "block2",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSImage",
+    "NSAttributedString",
+    "NSMenu",
+    "NSMenuItem",
+    "NSRunningApplication",
+] }
 
 [profile.release]
 opt-level = 1

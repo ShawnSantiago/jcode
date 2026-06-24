@@ -451,6 +451,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             RestartCommand::Status => commands::run_restart_status_command()?,
             RestartCommand::Clear => commands::run_restart_clear_command()?,
         },
+        Some(Command::Menubar { once, json }) => {
+            commands::run_menubar_command(once, json)?;
+        }
         None => run_default_command(args).await?,
     }
 
@@ -752,11 +755,17 @@ async fn run_default_command(args: Args) -> Result<()> {
         // surface the keybinding-conflict heads-up when nothing else is queued,
         // so we never clobber an early-launch tip. The conflict hint is
         // self-debouncing (shown once per distinct conflict set).
-        setup_hints::maybe_show_setup_hints().or_else(|| {
-            setup_hints::maybe_show_keymap_conflict_hint(&crate::config::config().keybindings)
-        })
+        setup_hints::maybe_show_setup_hints()
+            .or_else(|| {
+                setup_hints::maybe_show_keymap_conflict_hint(&crate::config::config().keybindings)
+            })
+            .or_else(setup_hints::maybe_show_glyph_safe_notice)
     };
     startup_profile::mark("setup_hints");
+
+    // Best-effort: make sure the macOS menu bar session-count indicator is
+    // running so it shows up automatically for every macOS user.
+    commands::ensure_menubar_helper_running();
 
     if args.resume.is_none() {
         terminal::show_crash_resume_hint();
@@ -767,6 +776,15 @@ async fn run_default_command(args: Args) -> Result<()> {
     let in_jcode_repo = build::is_jcode_repo(&cwd);
     startup_profile::mark("is_jcode_repo");
     let already_in_selfdev = crate::cli::selfdev::client_selfdev_requested();
+
+    // Record where this interactive launch happened so the system-wide launch
+    // hotkeys can reopen jcode in the last project directory (Cmd+') and the
+    // last jcode repo for self-dev (Cmd+Shift+'). Best-effort; ignored unless a
+    // real TTY and not a fresh-spawn re-entry.
+    if !args.fresh_spawn && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let repo_dir = build::get_repo_dir();
+        setup_hints::record_launch_dirs(&cwd, repo_dir.as_deref());
+    }
 
     if in_jcode_repo && !already_in_selfdev && !args.no_selfdev {
         output::stderr_info("📍 Detected jcode repository - enabling self-dev mode");

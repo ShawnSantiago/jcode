@@ -1542,8 +1542,18 @@ fn handle_disconnected_key_internal(
         }
     }
 
-    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL) {
+    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) {
         queue_message_for_reconnect(app);
+        return Ok(());
+    }
+
+    if app.new_terminal_key_matches(code, modifiers) {
+        app.handle_new_terminal_hotkey();
+        return Ok(());
+    }
+
+    if app.open_resume_key_matches(code, modifiers) {
+        app.open_session_picker();
         return Ok(());
     }
 

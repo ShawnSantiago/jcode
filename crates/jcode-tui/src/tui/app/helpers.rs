@@ -718,6 +718,12 @@ fn spawn_command_in_new_terminal(
     title: &str,
     cwd: &Path,
 ) -> anyhow::Result<bool> {
+    if cfg!(test) {
+        // Never launch real terminal windows from unit tests. Server-event
+        // handlers (e.g. SplitResponse) call this with current_exe(), which in
+        // tests is the libtest harness and would pop up a broken window.
+        return Ok(false);
+    }
     let command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
         .title(title.to_string());
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
@@ -730,6 +736,35 @@ pub(super) fn spawn_resume_target_in_new_terminal(
 ) -> anyhow::Result<bool> {
     let (program, args, title) = build_resume_command(target, socket);
     spawn_command_in_new_terminal(&program, &args, &title, cwd)
+}
+
+/// Build the terminal command used to spawn a brand-new jcode session.
+/// Split from `spawn_fresh_session_in_new_terminal` so tests can verify the
+/// invocation without launching a window.
+fn build_fresh_session_command(socket: Option<&str>) -> crate::terminal_launch::TerminalCommand {
+    let exe = launch_client_executable();
+    let mut args = vec!["--fresh-spawn".to_string()];
+    if let Some(socket) = socket.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--socket".to_string());
+        args.push(socket.to_string());
+    }
+    crate::terminal_launch::TerminalCommand::new(&exe, args)
+        .title("jcode · new session".to_string())
+        .kind("new-terminal")
+        .fresh_spawn()
+}
+
+/// Spawn a brand-new jcode session in a new terminal window, staying on the
+/// same server socket when one is configured. Returns Ok(true) when a terminal
+/// was launched, Ok(false) when no supported terminal was found.
+pub(super) fn spawn_fresh_session_in_new_terminal(cwd: &Path) -> anyhow::Result<bool> {
+    if cfg!(test) {
+        // Never launch real terminal windows from unit tests.
+        return Ok(false);
+    }
+    let socket = std::env::var("JCODE_SOCKET").ok();
+    let command = build_fresh_session_command(socket.as_deref());
+    crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
 fn resumed_window_title(session_id: &str) -> String {
@@ -1063,12 +1098,15 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
     static CACHE: Mutex<Option<(Instant, Option<MemoryInfo>, bool)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_secs(2);
 
-    if !memory_enabled {
-        return None;
-    }
-
-    let activity = crate::memory::get_activity();
-    let sidecar_model = if crate::memory::memory_sidecar_enabled() {
+    // When memory is disabled we still surface the stored counts (with a
+    // DISABLED badge) so the user can see they have memories but recall is off.
+    // Live activity and the sidecar model are suppressed in that case.
+    let activity = if memory_enabled {
+        crate::memory::get_activity()
+    } else {
+        None
+    };
+    let sidecar_model = if memory_enabled && crate::memory::memory_sidecar_enabled() {
         let sidecar = crate::sidecar::Sidecar::new();
         Some(format!(
             "{} · {}",
@@ -1079,35 +1117,24 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         None
     };
 
+    let finalize = |mut info: MemoryInfo| {
+        info.activity = activity.clone();
+        info.sidecar_model = sidecar_model.clone();
+        info.disabled = !memory_enabled;
+        info
+    };
+
     if let Ok(mut guard) = CACHE.lock() {
         if let Some((ts, cached, refreshing)) = guard.as_mut() {
             if ts.elapsed() < TTL || *refreshing {
                 return match cached.clone() {
-                    Some(mut info) => {
-                        info.activity = activity.clone();
-                        info.sidecar_model = sidecar_model.clone();
-                        Some(info)
-                    }
-                    None => activity.clone().map(|activity| MemoryInfo {
-                        sidecar_available: crate::memory::memory_sidecar_enabled(),
-                        sidecar_model: sidecar_model.clone(),
-                        activity: Some(activity),
-                        ..Default::default()
-                    }),
+                    Some(info) => Some(finalize(info)),
+                    None => fallback_memory_info(memory_enabled, &activity, &sidecar_model),
                 };
             }
             let stale = match cached.clone() {
-                Some(mut info) => {
-                    info.activity = activity.clone();
-                    info.sidecar_model = sidecar_model.clone();
-                    Some(info)
-                }
-                None => activity.clone().map(|activity| MemoryInfo {
-                    sidecar_available: crate::memory::memory_sidecar_enabled(),
-                    sidecar_model: sidecar_model.clone(),
-                    activity: Some(activity),
-                    ..Default::default()
-                }),
+                Some(info) => Some(finalize(info)),
+                None => fallback_memory_info(memory_enabled, &activity, &sidecar_model),
             };
             *refreshing = true;
             std::thread::spawn(|| {
@@ -1128,10 +1155,23 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         });
     }
 
-    activity.map(|activity| MemoryInfo {
+    fallback_memory_info(memory_enabled, &activity, &sidecar_model)
+}
+
+fn fallback_memory_info(
+    memory_enabled: bool,
+    activity: &Option<crate::memory_types::MemoryActivity>,
+    sidecar_model: &Option<String>,
+) -> Option<MemoryInfo> {
+    // No cached counts yet. Show whatever live signal we have.
+    if activity.is_none() && sidecar_model.is_none() && memory_enabled {
+        return None;
+    }
+    Some(MemoryInfo {
         sidecar_available: crate::memory::memory_sidecar_enabled(),
-        sidecar_model,
-        activity: Some(activity),
+        sidecar_model: sidecar_model.clone(),
+        activity: activity.clone(),
+        disabled: !memory_enabled,
         ..Default::default()
     })
 }
@@ -1193,6 +1233,7 @@ fn gather_memory_info_inner() -> Option<MemoryInfo> {
             sidecar_available: crate::memory::memory_sidecar_enabled(),
             sidecar_model,
             activity,
+            disabled: false,
             graph_nodes,
             graph_edges,
         })

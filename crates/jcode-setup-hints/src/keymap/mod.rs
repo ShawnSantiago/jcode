@@ -12,6 +12,7 @@
 
 pub mod chord;
 pub mod conflicts;
+pub mod external;
 pub mod macos_hotkeys;
 pub mod report;
 pub mod source;
@@ -97,6 +98,7 @@ pub fn collect_snapshot() -> KeymapSnapshot {
     let mut bindings = Vec::new();
     bindings.extend(macos_hotkeys::read_symbolic_hotkeys());
     bindings.extend(terminal::read_ghostty_keybinds());
+    bindings.extend(external::read_external_bindings());
 
     KeymapSnapshot {
         version: SNAPSHOT_VERSION,
@@ -178,6 +180,7 @@ mod tests {
                 source: KeySource::Terminal,
                 action: "clear_screen".to_string(),
                 raw: "super+k=clear_screen".to_string(),
+                tool: String::new(),
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();

@@ -112,8 +112,41 @@ struct LegacyNoteEntry {
 
 pub type MemoryEventSink = Arc<dyn Fn(crate::protocol::ServerEvent) + Send + Sync>;
 
+/// Whether the user opted into the memory sidecar (LLM precision judge) mode.
+///
+/// This is the *configured* intent, not whether an LLM is actually reachable.
+/// It defaults to `true`: the LLM precision-judge path is the only mode that is
+/// reliably productive, so memory uses it unless the user explicitly opts into
+/// the no-LLM hybrid path (`agents.memory_sidecar_enabled = false`).
 pub fn memory_sidecar_enabled() -> bool {
     crate::config::config().agents.memory_sidecar_enabled
+}
+
+/// Whether the LLM precision-judge (sidecar) path can actually run right now:
+/// the user opted into sidecar mode AND a real LLM backend is reachable.
+///
+/// Re-evaluated live so login add/remove is reflected without a restart.
+pub fn memory_llm_judge_available() -> bool {
+    memory_sidecar_enabled() && crate::sidecar::Sidecar::llm_backend_available()
+}
+
+/// Whether memory should do anything at all this moment.
+///
+/// Memory is only worthwhile with the LLM precision judge. So memory is active
+/// when EITHER:
+/// - the LLM judge is available (configured + a backend is reachable), OR
+/// - the user explicitly opted OUT of the sidecar (they deliberately want the
+///   no-LLM hybrid path).
+///
+/// The one case we suppress is "sidecar mode requested but no LLM backend is
+/// reachable" (e.g. logged out / lost access): rather than silently degrading
+/// to the low-precision no-LLM path, memory goes dormant until a login returns.
+pub fn memory_runtime_active() -> bool {
+    if !memory_sidecar_enabled() {
+        // Explicit opt-out: user chose the no-LLM hybrid path on purpose.
+        return true;
+    }
+    crate::sidecar::Sidecar::llm_backend_available()
 }
 
 fn emit_memory_activity(event_tx: Option<&MemoryEventSink>) {
@@ -135,15 +168,13 @@ impl MemoryEntryEmbeddingExt for MemoryEntry {
             return false;
         }
 
-        match crate::embedding::embed(&self.content) {
-            Ok(embedding) => {
-                // Tag with the active local model so dense search only compares
-                // vectors from the same model. Untagged legacy memories are
-                // treated as this same model via effective_embedding_model().
-                self.set_embedding(
-                    Some(embedding),
-                    Some(crate::memory_types::LEGACY_EMBEDDING_MODEL.to_string()),
-                );
+        match crate::embedding_backend::embed_passage_active(&self.content) {
+            Ok((embedding, model_id)) => {
+                // Tag with the ACTIVE backend's model id so dense search only
+                // compares vectors from the same model/vector space. Untagged
+                // legacy memories are treated as local MiniLM via
+                // effective_embedding_model().
+                self.set_embedding(Some(embedding), Some(model_id));
                 true
             }
             Err(err) => {
@@ -544,8 +575,8 @@ impl MemoryManager {
         limit: usize,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
         // Generate embedding for query text
-        let query_embedding = match crate::embedding::embed(text) {
-            Ok(emb) => emb,
+        let query_embedding = match crate::embedding_backend::embed_query_active(text) {
+            Ok((emb, _model)) => emb,
             Err(e) => {
                 crate::logging::info(&format!(
                     "Embedding failed, falling back to keyword search: {}",
@@ -565,8 +596,8 @@ impl MemoryManager {
         limit: usize,
         scope: MemoryScope,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
-        let query_embedding = match crate::embedding::embed(text) {
-            Ok(emb) => emb,
+        let query_embedding = match crate::embedding_backend::embed_query_active(text) {
+            Ok((emb, _model)) => emb,
             Err(e) => {
                 crate::logging::info(&format!(
                     "Embedding failed, falling back to keyword search: {}",
@@ -654,12 +685,28 @@ impl MemoryManager {
         let pool = (limit * 5).max(HYBRID_POOL_MIN);
 
         // Dense ranking (no hard threshold; just take the top by cosine).
-        let emb_refs: Vec<&[f32]> = entries
+        // Vector-space gate: only entries embedded by the ACTIVE backend share a
+        // comparable space, so dense scores are computed over those only. Other
+        // entries (different model, e.g. not-yet-re-embedded local memories when
+        // OpenAI is active) still participate via the BM25 lexical half below, so
+        // they remain reachable rather than disappearing on a backend switch.
+        let active_model = crate::embedding_backend::active_model_id();
+        let dense_eligible: Vec<usize> = entries
             .iter()
-            .filter_map(|e| e.embedding.as_deref())
+            .enumerate()
+            .filter(|(_, e)| e.effective_embedding_model() == active_model)
+            .map(|(i, _)| i)
+            .collect();
+        let emb_refs: Vec<&[f32]> = dense_eligible
+            .iter()
+            .filter_map(|&i| entries[i].embedding.as_deref())
             .collect();
         let dense_scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
-        let mut dense: Vec<(usize, f32)> = dense_scores.iter().copied().enumerate().collect();
+        let mut dense: Vec<(usize, f32)> = dense_eligible
+            .iter()
+            .copied()
+            .zip(dense_scores)
+            .collect();
         dense.sort_by(|a, b| b.1.total_cmp(&a.1));
         dense.truncate(pool);
 
@@ -770,8 +817,8 @@ impl MemoryManager {
         limit: usize,
         scope: MemoryScope,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
-        let query_embedding = match crate::embedding::embed(text) {
-            Ok(emb) => emb,
+        let query_embedding = match crate::embedding_backend::embed_query_active(text) {
+            Ok((emb, _model)) => emb,
             Err(e) => {
                 crate::logging::info(&format!(
                     "Embedding failed for retrieval candidates, falling back to keyword search: {}",
@@ -798,17 +845,33 @@ impl MemoryManager {
 
         let mut filtered_entries = Vec::with_capacity(entries.len());
         let mut skipped_missing_embeddings = 0usize;
+        // Vector-space gate: only compare embeddings produced by the ACTIVE
+        // backend (same model id). When the active backend differs from an
+        // entry's stored model (e.g. user switched to OpenAI but this memory was
+        // embedded with local MiniLM, not yet re-embedded), the cosine would be
+        // meaningless, so we exclude it from dense scoring. Such memories remain
+        // reachable via the lexical/BM25 path in hybrid retrieval.
+        let active_model = crate::embedding_backend::active_model_id();
+        let mut skipped_model_mismatch = 0usize;
         for entry in entries {
-            if entry.embedding.is_some() {
-                filtered_entries.push(entry);
-            } else {
+            if entry.embedding.is_none() {
                 skipped_missing_embeddings += 1;
+            } else if entry.effective_embedding_model() != active_model {
+                skipped_model_mismatch += 1;
+            } else {
+                filtered_entries.push(entry);
             }
         }
         if skipped_missing_embeddings > 0 {
             crate::logging::warn(&format!(
                 "Skipped {} retrieval candidate(s) without embeddings during similarity scoring",
                 skipped_missing_embeddings
+            ));
+        }
+        if skipped_model_mismatch > 0 {
+            crate::logging::info(&format!(
+                "Skipped {} retrieval candidate(s) embedded with a different model than the active backend ({})",
+                skipped_model_mismatch, active_model
             ));
         }
         if filtered_entries.is_empty() {
@@ -1059,8 +1122,10 @@ impl MemoryManager {
         transcript: &str,
         session_id: &str,
     ) -> Result<Vec<String>> {
-        if !memory_sidecar_enabled() {
-            crate::logging::info("Memory transcript extraction skipped: memory sidecar disabled");
+        if !memory_llm_judge_available() {
+            crate::logging::info(
+                "Memory transcript extraction skipped: LLM judge unavailable",
+            );
             return Ok(Vec::new());
         }
 

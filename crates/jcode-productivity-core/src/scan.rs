@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// One cached entry: the file fingerprint plus the computed summary.
@@ -99,8 +99,8 @@ pub fn scan_all() -> Result<ScanResult> {
         }
     }
 
-    let cache_hits = Mutex::new(0u64);
-    let parse_errors = Mutex::new(0u64);
+    let cache_hits = AtomicU64::new(0);
+    let parse_errors = AtomicU64::new(0);
 
     // Parse (or reuse cache) in parallel. Returns (filename, entry).
     let results: Vec<(String, CacheEntry)> = files
@@ -110,7 +110,7 @@ pub fn scan_all() -> Result<ScanResult> {
                 && prev.len == *len
                 && prev.mtime_ns == *mtime_ns
             {
-                *cache_hits.lock().unwrap() += 1;
+                cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Some((name.clone(), prev.clone()));
             }
             let path = dir.join(name);
@@ -124,7 +124,7 @@ pub fn scan_all() -> Result<ScanResult> {
                     },
                 )),
                 Err(_) => {
-                    *parse_errors.lock().unwrap() += 1;
+                    parse_errors.fetch_add(1, Ordering::Relaxed);
                     None
                 }
             }
@@ -150,8 +150,8 @@ pub fn scan_all() -> Result<ScanResult> {
 
     Ok(ScanResult {
         scanned_files: summaries.len() as u64,
-        parse_errors: parse_errors.into_inner().unwrap_or(0),
-        cache_hits: cache_hits.into_inner().unwrap_or(0),
+        parse_errors: parse_errors.into_inner(),
+        cache_hits: cache_hits.into_inner(),
         scan_secs: started.elapsed().as_secs_f64(),
         summaries,
     })

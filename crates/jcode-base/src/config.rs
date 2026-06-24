@@ -8,9 +8,9 @@ pub use jcode_config_types::{
     CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
     DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HooksConfig, KeybindingsConfig,
     MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode,
-    SafetyConfig, SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig, UpdateChannel,
-    WebSearchConfig, WebSearchEngine,
+    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig,
+    ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig,
+    UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -105,6 +105,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MODEL_SWITCH_KEY",
     "JCODE_MODEL_SWITCH_PREV_KEY",
     "JCODE_MOUSE_CAPTURE",
+    "JCODE_NEW_TERMINAL_KEY",
     "JCODE_NTFY_SERVER",
     "JCODE_NTFY_TOPIC",
     "JCODE_OPENAI_NATIVE_COMPACTION_MODE",
@@ -474,6 +475,9 @@ pub struct Config {
 
     /// Safety / notification configuration
     pub safety: SafetyConfig,
+
+    /// Desktop notifications for interactive sessions (e.g. turn completion)
+    pub notifications: NotificationsConfig,
 
     /// WebSocket gateway configuration (for iOS/web clients)
     pub gateway: GatewayConfig,

@@ -349,10 +349,17 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(Line::from(""));
     lines.push(key_entry("PageUp / PageDown", "Scroll history"));
     lines.push(key_entry("Up / Down", "Scroll history (when input empty)"));
-    lines.push(key_entry("Ctrl+[ / Ctrl+]", "Jump between user prompts"));
+    lines.push(key_entry(
+        "Ctrl+J / Ctrl+K",
+        "Jump to next / previous user prompt (also Ctrl+] / Ctrl+[)",
+    ));
+    lines.push(key_entry(
+        "Ctrl+Shift+J / Ctrl+Shift+K",
+        "Scroll history down / up one line",
+    ));
     lines.push(key_entry(
         "Cmd/Super+K / J",
-        "Jump to previous / next user prompt (macOS)",
+        "Jump to previous / next user prompt (macOS, if forwarded)",
     ));
     lines.push(key_entry("Ctrl+1..4", "Resize side panel to 25/50/75/100%"));
     lines.push(key_entry(
@@ -403,7 +410,6 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Quit (press twice to confirm)",
     ));
     lines.push(key_entry("Ctrl+X", "Cut entire input line to clipboard"));
-    lines.push(key_entry("Ctrl+E", "Edit prompt in $EDITOR"));
     lines.push(key_entry(
         "Ctrl+A",
         "Copy visible chat viewport plus nearby context",
@@ -418,10 +424,16 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Cmd/Super+Backspace / Delete",
         "Delete previous word in input",
     ));
-    lines.push(key_entry(
-        "Cmd/Super+Left / Right",
-        "Move to start / end of input",
-    ));
+    if cfg!(target_os = "macos") {
+        // On macOS, Cmd+Left/Right default to effort cycling; Home/End and
+        // Cmd+A/E still jump to the start/end of the input.
+        lines.push(key_entry("Home / End", "Move to start / end of input"));
+    } else {
+        lines.push(key_entry(
+            "Cmd/Super+Left / Right",
+            "Move to start / end of input",
+        ));
+    }
     lines.push(key_entry("Cmd/Super+Z", "Undo input edit"));
     lines.push(key_entry("Cmd/Super+X / V", "Cut input / paste clipboard"));
     lines.push(key_entry("Ctrl+S", "Stash / pop input (save for later)"));
@@ -433,7 +445,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Insert newline in input",
     ));
     lines.push(key_entry(
-        "Ctrl+Enter",
+        "Ctrl+Enter / Cmd+Enter",
         "Use opposite send mode while processing",
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
@@ -450,9 +462,27 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Alt+Y", "Toggle chat selection/copy mode"));
     lines.push(key_entry("Alt+S", "Toggle typing scroll lock"));
     lines.push(key_entry("Ctrl+P", "Toggle auto-poke for incomplete todos"));
-    lines.push(key_entry("Alt+Left / Right", "Cycle reasoning effort"));
+    lines.push(key_entry(
+        &crate::tui::keybind::effort_switch_keys_label(),
+        "Cycle reasoning effort",
+    ));
+    if cfg!(target_os = "macos") {
+        lines.push(key_entry(
+            "Alt+Left / Right",
+            "Move by word in input (also Alt+B / Alt+F)",
+        ));
+    }
     if let Some(label) = app.dictation_key_label() {
         lines.push(key_entry(&label, "Run configured dictation"));
+    }
+    if let Some(label) = crate::tui::keybind::load_open_resume_key().label {
+        lines.push(key_entry(&label, "Open the /resume session picker"));
+    }
+    if let Some(label) = crate::tui::keybind::load_new_terminal_key().label {
+        lines.push(key_entry(
+            &label,
+            "Spawn new jcode session in a new terminal",
+        ));
     }
 
     lines.push(Line::from(""));

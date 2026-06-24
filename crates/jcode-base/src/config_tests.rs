@@ -206,6 +206,15 @@ fn test_env_override_focus_hook() {
 }
 
 #[test]
+fn test_memory_sidecar_enabled_defaults_true() {
+    // The LLM precision-judge path is the only reliably productive memory mode,
+    // so memory uses it by default. Users opt into the no-LLM hybrid path
+    // explicitly by setting this false.
+    let cfg = Config::default();
+    assert!(cfg.agents.memory_sidecar_enabled);
+}
+
+#[test]
 fn test_env_override_memory_sidecar() {
     let _guard = crate::storage::lock_test_env();
     let prev_model = std::env::var_os("JCODE_MEMORY_MODEL");
@@ -401,6 +410,22 @@ fn test_generated_default_config_uses_low_openai_reasoning_effort() {
     assert!(
         content.contains("[agents]") && content.contains("swarm_spawn_mode = \"visible\""),
         "generated default config should document agent spawn defaults"
+    );
+
+    // Effort keys come from the per-platform keybinding registry; the template
+    // placeholders must always be substituted.
+    assert!(
+        !content.contains("@EFFORT_INCREASE@") && !content.contains("@EFFORT_DECREASE@"),
+        "generated default config should substitute effort key placeholders"
+    );
+    let expected_increase = if cfg!(target_os = "macos") {
+        "effort_increase = \"cmd+right\""
+    } else {
+        "effort_increase = \"alt+right\""
+    };
+    assert!(
+        content.contains(expected_increase),
+        "generated default config should use the platform effort_increase default"
     );
 
     // The generated file must always be valid TOML for the current Config schema.

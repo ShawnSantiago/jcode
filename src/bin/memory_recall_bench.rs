@@ -165,7 +165,7 @@ fn dense_retrieve(
         .collect();
     let emb_refs: Vec<&[f32]> = entries
         .iter()
-        .map(|m| m.embedding.as_deref().unwrap())
+        .filter_map(|m| m.embedding.as_deref())
         .collect();
     let scores = embedding::batch_cosine_similarity(query_emb, &emb_refs);
 
@@ -472,7 +472,9 @@ fn cmd_queries(args: &[String]) -> Result<()> {
     sessions.sort_by(|a, b| b.1.cmp(&a.1));
 
     let out_path = bench_root().join("labels/queries.jsonl");
-    std::fs::create_dir_all(out_path.parent().unwrap())?;
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut out = String::new();
     let mut count = 0usize;
     let mut used_sessions = 0usize;
@@ -585,7 +587,9 @@ fn cmd_pool(args: &[String]) -> Result<()> {
 
     let queries = read_queries()?;
     let out_path = bench_root().join("labels/pool.jsonl");
-    std::fs::create_dir_all(out_path.parent().unwrap())?;
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut out = String::new();
 
     for q in &queries {
@@ -897,7 +901,9 @@ fn cmd_judge(args: &[String]) -> Result<()> {
     });
 
     let out_path = bench_root().join("labels/gold.jsonl");
-    std::fs::create_dir_all(out_path.parent().unwrap())?;
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut out = String::new();
     let mut with_rel = 0usize;
     let mut total = 0usize;
@@ -1006,6 +1012,65 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
         }
         None => Vec::new(),
     };
+
+    // Optional remote OpenAI embedding backend for A/B (configs openai_dense /
+    // openai_hybrid). Re-embeds the corpus and queries through the REAL shipped
+    // `OpenAiEmbeddingBackend` so the bench measures exactly what production
+    // would use. Requires OPENAI_API_KEY (or --openai_key=...). Model/base via
+    // --openai_model / --openai_base.
+    let openai_backend = if config == "openai_dense" || config == "openai_hybrid" {
+        use jcode::embedding_backend::{OpenAiEmbeddingBackend, DEFAULT_OPENAI_EMBEDDING_MODEL};
+        let model = opts
+            .get("openai_model")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
+        let key = opts
+            .get("openai_key")
+            .cloned()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or_else(|| {
+                jcode::provider_catalog::load_api_key_from_env_or_config(
+                    "OPENAI_API_KEY",
+                    "openai.env",
+                )
+            })
+            .expect("openai_dense/openai_hybrid require OPENAI_API_KEY or --openai_key");
+        let base = opts.get("openai_base").cloned();
+        let dim = opts.get("openai_dim").and_then(|s| s.parse().ok());
+        eprintln!("Using OpenAI embedding backend model={model}");
+        Some(OpenAiEmbeddingBackend::new(model, key, base, dim))
+    } else {
+        None
+    };
+
+    // Precompute OpenAI corpus embeddings (active memories only), batched to
+    // amortize HTTP round-trips. id -> vector.
+    let openai_corpus_emb: Vec<(String, Vec<f32>)> = match openai_backend.as_ref() {
+        Some(b) => {
+            use jcode::embedding_backend::EmbeddingBackend;
+            let items: Vec<(String, String)> = corpus
+                .active()
+                .map(|m| (m.id.clone(), m.content.clone()))
+                .collect();
+            eprintln!(
+                "Re-embedding {} active memories with OpenAI backend (batched)...",
+                items.len()
+            );
+            let mut out: Vec<(String, Vec<f32>)> = Vec::with_capacity(items.len());
+            for chunk in items.chunks(128) {
+                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
+                let vecs = b
+                    .embed_passages(&texts)
+                    .expect("OpenAI corpus embedding batch failed");
+                for ((id, _), v) in chunk.iter().zip(vecs) {
+                    out.push((id.clone(), v));
+                }
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+
 
     // Optional cross-encoder reranker for ce_rerank config.
     let ce_reranker = opts.get("reranker").map(|dir| {
@@ -1255,7 +1320,9 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
     // Persist the freshly-computed map for cheap replay via config=llm_cached.
     if !llm_rerank_map.is_empty() && config != "llm_cached" {
         let path = bench_root().join("results/llm_rerank_map.json");
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let _ = std::fs::write(&path, serde_json::to_string(&llm_rerank_map)?);
     }
 
@@ -1517,6 +1584,10 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
         let q_emb_alt = alt_embedder
             .as_ref()
             .map(|emb| emb.embed(&format!("{query_prefix}{}", q.query)).unwrap_or_default());
+        let q_emb_openai = openai_backend.as_ref().map(|b| {
+            use jcode::embedding_backend::EmbeddingBackend;
+            b.embed_query(&q.query).expect("OpenAI query embedding failed")
+        });
         let origin: HashSet<&String> = q.origin_memory_ids.iter().collect();
 
         let ranked: Vec<String> = match config.as_str() {
@@ -1720,6 +1791,29 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .map(|(id, _)| id)
                     .collect()
             }
+            "openai_dense" => {
+                // Pure dense retrieval using OpenAI embeddings (top-k cosine).
+                let qe = q_emb_openai
+                    .as_ref()
+                    .expect("openai_dense requires the OpenAI backend");
+                alt_dense_rank(qe, &openai_corpus_emb, EMBEDDING_MAX_HITS)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            }
+            "openai_hybrid" => {
+                // Hybrid: OpenAI dense + BM25 lexical fused with RRF (mirrors the
+                // shipped find_similar_hybrid fusion, just with OpenAI vectors).
+                let qe = q_emb_openai
+                    .as_ref()
+                    .expect("openai_hybrid requires the OpenAI backend");
+                let dense = alt_dense_rank(qe, &openai_corpus_emb, 50);
+                let lex = bm25.search(&q.query, 50);
+                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            }
             "prod_hybrid" => {
                 // Validate the ACTUAL shipped production method end-to-end.
                 prod_mgr
@@ -1766,7 +1860,9 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
         "empty_gold_avg_injected": if empty_q > 0 { empty_injected as f32 / empty_q as f32 } else { 0.0 },
     });
     let out_path = bench_root().join(format!("results/{}.json", config));
-    std::fs::create_dir_all(out_path.parent().unwrap())?;
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&out_path, serde_json::to_string_pretty(&result)?)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
@@ -2100,7 +2196,7 @@ fn cmd_gate(args: &[String]) -> Result<()> {
         }
     }
 
-    consec_sims.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    consec_sims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let pct = |p: f32| {
         if consec_sims.is_empty() {
             return f32::NAN;

@@ -184,7 +184,10 @@ fn streaks(dates: &BTreeSet<String>) -> (u64, u64) {
     // Current streak: walk backwards from the last active day, but only counts
     // as "current" if it reaches today or yesterday.
     let today = Local::now().date_naive();
-    let last = *parsed.last().unwrap();
+    // `parsed` is guaranteed non-empty by the early return above.
+    let Some(&last) = parsed.last() else {
+        return (0, longest);
+    };
     let mut current = 0u64;
     if (today - last).num_days() <= 1 {
         current = 1;

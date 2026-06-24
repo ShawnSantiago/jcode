@@ -45,6 +45,7 @@ pub fn parse_ghostty_keybind_line(line: &str) -> Option<DiscoveredBinding> {
         source: KeySource::Terminal,
         action: action.to_string(),
         raw: line.to_string(),
+        tool: String::new(),
     })
 }
 

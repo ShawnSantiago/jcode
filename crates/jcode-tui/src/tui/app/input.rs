@@ -12,9 +12,7 @@ use crate::bus::{
 use crate::util::truncate_str;
 use anyhow::Result;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::DefaultTerminal;
-use std::io::{Read, Write};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -49,66 +47,6 @@ pub(super) fn strip_reasoning_lines(content: &str) -> String {
         prev_blank = is_blank;
     }
     result.trim_end().to_string()
-}
-
-pub(super) fn edit_input_in_external_editor(app: &mut App) {
-    match edit_text_in_external_editor(&app.input) {
-        Ok(edited) => {
-            if edited != app.input {
-                app.remember_input_undo_state();
-                app.input = edited;
-                app.cursor_pos = app.input.len();
-                app.sync_model_picker_preview_from_input();
-            }
-            app.set_status_notice("Prompt edited in $EDITOR");
-        }
-        Err(err) => app.set_status_notice(format!("Failed to open $EDITOR: {err}")),
-    }
-}
-
-fn edit_text_in_external_editor(initial_text: &str) -> Result<String> {
-    let mut file = tempfile::Builder::new()
-        .prefix("jcode-prompt-")
-        .suffix(".md")
-        .tempfile()?;
-    file.write_all(initial_text.as_bytes())?;
-    file.flush()?;
-    let path = file.path().to_path_buf();
-
-    let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-    if raw_was_enabled {
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        LeaveAlternateScreen,
-        crossterm::cursor::Show
-    );
-
-    let status_result = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("exec ${VISUAL:-${EDITOR:-vi}} \"$@\"")
-        .arg("jcode-editor")
-        .arg(&path)
-        .status();
-
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        EnterAlternateScreen,
-        crossterm::cursor::Hide
-    );
-    if raw_was_enabled {
-        let _ = crossterm::terminal::enable_raw_mode();
-    }
-
-    let status = status_result?;
-    if !status.success() {
-        anyhow::bail!("editor exited with status {status}");
-    }
-
-    let mut edited = String::new();
-    std::fs::File::open(&path)?.read_to_string(&mut edited)?;
-    Ok(edited)
 }
 
 fn mission_turn_reminder(session_id: &str) -> Option<String> {
@@ -856,6 +794,17 @@ pub(super) fn handle_multiline_input_navigation(
     true
 }
 
+/// True when `modifiers` is exactly one of Ctrl, Alt(Option) or Cmd(Super),
+/// the set of single modifiers we treat as "recall queued prompts / browse
+/// history" when combined with Up/Down. Shift or any combination is excluded so
+/// it doesn't shadow selection-extension or other chords.
+pub(super) fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
+    matches!(
+        modifiers,
+        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER
+    )
+}
+
 pub(super) fn handle_prompt_history_navigation(
     app: &mut App,
     code: KeyCode,
@@ -1151,12 +1100,52 @@ impl App {
             self.set_status_notice("Next-prompt new session canceled");
         }
     }
+
+    /// Whether the configured `keybindings.new_terminal` chord matches this key.
+    pub(crate) fn new_terminal_key_matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.new_terminal_key
+            .binding
+            .as_ref()
+            .map(|binding| binding.matches(code, modifiers))
+            .unwrap_or(false)
+    }
+
+    /// Whether the configured `keybindings.open_resume` chord matches this key.
+    pub(crate) fn open_resume_key_matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.open_resume_key
+            .binding
+            .as_ref()
+            .map(|binding| binding.matches(code, modifiers))
+            .unwrap_or(false)
+    }
+
+    /// Spawn a brand-new jcode session in a new terminal window.
+    pub(crate) fn handle_new_terminal_hotkey(&mut self) {
+        let cwd = commands::active_working_dir(self)
+            .filter(|path| path.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        match super::spawn_fresh_session_in_new_terminal(&cwd) {
+            Ok(true) => self.set_status_notice("↗ New terminal opened"),
+            Ok(false) => {
+                self.set_status_notice("No supported terminal found; run `jcode` manually")
+            }
+            Err(error) => self.set_status_notice(format!("New terminal failed: {}", error)),
+        }
+    }
 }
 
 pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    code == KeyCode::Char(' ')
-        && modifiers.contains(KeyModifiers::SUPER)
-        && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::HYPER)
+    if code != KeyCode::Char(' ') {
+        return false;
+    }
+    // Accept either Command/Super+Space (macOS Cmd, often eaten by Spotlight) or
+    // Option/Alt+Space (macOS Option) so the fork-to-new-session arming hotkey is
+    // reachable across terminals. Reject Ctrl/Hyper combos so other chords still
+    // route to their own handlers.
+    let has_super = modifiers.contains(KeyModifiers::SUPER);
+    let has_alt = modifiers.contains(KeyModifiers::ALT);
+    (has_super || has_alt) && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::HYPER)
 }
 
 fn input_routes_to_new_session(app: &App) -> bool {
@@ -1238,7 +1227,7 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Char('e') => {
-            edit_input_in_external_editor(app);
+            app.cursor_pos = app.input.len();
             true
         }
         KeyCode::Char('b') => {
@@ -1361,11 +1350,12 @@ pub(super) fn delete_input_word_back(app: &mut App) {
 
 pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
     match code {
-        KeyCode::Char('b') => {
+        // Alt/Option+Left/Right move by word, matching Alt+B / Alt+F.
+        KeyCode::Left | KeyCode::Char('b') => {
             app.cursor_pos = app.find_word_boundary_back();
             true
         }
-        KeyCode::Char('f') => {
+        KeyCode::Right | KeyCode::Char('f') => {
             app.cursor_pos = app.find_word_boundary_forward();
             true
         }
@@ -1587,6 +1577,14 @@ pub(super) fn handle_pre_control_shortcuts(
     }
     if app.dictation_key_matches(code, modifiers) {
         app.handle_dictation_trigger();
+        return true;
+    }
+    if app.new_terminal_key_matches(code, modifiers) {
+        app.handle_new_terminal_hotkey();
+        return true;
+    }
+    if app.open_resume_key_matches(code, modifiers) {
+        app.open_session_picker();
         return true;
     }
     if let Some(direction) = app.model_switch_keys.direction_for(code, modifiers) {
@@ -2121,16 +2119,23 @@ impl App {
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
 
-        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Up {
+        // Ctrl / Alt(Option) / Cmd(Super) + Up all recall queued/pending messages
+        // for editing and then walk prompt history. We accept any of the three
+        // single modifiers so the gesture works regardless of which one a given
+        // terminal forwards (some send Option as Alt, some forward Command as
+        // Super), without the user having to rebind anything.
+        if code == KeyCode::Up && is_prompt_recall_modifier(modifiers) {
             if retrieve_pending_message_for_edit(self) {
                 return Ok(());
             }
-            handle_prompt_history_navigation(self, code, modifiers);
+            // Normalize to CONTROL so handle_prompt_history_navigation takes its
+            // explicit-history path (jump straight into history even mid-draft).
+            handle_prompt_history_navigation(self, KeyCode::Up, KeyModifiers::CONTROL);
             return Ok(());
         }
 
-        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Down {
-            handle_prompt_history_navigation(self, code, modifiers);
+        if code == KeyCode::Down && is_prompt_recall_modifier(modifiers) {
+            handle_prompt_history_navigation(self, KeyCode::Down, KeyModifiers::CONTROL);
             return Ok(());
         }
 
@@ -2141,8 +2146,10 @@ impl App {
             return Ok(());
         }
 
-        // Ctrl+Enter: does opposite of queue_mode during processing
-        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing
+        if code == KeyCode::Enter
+            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+        {
             handle_alternate_enter(self);
             return Ok(());
         }
@@ -2664,6 +2671,19 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Invariant: answer text is never appended *into* an open reasoning
+        // region. If a region is still open when real (non-whitespace) answer
+        // text arrives, close it first so the next `open_reasoning_region` still
+        // inserts its blank-line separator. Without this, a stale
+        // `reasoning_streaming` flag makes `open_reasoning_region` early-return
+        // and the answer tail gets glued directly onto the next reasoning run
+        // (e.g. `...patch + build.Ah, I see...`). Whitespace-only appends (the
+        // separators emitted by the reasoning helpers themselves) never trip
+        // this. `open_reasoning_region` only appends its separator *before*
+        // setting the flag, so this cannot recurse.
+        if self.reasoning_streaming && !text.trim().is_empty() {
+            self.close_reasoning_region(None);
+        }
         self.streaming.streaming_text.push_str(text);
         self.refresh_split_view_if_needed();
     }
@@ -2683,13 +2703,11 @@ impl App {
             match op {
                 StreamOp::Text(text) => {
                     if !text.is_empty() {
-                        // Real output: make sure any still-open reasoning region is
-                        // closed first so the answer renders as normal text. The
-                        // buffer queues an explicit CloseReasoning before
-                        // non-whitespace text, but be defensive about ordering.
-                        if self.reasoning_streaming && !text.trim().is_empty() {
-                            self.close_reasoning_region(None);
-                        }
+                        // `append_streaming_text` enforces the invariant that real
+                        // answer text closes any still-open reasoning region first
+                        // (so the region's blank-line separator is preserved). The
+                        // buffer also queues an explicit CloseReasoning before
+                        // non-whitespace text, so this is normally already closed.
                         self.append_streaming_text(&text);
                         changed = true;
                     }

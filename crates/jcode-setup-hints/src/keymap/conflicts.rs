@@ -49,9 +49,20 @@ impl Conflict {
             self.jcode.action,
             self.jcode.field,
             self.jcode.raw,
-            self.interceptor.source.label(),
+            self.interceptor_label(),
             describe_action(&self.interceptor),
         )
+    }
+
+    /// How to refer to the thing intercepting the key. For external apps this is
+    /// the specific tool name (e.g. "OmniWM"); otherwise the source label.
+    fn interceptor_label(&self) -> String {
+        match self.interceptor.source {
+            KeySource::ExternalApp if !self.interceptor.tool.is_empty() => {
+                self.interceptor.tool.clone()
+            }
+            other => other.label().to_string(),
+        }
     }
 }
 
@@ -61,6 +72,13 @@ fn describe_action(b: &DiscoveredBinding) -> String {
         KeySource::Terminal => {
             if b.action.is_empty() {
                 "a terminal action".to_string()
+            } else {
+                format!("`{}`", b.action)
+            }
+        }
+        KeySource::ExternalApp => {
+            if b.action.is_empty() {
+                "an app action".to_string()
             } else {
                 format!("`{}`", b.action)
             }
@@ -163,6 +181,11 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
             "Toggle info widget",
             cfg.info_widget_toggle.as_str(),
         ),
+        (
+            "new_terminal",
+            "Spawn new terminal session",
+            cfg.new_terminal.as_str(),
+        ),
     ];
 
     let mut out = Vec::new();
@@ -211,6 +234,40 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
                     chord,
                 });
             }
+        }
+    }
+
+    // Built-in prompt-navigation fallbacks. These are not configurable fields:
+    // `ScrollKeys::prompt_jump` always honors them in addition to the configured
+    // `scroll_prompt_up`/`scroll_prompt_down`. On macOS in particular, Cmd+K /
+    // Cmd+J move by prompt, which is exactly what a tiling window manager tends
+    // to steal for window focus, so we must enumerate them to detect that.
+    let fallbacks: &[(&str, &str)] = &[
+        ("scroll_prompt_up", "cmd+k"),
+        ("scroll_prompt_down", "cmd+j"),
+        ("scroll_prompt_up", "cmd+["),
+        ("scroll_prompt_down", "cmd+]"),
+        ("scroll_prompt_up", "ctrl+["),
+        ("scroll_prompt_down", "ctrl+]"),
+    ];
+    for (field, raw) in fallbacks {
+        if let Some(chord) = KeyChord::parse(raw) {
+            // Skip if a configured single-chord field already produced this exact
+            // chord, to avoid duplicate conflict rows for the same keys.
+            if out.iter().any(|b| b.chord == chord) {
+                continue;
+            }
+            let action = if *field == "scroll_prompt_up" {
+                "Jump to previous prompt (built-in)"
+            } else {
+                "Jump to next prompt (built-in)"
+            };
+            out.push(JcodeBinding {
+                field: format!("keybindings.{field} (built-in fallback)"),
+                action: action.to_string(),
+                raw: (*raw).to_string(),
+                chord,
+            });
         }
     }
 
@@ -289,6 +346,17 @@ mod tests {
             source: KeySource::Terminal,
             action: action.to_string(),
             raw: format!("{canonical_keys}={action}"),
+            tool: String::new(),
+        }
+    }
+
+    fn app_binding(canonical_keys: &str, action: &str, tool: &str) -> DiscoveredBinding {
+        DiscoveredBinding {
+            chord: KeyChord::parse(canonical_keys).unwrap(),
+            source: KeySource::ExternalApp,
+            action: action.to_string(),
+            raw: canonical_keys.to_string(),
+            tool: tool.to_string(),
         }
     }
 
@@ -337,6 +405,29 @@ mod tests {
         let summary = conflicts[0].summary();
         assert!(summary.contains("model"), "summary was: {summary}");
         assert!(summary.contains("terminal"), "summary was: {summary}");
+    }
+
+    #[test]
+    fn detects_window_manager_prompt_jump_conflict() {
+        // The motivating case: a tiling WM (OmniWM) binds Cmd+J / Cmd+K to window
+        // focus, shadowing jcode's built-in prompt navigation fallback.
+        let cfg = KeybindingsConfig::default();
+        let snapshot = snapshot_with(vec![
+            app_binding("cmd+j", "focus.down", "OmniWM"),
+            app_binding("cmd+k", "focus.up", "OmniWM"),
+        ]);
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert_eq!(conflicts.len(), 2, "both Cmd+J and Cmd+K should conflict");
+        // The interceptor is attributed to the specific tool, not a generic label.
+        let summary = conflicts[0].summary();
+        assert!(summary.contains("OmniWM"), "summary was: {summary}");
+        assert!(summary.contains("prompt"), "summary was: {summary}");
+        assert!(
+            conflicts
+                .iter()
+                .all(|c| c.jcode.field.contains("built-in fallback")),
+            "prompt-jump fallback fields should be flagged"
+        );
     }
 
     #[test]

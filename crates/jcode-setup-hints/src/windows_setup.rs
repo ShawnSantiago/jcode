@@ -403,6 +403,9 @@ fn prompt_try_it_out(installed_alacritty: bool) {
     eprintln!(
         "\x1b[32m│\x1b[0m    Press \x1b[1mAlt+;\x1b[0m from anywhere to launch jcode.                \x1b[32m│\x1b[0m"
     );
+    eprintln!(
+        "\x1b[32m│\x1b[0m    Inside jcode, \x1b[1mAlt+Shift+;\x1b[0m opens a new session here.      \x1b[32m│\x1b[0m"
+    );
     if installed_alacritty {
         eprintln!(
             "\x1b[32m│\x1b[0m    It will open in \x1b[1mAlacritty\x1b[0m for maximum performance.    \x1b[32m│\x1b[0m"

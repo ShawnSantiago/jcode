@@ -336,13 +336,28 @@ pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool 
 
 /// Fast in-memory matcher for interactive picker filtering.
 ///
-/// This intentionally avoids transcript file I/O because it runs on every
-/// keystroke while the `/resume` overlay is open. Transcript-backed content can
+/// Splits the query into whitespace-separated tokens and requires *every* token
+/// to appear somewhere in the session's search index (logical AND, order
+/// independent). This is far more forgiving than a single contiguous substring
+/// match - `api deploy` now matches a session mentioning "deploy ... api" - while
+/// staying cheap: it runs on every keystroke and only does N case-insensitive
+/// substring scans over an already-lowercased index.
+///
+/// This intentionally avoids transcript file I/O. Transcript-backed content can
 /// still become searchable after preview load because the picker refreshes the
 /// session's cached `search_index` from the loaded preview.
 pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -> bool {
-    let normalized = query.trim().to_lowercase();
-    normalized.is_empty() || session.search_index.contains(&normalized)
+    let tokens = search_query_tokens(query);
+    tokens.is_empty() || tokens.iter().all(|token| session.search_index.contains(token))
+}
+
+/// Split a raw query into normalized (lowercased, whitespace-trimmed) search
+/// tokens. Empty/whitespace-only queries yield no tokens (match everything).
+pub(super) fn search_query_tokens(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| token.to_lowercase())
+        .collect()
 }
 
 #[cfg(test)]
@@ -1925,16 +1940,18 @@ pub(crate) fn latest_external_cli_session_secs(
     cli: crate::tui::app::onboarding_flow::ExternalCli,
 ) -> Option<u64> {
     use crate::tui::app::onboarding_flow::ExternalCli;
-    let rel_root = match cli {
-        ExternalCli::Codex => ".codex/sessions",
-        ExternalCli::ClaudeCode => ".claude/projects",
+    let (rel_root, ext) = match cli {
+        ExternalCli::Codex => (".codex/sessions", "jsonl"),
+        ExternalCli::ClaudeCode => (".claude/projects", "jsonl"),
+        ExternalCli::Pi => (".pi/agent/sessions", "jsonl"),
+        ExternalCli::OpenCode => (".local/share/opencode/storage/session", "json"),
     };
     let root = crate::storage::user_home_path(rel_root).ok()?;
     if !root.exists() {
         return None;
     }
     // One file is enough to learn the newest mtime.
-    collect_recent_files_recursive(&root, "jsonl", 1)
+    collect_recent_files_recursive(&root, ext, 1)
         .first()
         .and_then(|path| path.metadata().ok())
         .and_then(|meta| meta.modified().ok())
@@ -2717,6 +2734,8 @@ pub(crate) fn load_external_cli_sessions_grouped(
     let sessions = match cli {
         ExternalCli::Codex => load_external_codex_sessions(scan_limit),
         ExternalCli::ClaudeCode => load_external_claude_code_sessions(scan_limit),
+        ExternalCli::Pi => load_external_pi_sessions(scan_limit),
+        ExternalCli::OpenCode => load_external_opencode_sessions(scan_limit),
     };
     (Vec::new(), sessions)
 }
@@ -2738,6 +2757,8 @@ pub(crate) fn load_external_cli_sessions_grouped_multi(
     let mut sessions = Vec::new();
     let mut seen_codex = false;
     let mut seen_claude = false;
+    let mut seen_pi = false;
+    let mut seen_opencode = false;
     for cli in clis {
         match cli {
             ExternalCli::Codex if !seen_codex => {
@@ -2747,6 +2768,14 @@ pub(crate) fn load_external_cli_sessions_grouped_multi(
             ExternalCli::ClaudeCode if !seen_claude => {
                 seen_claude = true;
                 sessions.extend(load_external_claude_code_sessions(scan_limit));
+            }
+            ExternalCli::Pi if !seen_pi => {
+                seen_pi = true;
+                sessions.extend(load_external_pi_sessions(scan_limit));
+            }
+            ExternalCli::OpenCode if !seen_opencode => {
+                seen_opencode = true;
+                sessions.extend(load_external_opencode_sessions(scan_limit));
             }
             _ => {}
         }

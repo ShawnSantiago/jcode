@@ -6,6 +6,80 @@ pub(super) enum PickerInitMode {
     Probe,
 }
 
+/// Terminal multiplexers / agent-multiplexers that sit between jcode and the
+/// real outer terminal. Inside any of these the outer terminal's identity env
+/// vars (TERM_PROGRAM, KITTY_WINDOW_ID, ...) are masked or rewritten, so
+/// env-based protocol detection cannot see whether the outer terminal supports
+/// kitty/sixel graphics. The only reliable signal in that case is an
+/// authoritative stdio capability probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Multiplexer {
+    None,
+    Tmux,
+    Screen,
+    Zellij,
+    /// herdr.dev agent multiplexer. Advertises `TERM=xterm-256color` and sets
+    /// `HERDR_ENV=1` in every pane, hiding the outer terminal. Recent versions
+    /// can pass kitty graphics through to a capable outer terminal.
+    Herdr,
+}
+
+impl Multiplexer {
+    fn label(self) -> &'static str {
+        match self {
+            Multiplexer::None => "none",
+            Multiplexer::Tmux => "tmux",
+            Multiplexer::Screen => "screen",
+            Multiplexer::Zellij => "zellij",
+            Multiplexer::Herdr => "herdr",
+        }
+    }
+}
+
+fn env_is_set(value: Option<&str>) -> bool {
+    value.map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
+
+/// Detect whether jcode is running inside a known multiplexer, using the same
+/// signals the multiplexers themselves expose to child processes.
+pub(super) fn detect_multiplexer(
+    term: Option<&str>,
+    tmux: Option<&str>,
+    sty: Option<&str>,
+    zellij: Option<&str>,
+    herdr_env: Option<&str>,
+) -> Multiplexer {
+    // Herdr wins first: it rewrites TERM to a bland value but always exports
+    // HERDR_ENV=1, so it is the most specific signal.
+    if env_is_set(herdr_env) {
+        return Multiplexer::Herdr;
+    }
+    if env_is_set(zellij) {
+        return Multiplexer::Zellij;
+    }
+    if env_is_set(tmux) {
+        return Multiplexer::Tmux;
+    }
+    let term = term.unwrap_or("");
+    if env_is_set(sty) || term.starts_with("screen") {
+        return Multiplexer::Screen;
+    }
+    if term.starts_with("tmux") {
+        return Multiplexer::Tmux;
+    }
+    Multiplexer::None
+}
+
+fn detect_multiplexer_from_env() -> Multiplexer {
+    detect_multiplexer(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("TMUX").ok().as_deref(),
+        std::env::var("STY").ok().as_deref(),
+        std::env::var("ZELLIJ").ok().as_deref(),
+        std::env::var("HERDR_ENV").ok().as_deref(),
+    )
+}
+
 fn parse_env_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -14,17 +88,45 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
     }
 }
 
-pub(super) fn picker_init_mode_from_probe_env(raw: Option<&str>) -> PickerInitMode {
-    if let Some(raw) = raw
-        && parse_env_bool(raw) == Some(true)
-    {
-        return PickerInitMode::Probe;
+/// Decide how to initialize the picker.
+///
+/// * `probe_override` is the parsed value of `JCODE_MERMAID_PICKER_PROBE`
+///   (`Some(true)`/`Some(false)` when set explicitly, `None` otherwise) and
+///   always wins so users can force either behavior.
+/// * When the override is absent we trust env-based detection if it already
+///   identifies a graphics-capable terminal (no probe, instant startup).
+/// * Otherwise (env detection missed, e.g. inside a multiplexer that masks the
+///   outer terminal, or an unknown bare terminal) we probe stdio, which is the
+///   only authoritative way to learn the real capabilities. The probe is
+///   bounded by a timeout and safely falls back to halfblocks.
+pub(super) fn decide_picker_init_mode(
+    probe_override: Option<bool>,
+    env_protocol: Option<ProtocolType>,
+    _multiplexer: Multiplexer,
+) -> PickerInitMode {
+    if let Some(force) = probe_override {
+        return if force {
+            PickerInitMode::Probe
+        } else {
+            PickerInitMode::Fast
+        };
     }
-    PickerInitMode::Fast
+    if env_protocol.is_some() {
+        return PickerInitMode::Fast;
+    }
+    PickerInitMode::Probe
 }
 
-fn picker_init_mode_from_env() -> PickerInitMode {
-    picker_init_mode_from_probe_env(std::env::var("JCODE_MERMAID_PICKER_PROBE").ok().as_deref())
+/// Parse only the explicit `JCODE_MERMAID_PICKER_PROBE` override into a mode,
+/// ignoring env/multiplexer detection. `Some(true)` probes; unset or any other
+/// value keeps the historical fast default. Used for the force-on/off path and
+/// as a focused unit-test seam.
+#[cfg(test)]
+pub(super) fn picker_init_mode_from_probe_env(raw: Option<&str>) -> PickerInitMode {
+    match raw.and_then(parse_env_bool) {
+        Some(true) => PickerInitMode::Probe,
+        _ => PickerInitMode::Fast,
+    }
 }
 
 pub(super) fn infer_protocol_from_env(
@@ -108,6 +210,37 @@ fn fast_picker() -> Picker {
     picker
 }
 
+/// Build a picker via the authoritative stdio capability probe.
+///
+/// The probe reports the protocol the *outer* terminal actually supports, which
+/// is the only way to get crisp graphics inside a multiplexer that masks the
+/// outer terminal's identity. ratatui-image has no public font-size setter, and
+/// its `from_query_stdio` uses a placeholder 10x20 cell when the terminal does
+/// not answer the cell-size query, which breaks HiDPI scaling. So we keep our
+/// own font-size-correct `fast_picker()` as the base and only adopt the
+/// probe's *protocol* decision. Any probe failure leaves the env-based fast
+/// picker untouched.
+fn probe_picker() -> Picker {
+    let mut picker = fast_picker();
+    match Picker::from_query_stdio() {
+        Ok(probed) => {
+            let protocol = probed.protocol_type();
+            crate::log_info(&format!(
+                "Mermaid picker stdio probe detected protocol: {:?}",
+                protocol
+            ));
+            picker.set_protocol_type(protocol);
+        }
+        Err(err) => {
+            crate::log_warn(&format!(
+                "Mermaid picker probe failed ({}); using fast picker fallback",
+                err
+            ));
+        }
+    }
+    picker
+}
+
 fn prewarm_svg_font_db_async() {
     SVG_FONT_DB_PREWARM_STARTED.get_or_init(|| {
         let _ = std::thread::Builder::new()
@@ -119,22 +252,38 @@ fn prewarm_svg_font_db_async() {
 }
 
 /// Initialize the global picker.
-/// By default this uses a fast non-blocking path and avoids terminal probing.
-/// Set JCODE_MERMAID_PICKER_PROBE=1 to force full stdio capability probing.
-/// Also triggers cache eviction on first call.
+/// By default jcode trusts env-based detection when it already identifies a
+/// graphics-capable terminal (fast, no probing). When env detection misses
+/// (for example inside a multiplexer such as herdr/tmux/zellij/screen that
+/// masks the outer terminal, or an unknown bare terminal) it runs an
+/// authoritative stdio capability probe instead of silently degrading to blurry
+/// halfblocks. Set JCODE_MERMAID_PICKER_PROBE=1 to always probe or =0 to never
+/// probe. Also triggers cache eviction on first call.
 pub fn init_picker() {
-    PICKER.get_or_init(|| match picker_init_mode_from_env() {
-        PickerInitMode::Fast => Some(fast_picker()),
-        PickerInitMode::Probe => match Picker::from_query_stdio() {
-            Ok(picker) => Some(picker),
-            Err(err) => {
-                crate::log_warn(&format!(
-                    "Mermaid picker probe failed ({}); using fast picker fallback",
-                    err
-                ));
-                Some(fast_picker())
-            }
-        },
+    PICKER.get_or_init(|| {
+        let env_protocol = infer_protocol_from_env(
+            std::env::var("TERM").ok().as_deref(),
+            std::env::var("TERM_PROGRAM").ok().as_deref(),
+            std::env::var("LC_TERMINAL").ok().as_deref(),
+            std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
+        );
+        let multiplexer = detect_multiplexer_from_env();
+        let probe_override = std::env::var("JCODE_MERMAID_PICKER_PROBE")
+            .ok()
+            .as_deref()
+            .and_then(parse_env_bool);
+        let mode = decide_picker_init_mode(probe_override, env_protocol, multiplexer);
+        crate::log_info(&format!(
+            "Mermaid picker init: mode={:?} multiplexer={} env_protocol={:?} probe_override={:?}",
+            mode,
+            multiplexer.label(),
+            env_protocol,
+            probe_override
+        ));
+        match mode {
+            PickerInitMode::Fast => Some(fast_picker()),
+            PickerInitMode::Probe => Some(probe_picker()),
+        }
     });
     prewarm_svg_font_db_async();
     // Evict old cache files once per process
@@ -269,4 +418,144 @@ pub fn get_font_size() -> Option<(u16, u16)> {
     PICKER
         .get()
         .and_then(|p| p.as_ref().map(|picker| picker.font_size()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_protocol_detects_kitty_family() {
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-kitty"), None, None, None),
+            Some(ProtocolType::Kitty)
+        );
+        assert_eq!(
+            infer_protocol_from_env(None, Some("ghostty"), None, None),
+            Some(ProtocolType::Kitty)
+        );
+        assert_eq!(
+            infer_protocol_from_env(None, Some("WezTerm"), None, None),
+            Some(ProtocolType::Kitty)
+        );
+        // KITTY_WINDOW_ID present is sufficient.
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3")),
+            Some(ProtocolType::Kitty)
+        );
+    }
+
+    #[test]
+    fn infer_protocol_detects_iterm_and_sixel() {
+        assert_eq!(
+            infer_protocol_from_env(None, Some("iTerm.app"), None, None),
+            Some(ProtocolType::Iterm2)
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
+            Some(ProtocolType::Sixel)
+        );
+    }
+
+    #[test]
+    fn infer_protocol_misses_inside_masking_multiplexer() {
+        // Herdr/tmux advertise a bland TERM with no graphics hints.
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-256color"), None, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_multiplexer_identifies_each() {
+        assert_eq!(
+            detect_multiplexer(Some("xterm-256color"), None, None, None, Some("1")),
+            Multiplexer::Herdr
+        );
+        assert_eq!(
+            detect_multiplexer(Some("xterm-256color"), None, None, Some("0.40.1"), None),
+            Multiplexer::Zellij
+        );
+        assert_eq!(
+            detect_multiplexer(Some("tmux-256color"), Some("/tmp/tmux-1000/default,1,0"), None, None, None),
+            Multiplexer::Tmux
+        );
+        assert_eq!(
+            detect_multiplexer(Some("screen.xterm-256color"), None, Some("1234.pts-0.host"), None, None),
+            Multiplexer::Screen
+        );
+        // TERM prefix alone is enough for screen/tmux even without TMUX/STY.
+        assert_eq!(
+            detect_multiplexer(Some("screen-256color"), None, None, None, None),
+            Multiplexer::Screen
+        );
+        assert_eq!(
+            detect_multiplexer(Some("tmux-256color"), None, None, None, None),
+            Multiplexer::Tmux
+        );
+        assert_eq!(
+            detect_multiplexer(Some("xterm-kitty"), None, None, None, None),
+            Multiplexer::None
+        );
+    }
+
+    #[test]
+    fn detect_multiplexer_herdr_wins_over_others() {
+        // Herdr is the most specific signal even if a stale TMUX leaks through.
+        assert_eq!(
+            detect_multiplexer(Some("xterm-256color"), Some("/tmp/tmux"), None, None, Some("1")),
+            Multiplexer::Herdr
+        );
+    }
+
+    #[test]
+    fn decide_mode_respects_explicit_override() {
+        // Force-on always probes, even when env already detected a protocol.
+        assert_eq!(
+            decide_picker_init_mode(Some(true), Some(ProtocolType::Kitty), Multiplexer::None),
+            PickerInitMode::Probe
+        );
+        // Force-off never probes, even on an env miss inside a multiplexer.
+        assert_eq!(
+            decide_picker_init_mode(Some(false), None, Multiplexer::Herdr),
+            PickerInitMode::Fast
+        );
+    }
+
+    #[test]
+    fn decide_mode_trusts_env_hit_and_probes_on_miss() {
+        // Env already identified a graphics terminal: stay fast.
+        assert_eq!(
+            decide_picker_init_mode(None, Some(ProtocolType::Kitty), Multiplexer::None),
+            PickerInitMode::Fast
+        );
+        // Env miss (bare terminal or masking multiplexer): probe stdio instead
+        // of silently degrading to halfblocks. This is the herdr/tmux fix.
+        assert_eq!(
+            decide_picker_init_mode(None, None, Multiplexer::Herdr),
+            PickerInitMode::Probe
+        );
+        assert_eq!(
+            decide_picker_init_mode(None, None, Multiplexer::None),
+            PickerInitMode::Probe
+        );
+    }
+
+    #[test]
+    fn probe_env_helper_back_compat() {
+        // Unset / disabled keeps the historical fast default.
+        assert_eq!(
+            picker_init_mode_from_probe_env(None),
+            PickerInitMode::Fast
+        );
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("0")),
+            PickerInitMode::Fast
+        );
+        // Explicit enable still probes.
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("1")),
+            PickerInitMode::Probe
+        );
+    }
 }

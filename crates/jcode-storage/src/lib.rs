@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 mod active_pids;
 pub use active_pids::{
-    active_pids_dir, active_session_ids, find_active_session_id_by_pid, register_active_pid,
-    unregister_active_pid,
+    SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
+    find_active_session_id_by_pid, mark_streaming, register_active_pid, session_counts,
+    session_presence, streaming_pids_dir, unmark_streaming, unregister_active_pid,
 };
 
 /// Platform-aware runtime directory for sockets and ephemeral state.

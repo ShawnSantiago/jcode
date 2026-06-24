@@ -1,2 +1,0 @@
-llm_ensemble: 150 queries x 5 votes (pool=50) with claude-sonnet-4-6 (concurrency 12)
-llm_ensemble: 150 queries | 5 calls/turn | avg prompt ~12292 tok, avg output ~5 tok

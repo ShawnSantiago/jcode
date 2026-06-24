@@ -315,19 +315,28 @@ impl ScrollKeys {
         if self.page_down.matches(code, modifiers) {
             return Some(10); // Page down
         }
-        let legacy_ctrl_fallback = self.up.matches(KeyCode::Char('k'), KeyModifiers::CONTROL)
-            && self.down.matches(KeyCode::Char('j'), KeyModifiers::CONTROL);
-        if legacy_ctrl_fallback && modifiers.contains(KeyModifiers::CONTROL) {
+
+        // Built-in incremental-scroll fallback: <mod>+Shift+K / <mod>+Shift+J
+        // scroll up / down one line, where <mod> is Ctrl, Cmd, or Option. This is
+        // the shifted counterpart of the prompt navigation on the un-shifted
+        // chords (see `prompt_jump`): plain J/K move by prompt, holding Shift
+        // makes them scroll line-by-line. Terminals with the Kitty keyboard
+        // protocol report these as Char('k'/'j') (or shifted 'K'/'J') with the
+        // modifier set including SHIFT.
+        let has_nav_mod = modifiers.intersects(
+            KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::ALT,
+        );
+        if has_nav_mod && modifiers.contains(KeyModifiers::SHIFT) {
             match code {
-                KeyCode::Char('k') => return Some(-LINE_SCROLL_AMOUNT),
-                KeyCode::Char('j') => return Some(LINE_SCROLL_AMOUNT),
+                KeyCode::Char('k') | KeyCode::Char('K') => return Some(-LINE_SCROLL_AMOUNT),
+                KeyCode::Char('j') | KeyCode::Char('J') => return Some(LINE_SCROLL_AMOUNT),
                 _ => {}
             }
         }
 
-        // NOTE: On macOS, Cmd+J / Cmd+K move by prompt (see `prompt_jump`) rather than
-        // line-scrolling. We intentionally do not add a Command line-scroll fallback here so
-        // those keys reach the prompt-jump handler.
+        // NOTE: The un-shifted <mod>+J / <mod>+K chords move by prompt (see
+        // `prompt_jump`) rather than line-scrolling, so they intentionally fall
+        // through here to reach the prompt-jump handler.
         None
     }
 
@@ -340,22 +349,23 @@ impl ScrollKeys {
             return Some(1);
         }
 
-        // Fallback prompt-jump bindings:
-        // - Ctrl+[ / Ctrl+] in terminals with keyboard enhancement
-        //   (Ctrl+[ is indistinguishable from Esc without keyboard enhancement)
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            match code {
-                KeyCode::Char('[') => return Some(-1),
-                KeyCode::Char(']') => return Some(1),
-                _ => {}
-            }
+        // Shifted chords are reserved for incremental scrolling (see
+        // `scroll_amount`), so never treat them as prompt jumps.
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            return None;
         }
 
-        // macOS compatibility fallback: terminals that forward Command as SUPER/META
-        // can use Cmd+[ / Cmd+] for prompt jumps, mirroring Ctrl+[ / Ctrl+].
-        // Cmd+K / Cmd+J also move up / down by prompt on macOS, matching native
-        // expectations for Command-based navigation.
-        if modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META) {
+        // Built-in prompt-jump fallbacks. With any navigation modifier (Ctrl,
+        // Cmd, or Option) held and no Shift:
+        //   - K / J move to the previous / next prompt, and
+        //   - [ / ] do the same (Ctrl+[ / Ctrl+] also work in terminals with
+        //     keyboard enhancement, where Ctrl+[ is distinguishable from Esc).
+        // Cmd and Option are best-effort: they only fire if the terminal/window
+        // manager forwards them instead of consuming them first.
+        let has_nav_mod = modifiers.intersects(
+            KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::ALT,
+        );
+        if has_nav_mod {
             match code {
                 KeyCode::Char('[') => return Some(-1),
                 KeyCode::Char(']') => return Some(1),
@@ -487,6 +497,51 @@ pub fn format_binding(binding: &KeyBinding) -> String {
 mod tests {
     use super::*;
 
+    /// Decode a kitty CSI-u modifier byte (bitfield + 1) into `KeyModifiers`.
+    /// This mirrors the sequences we ask Ghostty to forward for Cmd hotkeys, so
+    /// the test fails if our binding parsing drifts from that wire encoding.
+    fn kitty_mods(modbyte: u8) -> KeyModifiers {
+        let bits = modbyte - 1;
+        let mut mods = KeyModifiers::empty();
+        if bits & 1 != 0 {
+            mods |= KeyModifiers::SHIFT;
+        }
+        if bits & 2 != 0 {
+            mods |= KeyModifiers::ALT;
+        }
+        if bits & 4 != 0 {
+            mods |= KeyModifiers::CONTROL;
+        }
+        if bits & 8 != 0 {
+            mods |= KeyModifiers::SUPER;
+        }
+        mods
+    }
+
+    #[test]
+    fn ghostty_cmd_r_sequence_matches_open_resume_binding() {
+        // Ghostty forwards Cmd+R as ESC[114;9u (114='r', super-only).
+        let code = KeyCode::Char(char::from_u32(114).unwrap());
+        let mods = kitty_mods(9);
+        let binding = parse_keybinding("cmd+r").expect("cmd+r parses");
+        assert!(
+            binding.matches_for_platform(code, mods, true),
+            "Cmd+R kitty sequence must trigger the open_resume binding"
+        );
+    }
+
+    #[test]
+    fn ghostty_cmd_shift_semicolon_sequence_matches_new_terminal_binding() {
+        // Ghostty forwards Cmd+Shift+; as ESC[59;10u (59=';', shift+super).
+        let code = KeyCode::Char(char::from_u32(59).unwrap());
+        let mods = kitty_mods(10);
+        let binding = parse_keybinding("cmd+shift+;").expect("cmd+shift+; parses");
+        assert!(
+            binding.matches_for_platform(code, mods, true),
+            "Cmd+Shift+; kitty sequence must trigger the new_terminal binding"
+        );
+    }
+
     fn test_scroll_keys() -> ScrollKeys {
         ScrollKeys {
             up: KeyBinding {
@@ -612,6 +667,80 @@ mod tests {
     }
 
     #[test]
+    fn test_scroll_amount_cmd_shift_jk_line_scroll() {
+        // Cmd+Shift+K / Cmd+Shift+J mirror Ctrl+Shift+K / Ctrl+Shift+J: they
+        // line-scroll up / down on macOS regardless of the configured bindings.
+        let mut keys = test_scroll_keys();
+        keys.up_fallback = None;
+        keys.down_fallback = None;
+
+        for code in [KeyCode::Char('k'), KeyCode::Char('K')] {
+            assert_eq!(
+                keys.scroll_amount(code, KeyModifiers::SUPER | KeyModifiers::SHIFT),
+                Some(-LINE_SCROLL_AMOUNT)
+            );
+        }
+        for code in [KeyCode::Char('j'), KeyCode::Char('J')] {
+            assert_eq!(
+                keys.scroll_amount(code, KeyModifiers::SUPER | KeyModifiers::SHIFT),
+                Some(LINE_SCROLL_AMOUNT)
+            );
+        }
+    }
+
+    #[test]
+    fn test_scroll_amount_ctrl_shift_jk_line_scroll() {
+        // Ctrl+Shift+K / Ctrl+Shift+J line-scroll up / down. This is the shifted
+        // counterpart to the un-shifted Ctrl+J/K prompt navigation.
+        let mut keys = test_scroll_keys();
+        keys.up_fallback = None;
+        keys.down_fallback = None;
+
+        for code in [KeyCode::Char('k'), KeyCode::Char('K')] {
+            assert_eq!(
+                keys.scroll_amount(code, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+                Some(-LINE_SCROLL_AMOUNT)
+            );
+        }
+        for code in [KeyCode::Char('j'), KeyCode::Char('J')] {
+            assert_eq!(
+                keys.scroll_amount(code, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+                Some(LINE_SCROLL_AMOUNT)
+            );
+        }
+    }
+
+    #[test]
+    fn test_prompt_jump_ctrl_jk() {
+        // Ctrl+K / Ctrl+J (un-shifted) move up / down by prompt: the primary
+        // default that survives a stock Ghostty + tiling-WM setup.
+        let keys = test_scroll_keys();
+        assert_eq!(keys.prompt_jump(KeyCode::Char('k'), KeyModifiers::CONTROL), Some(-1));
+        assert_eq!(keys.prompt_jump(KeyCode::Char('j'), KeyModifiers::CONTROL), Some(1));
+    }
+
+    #[test]
+    fn test_prompt_jump_shifted_jk_is_not_prompt() {
+        // Shifted chords are reserved for incremental scrolling, so they must
+        // never be reported as prompt jumps regardless of the modifier family.
+        let keys = test_scroll_keys();
+        for mods in [
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ] {
+            for code in [
+                KeyCode::Char('k'),
+                KeyCode::Char('K'),
+                KeyCode::Char('j'),
+                KeyCode::Char('J'),
+            ] {
+                assert_eq!(keys.prompt_jump(code, mods), None, "mods={mods:?} code={code:?}");
+            }
+        }
+    }
+
+    #[test]
     fn test_prompt_jump_ctrl_bracket_fallback() {
         let keys = test_scroll_keys();
         assert_eq!(
@@ -656,6 +785,16 @@ mod tests {
             assert_eq!(keys.prompt_jump(KeyCode::Char('j'), mods), Some(1));
             assert_eq!(keys.prompt_jump(KeyCode::Char('J'), mods), Some(1));
         }
+    }
+
+    #[test]
+    fn test_prompt_jump_option_jk() {
+        // Option (Alt) + K / J mirror Cmd+K / Cmd+J for prompt navigation on macOS.
+        let keys = test_scroll_keys();
+        assert_eq!(keys.prompt_jump(KeyCode::Char('k'), KeyModifiers::ALT), Some(-1));
+        assert_eq!(keys.prompt_jump(KeyCode::Char('K'), KeyModifiers::ALT), Some(-1));
+        assert_eq!(keys.prompt_jump(KeyCode::Char('j'), KeyModifiers::ALT), Some(1));
+        assert_eq!(keys.prompt_jump(KeyCode::Char('J'), KeyModifiers::ALT), Some(1));
     }
 
     #[test]

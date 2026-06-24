@@ -83,7 +83,7 @@ impl App {
                 "/judge\nLaunch a one-shot headed judge session immediately.\n\nThe judge will DM this session when done. If OpenAI ChatGPT OAuth is available, it prefers gpt-5.5."
             }
             "effort" => {
-                "/effort\nShow current reasoning effort.\n\n/effort <level>\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: Alt+Left / Alt+Right to cycle."
+                "/effort\nShow current reasoning effort.\n\n/effort <level>\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: {effort_keys} to cycle."
             }
             "fast" => {
                 "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast off\nDisable fast mode for the current session.\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
@@ -140,7 +140,7 @@ impl App {
                 "/split\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point."
             }
             "resume" | "sessions" => {
-                "/resume\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and resume the highlighted session. By default, Enter resumes in the current terminal and Ctrl+Enter opens a new terminal; keybindings.session_picker_enter can swap those actions.\n\nPress Esc to return to your current session."
+                "/resume\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and resume the highlighted session. By default, Enter resumes in the current terminal and Ctrl+Enter opens a new terminal; keybindings.session_picker_enter can swap those actions.{resume_shortcut}\n\nPress Esc to return to your current session."
             }
             "info" => "/info\nShow session metadata and token usage.",
             "context" => {
@@ -185,6 +185,15 @@ impl App {
             }
             _ => return None,
         };
-        Some(help.to_string())
+        let help = help.replace(
+            "{effort_keys}",
+            &crate::tui::keybind::effort_switch_keys_label(),
+        );
+        let resume_shortcut = match crate::tui::keybind::load_open_resume_key().label {
+            Some(label) => format!(" You can also press {label} to open it directly."),
+            None => String::new(),
+        };
+        let help = help.replace("{resume_shortcut}", &resume_shortcut);
+        Some(help)
     }
 }

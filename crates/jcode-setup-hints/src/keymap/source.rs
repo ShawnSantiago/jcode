@@ -12,6 +12,11 @@ pub enum KeySource {
     MacosSystem,
     /// A binding declared by the terminal emulator (config or built-in default).
     Terminal,
+    /// A binding declared by a third-party app that grabs global hotkeys before
+    /// the terminal sees them: window managers (OmniWM, AeroSpace, yabai/skhd),
+    /// automation tools (Hammerspoon), launchers (Raycast), etc. The specific
+    /// app is named in [`DiscoveredBinding::tool`].
+    ExternalApp,
 }
 
 impl KeySource {
@@ -19,6 +24,7 @@ impl KeySource {
         match self {
             KeySource::MacosSystem => "macOS system shortcut",
             KeySource::Terminal => "terminal",
+            KeySource::ExternalApp => "external app",
         }
     }
 }
@@ -37,4 +43,9 @@ pub struct DiscoveredBinding {
     /// The raw declaration we parsed, for debugging (e.g. the original config
     /// line or the symbolic-hotkey id).
     pub raw: String,
+    /// For [`KeySource::ExternalApp`], the human-facing name of the app that
+    /// owns this binding (e.g. "OmniWM", "AeroSpace", "skhd"). Empty for the
+    /// macOS system and terminal sources, where the source label is enough.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool: String,
 }

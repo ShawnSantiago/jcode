@@ -40,6 +40,8 @@ pub(crate) const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) enum ExternalCli {
     Codex,
     ClaudeCode,
+    Pi,
+    OpenCode,
 }
 
 impl ExternalCli {
@@ -47,57 +49,70 @@ impl ExternalCli {
         match self {
             ExternalCli::Codex => "Codex",
             ExternalCli::ClaudeCode => "Claude Code",
+            ExternalCli::Pi => "Pi",
+            ExternalCli::OpenCode => "OpenCode",
         }
     }
 }
 
-/// Per-candidate yes/no walkthrough for importing detected external logins.
+/// Single-screen multi-select review for importing detected external logins.
 ///
 /// On a fresh install we may detect logins left behind by other tools (Codex,
-/// Claude Code, Copilot, ...). Instead of a single "type 1,3" prompt, we walk
-/// the user through each detected login one at a time and ask whether to import
-/// it. The highlighted Yes/No option moves with the arrow / vim keys and is
-/// committed with Enter or Space.
+/// Claude Code, Copilot, ...). Rather than walking the user through one yes/no
+/// page per login, we show them ALL at once as a checkbox list. Every login is
+/// pre-checked (the safe, common default is "import everything"), the user can
+/// move a cursor and toggle any row off, and a single "Import" action commits
+/// all checked logins together. This collapses N pages into one screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ImportReview {
     /// All detected importable logins, in display order.
     pub(crate) candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
-    /// Index of the candidate currently being reviewed.
-    pub(crate) index: usize,
-    /// Which option (Yes/No) is highlighted for the current candidate.
-    pub(crate) yes_highlighted: bool,
-    /// Zero-based indices of candidates the user chose to import so far.
-    pub(crate) approved: Vec<usize>,
-    /// When the current candidate was first shown, for the decision countdown.
+    /// Per-candidate checked state (parallel to `candidates`). `true` = import.
+    /// All start checked so the default action imports everything.
+    pub(crate) checked: Vec<bool>,
+    /// Index of the row the cursor is currently on (for toggling/highlight).
+    pub(crate) cursor: usize,
+    /// When `true`, focus is on the "Continue" pill (rendered above and below
+    /// the list) rather than on a login row. Moving down past the last row, or
+    /// up past the first row, lands here; pressing Enter commits the import.
+    /// This lets the user reach the commit action purely by arrowing, instead
+    /// of relying on the "Press Enter" instruction text.
+    pub(crate) continue_focused: bool,
+    /// When the screen was first shown, for the single decision countdown.
     pub(crate) shown_at: Instant,
 }
 
 impl ImportReview {
-    /// Create a review for the given candidates, starting on the first with
-    /// "Yes" highlighted by default. Returns `None` if there are no candidates.
+    /// Create a review for the given candidates with every login pre-checked.
+    /// Returns `None` if there are no candidates.
     pub(crate) fn new(
         candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
     ) -> Option<Self> {
         if candidates.is_empty() {
             return None;
         }
+        let checked = vec![true; candidates.len()];
         Some(Self {
             candidates,
-            index: 0,
-            yes_highlighted: true,
-            approved: Vec::new(),
+            checked,
+            cursor: 0,
+            continue_focused: false,
             shown_at: Instant::now(),
         })
     }
 
-    /// The candidate currently under review, if any.
+    /// The candidate the cursor is currently on, if any. Returns `None` while
+    /// the "Continue" pill is focused.
     pub(crate) fn current(&self) -> Option<&crate::external_auth::ExternalAuthReviewCandidate> {
-        self.candidates.get(self.index)
+        if self.continue_focused {
+            return None;
+        }
+        self.candidates.get(self.cursor)
     }
 
-    /// 1-based position of the current candidate (for "1 of 3" display).
+    /// 1-based position of the cursor row (for "1 of 3" display).
     pub(crate) fn position(&self) -> usize {
-        self.index + 1
+        self.cursor + 1
     }
 
     /// Total number of candidates being reviewed.
@@ -105,37 +120,97 @@ impl ImportReview {
         self.candidates.len()
     }
 
-    /// Move the Yes/No highlight (true = highlight Yes, false = highlight No).
-    pub(crate) fn set_yes(&mut self, yes: bool) {
-        self.yes_highlighted = yes;
-    }
-
-    /// Toggle the Yes/No highlight (used by left/right or tab-style keys).
-    pub(crate) fn toggle(&mut self) {
-        self.yes_highlighted = !self.yes_highlighted;
-    }
-
-    /// Record the current decision and advance to the next candidate.
-    /// Returns `true` if the walkthrough is now complete (no more candidates).
-    pub(crate) fn commit_current(&mut self) -> bool {
-        if self.yes_highlighted && !self.approved.contains(&self.index) {
-            self.approved.push(self.index);
+    /// Move focus to the previous item, treating the "Continue" pill as a single
+    /// element that sits both above and below the list. The cycle is:
+    /// Continue -> last row -> ... -> first row -> Continue.
+    pub(crate) fn cursor_up(&mut self) {
+        if self.candidates.is_empty() {
+            return;
         }
-        self.index += 1;
-        self.yes_highlighted = true;
-        // Restart the decision countdown for the next candidate.
-        self.shown_at = Instant::now();
-        self.index >= self.candidates.len()
+        if self.continue_focused {
+            // From Continue, step up onto the last row.
+            self.continue_focused = false;
+            self.cursor = self.candidates.len() - 1;
+        } else if self.cursor == 0 {
+            // Above the first row sits the Continue pill.
+            self.continue_focused = true;
+        } else {
+            self.cursor -= 1;
+        }
     }
 
-    /// Seconds left before the current candidate auto-commits its default.
+    /// Move focus to the next item. The cycle is:
+    /// first row -> ... -> last row -> Continue -> first row.
+    pub(crate) fn cursor_down(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        if self.continue_focused {
+            // From Continue, step down onto the first row.
+            self.continue_focused = false;
+            self.cursor = 0;
+        } else if self.cursor + 1 >= self.candidates.len() {
+            // Below the last row sits the Continue pill.
+            self.continue_focused = true;
+        } else {
+            self.cursor += 1;
+        }
+    }
+
+    /// Toggle the checked state of the row under the cursor. No-op while the
+    /// "Continue" pill is focused.
+    pub(crate) fn toggle_current(&mut self) {
+        if self.continue_focused {
+            return;
+        }
+        if let Some(slot) = self.checked.get_mut(self.cursor) {
+            *slot = !*slot;
+        }
+    }
+
+    /// Set the checked state of the row under the cursor. No-op while the
+    /// "Continue" pill is focused.
+    pub(crate) fn set_current(&mut self, checked: bool) {
+        if self.continue_focused {
+            return;
+        }
+        if let Some(slot) = self.checked.get_mut(self.cursor) {
+            *slot = checked;
+        }
+    }
+
+    /// Whether the row under the cursor is currently checked. False while the
+    /// "Continue" pill is focused.
+    pub(crate) fn current_checked(&self) -> bool {
+        if self.continue_focused {
+            return false;
+        }
+        self.checked.get(self.cursor).copied().unwrap_or(false)
+    }
+
+    /// The zero-based indices of all checked (to-be-imported) candidates.
+    pub(crate) fn approved_indices(&self) -> Vec<usize> {
+        self.checked
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &c)| c.then_some(i))
+            .collect()
+    }
+
+    /// How many logins are currently checked for import.
+    pub(crate) fn checked_count(&self) -> usize {
+        self.checked.iter().filter(|&&c| c).count()
+    }
+
+    /// Seconds left before the screen auto-commits its default (import all
+    /// currently-checked logins).
     pub(crate) fn seconds_remaining(&self) -> u64 {
         DECISION_TIMEOUT
             .saturating_sub(self.shown_at.elapsed())
             .as_secs()
     }
 
-    /// Whether the current candidate's decision countdown has elapsed.
+    /// Whether the decision countdown has elapsed.
     pub(crate) fn timed_out(&self) -> bool {
         self.shown_at.elapsed() >= DECISION_TIMEOUT
     }
@@ -315,11 +390,12 @@ impl OnboardingFlow {
     }
 }
 
-/// Detect whether an external Codex or Claude Code OAuth login is present.
+/// Detect whether an external Codex, Claude Code, Pi, or OpenCode OAuth login
+/// is present.
 ///
 /// Returns every detected CLI (sandbox-aware), so the caller can choose which
-/// one to offer (e.g. by most-recent activity). The order is Codex first,
-/// Claude second, but callers should not treat that as a preference.
+/// one to offer (e.g. by most-recent activity). The order is Codex, Claude, Pi,
+/// then OpenCode, but callers should not treat that as a preference.
 pub(crate) fn detect_external_cli_oauths() -> Vec<ExternalCli> {
     let mut found = Vec::new();
     if external_oauth_present(&external_home_path(".codex/auth.json")) {
@@ -327,6 +403,12 @@ pub(crate) fn detect_external_cli_oauths() -> Vec<ExternalCli> {
     }
     if external_oauth_present(&external_home_path(".claude/.credentials.json")) {
         found.push(ExternalCli::ClaudeCode);
+    }
+    if external_oauth_present(&external_home_path(".pi/agent/auth.json")) {
+        found.push(ExternalCli::Pi);
+    }
+    if external_oauth_present(&external_home_path(".local/share/opencode/auth.json")) {
+        found.push(ExternalCli::OpenCode);
     }
     found
 }

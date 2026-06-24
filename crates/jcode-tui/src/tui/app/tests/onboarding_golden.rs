@@ -78,13 +78,19 @@ fn onboarding_golden_walks_every_phase() {
         });
         let text = render_onboarding_text(&app, width, height);
         dump("LoginOpenAi (no imports)", &text);
-        assert!(text.contains("First, log in to get started."), "{text}");
+        // Lean prompt: just the question + the Yes/No lozenge pills. The Esc hint
+        // already covers the "skip / log in later" path, so no extra prose.
         assert!(text.contains("Log in to OpenAI?"), "{text}");
-        assert!(
-            text.contains("Choose \"No\" to skip for now (run /login anytime)."),
-            "{text}"
-        );
         assert!(text.contains("Yes") && text.contains("No"), "{text}");
+        assert!(
+            text.contains("\u{25D6} Yes \u{25D7}") && text.contains("\u{25D6} No \u{25D7}"),
+            "yes/no lozenge pills: {text}"
+        );
+        // The redundant "Choose No to skip" line was removed.
+        assert!(
+            !text.contains("Choose \"No\" to skip"),
+            "redundant skip line should be gone: {text}"
+        );
     }
 
     // 1b. Recovery fallback: bare Login phase with no import (import declined or
@@ -94,10 +100,13 @@ fn onboarding_golden_walks_every_phase() {
         let text = render_onboarding_text(&app, width, height);
         dump("Login (no imports, recovery)", &text);
         assert!(text.contains("First, log in to get started."), "{text}");
-        assert!(text.contains("Press Enter to choose a provider."), "{text}");
+        assert!(
+            text.contains("Press Enter to pick who to log in with"),
+            "{text}"
+        );
     }
 
-    // 2. Login with detected imports (per-candidate review).
+    // 2. Login with detected imports (two-column list + Next button).
     {
         let review = ImportReview::new(vec![
             ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
@@ -108,21 +117,31 @@ fn onboarding_golden_walks_every_phase() {
             import: Some(review),
         });
         let text = render_onboarding_text(&app, width, height);
-        dump("Login (import review, candidate 1/2)", &text);
-        assert!(text.contains("We found 2 existing logins."), "count: {text}");
-        assert!(text.contains("Login 1 of 2"), "position: {text}");
-        assert!(text.contains("OpenAI/Codex"), "provider: {text}");
-        assert!(text.contains("Codex auth.json"), "source: {text}");
-        assert!(text.contains("Yes"), "yes option: {text}");
-        assert!(text.contains("No"), "no option: {text}");
+        dump("Login (import two-column list, 2 logins)", &text);
+        // The section is labeled "Import:" (lean header; the list itself shows
+        // how many and which logins were found).
+        assert!(text.contains("Import:"), "import label: {text}");
+        // Both logins are listed at once, each with a Yes/No choice.
+        assert!(text.contains("OpenAI/Codex"), "provider 1: {text}");
+        assert!(text.contains("Codex auth.json"), "source 1: {text}");
+        assert!(text.contains("Claude"), "provider 2: {text}");
+        // A Yes/No header sits above the per-login circle columns, with the
+        // filled circle marking the current (pre-selected: Yes) choice.
+        assert!(text.contains("Yes") && text.contains("No"), "yes/no header: {text}");
+        assert!(text.contains('●'), "filled choice circle: {text}");
+        assert!(text.contains('○'), "hollow choice circle: {text}");
+        // A navigable "Continue" pill sits above the list (between the label and
+        // the rows) so the user can reach the commit action by arrowing out of
+        // the list. It is drawn as a real lozenge: half-circle end caps (◖ ◗)
+        // around the label.
+        assert!(text.contains("Continue"), "continue pill label: {text}");
         assert!(
-            text.contains("Left/right or h/l to move, Enter or Space to choose (y / n also work)."),
-            "keys hint: {text}"
+            text.contains('\u{25D6}') && text.contains('\u{25D7}'),
+            "continue pill rounded end caps: {text}"
         );
-        assert!(text.contains("Auto-selects in"), "countdown: {text}");
     }
 
-    // 2b. Singular phrasing for a single detected login.
+    // 2b. A single detected login still renders the labeled list + one row.
     {
         let review =
             ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("Cursor", "Cursor")])
@@ -131,12 +150,11 @@ fn onboarding_golden_walks_every_phase() {
             import: Some(review),
         });
         let text = render_onboarding_text(&app, width, height);
-        dump("Login (import review, single login)", &text);
-        assert!(
-            text.contains("We found 1 existing login."),
-            "singular count: {text}"
-        );
-        assert!(text.contains("Login 1 of 1"), "{text}");
+        dump("Login (import two-column list, single login)", &text);
+        assert!(text.contains("Import:"), "import label: {text}");
+        assert!(text.contains("Cursor"), "single login row: {text}");
+        assert!(text.contains("Yes") && text.contains("No"), "yes/no header: {text}");
+        assert!(text.contains('●'), "filled choice circle: {text}");
     }
 
     // 4. Continue prompt (resume an external session).
@@ -153,12 +171,8 @@ fn onboarding_golden_walks_every_phase() {
             "continue prompt: {text}"
         );
         assert!(
-            text.contains("Yes") && text.contains("No"),
-            "continue prompt Yes/No selector: {text}"
-        );
-        assert!(
-            text.contains("Left/right or h/l to move"),
-            "continue prompt movement hint: {text}"
+            text.contains("\u{25D6} Yes \u{25D7}") && text.contains("\u{25D6} No \u{25D7}"),
+            "continue prompt Yes/No lozenge pills: {text}"
         );
         assert!(
             text.contains("Opens the resume menu automatically in"),
@@ -172,5 +186,117 @@ fn onboarding_golden_walks_every_phase() {
         let text = render_onboarding_text(&app, width, height);
         dump("Suggestions", &text);
         assert!(text.contains("Welcome to jcode onboarding"), "{text}");
+    }
+}
+
+/// Comprehensive state-space walkthrough that also covers the async-wait and
+/// failure screens the basic golden walk omits (the "Importing your logins..."
+/// progress screen and the failure-aware recovery screen), and enforces polish
+/// invariants on every guided screen:
+///
+///   * It always renders the welcome title + tagline (no blank/garbled card).
+///   * Every guided screen advertises the universal Esc escape hatch, so the
+///     user can always see a way out (the liveness guarantee, made visible).
+///   * The failure screen states what went wrong AND the concrete next step.
+///
+/// Run with `--nocapture` to eyeball every screen, including the edge states.
+#[test]
+fn onboarding_golden_walks_failure_and_async_states() {
+    use crate::external_auth::ExternalAuthReviewCandidate;
+    use crate::tui::app::onboarding_flow::ImportReview;
+
+    let width = 80u16;
+    let height = 32u16;
+
+    // Helper: assert the shared polish invariants for a guided screen.
+    let assert_guided_polish = |title: &str, text: &str| {
+        assert!(
+            text.contains("Welcome to jcode onboarding"),
+            "{title}: must render the welcome title\n{text}"
+        );
+        assert!(
+            text.contains("Esc to skip onboarding"),
+            "{title}: every guided screen must advertise the Esc escape hatch\n{text}"
+        );
+    };
+
+    // (a) Import committed, async LoginCompleted not yet arrived: progress card.
+    {
+        let mut app = app_in_phase(OnboardingPhase::Login { import: None });
+        app.onboarding_import_in_progress = Some(std::time::Instant::now());
+        let text = render_onboarding_text(&app, width, height);
+        dump("Login (importing in progress)", &text);
+        assert!(
+            text.contains("Importing your logins"),
+            "progress headline: {text}"
+        );
+        assert!(
+            text.contains("Hang tight"),
+            "progress reassurance: {text}"
+        );
+        // The progress screen must NOT show the manual-login recovery copy.
+        assert!(
+            !text.contains("Press Enter to pick who to log in with"),
+            "progress screen must not tell the user to log in again: {text}"
+        );
+        assert_guided_polish("Login (importing in progress)", &text);
+    }
+
+    // (b) Import failed: failure-aware recovery card with reason + next step.
+    {
+        let mut app = app_in_phase(OnboardingPhase::Login { import: None });
+        app.onboarding_import_error =
+            Some("the saved credential was rejected".to_string());
+        let text = render_onboarding_text(&app, width, height);
+        dump("Login (import failed, recovery)", &text);
+        assert!(
+            text.contains("We couldn't import those logins."),
+            "failure headline: {text}"
+        );
+        assert!(
+            text.contains("the saved credential was rejected"),
+            "failure reason must be shown verbatim: {text}"
+        );
+        assert!(
+            text.contains("you can log in directly"),
+            "failure must offer a concrete recovery: {text}"
+        );
+        assert!(
+            text.contains("Press Enter to choose a provider"),
+            "failure must state the exact next key: {text}"
+        );
+        assert_guided_polish("Login (import failed, recovery)", &text);
+    }
+
+    // (c) The import list, recovery, OpenAI prompt, and continue prompt must all
+    // advertise the Esc escape hatch (polish invariant across guided screens).
+    {
+        let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            "OpenAI/Codex",
+            "Codex auth.json",
+        )])
+        .unwrap();
+        let app = app_in_phase(OnboardingPhase::Login {
+            import: Some(review),
+        });
+        let text = render_onboarding_text(&app, width, height);
+        dump("Login (import list, Esc hint)", &text);
+        assert_guided_polish("Login (import list)", &text);
+    }
+    {
+        let app = app_in_phase(OnboardingPhase::LoginOpenAi {
+            yes_highlighted: true,
+        });
+        let text = render_onboarding_text(&app, width, height);
+        assert_guided_polish("LoginOpenAi", &text);
+    }
+    {
+        let app = app_in_phase(OnboardingPhase::ContinuePrompt {
+            cli: ExternalCli::Codex,
+            yes_highlighted: true,
+            shown_at: std::time::Instant::now(),
+        });
+        let text = render_onboarding_text(&app, width, height);
+        assert_guided_polish("ContinuePrompt", &text);
     }
 }

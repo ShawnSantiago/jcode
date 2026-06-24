@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+pub mod keybindings;
+pub use keybindings::{
+    KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,
+    KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding, default_binding_or,
+    keybinding_default, keybinding_defaults_report, validate_keybinding_defaults,
+};
+
 /// Compaction mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -441,7 +448,7 @@ pub struct AuthConfig {
 }
 
 /// Agent-specific model defaults.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentsConfig {
     /// Optional default model override for spawned swarm/subagent sessions.
@@ -461,6 +468,14 @@ pub struct AgentsConfig {
     /// Optional default model override for the memory sidecar.
     pub memory_model: Option<String>,
     /// Whether memory should use the sidecar for relevance/extraction.
+    ///
+    /// Defaults to `true`: the LLM precision-judge path is the only memory mode
+    /// that is reliably productive (injection precision ~1.0), so memory uses it
+    /// by default. Set to `false` only to deliberately opt into the lower-
+    /// precision no-LLM hybrid path. When sidecar mode is on but no LLM backend
+    /// is reachable, the memory runtime goes dormant instead of degrading to the
+    /// no-LLM path.
+    #[serde(default = "default_memory_sidecar_enabled")]
     pub memory_sidecar_enabled: bool,
     /// Minimum turns between Mode-2 memory reranks (cadence floor). The
     /// expensive listwise LLM rerank runs at most once per this many turns;
@@ -480,6 +495,34 @@ pub struct AgentsConfig {
     /// memory. Clamped to 1..=votes. Higher = stricter precision, lower recall.
     #[serde(default = "default_memory_rerank_min_agree")]
     pub memory_rerank_min_agree: usize,
+    /// Which embedding backend memory dense-retrieval uses: `"local"` (bundled
+    /// all-MiniLM-L6-v2 ONNX, default, no network) or `"openai"` (remote
+    /// OpenAI/openai-compatible `/v1/embeddings`, opt-in, requires an
+    /// `OPENAI_API_KEY`). A keyless `"openai"` setting silently degrades to
+    /// local. Env override: `JCODE_MEMORY_EMBEDDING_BACKEND`.
+    #[serde(default = "default_memory_embedding_backend")]
+    pub memory_embedding_backend: String,
+    /// OpenAI embedding model name when `memory_embedding_backend = "openai"`.
+    /// Unset = `text-embedding-3-small`. Env: `JCODE_MEMORY_EMBEDDING_MODEL`.
+    #[serde(default)]
+    pub memory_embedding_model: Option<String>,
+    /// Optional override for the embeddings API base URL (no trailing slash),
+    /// for OpenAI-compatible gateways. Unset = `https://api.openai.com/v1`.
+    /// Env: `JCODE_MEMORY_EMBEDDING_BASE_URL`.
+    #[serde(default)]
+    pub memory_embedding_base_url: Option<String>,
+    /// Optional override for the remote embedding dimensionality (vector-space
+    /// metadata / sanity checks). Unset = inferred from the model name.
+    #[serde(default)]
+    pub memory_embedding_dim: Option<usize>,
+}
+
+fn default_memory_embedding_backend() -> String {
+    "local".to_string()
+}
+
+fn default_memory_sidecar_enabled() -> bool {
+    true
 }
 
 fn default_memory_rerank_cadence() -> usize {
@@ -492,6 +535,25 @@ fn default_memory_rerank_votes() -> usize {
 
 fn default_memory_rerank_min_agree() -> usize {
     2
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            swarm_model: None,
+            swarm_spawn_mode: SwarmSpawnMode::default(),
+            swarm_gallery_max_pct: None,
+            memory_model: None,
+            memory_sidecar_enabled: default_memory_sidecar_enabled(),
+            memory_rerank_cadence: default_memory_rerank_cadence(),
+            memory_rerank_votes: default_memory_rerank_votes(),
+            memory_rerank_min_agree: default_memory_rerank_min_agree(),
+            memory_embedding_backend: default_memory_embedding_backend(),
+            memory_embedding_model: None,
+            memory_embedding_base_url: None,
+            memory_embedding_dim: None,
+        }
+    }
 }
 
 /// How swarm-created agents should be spawned.
@@ -653,9 +715,9 @@ pub struct KeybindingsConfig {
     pub model_switch_next: String,
     /// Model switch previous key (default: "ctrl+shift+tab")
     pub model_switch_prev: String,
-    /// Effort increase key (default: "alt+right")
+    /// Effort increase key (default: "cmd+right" on macOS, "alt+right" elsewhere)
     pub effort_increase: String,
-    /// Effort decrease key (default: "alt+left")
+    /// Effort decrease key (default: "cmd+left" on macOS, "alt+left" elsewhere)
     pub effort_decrease: String,
     /// Centered mode toggle key (default: "alt+c")
     pub centered_toggle: String,
@@ -689,6 +751,12 @@ pub struct KeybindingsConfig {
     pub diff_mode_cycle: String,
     /// Toggle the info widget (default: "alt+i")
     pub info_widget_toggle: String,
+    /// Spawn a fresh jcode session in a new terminal window (default: unbound).
+    /// Example: "alt+enter".
+    pub new_terminal: String,
+    /// Open the `/resume` session picker (default: "cmd+r" on macOS, "ctrl+r"
+    /// elsewhere). Set "" to disable.
+    pub open_resume: String,
     /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
     /// Ctrl+Enter performs the alternate action.
     pub session_picker_enter: SessionPickerResumeAction,
@@ -696,31 +764,40 @@ pub struct KeybindingsConfig {
 
 impl Default for KeybindingsConfig {
     fn default() -> Self {
+        // Pull platform-appropriate defaults from the single source of truth in
+        // `keybindings.rs`. This is where the macOS vs Windows/Linux split takes
+        // effect: each field resolves to its own platform's default binding.
+        let p = KeybindingPlatform::current();
+        let get = |id: &str, fallback: &'static str| {
+            default_binding(id, p).unwrap_or(fallback).to_string()
+        };
         Self {
-            scroll_up: "ctrl+k".to_string(),
-            scroll_down: "ctrl+j".to_string(),
-            scroll_page_up: "alt+u".to_string(),
-            scroll_page_down: "alt+d".to_string(),
-            model_switch_next: "ctrl+tab".to_string(),
-            model_switch_prev: "ctrl+shift+tab".to_string(),
-            effort_increase: "alt+right".to_string(),
-            effort_decrease: "alt+left".to_string(),
-            centered_toggle: "alt+c".to_string(),
-            scroll_prompt_up: "ctrl+[".to_string(),
-            scroll_prompt_down: "ctrl+]".to_string(),
-            scroll_bookmark: "ctrl+g".to_string(),
-            scroll_up_fallback: String::new(),
-            scroll_down_fallback: String::new(),
-            workspace_left: "alt+h".to_string(),
-            workspace_down: "alt+j".to_string(),
-            workspace_up: "alt+k".to_string(),
-            workspace_right: "alt+l".to_string(),
-            side_panel_toggle: "alt+m".to_string(),
-            copy_selection_toggle: "alt+y".to_string(),
-            diagram_pane_toggle: "alt+t".to_string(),
-            typing_scroll_lock_toggle: "alt+s".to_string(),
-            diff_mode_cycle: "alt+g".to_string(),
-            info_widget_toggle: "alt+i".to_string(),
+            scroll_up: get("scroll_up", "ctrl+k"),
+            scroll_down: get("scroll_down", "ctrl+j"),
+            scroll_page_up: get("scroll_page_up", "alt+u"),
+            scroll_page_down: get("scroll_page_down", "alt+d"),
+            model_switch_next: get("model_switch_next", "ctrl+tab"),
+            model_switch_prev: get("model_switch_prev", "ctrl+shift+tab"),
+            effort_increase: get("effort_increase", "alt+right"),
+            effort_decrease: get("effort_decrease", "alt+left"),
+            centered_toggle: get("centered_toggle", "alt+c"),
+            scroll_prompt_up: get("scroll_prompt_up", "ctrl+["),
+            scroll_prompt_down: get("scroll_prompt_down", "ctrl+]"),
+            scroll_bookmark: get("scroll_bookmark", "ctrl+g"),
+            scroll_up_fallback: get("scroll_up_fallback", ""),
+            scroll_down_fallback: get("scroll_down_fallback", ""),
+            workspace_left: get("workspace_left", "alt+h"),
+            workspace_down: get("workspace_down", "alt+j"),
+            workspace_up: get("workspace_up", "alt+k"),
+            workspace_right: get("workspace_right", "alt+l"),
+            side_panel_toggle: get("side_panel_toggle", "alt+m"),
+            copy_selection_toggle: get("copy_selection_toggle", "alt+y"),
+            diagram_pane_toggle: get("diagram_pane_toggle", "alt+t"),
+            typing_scroll_lock_toggle: get("typing_scroll_lock_toggle", "alt+s"),
+            diff_mode_cycle: get("diff_mode_cycle", "alt+g"),
+            info_widget_toggle: get("info_widget_toggle", "alt+i"),
+            new_terminal: get("new_terminal", ""),
+            open_resume: get("open_resume", if cfg!(target_os = "macos") { "cmd+r" } else { "alt+r" }),
             session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
@@ -1070,6 +1147,45 @@ impl Default for AmbientConfig {
             proactive_work: true,
             work_branch_prefix: "ambient/".to_string(),
             visible: true,
+        }
+    }
+}
+
+/// Desktop notification configuration for interactive sessions.
+///
+/// Unlike `[safety]` (ambient-mode ntfy/email/channel notifications), this
+/// section controls lightweight local desktop notifications for the normal
+/// interactive TUI, e.g. "agent finished a long turn".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    /// Send a desktop notification when an agent turn completes (default: true).
+    /// Notifications fire only for long turns (see thresholds below) and, by
+    /// default, only while the terminal window is unfocused.
+    pub turn_complete: bool,
+    /// Minimum turn duration, in seconds, before a completed turn notifies
+    /// (default: 120).
+    pub turn_complete_min_secs: u64,
+    /// Lower duration threshold, in seconds, used when the session has todos
+    /// recorded, since todos indicate longer task-style work (default: 30).
+    pub turn_complete_todo_min_secs: u64,
+    /// Only notify while the terminal window is unfocused (default: true).
+    /// Requires a terminal that reports focus events (most modern terminals).
+    pub turn_complete_only_when_unfocused: bool,
+    /// macOS Notification Center sound name played on turn completion
+    /// (e.g. "Glass", "Ping", "Hero"). Empty string disables the sound.
+    /// Ignored on non-macOS platforms. Default: "Glass".
+    pub turn_complete_sound: String,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            turn_complete: true,
+            turn_complete_min_secs: 120,
+            turn_complete_todo_min_secs: 30,
+            turn_complete_only_when_unfocused: true,
+            turn_complete_sound: "Glass".to_string(),
         }
     }
 }

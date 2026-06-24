@@ -1137,19 +1137,36 @@ impl App {
         use crate::tui::app::onboarding_flow::OnboardingPhase;
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
-                let prompt = import.as_ref().and_then(|review| {
-                    review
-                        .current()
-                        .map(|candidate| crate::tui::LoginImportPrompt {
+                let prompt = import.as_ref().map(|review| {
+                    let rows = review
+                        .candidates
+                        .iter()
+                        .enumerate()
+                        .map(|(i, candidate)| crate::tui::LoginImportRow {
                             provider_summary: candidate.provider_summary().to_string(),
                             source_name: candidate.source_name().to_string(),
-                            position: review.position(),
-                            total: review.total(),
-                            yes_highlighted: review.yes_highlighted,
-                            seconds_left: review.seconds_remaining(),
+                            checked: review.checked.get(i).copied().unwrap_or(false),
                         })
+                        .collect();
+                    crate::tui::LoginImportPrompt {
+                        rows,
+                        cursor: review.cursor,
+                        continue_focused: review.continue_focused,
+                        checked_count: review.checked_count(),
+                        seconds_left: review.seconds_remaining(),
+                    }
                 });
-                OnboardingWelcomeKind::Login { import: prompt }
+                OnboardingWelcomeKind::Login {
+                    import: prompt,
+                    importing: self.onboarding_import_in_progress.is_some(),
+                    error: self.onboarding_import_error.clone(),
+                    // Only offer the agent-repair option on the failure screen,
+                    // and only when we can name an agent the user recently used.
+                    repair_agent_label: self.onboarding_import_error.as_ref().and_then(|_| {
+                        crate::tui::app::onboarding_repair::detect_preferred_repair_agent()
+                            .map(|a| a.label().to_string())
+                    }),
+                }
             }
             Some(OnboardingPhase::LoginOpenAi { yes_highlighted }) => {
                 OnboardingWelcomeKind::LoginOpenAi {

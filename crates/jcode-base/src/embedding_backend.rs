@@ -64,6 +64,13 @@ pub trait EmbeddingBackend: Send + Sync {
     fn embed_passage(&self, text: &str) -> Result<Vec<f32>> {
         self.embed_raw(&self.format_passage(text))
     }
+
+    /// Batch-embed many passages. Backends with a remote API override this to
+    /// amortize one HTTP round-trip over many inputs; the default loops over
+    /// [`Self::embed_passage`] so local backends need no special-casing.
+    fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed_passage(t)).collect()
+    }
 }
 
 /// The bundled local ONNX embedder (currently all-MiniLM-L6-v2).
@@ -91,13 +98,240 @@ impl EmbeddingBackend for LocalOnnxBackend {
     // MiniLM is symmetric and prefix-free: default identity formatting is correct.
 }
 
+/// A remote OpenAI-compatible embeddings backend (`POST /v1/embeddings`).
+///
+/// Works against OpenAI proper and any OpenAI-compatible gateway that exposes
+/// the same schema (the `base_url` + `Authorization: Bearer` contract). The
+/// model id is stored as `"openai:<model>"` so its vectors never get compared
+/// against local MiniLM vectors (different vector space): see the module
+/// invariants. OpenAI embeddings are L2-normalized by the API, so plain cosine
+/// over the returned vectors is correct.
+#[derive(Debug, Clone)]
+pub struct OpenAiEmbeddingBackend {
+    /// Stable `"openai:<model>"` identifier persisted on each MemoryEntry.
+    model_id: String,
+    /// Bare model name sent in the request body (e.g. `text-embedding-3-small`).
+    model: String,
+    /// API base, no trailing slash, e.g. `https://api.openai.com/v1`.
+    base_url: String,
+    /// Bearer credential.
+    api_key: String,
+    /// Reported embedding dimensionality.
+    dim: usize,
+}
+
+/// Default OpenAI embedding model. 3-small is the cost/quality sweet spot
+/// (1536-d, ~5x cheaper than ada-002 with higher MTEB scores).
+pub const DEFAULT_OPENAI_EMBEDDING_MODEL: &str = "text-embedding-3-small";
+const OPENAI_EMBEDDINGS_BASE: &str = "https://api.openai.com/v1";
+
+/// Native dimensionality for the common OpenAI embedding models.
+fn default_openai_dim(model: &str) -> usize {
+    match model {
+        "text-embedding-3-small" => 1536,
+        "text-embedding-3-large" => 3072,
+        "text-embedding-ada-002" => 1536,
+        _ => 1536,
+    }
+}
+
+impl OpenAiEmbeddingBackend {
+    /// Construct a backend for `model`, resolving `base_url`/`dim` to sensible
+    /// defaults when not supplied.
+    pub fn new(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        base_url: Option<String>,
+        dim: Option<usize>,
+    ) -> Self {
+        let model = model.into();
+        let dim = dim.unwrap_or_else(|| default_openai_dim(&model));
+        let base_url = base_url
+            .map(|b| b.trim_end_matches('/').to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| OPENAI_EMBEDDINGS_BASE.to_string());
+        Self {
+            model_id: format!("openai:{model}"),
+            model,
+            base_url,
+            api_key: api_key.into(),
+            dim,
+        }
+    }
+
+    /// POST a batch of inputs to `/embeddings` and return their vectors in order.
+    ///
+    /// Runs the blocking HTTP call on a dedicated thread so it is safe to call
+    /// from a synchronous context (the bench) AND from inside a tokio runtime
+    /// worker (the live memory path) without the nested-runtime panic that
+    /// `reqwest::blocking` would otherwise trigger.
+    fn embed_inputs(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = format!("{}/embeddings", self.base_url);
+        let api_key = self.api_key.clone();
+        let model = self.model.clone();
+        let want = inputs.len();
+        let expected_dim = self.dim;
+
+        let vectors = std::thread::scope(|scope| {
+            scope
+                .spawn(move || -> Result<Vec<Vec<f32>>> {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(60))
+                        .build()?;
+                    let body = serde_json::json!({
+                        "model": model,
+                        "input": inputs,
+                    });
+                    let resp = client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send()?;
+                    let status = resp.status();
+                    let text = resp.text()?;
+                    if !status.is_success() {
+                        anyhow::bail!(
+                            "OpenAI embeddings request failed ({status}): {}",
+                            text.chars().take(400).collect::<String>()
+                        );
+                    }
+                    let parsed: EmbeddingsResponse = serde_json::from_str(&text)
+                        .map_err(|e| anyhow::anyhow!("parse embeddings response: {e}"))?;
+                    let mut data = parsed.data;
+                    // The API returns items with an `index` field; sort to be safe.
+                    data.sort_by_key(|d| d.index);
+                    Ok(data.into_iter().map(|d| d.embedding).collect())
+                })
+                .join()
+                .map_err(|_| anyhow::anyhow!("OpenAI embeddings worker thread panicked"))?
+        })?;
+
+        if vectors.len() != want {
+            anyhow::bail!(
+                "OpenAI embeddings returned {} vectors for {} inputs",
+                vectors.len(),
+                want
+            );
+        }
+        if let Some(first) = vectors.first()
+            && first.len() != expected_dim
+        {
+            // Not fatal (cosine still works), but log so an index/dim mismatch is
+            // visible rather than silently corrupting cross-model gating.
+            crate::logging::warn(&format!(
+                "OpenAI embedding dim {} != configured {} for model {}",
+                first.len(),
+                expected_dim,
+                self.model
+            ));
+        }
+        Ok(vectors)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct EmbeddingsResponse {
+    data: Vec<EmbeddingsDatum>,
+}
+
+#[derive(serde::Deserialize)]
+struct EmbeddingsDatum {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+impl EmbeddingBackend for OpenAiEmbeddingBackend {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn embed_raw(&self, text: &str) -> Result<Vec<f32>> {
+        let mut out = self.embed_inputs(vec![text.to_string()])?;
+        out.pop()
+            .ok_or_else(|| anyhow::anyhow!("OpenAI embeddings returned no vector"))
+    }
+
+    fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let inputs: Vec<String> = texts.iter().map(|t| self.format_passage(t)).collect();
+        self.embed_inputs(inputs)
+    }
+
+    // OpenAI embeddings are symmetric and prefix-free: identity formatting.
+}
+
 /// Resolve the active embedding backend.
 ///
-/// For now this always returns the local ONNX backend. Remote backends
-/// (OpenAI/openai-compatible) will be added here, selected only when an
-/// embeddings-capable API key is configured; see the embedding-backends plan.
+/// Selects the OpenAI/openai-compatible remote backend when the user has
+/// opted in (`agents.memory_embedding_backend = "openai"`) AND an embeddings
+/// credential is resolvable; otherwise falls back to the always-available local
+/// ONNX backend. Selection is intentionally conservative: a misconfigured or
+/// keyless remote setting silently degrades to local rather than failing
+/// retrieval.
 pub fn active_backend() -> Box<dyn EmbeddingBackend> {
+    if let Some(remote) = openai_backend_from_config() {
+        return Box::new(remote);
+    }
     Box::new(LocalOnnxBackend)
+}
+
+/// Build an [`OpenAiEmbeddingBackend`] from config + resolved credentials, or
+/// `None` when remote embeddings are not selected/available.
+pub fn openai_backend_from_config() -> Option<OpenAiEmbeddingBackend> {
+    let agents = &crate::config::config().agents;
+    if !agents.memory_embedding_backend.eq_ignore_ascii_case("openai") {
+        return None;
+    }
+    let api_key = crate::provider_catalog::load_api_key_from_env_or_config(
+        "OPENAI_API_KEY",
+        "openai.env",
+    )?;
+    let model = agents
+        .memory_embedding_model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
+    let base_url = agents.memory_embedding_base_url.clone();
+    let dim = agents.memory_embedding_dim;
+    Some(OpenAiEmbeddingBackend::new(model, api_key, base_url, dim))
+}
+
+/// The model id (vector-space tag) of the currently active backend.
+///
+/// Persisted on freshly embedded memories and used to gate cross-model dense
+/// comparisons. When remote embeddings are not active this is the local
+/// MiniLM tag, matching legacy untagged memories.
+pub fn active_model_id() -> String {
+    active_backend().model_id().to_string()
+}
+
+/// Whether `entry_model` (an entry's `effective_embedding_model()`) shares a
+/// vector space with the active backend, so their dense cosine is meaningful.
+pub fn model_matches_active(entry_model: &str) -> bool {
+    entry_model == active_model_id()
+}
+
+/// Embed a retrieval QUERY with the active backend, returning the vector and the
+/// backend's model id. The local backend round-trips through the cached
+/// `crate::embedding` facade; remote backends call their API directly.
+pub fn embed_query_active(text: &str) -> anyhow::Result<(Vec<f32>, String)> {
+    let backend = active_backend();
+    let vec = backend.embed_query(text)?;
+    Ok((vec, backend.model_id().to_string()))
+}
+
+/// Embed a stored PASSAGE/memory with the active backend, returning the vector
+/// and the backend's model id (to persist on the entry for space-gating).
+pub fn embed_passage_active(text: &str) -> anyhow::Result<(Vec<f32>, String)> {
+    let backend = active_backend();
+    let vec = backend.embed_passage(text)?;
+    Ok((vec, backend.model_id().to_string()))
 }
 
 #[cfg(test)]
@@ -116,5 +350,23 @@ mod tests {
         let b = LocalOnnxBackend;
         assert_eq!(b.format_query("hello"), "hello");
         assert_eq!(b.format_passage("world"), "world");
+    }
+
+    #[test]
+    fn openai_backend_namespaces_model_id_and_infers_dim() {
+        let b = OpenAiEmbeddingBackend::new("text-embedding-3-small", "sk-x", None, None);
+        // model_id must be namespaced so OpenAI vectors never compare against
+        // local MiniLM vectors (different vector spaces).
+        assert_eq!(b.model_id(), "openai:text-embedding-3-small");
+        assert_ne!(b.model_id(), LocalOnnxBackend.model_id());
+        assert_eq!(b.dim(), 1536);
+
+        let large = OpenAiEmbeddingBackend::new("text-embedding-3-large", "sk-x", None, None);
+        assert_eq!(large.dim(), 3072);
+
+        // Explicit dim override wins (for truncated 3-small/3-large indexes).
+        let truncated =
+            OpenAiEmbeddingBackend::new("text-embedding-3-large", "sk-x", None, Some(256));
+        assert_eq!(truncated.dim(), 256);
     }
 }

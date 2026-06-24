@@ -131,6 +131,23 @@ impl Sidecar {
         }
     }
 
+    /// Whether a usable LLM backend is actually reachable for the sidecar right
+    /// now. Unlike [`Sidecar::auto_select_backend`] this does NOT fall back to a
+    /// Claude placeholder when nothing is logged in: it returns `true` only when
+    /// real Codex/Claude credentials exist or a live agent provider is
+    /// registered.
+    ///
+    /// Re-evaluated live (reads credentials/provider state on each call) so that
+    /// adding or removing a login is reflected without a restart. This is the
+    /// signal the memory system uses to decide whether the LLM precision judge
+    /// can run; if it returns `false`, memory's sidecar mode is treated as
+    /// unavailable rather than silently degrading to the no-LLM path.
+    pub fn llm_backend_available() -> bool {
+        auth::codex::load_credentials().is_ok()
+            || auth::claude::load_credentials().is_ok()
+            || crate::provider::active_provider_fork().is_some()
+    }
+
     /// Return the currently selected sidecar model name.
     pub fn model_name(&self) -> &str {
         &self.model
