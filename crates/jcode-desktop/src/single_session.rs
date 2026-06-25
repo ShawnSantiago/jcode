@@ -6210,7 +6210,7 @@ fn latest_jsonl_candidates(
     }
     let mut files = Vec::new();
     collect_recent_jsonl_files(root, &mut files, scan_limit.saturating_mul(8));
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|file| std::cmp::Reverse(file.1));
     files.truncate(scan_limit);
     files
         .into_iter()
