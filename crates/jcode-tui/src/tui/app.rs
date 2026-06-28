@@ -75,12 +75,14 @@ mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
 mod onboarding_repair;
+mod onboarding_sim;
 mod productivity;
 mod remote;
 mod remote_notifications;
 mod replay;
 pub(crate) mod run_shell;
 mod runtime_memory;
+mod shortcut_hints;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
@@ -92,7 +94,6 @@ mod todos_view;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
-mod shortcut_hints;
 mod turn;
 mod turn_memory;
 mod turn_notify;
@@ -301,6 +302,23 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+}
+
+/// An interactive "switch to the next best model/method and resend" offer shown
+/// after a provider turn error (auth failure, broken API key, rate limit, etc.).
+///
+/// Unlike [`PendingProviderFailover`], this is a manual, keypress-activated
+/// affordance and can switch between *auth methods on the same provider* (e.g.
+/// fall back from a broken `claude-api` key to a working `claude-oauth` login),
+/// which is exactly the case automatic cross-provider failover cannot handle.
+#[derive(Debug, Clone)]
+struct PendingFallbackOffer {
+    /// The route selection to apply when the user accepts the offer.
+    selection: crate::provider::RouteSelection,
+    /// Short human label for the target (e.g. "claude-sonnet-4 via OAuth").
+    target_label: String,
+    /// Short label for what just failed (e.g. "Claude via API key").
+    from_label: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -762,6 +780,9 @@ pub struct App {
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
     pending_provider_failover: Option<PendingProviderFailover>,
+    // Interactive "switch to next best model/method and resend" offer surfaced
+    // after a provider turn error; accepted with a keypress.
+    pending_fallback_offer: Option<PendingFallbackOffer>,
     // Local session file write to flush once the first "sending" frame is visible.
     session_save_pending: bool,
     // Tool calls detected during streaming (shown in real-time with details)
@@ -783,6 +804,11 @@ pub struct App {
     last_resize_redraw: Option<Instant>,
     // Cached MCP server names and tool counts (updated on connect/disconnect)
     mcp_server_names: Vec<(String, usize)>,
+    // When the current connection phase (authenticating/connecting/waiting) began.
+    // Reset on every phase change so the "suspiciously long" yellow status is
+    // measured per-attempt instead of inheriting the whole-turn elapsed time
+    // (which would immediately render yellow on later round-trips of a turn).
+    connection_phase_started: Option<Instant>,
     // Semantic stream buffer for chunked output
     stream_buffer: StreamBuffer,
     // Track thinking start time for extended thinking display
@@ -843,6 +869,11 @@ pub struct App {
     startup_submit_deferred_reason: Option<&'static str>,
     /// One-shot/session-local preview of the first-run onboarding empty state.
     onboarding_preview_mode: bool,
+    /// Active onboarding simulator: `Some(index)` is the current simulated
+    /// screen (driven by `onboarding_sim.rs`); `None` when not simulating. The
+    /// simulator seeds synthetic phases so a developer can step through every
+    /// first-run screen via Cmd+5 without touching real auth state.
+    onboarding_sim: Option<usize>,
     /// Active guided first-run onboarding flow (model select -> continue ->
     /// transcript pick -> suggestions). `None` when not onboarding.
     onboarding_flow: Option<onboarding_flow::OnboardingFlow>,
@@ -1027,6 +1058,10 @@ pub struct App {
     // Debug-only: force the inline swarm gallery active (bypasses spawn-mode
     // and members-present gating) so visual tests can drive it deterministically.
     debug_force_inline_gallery: bool,
+    // Currently selected agent index in the inline swarm panel (display order).
+    swarm_panel_selected: usize,
+    // Whether the inline swarm panel has keyboard focus (navigable list + detail).
+    swarm_panel_focused: bool,
     // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
@@ -1104,8 +1139,7 @@ pub struct App {
     // `expanded_images_version` bumps on every change so the body/full prep
     // caches (which embed anchored images) invalidate exactly like the
     // `inline_images_visible` toggle does.
-    expanded_images:
-        std::collections::HashMap<u64, super::ui::inline_image_ui::ImageExpandLevel>,
+    expanded_images: std::collections::HashMap<u64, super::ui::inline_image_ui::ImageExpandLevel>,
     expanded_images_version: u64,
     // Auto-hide deadline for the pinned image side pane only.
     pinned_images_auto_hide_deadline: Option<Instant>,
@@ -1161,6 +1195,8 @@ pub struct App {
     new_terminal_key: OptionalBinding,
     // Optional configured keybinding for opening the /resume session picker
     open_resume_key: OptionalBinding,
+    // Optional configured keybinding for accepting the post-error fallback offer
+    fallback_switch_key: OptionalBinding,
     // Active external dictation session, if one is running
     dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running

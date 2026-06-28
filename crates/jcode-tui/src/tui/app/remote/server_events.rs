@@ -621,8 +621,15 @@ pub(in crate::tui::app) fn handle_server_event(
             };
             app.status = if matches!(cp, crate::message::ConnectionPhase::Streaming) {
                 app.resume_streaming_tps();
+                app.connection_phase_started = None;
                 ProcessingStatus::Streaming
             } else {
+                // Start the "suspiciously long" timer when we first enter the
+                // connecting group so later round-trips in a turn don't inherit
+                // the whole-turn elapsed and immediately render yellow.
+                if !matches!(app.status, ProcessingStatus::Connecting(_)) {
+                    app.connection_phase_started = Some(Instant::now());
+                }
                 ProcessingStatus::Connecting(cp)
             };
             eager_stream_redraw
@@ -649,6 +656,7 @@ pub(in crate::tui::app) fn handle_server_event(
             ));
             app.rollback_streaming_attempt();
             remote.clear_pending();
+            app.connection_phase_started = Some(Instant::now());
             app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
                 attempt,
                 max,
@@ -1881,8 +1889,12 @@ pub(in crate::tui::app) fn handle_server_event(
             };
 
             if background_task_scope {
-                let presentation =
-                    present_swarm_notification(&sender, &notification_type, &message);
+                let presentation = present_swarm_notification(
+                    &sender,
+                    &notification_type,
+                    &message,
+                    crate::config::config().display.compact_notifications,
+                );
                 if crate::message::parse_background_task_progress_notification_markdown(&message)
                     .is_some()
                 {
@@ -1924,7 +1936,12 @@ pub(in crate::tui::app) fn handle_server_event(
                 return false;
             }
 
-            let presentation = present_swarm_notification(&sender, &notification_type, &message);
+            let presentation = present_swarm_notification(
+                &sender,
+                &notification_type,
+                &message,
+                crate::config::config().display.compact_notifications,
+            );
             app.push_display_message(DisplayMessage::swarm(
                 presentation.title.clone(),
                 presentation.message.clone(),

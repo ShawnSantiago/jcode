@@ -100,7 +100,11 @@ struct GridShape {
 /// Choose how many columns/rows to use for `tile_count` agents in the given
 /// budget. Picks the column count whose resulting cell aspect ratio is closest
 /// to `target_aspect`, subject to width/height minimums.
-fn choose_grid(tile_count: usize, total_width: usize, cfg: &SwarmGalleryConfig) -> Option<GridShape> {
+fn choose_grid(
+    tile_count: usize,
+    total_width: usize,
+    cfg: &SwarmGalleryConfig,
+) -> Option<GridShape> {
     if tile_count == 0 || total_width == 0 || cfg.max_height == 0 {
         return None;
     }
@@ -136,8 +140,8 @@ fn choose_grid(tile_count: usize, total_width: usize, cfg: &SwarmGalleryConfig) 
         let empty_slots = (cols * rows).saturating_sub(shown);
         // Prefer aspect close to target; penalize raggedness; tie-break toward
         // showing more tiles.
-        let cost = (aspect - cfg.target_aspect).abs() + (empty_slots as f32) * 0.6
-            - (shown as f32) * 0.01;
+        let cost =
+            (aspect - cfg.target_aspect).abs() + (empty_slots as f32) * 0.6 - (shown as f32) * 0.01;
         let shape = GridShape { cols, rows, shown };
         match &best {
             Some((best_cost, _)) if *best_cost <= cost => {}
@@ -242,10 +246,7 @@ fn normalize_top_width(spans: &mut Vec<Span<'static>>, box_width: usize, border_
         // Pad just before the trailing " ─╮".
         let pad = box_width - cur;
         let insert_at = spans.len().saturating_sub(1);
-        spans.insert(
-            insert_at,
-            Span::styled("─".repeat(pad), border_style),
-        );
+        spans.insert(insert_at, Span::styled("─".repeat(pad), border_style));
     }
 }
 
@@ -320,6 +321,25 @@ fn truncate_w(s: &str, max_width: usize) -> String {
     out
 }
 
+/// Render a single tile filling exactly `width` x `height` (including borders).
+/// Used by the list+detail swarm panel to draw the focused agent's viewport.
+/// Returns an empty vec when the area is too small to draw a bordered box.
+pub fn render_single_tile(tile: &SwarmTile, width: usize, height: usize) -> Vec<Line<'static>> {
+    if width < 4 || height < 3 {
+        return Vec::new();
+    }
+    let inner_w = width - 2;
+    let inner_h = height - 2;
+    let mut lines = render_cell(tile, inner_w, inner_h);
+    // render_cell already yields `height` lines, but pad/truncate defensively so
+    // callers can rely on the exact height.
+    while lines.len() < height {
+        lines.push(Line::from(Span::raw(" ".repeat(width))));
+    }
+    lines.truncate(height);
+    lines
+}
+
 /// Render the swarm gallery. Returns lines ready to draw, fitting within
 /// `total_width` columns and roughly `cfg.max_height` rows (plus header).
 pub fn render_swarm_gallery(
@@ -347,7 +367,8 @@ pub fn render_swarm_gallery(
     let cell_inner_w = cell_total_w.saturating_sub(2);
 
     // Distribute the height budget across rows; cap at preferred height.
-    let cell_total_h = (cfg.max_height / rows).clamp(cfg.min_cell_height, cfg.preferred_cell_height);
+    let cell_total_h =
+        (cfg.max_height / rows).clamp(cfg.min_cell_height, cfg.preferred_cell_height);
     let cell_inner_h = cell_total_h.saturating_sub(2);
 
     // Render each shown tile into a grid of line buffers.
@@ -385,7 +406,11 @@ pub fn render_swarm_gallery(
     let hidden = tiles.len().saturating_sub(shown);
     if hidden > 0 {
         out.push(Line::from(Span::styled(
-            format!("  +{} more agent{}", hidden, if hidden == 1 { "" } else { "s" }),
+            format!(
+                "  +{} more agent{}",
+                hidden,
+                if hidden == 1 { "" } else { "s" }
+            ),
             Style::default().fg(Color::Rgb(140, 140, 150)),
         )));
     }
@@ -447,7 +472,12 @@ mod tests {
     #[test]
     fn cells_are_width_bounded() {
         let tiles: Vec<SwarmTile> = (0..3)
-            .map(|i| tile(&format!("a{i}"), &["a very long line that should be truncated nicely"]))
+            .map(|i| {
+                tile(
+                    &format!("a{i}"),
+                    &["a very long line that should be truncated nicely"],
+                )
+            })
             .collect();
         let cfg = SwarmGalleryConfig::default();
         let lines = render_swarm_gallery(&tiles, 80, &cfg, None);

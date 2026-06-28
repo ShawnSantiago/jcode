@@ -1472,14 +1472,13 @@ async fn run() -> Result<()> {
                                     if app
                                         .set_reasoning_effort_via_active_session(effort.clone())
                                         .is_err()
-                                    {
-                                        if let Err(error) = reasoning_effort_queue.request(
+                                        && let Err(error) = reasoning_effort_queue.request(
                                             effort,
                                             target_session_id,
                                             session_event_tx.clone(),
-                                        ) {
-                                            apply_single_session_error(&mut app, error);
-                                        }
+                                        )
+                                    {
+                                        apply_single_session_error(&mut app, error);
                                     }
                                 }
                                 None => app.set_single_session_status_label(
@@ -2905,7 +2904,7 @@ async fn render_hero_frame_to_image(
             0.0,
             &rendered_body_lines,
         );
-        vertices.truncate(0);
+        vertices.clear();
         push_gradient_rect(
             &mut vertices,
             Rect {
@@ -6396,7 +6395,7 @@ fn action_render_window(
     tick: u64,
     smooth_scroll_lines: f32,
     font_system: &mut FontSystem,
-    buffers: &mut Vec<Buffer>,
+    buffers: &mut [Buffer],
     window_start: &mut usize,
     window_end: &mut usize,
     last_scroll_start: &mut usize,
@@ -7477,14 +7476,13 @@ impl DesktopHotReloader {
                 }
             }
         }
-        if should_drop_worker {
-            if let Some(worker) = self.app_worker.take()
-                && let Err(error) = worker.kill()
-            {
-                desktop_log::warn(format_args!(
-                    "jcode-desktop: failed to clean up stopped app worker: {error:#}"
-                ));
-            }
+        if should_drop_worker
+            && let Some(worker) = self.app_worker.take()
+            && let Err(error) = worker.kill()
+        {
+            desktop_log::warn(format_args!(
+                "jcode-desktop: failed to clean up stopped app worker: {error:#}"
+            ));
         }
         drained
     }
@@ -13685,6 +13683,7 @@ fn workspace_panel_size(rect: Rect) -> PhysicalSize<u32> {
 /// workspace content state. Hashing the inputs lets idle frames reuse the
 /// previously assembled vertex buffer instead of re-transforming ~100k vertices
 /// every redraw.
+#[allow(clippy::too_many_arguments)]
 fn workspace_primitive_vertices_cache_key(
     workspace: &Workspace,
     size: PhysicalSize<u32>,

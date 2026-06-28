@@ -94,6 +94,12 @@ impl Provider for OpenRouterProvider {
         let mut sent_reasoning_config = false;
         if let Some(effort) = reasoning_effort.as_deref() {
             if self.supports_deepseek_reasoning_effort() {
+                // The `swarm` sentinel maps to the strongest real effort.
+                let effort = if crate::prompt::is_swarm_effort(effort) {
+                    "max"
+                } else {
+                    effort
+                };
                 if effort != "none" {
                     request["reasoning_effort"] = serde_json::json!(effort);
                     sent_reasoning_config = true;
@@ -102,6 +108,11 @@ impl Provider for OpenRouterProvider {
                 self.profile_id.as_deref(),
                 self.send_openrouter_headers,
             ) {
+                let effort = if crate::prompt::is_swarm_effort(effort) {
+                    "xhigh"
+                } else {
+                    effort
+                };
                 request["reasoning"] = serde_json::json!({
                     "effort": effort,
                 });
@@ -378,12 +389,12 @@ impl Provider for OpenRouterProvider {
 
     fn available_efforts(&self) -> Vec<&'static str> {
         if self.supports_deepseek_reasoning_effort() {
-            vec!["none", "low", "medium", "high", "max"]
+            vec!["none", "low", "medium", "high", "max", "swarm"]
         } else if Self::profile_supports_unified_reasoning(
             self.profile_id.as_deref(),
             self.send_openrouter_headers,
         ) {
-            vec!["none", "low", "medium", "high", "xhigh"]
+            vec!["none", "low", "medium", "high", "xhigh", "swarm"]
         } else {
             vec![]
         }
@@ -602,7 +613,13 @@ impl Provider for OpenRouterProvider {
     }
 
     fn context_window(&self) -> usize {
-        let model_id = self.model();
+        // Defensive: the runtime model may transiently carry a session-routing
+        // `<profile>:<model>` prefix (e.g. right after session restore, before
+        // set_model normalizes it). Strip it so the per-model context_window
+        // lookups below hit on the bare model id instead of falling through to
+        // the (large) provider default and over-budgeting the request. See #403.
+        let raw_model = self.model();
+        let model_id = self.strip_session_profile_prefix(&raw_model).to_string();
         // Try cached model data from OpenRouter API
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache

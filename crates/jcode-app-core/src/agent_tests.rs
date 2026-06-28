@@ -311,7 +311,6 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
     );
 }
 
-
 #[tokio::test]
 async fn set_working_dir_persists_refreshed_initial_session_context() {
     let _guard = crate::storage::lock_test_env();

@@ -61,6 +61,7 @@ pub use jcode_provider_core::{
     shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
+pub use jcode_provider_core::{model_route_provider_labels_match, pick_next_fallback_route};
 pub use route_builders::{
     build_anthropic_oauth_route, build_copilot_route, build_openai_api_key_route,
     build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
@@ -252,7 +253,12 @@ pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Resu
                 provider.name(),
                 &[("reason", first_message.as_str())],
             );
-            provider.on_auth_changed();
+            // Use the preserve-current-provider variant: this is a retry for an
+            // already-open session, so refreshing auth from disk must NOT swap a
+            // user-defined named OpenAI-compatible profile slot for a generic
+            // OpenRouter runtime (which would lose `profile_id` and re-introduce
+            // the `<profile>:<model>` prefix on the wire). See #408.
+            provider.on_auth_changed_preserve_current_provider();
             provider.set_model(model).map_err(|second_err| {
                 anyhow::anyhow!(
                     "{} (retried after reloading auth from disk: {})",
@@ -281,11 +287,10 @@ pub use self::models::{
     note_openai_model_catalog_refresh_attempt, persist_anthropic_model_catalog,
     persist_openai_model_catalog, populate_account_models, populate_anthropic_models,
     populate_context_limits, populate_context_limits_from_config, provider_for_model,
-    provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, record_model_unavailable_for_account,
-    record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
-    resolve_model_capabilities, should_refresh_anthropic_model_catalog,
-    should_refresh_openai_model_catalog,
+    provider_for_model_with_hint, provider_unavailability_detail_for_account,
+    record_model_unavailable_for_account, record_provider_unavailable_for_account,
+    refresh_openai_model_catalog_in_background, resolve_model_capabilities,
+    should_refresh_anthropic_model_catalog, should_refresh_openai_model_catalog,
 };
 pub use self::selection::DefaultModelSelection;
 use self::selection::{ActiveProvider, ProviderAvailability};
@@ -1675,6 +1680,7 @@ impl Provider for MultiProvider {
             },
         );
 
+        let active_provider = self.active_provider();
         let mut errors = Vec::new();
         let mut optional_errors = Vec::new();
         for (provider_name, result) in [
@@ -1689,7 +1695,18 @@ impl Provider for MultiProvider {
             ("bedrock", bedrock_result),
         ] {
             if let Err(err) = result {
-                if matches!(provider_name, "bedrock") {
+                let is_active = matches!(
+                    (active_provider, provider_name),
+                    (ActiveProvider::Claude, "anthropic" | "claude")
+                        | (ActiveProvider::OpenAI, "openai")
+                        | (ActiveProvider::OpenRouter, "openrouter")
+                        | (ActiveProvider::Copilot, "copilot")
+                        | (ActiveProvider::Antigravity, "antigravity")
+                        | (ActiveProvider::Gemini, "gemini")
+                        | (ActiveProvider::Cursor, "cursor")
+                        | (ActiveProvider::Bedrock, "bedrock")
+                );
+                if !is_active || matches!(provider_name, "bedrock") {
                     optional_errors.push(format!("{provider_name}: {err}"));
                 } else {
                     errors.push(format!("{provider_name}: {err}"));

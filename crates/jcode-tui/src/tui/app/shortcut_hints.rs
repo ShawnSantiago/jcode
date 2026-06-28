@@ -63,12 +63,7 @@ fn save_state(state: &HintState) {
 /// Whether `hint_id` still has remaining nudges to show. Pure read; does not
 /// record anything. Used to decide before building a (possibly costly) message.
 pub(crate) fn should_show(hint_id: &str) -> bool {
-    load_state()
-        .shows
-        .get(hint_id)
-        .copied()
-        .unwrap_or(0)
-        < MAX_SHOWS_PER_HINT
+    load_state().shows.get(hint_id).copied().unwrap_or(0) < MAX_SHOWS_PER_HINT
 }
 
 /// Record that `hint_id` was shown once, persisting the bumped counter.
@@ -146,13 +141,13 @@ mod tests {
         let id = "resume";
         // First MAX shows produce a message; record each.
         for _ in 0..MAX_SHOWS_PER_HINT {
-            let msg = nudge_message(id, "open the session picker", Some("Cmd+R"));
+            let msg = nudge_message(id, "open the session picker", Some("Cmd+B"));
             assert!(msg.is_some(), "expected a nudge while under the cap");
             record_shown(id);
         }
         // Now exhausted.
         assert!(
-            nudge_message(id, "open the session picker", Some("Cmd+R")).is_none(),
+            nudge_message(id, "open the session picker", Some("Cmd+B")).is_none(),
             "nudge should stop after the cap"
         );
 

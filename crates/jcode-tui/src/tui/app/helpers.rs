@@ -398,6 +398,7 @@ fn copy_to_clipboard_osc52(text: &str) -> bool {
 
 pub(super) fn effort_display_label(effort: &str) -> &str {
     match effort {
+        "swarm" => "Swarm (Max + Swarm)",
         "max" => "Max",
         "xhigh" => "xHigh (Max)",
         "high" => "High",
@@ -674,14 +675,20 @@ pub(super) fn build_resume_command(
             let exe = launch_client_executable();
             let imported_id = crate::import::imported_claude_code_session_id(session_id);
             let args = resume_invocation_args(&imported_id, socket);
-            let title = format!("🧵 Claude Code {}", &session_id[..session_id.len().min(8)]);
+            let title = format!(
+                "🧵 Claude Code {}",
+                jcode_core::util::truncate_str(&session_id, 8)
+            );
             (exe, args, title)
         }
         ResumeTarget::CodexSession { session_id, .. } => {
             let exe = launch_client_executable();
             let imported_id = crate::import::imported_codex_session_id(session_id);
             let args = resume_invocation_args(&imported_id, socket);
-            let title = format!("🧠 Codex {}", &session_id[..session_id.len().min(8)]);
+            let title = format!(
+                "🧠 Codex {}",
+                jcode_core::util::truncate_str(&session_id, 8)
+            );
             (exe, args, title)
         }
         ResumeTarget::PiSession { session_path } => {
@@ -701,7 +708,10 @@ pub(super) fn build_resume_command(
             let exe = launch_client_executable();
             let imported_id = crate::import::imported_opencode_session_id(session_id);
             let args = resume_invocation_args(&imported_id, socket);
-            let title = format!("◌ OpenCode {}", &session_id[..session_id.len().min(8)]);
+            let title = format!(
+                "◌ OpenCode {}",
+                jcode_core::util::truncate_str(&session_id, 8)
+            );
             (exe, args, title)
         }
     }
@@ -863,7 +873,7 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
             if let Some(url) = extract_image_url(&html) {
                 crate::logging::info(&format!(
                     "clipboard_image: found image URL in HTML: {}",
-                    &url[..url.len().min(80)]
+                    jcode_core::util::truncate_str(&url, 80)
                 ));
                 if let Some(result) = download_image_url(&url) {
                     return Some(result);

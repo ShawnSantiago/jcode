@@ -1,7 +1,15 @@
 use super::*;
 
 /// Maximum in-memory RENDER_CACHE entries (metadata only, not images).
-pub(super) const RENDER_CACHE_MAX: usize = 64;
+///
+/// Each entry is just `(hash, profile) -> (path, width, height)` (well under a
+/// few hundred bytes), so this can be generous. It must comfortably exceed the
+/// number of inline screenshots a single transcript can accumulate: the
+/// inline-image scroll path looks images up here by id on the hot path
+/// (`get_cached_diagram_in_memory`), and an eviction forces a re-materialize
+/// (decode + cache-file write) round trip the next time that image scrolls into
+/// view, which shows up as a scroll hitch on screenshot-heavy sessions.
+pub(super) const RENDER_CACHE_MAX: usize = 512;
 /// Reuse a cached PNG only if it's at least this fraction of requested width.
 /// This avoids visibly blurry upscaling after terminal/pane resizes.
 pub(super) const CACHE_WIDTH_MATCH_PERCENT: u32 = 85;
@@ -69,9 +77,11 @@ impl MermaidCache {
             }
         }) {
             if existing.path.exists() {
+                super::record_cache_stat_syscall();
                 self.touch(key);
                 return Some(existing);
             }
+            super::record_cache_stat_syscall();
             self.entries.remove(&key);
             if let Some(pos) = self.order.iter().position(|entry| *entry == key) {
                 self.order.remove(pos);
@@ -94,6 +104,7 @@ impl MermaidCache {
     ) -> Option<CachedDiagram> {
         let key = (hash, profile);
         if let Some(existing) = self.entries.get(&key).cloned() {
+            super::record_cache_stat_syscall();
             if existing.path.exists() && cached_width_satisfies(existing.width, min_width) {
                 self.touch(key);
                 return Some(existing);
@@ -110,6 +121,17 @@ impl MermaidCache {
         }
 
         None
+    }
+
+    /// In-memory-only lookup for `(hash, profile)`: returns a clone of the
+    /// cached entry if present, without any `path.exists()` stat or on-disk
+    /// discovery. Marks the entry as recently used so the hot scroll path keeps
+    /// the working set warm in the LRU.
+    fn get_in_memory(&mut self, hash: u64, profile: RenderProfile) -> Option<CachedDiagram> {
+        let key = (hash, profile);
+        let existing = self.entries.get(&key).cloned()?;
+        self.touch(key);
+        Some(existing)
     }
 
     pub(super) fn insert(&mut self, hash: u64, profile: RenderProfile, diagram: CachedDiagram) {
@@ -148,6 +170,7 @@ impl MermaidCache {
         profile: Option<RenderProfile>,
     ) -> Option<CachedDiagram> {
         let mut candidates: Vec<(PathBuf, u32, RenderProfile)> = Vec::new();
+        super::record_cache_stat_syscall();
         let entries = fs::read_dir(&self.cache_dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
@@ -229,6 +252,25 @@ pub(super) fn get_cached_diagram(hash: u64, min_width: Option<u32>) -> Option<Ca
         return Some(diagram);
     }
     cache.get(hash, min_width, None)
+}
+
+/// In-memory-only render-cache lookup: returns the cached entry for `hash`
+/// without touching the filesystem (no `path.exists()` stat, no `read_dir`
+/// discovery). This is the hot-path lookup used by the inline-image scroll
+/// renderer, which calls it for every visible and prefetched image *per frame*;
+/// a per-frame stat syscall there shows up as tail-latency jank while scrolling
+/// a transcript full of screenshots.
+///
+/// Correctness: a genuinely missing file degrades gracefully at the actual
+/// decode point (`load_source_image`/`image::open` returns `None`, and the
+/// stable-fit renderer falls back), so re-validating existence on every frame
+/// buys nothing for the common case where the file is present.
+pub(super) fn get_cached_diagram_in_memory(hash: u64) -> Option<CachedDiagram> {
+    let profile = current_render_profile();
+    let mut cache = RENDER_CACHE.lock().ok()?;
+    cache
+        .get_in_memory(hash, profile)
+        .or_else(|| cache.get_in_memory(hash, RenderProfile::default()))
 }
 
 fn get_cached_diagram_for_profile(

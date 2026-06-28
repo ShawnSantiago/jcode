@@ -204,3 +204,37 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
     assert_eq!(delta[0]["type"], "function_call_output");
     assert_eq!(delta[1]["type"], "message");
 }
+
+#[test]
+fn swarm_effort_maps_to_xhigh_for_api_and_is_accepted_by_normalize() {
+    // The swarm sentinel is a valid stored effort...
+    assert_eq!(
+        OpenAIProvider::normalize_reasoning_effort("swarm").as_deref(),
+        Some("swarm")
+    );
+    // ...but maps to the strongest real effort when building the request.
+    assert_eq!(
+        OpenAIProvider::api_reasoning_effort(Some("swarm")).as_deref(),
+        Some("xhigh")
+    );
+    assert_eq!(
+        OpenAIProvider::api_reasoning_effort(Some("high")).as_deref(),
+        Some("high")
+    );
+    assert_eq!(OpenAIProvider::api_reasoning_effort(None), None);
+
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        OpenAIProvider::api_reasoning_effort(Some("swarm")).as_deref(),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(request["reasoning"]["effort"], serde_json::json!("xhigh"));
+}

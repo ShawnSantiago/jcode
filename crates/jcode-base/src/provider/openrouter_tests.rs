@@ -1337,7 +1337,7 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "low", "medium", "high", "max"]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("max")
@@ -1351,7 +1351,7 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "low", "medium", "high", "xhigh"]
+        vec!["none", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("max")
@@ -1807,6 +1807,40 @@ fn named_openai_compatible_model_context_window_overrides_default() {
         OpenRouterProvider::new_named_openai_compatible("custom", &config).expect("provider");
 
     assert_eq!(provider.context_window(), 512_000);
+}
+
+#[test]
+fn named_profile_context_window_survives_provider_qualified_model() {
+    // Regression for #403: if the runtime model transiently carries the
+    // session-routing `<profile>:<model>` prefix, context_window() must still
+    // resolve the configured per-model context_window rather than falling
+    // through to the (large) provider default and over-budgeting the request.
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let mut config = crate::config::NamedProviderConfig {
+        base_url: "http://10.15.15.53:8080/v1".to_string(),
+        auth: crate::config::NamedProviderAuth::None,
+        default_model: Some("qwen3.6-35b-a2000-128k".to_string()),
+        models: vec![crate::config::NamedProviderModelConfig {
+            id: "qwen3.6-35b-a2000-128k".to_string(),
+            context_window: Some(131_072),
+            input: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    config.model_catalog = false;
+    config.requires_api_key = Some(false);
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("cachyai-a2000", &config)
+        .expect("provider");
+
+    // Simulate the poisoned/qualified runtime model that #403 reported.
+    {
+        let mut model = provider.model.try_write().expect("model lock");
+        *model = "cachyai-a2000:qwen3.6-35b-a2000-128k".to_string();
+    }
+
+    assert_eq!(provider.context_window(), 131_072);
 }
 
 #[test]
@@ -2664,7 +2698,7 @@ fn compat_profile_serving_deepseek_model_supports_reasoning_effort() {
     provider.set_model("deepseek-v4-flash").unwrap();
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "low", "medium", "high", "max"]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -2683,7 +2717,7 @@ fn named_profile_supports_reasoning_effort_config_override() {
     force_on.set_model("not-a-deepseek-model").unwrap();
     assert_eq!(
         force_on.available_efforts(),
-        vec!["none", "low", "medium", "high", "max"]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     force_on
         .set_reasoning_effort("medium")

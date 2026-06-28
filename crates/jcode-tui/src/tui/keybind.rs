@@ -59,6 +59,36 @@ pub fn load_model_switch_keys() -> ModelSwitchKeys {
     ModelSwitchKeys { next, prev }
 }
 
+/// Binding that accepts the post-error fallback offer (switch to the next best
+/// model/auth-method and resend). Defaults to Ctrl+Y; set "" to disable.
+pub fn load_fallback_switch_key() -> OptionalBinding {
+    let cfg = config();
+    let raw = cfg.keybindings.fallback_switch.trim();
+    if raw.is_empty() || is_disabled(raw) {
+        return OptionalBinding::default();
+    }
+    match parse_keybinding(raw) {
+        Some(binding) => OptionalBinding {
+            label: Some(format_binding(&binding)),
+            binding: Some(binding),
+        },
+        None => OptionalBinding {
+            label: Some("Ctrl+Y".to_string()),
+            binding: Some(KeyBinding {
+                code: KeyCode::Char('y'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+        },
+    }
+}
+
+/// Human-facing label for the fallback-switch key, for use in offer messages.
+pub fn fallback_switch_key_label() -> String {
+    load_fallback_switch_key()
+        .label
+        .unwrap_or_else(|| "Ctrl+Y".to_string())
+}
+
 pub fn load_workspace_navigation_keys() -> WorkspaceNavigationKeys {
     let cfg = config();
 
@@ -251,7 +281,7 @@ pub fn load_centered_toggle_key() -> CenteredToggleKeys {
         modifiers: KeyModifiers::ALT,
     };
 
-    let (toggle, _) = parse_or_default(&cfg.keybindings.centered_toggle, default_toggle, "Alt+C");
+    let (toggle, _) = parse_optional(&cfg.keybindings.centered_toggle, default_toggle, "Alt+C");
 
     CenteredToggleKeys { toggle }
 }
@@ -311,6 +341,7 @@ pub struct ToggleKeys {
     pub typing_scroll_lock: ToggleBinding,
     pub diff_mode_cycle: ToggleBinding,
     pub info_widget: ToggleBinding,
+    pub swarm_panel_focus: ToggleBinding,
 }
 
 pub fn load_toggle_keys() -> ToggleKeys {
@@ -322,6 +353,7 @@ pub fn load_toggle_keys() -> ToggleKeys {
         typing_scroll_lock: ToggleBinding::load(&cfg.keybindings.typing_scroll_lock_toggle, 's'),
         diff_mode_cycle: ToggleBinding::load(&cfg.keybindings.diff_mode_cycle, 'g'),
         info_widget: ToggleBinding::load(&cfg.keybindings.info_widget_toggle, 'i'),
+        swarm_panel_focus: ToggleBinding::load(&cfg.keybindings.swarm_panel_focus, 'w'),
     }
 }
 
@@ -459,7 +491,7 @@ pub fn load_new_terminal_key() -> OptionalBinding {
 }
 
 /// Optional binding that opens the `/resume` session picker.
-/// Default: Cmd+R on macOS, Alt+R elsewhere. Set "" to disable.
+/// Default: Cmd+B on macOS, Alt+R elsewhere. Set "" to disable.
 pub fn load_open_resume_key() -> OptionalBinding {
     let cfg = config();
     let raw = cfg.keybindings.open_resume.trim();

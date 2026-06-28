@@ -698,7 +698,11 @@ impl App {
         self.onboarding_import_failed_provider = approved
             .first()
             .and_then(|&i| candidates.get(i))
-            .and_then(|c| c.telemetry_auth_labels().first().map(|(p, _)| p.to_string()));
+            .and_then(|c| {
+                c.telemetry_auth_labels()
+                    .first()
+                    .map(|(p, _)| p.to_string())
+            });
         // Kick off the import on the runtime; the LoginCompleted event advances
         // onboarding and activates the provider.
         self.set_status_notice("Login: importing selected logins...");
@@ -1325,9 +1329,7 @@ impl App {
             .lines()
             .map(|l| l.trim())
             .find(|l| {
-                !l.is_empty()
-                    && !l.starts_with("**")
-                    && !l.eq_ignore_ascii_case("Logins imported")
+                !l.is_empty() && !l.starts_with("**") && !l.eq_ignore_ascii_case("Logins imported")
             })
             .unwrap_or("We couldn't import those logins.")
             .trim_start_matches(['✕', '✓', '-', ' '])
@@ -1383,6 +1385,11 @@ impl App {
     /// Drive auto-advancing phases. Call once per tick/redraw. Returns true if
     /// the flow state changed (so the caller can request a redraw).
     pub(super) fn onboarding_tick(&mut self) -> bool {
+        // The onboarding simulator drives phases manually; never auto-advance
+        // while it is walking screens.
+        if self.onboarding_sim_active() {
+            return false;
+        }
         // Fresh-install bootstrap: if we were already logged in at the CLI before
         // the TUI launched, no in-TUI login event fired, so evaluate (once)
         // whether to begin the guided flow now that the TUI is up.

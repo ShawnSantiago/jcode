@@ -243,6 +243,16 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_COPY_BADGE_ALT_LABEL") {
             self.display.copy_badge_alt_label = v;
         }
+        if let Ok(v) = std::env::var("JCODE_COMPACT_NOTIFICATIONS") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.compact_notifications = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SHOW_AGENTGREP_OUTPUT") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.show_agentgrep_output = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_CHAT_NATIVE_SCROLLBAR") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.native_scrollbars.chat = parsed;
@@ -372,6 +382,7 @@ impl Config {
                 };
             }
         }
+        hook_env_override(&mut self.hooks.turn_start, "JCODE_HOOK_TURN_START");
         hook_env_override(&mut self.hooks.turn_end, "JCODE_HOOK_TURN_END");
         hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
         hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");

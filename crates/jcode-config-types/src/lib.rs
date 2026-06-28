@@ -515,6 +515,16 @@ pub struct AgentsConfig {
     /// metadata / sanity checks). Unset = inferred from the model name.
     #[serde(default)]
     pub memory_embedding_dim: Option<usize>,
+    /// Maximum seconds a direct (blocking) `subagent` tool call will wait for the
+    /// child session to produce its final answer before failing with a timeout
+    /// error. Prevents a stuck/hung child turn from blocking the caller forever.
+    /// `0` disables the bound (wait indefinitely). Default 600 (10 min).
+    #[serde(default = "default_subagent_timeout_secs")]
+    pub subagent_timeout_secs: u64,
+}
+
+fn default_subagent_timeout_secs() -> u64 {
+    600
 }
 
 fn default_memory_embedding_backend() -> String {
@@ -552,6 +562,7 @@ impl Default for AgentsConfig {
             memory_embedding_model: None,
             memory_embedding_base_url: None,
             memory_embedding_dim: None,
+            subagent_timeout_secs: default_subagent_timeout_secs(),
         }
     }
 }
@@ -641,6 +652,12 @@ pub struct TerminalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
+    /// Runs when an agent turn begins (after the user message is added and
+    /// before the model starts generating). Fires before the first `pre_tool`,
+    /// so integrations can detect that the agent is actively working even while
+    /// it is only thinking/streaming text. Fields: MODEL, SOURCE
+    /// ("chat"/"resume"/"ambient"). Env override: JCODE_HOOK_TURN_START.
+    pub turn_start: Option<String>,
     /// Runs when an agent turn completes.
     /// Fields: STATUS ("ok"/"error"), DURATION_MS, MODEL, LAST_ASSISTANT_TEXT.
     /// Env override: JCODE_HOOK_TURN_END.
@@ -669,6 +686,7 @@ pub struct HooksConfig {
 impl Default for HooksConfig {
     fn default() -> Self {
         Self {
+            turn_start: None,
             turn_end: None,
             session_start: None,
             session_end: None,
@@ -715,6 +733,9 @@ pub struct KeybindingsConfig {
     pub model_switch_next: String,
     /// Model switch previous key (default: "ctrl+shift+tab")
     pub model_switch_prev: String,
+    /// Accept the post-error fallback offer: switch to the next best
+    /// model/auth-method and resend the failed turn (default: "ctrl+y").
+    pub fallback_switch: String,
     /// Effort increase key (default: "cmd+right" on macOS, "alt+right" elsewhere)
     pub effort_increase: String,
     /// Effort decrease key (default: "cmd+left" on macOS, "alt+left" elsewhere)
@@ -751,10 +772,14 @@ pub struct KeybindingsConfig {
     pub diff_mode_cycle: String,
     /// Toggle the info widget (default: "alt+i")
     pub info_widget_toggle: String,
+    /// Focus/unfocus the inline swarm panel for keyboard navigation (default:
+    /// "alt+w"). Active only when `agents.swarm_spawn_mode = "inline"` and the
+    /// session manages swarm agents.
+    pub swarm_panel_focus: String,
     /// Spawn a fresh jcode session in a new terminal window (default: unbound).
     /// Example: "alt+enter".
     pub new_terminal: String,
-    /// Open the `/resume` session picker (default: "cmd+r" on macOS, "ctrl+r"
+    /// Open the `/resume` session picker (default: "cmd+b" on macOS, "alt+r"
     /// elsewhere). Set "" to disable.
     pub open_resume: String,
     /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
@@ -778,6 +803,7 @@ impl Default for KeybindingsConfig {
             scroll_page_down: get("scroll_page_down", "alt+d"),
             model_switch_next: get("model_switch_next", "ctrl+tab"),
             model_switch_prev: get("model_switch_prev", "ctrl+shift+tab"),
+            fallback_switch: get("fallback_switch", "ctrl+y"),
             effort_increase: get("effort_increase", "alt+right"),
             effort_decrease: get("effort_decrease", "alt+left"),
             centered_toggle: get("centered_toggle", "alt+c"),
@@ -796,8 +822,16 @@ impl Default for KeybindingsConfig {
             typing_scroll_lock_toggle: get("typing_scroll_lock_toggle", "alt+s"),
             diff_mode_cycle: get("diff_mode_cycle", "alt+g"),
             info_widget_toggle: get("info_widget_toggle", "alt+i"),
+            swarm_panel_focus: get("swarm_panel_focus", "alt+w"),
             new_terminal: get("new_terminal", ""),
-            open_resume: get("open_resume", if cfg!(target_os = "macos") { "cmd+r" } else { "alt+r" }),
+            open_resume: get(
+                "open_resume",
+                if cfg!(target_os = "macos") {
+                    "cmd+b"
+                } else {
+                    "alt+r"
+                },
+            ),
             session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
@@ -871,8 +905,15 @@ pub struct DisplayConfig {
     pub redraw_fps: u32,
     /// Show a truncated preview of the previous prompt at the top when it scrolls out of view (default: true)
     pub prompt_preview: bool,
+    /// Render swarm/file-activity notifications in a compact single-line form
+    /// instead of the full multi-line card with diff preview (default: false)
+    pub compact_notifications: bool,
     /// Override the Alt/Option label shown in copy badges. Empty = auto (⌥ on macOS, Alt elsewhere).
     pub copy_badge_alt_label: String,
+    /// Show the full agentgrep tool output inline in the transcript instead of
+    /// just the one-line summary (default: false)
+    #[serde(default)]
+    pub show_agentgrep_output: bool,
     /// Native terminal scrollbar configuration for scrollable panes
     pub native_scrollbars: NativeScrollbarConfig,
 }
@@ -900,7 +941,9 @@ impl Default for DisplayConfig {
             animation_fps: 60,
             redraw_fps: 60,
             prompt_preview: true,
+            compact_notifications: false,
             copy_badge_alt_label: String::new(),
+            show_agentgrep_output: false,
             native_scrollbars: NativeScrollbarConfig::default(),
         }
     }
@@ -1334,4 +1377,50 @@ impl Default for PowerConfig {
             prevent_sleep_while_streaming: true,
         }
     }
+}
+
+/// A single global launch hotkey: a chord plus the directory it opens jcode in.
+///
+/// `dir` is usually an absolute path, but a few sentinels keep dynamic targets
+/// working without rewriting config on every launch:
+/// - `$HOME` -> the user's home directory.
+/// - `$LAST_DIR` -> the most recent non-home project directory jcode ran in.
+/// - `$LAST_REPO` -> the most recent jcode repo (for self-dev).
+///
+/// `self_dev = true` opens the directory as a self-dev session (passes the
+/// `self-dev` subcommand). `label` is an optional human name used in notices.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaunchHotkeyEntry {
+    /// jcode-style chord string, e.g. `cmd+;`, `cmd+[`, `cmd+shift+'`.
+    pub chord: String,
+    /// Directory to open (absolute path or a `$HOME`/`$LAST_DIR`/`$LAST_REPO`
+    /// sentinel).
+    pub dir: String,
+    /// Optional short label (e.g. the repo's directory name) for notices.
+    #[serde(default)]
+    pub label: String,
+    /// Open as a self-dev session instead of a normal session.
+    #[serde(default)]
+    pub self_dev: bool,
+}
+
+/// Configuration for the global "launch a new jcode" hotkeys (macOS).
+///
+/// When `entries` is empty, jcode uses its built-in defaults (`Cmd+;` -> home,
+/// `Cmd+'` -> last project, `Cmd+Shift+'` -> self-dev). Auto-import can bake a
+/// richer, per-repo mapping here once: the top repo on `Cmd+;`, home on
+/// `Cmd+'`, and the next repos on `Cmd+[` / `Cmd+]` / `Cmd+\`. Once baked the
+/// mapping is static and does not move around as the user's activity changes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LaunchHotkeysConfig {
+    /// Whether the global launch hotkeys are installed at all. `None` means
+    /// "not decided yet" (fall back to the legacy auto-install gating); `Some`
+    /// is an explicit user/import choice.
+    pub enabled: Option<bool>,
+    /// Explicit chord -> directory mapping. Empty = use built-in defaults.
+    pub entries: Vec<LaunchHotkeyEntry>,
+    /// Set true once auto-import has populated `entries`, so we only bake the
+    /// per-repo mapping a single time and never clobber later user edits.
+    pub imported: bool,
 }

@@ -103,7 +103,7 @@ fn test_anthropic_reasoning_effort_request_parts() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "low", "medium", "high"]
+        vec!["none", "low", "medium", "high", "swarm"]
     );
     assert_eq!(provider.reasoning_effort().as_deref(), Some("none"));
 

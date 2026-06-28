@@ -58,10 +58,7 @@ pub(super) fn swarm_ancestors(
 
 /// Depth of `session_id` in the spawn tree: number of ancestors reachable via
 /// the report-back chain. Root coordinators (no report-back owner) are depth 0.
-pub(super) fn swarm_spawn_depth(
-    members: &HashMap<String, SwarmMember>,
-    session_id: &str,
-) -> u32 {
+pub(super) fn swarm_spawn_depth(members: &HashMap<String, SwarmMember>, session_id: &str) -> u32 {
     swarm_ancestors(members, session_id).len() as u32
 }
 
@@ -331,6 +328,7 @@ async fn broadcast_swarm_status_now(
                     live_attachments: Some(m.event_txs.len()),
                     status_age_secs: Some(status_age_secs(m.last_status_change)),
                     output_tail: m.output_tail.clone(),
+                    report_back_to_session_id: m.report_back_to_session_id.clone(),
                 })
         })
         .collect();

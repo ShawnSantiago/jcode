@@ -33,6 +33,9 @@ impl Provider for OpenAIProvider {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        // Map the `swarm` sentinel (and any future aliases) to the real effort
+        // value the API understands.
+        let api_reasoning_effort = Self::api_reasoning_effort(reasoning_effort.as_deref());
         let service_tier = self
             .service_tier
             .read()
@@ -47,7 +50,7 @@ impl Provider for OpenAIProvider {
             &api_tools,
             is_chatgpt_mode,
             self.max_output_tokens,
-            reasoning_effort.as_deref(),
+            api_reasoning_effort.as_deref(),
             service_tier.as_deref(),
             self.prompt_cache_key.as_deref(),
             self.prompt_cache_retention.as_deref(),
@@ -745,7 +748,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        vec!["none", "low", "medium", "high", "xhigh"]
+        vec!["none", "low", "medium", "high", "xhigh", "swarm"]
     }
 
     fn service_tier(&self) -> Option<String> {

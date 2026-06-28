@@ -76,6 +76,14 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/transport", "Show/change connection transport"),
     RegisteredCommand::public("/alignment", "Show/change default text alignment"),
     RegisteredCommand::public(
+        "/compact-notifications",
+        "Show/toggle single-line swarm/file-activity notifications",
+    ),
+    RegisteredCommand::public(
+        "/show-agentgrep-output",
+        "Show/toggle full agentgrep search output inline in chat",
+    ),
+    RegisteredCommand::public(
         "/reasoning",
         "Show/change reasoning display (off/full/current)",
     ),
@@ -128,6 +136,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/onboarding-preview",
         "Preview the first-run onboarding screen",
     ),
+    RegisteredCommand::public(
+        "/onboarding-sim",
+        "Walk through every first-run onboarding screen (Cmd+5)",
+    ),
     RegisteredCommand::public("/reload", "Reload into newest available binary"),
     RegisteredCommand::public("/restart", "Restart with current binary"),
     RegisteredCommand::public("/rebuild", "Background rebuild and auto reload"),
@@ -142,6 +154,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/unsave", "Remove bookmark from session"),
     RegisteredCommand::public("/rename", "Rename current session"),
     RegisteredCommand::public("/split", "Split session into a new window"),
+    RegisteredCommand::public(
+        "/fork",
+        "Arm next prompt to launch in a new forked session",
+    ),
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),
@@ -936,6 +952,46 @@ impl App {
             );
         }
 
+        if prefix.starts_with("/compact-notifications ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/compact-notifications status".into(),
+                        "Show whether notifications are compact",
+                    ),
+                    (
+                        "/compact-notifications on".into(),
+                        "Collapse swarm/file-activity notifications to one line",
+                    ),
+                    (
+                        "/compact-notifications off".into(),
+                        "Show full multi-line notification cards",
+                    ),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/show-agentgrep-output ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/show-agentgrep-output status".into(),
+                        "Show whether agentgrep output is shown inline",
+                    ),
+                    (
+                        "/show-agentgrep-output on".into(),
+                        "Render full agentgrep search results inline in chat",
+                    ),
+                    (
+                        "/show-agentgrep-output off".into(),
+                        "Show only the one-line agentgrep summary",
+                    ),
+                ],
+            );
+        }
+
         if prefix.starts_with("/config ") {
             return self.rank_suggestions(
                 input,
@@ -1248,6 +1304,17 @@ impl App {
             ),
         ];
 
+        // macOS-only: offer to install ScrollWM, a scrolling window manager for
+        // macOS. The web installer downloads the latest release, strips the
+        // Gatekeeper quarantine, installs to ~/Applications, and launches it,
+        // with no sudo and no system files touched.
+        if cfg!(target_os = "macos") {
+            prompts.push((
+                "Install ScrollWM (scrolling window manager for macOS)".to_string(),
+                "Install ScrollWM, the scrolling window manager for macOS, by running its official one-line installer: `curl -fsSL https://raw.githubusercontent.com/1jehuang/scrollwm/main/scripts/web-install.sh | bash`. It downloads the latest release, removes the Gatekeeper quarantine, installs to ~/Applications, and launches it (no sudo, no system files touched). Run the command for me and report whether it succeeded.".to_string(),
+            ));
+        }
+
         prompts.push((
             "Continue my last Codex CLI / Claude Code session".to_string(),
             latest_external_cli_continuation_prompt().unwrap_or_else(|| {
@@ -1404,6 +1471,8 @@ impl App {
                 | "/compact"
                 | "/compact mode"
                 | "/alignment"
+                | "/compact-notifications"
+                | "/show-agentgrep-output"
                 | "/reasoning"
                 | "/config"
                 | "/save"

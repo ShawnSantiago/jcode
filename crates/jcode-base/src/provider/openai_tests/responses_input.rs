@@ -333,6 +333,52 @@ fn test_build_response_request_for_gpt_5_4_1m_uses_base_model_without_extra_flag
 }
 
 #[test]
+fn test_build_response_request_omits_image_generation_for_codex_models() {
+    // Codex models reject the hosted image_generation tool, so it must not be
+    // attached even in ChatGPT mode (issue #369).
+    let request = build_test_response_request(
+        "gpt-5.3-codex",
+        true,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        !request["tools"]
+            .as_array()
+            .expect("tools should be an array")
+            .contains(&serde_json::json!({ "type": "image_generation" })),
+        "codex models must not receive the image_generation tool"
+    );
+}
+
+#[test]
+fn test_build_response_request_keeps_image_generation_for_non_codex_chatgpt_models() {
+    let request = build_test_response_request(
+        "gpt-5.5",
+        true,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        request["tools"]
+            .as_array()
+            .expect("tools should be an array")
+            .contains(&serde_json::json!({ "type": "image_generation" })),
+        "non-codex ChatGPT models should still receive image_generation"
+    );
+}
+
+#[test]
 fn test_build_response_request_omits_long_context_for_plain_gpt_5_4() {
     let request = build_test_response_request(
         "gpt-5.4",

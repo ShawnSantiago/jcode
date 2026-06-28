@@ -243,6 +243,7 @@ pub use inline_image::{
     inline_image_dims, inline_image_id, inline_image_is_materialized, materialize_inline_image,
     materialize_inline_image_by_id,
 };
+pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
     is_video_export_mode, protocol_type, register_external_image, register_inline_image,
@@ -259,7 +260,7 @@ pub use widget_render::{render_image_widget, render_image_widget_fit, render_ima
 use cache_render::calculate_render_size;
 use cache_render::{
     CachedDiagram, MermaidCache, RENDER_CACHE_MAX, RENDER_WIDTH_BUCKET_CELLS,
-    bump_deferred_render_epoch, get_cached_diagram,
+    bump_deferred_render_epoch, get_cached_diagram, get_cached_diagram_in_memory,
 };
 use viewport_render::clear_image_area;
 use widget_render::{BORDER_WIDTH, draw_left_border, render_stateful_image_safe};
@@ -396,6 +397,22 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 /// naturally refreshed on the next redraw.
 static DEFERRED_RENDER_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+/// Count of `path.exists()`/`read_dir` filesystem stat syscalls performed by
+/// the render-cache lookup paths. The inline-image scroll hot path used to pay
+/// one of these per visible (and prefetched) image *per frame*, so this counter
+/// makes that cost observable to the image-scroll benchmark and regression tests.
+static CACHE_STAT_SYSCALLS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub(crate) fn record_cache_stat_syscall() {
+    CACHE_STAT_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Total filesystem stat syscalls performed by the render-cache lookups so far.
+pub fn cache_stat_syscalls() -> u64 {
+    CACHE_STAT_SYSCALLS.load(Ordering::Relaxed)
+}
+
 type PendingRenderKey = (u64, u32, RenderProfile);
 type PendingRenderMap = HashMap<PendingRenderKey, PendingDeferredRender>;
 
@@ -435,6 +452,20 @@ static SVG_FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
 /// (see `ui_inline_image::prefetch`) so scrolling back through a transcript of
 /// inline screenshots reuses warm protocol state instead of re-encoding.
 const IMAGE_STATE_MAX: usize = 24;
+
+/// Maximum number of Kitty virtual-placement state entries to keep.
+///
+/// Unlike `IMAGE_STATE` (which holds full decoded+encoded `StatefulProtocol`
+/// data), a steady-state `KittyViewportState` entry is tiny: once its one-shot
+/// `pending_transmit` payload has been drawn it is just metadata (a path, a u32
+/// id, and a few dimensions, ~100 bytes). The terminal itself retains the
+/// transmitted pixels, so keeping the id->geometry mapping warm lets a scroll
+/// back over a long transcript of screenshots re-address the existing image with
+/// unicode placeholders instead of paying a synchronous decode + scale + base64
+/// re-transmit. We therefore size this far larger than `IMAGE_STATE_MAX` so the
+/// scroll working set for a screenshot-heavy session stays warm; the memory cost
+/// of the extra metadata entries is negligible.
+const KITTY_VIEWPORT_STATE_MAX: usize = 256;
 
 /// Image state cache - holds StatefulProtocol for each rendered image
 /// Keyed by content hash; source_path guards prevent stale reuse when
@@ -628,7 +659,7 @@ impl KittyViewportCache {
         } else {
             self.entries.insert(hash, state);
             self.order.push_back(hash);
-            while self.order.len() > IMAGE_STATE_MAX {
+            while self.order.len() > KITTY_VIEWPORT_STATE_MAX {
                 if let Some(old) = self.order.pop_front() {
                     self.entries.remove(&old);
                 }
@@ -878,6 +909,35 @@ pub struct MermaidFlickerBenchmark {
     pub fit_protocol_rebuild_rate: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageScrollBenchmark {
+    /// Protocol the benchmark ran against (e.g. "Kitty").
+    pub protocol: Option<String>,
+    /// Number of distinct inline images in the simulated transcript.
+    pub images: usize,
+    /// Number of simulated scroll frames.
+    pub frames: usize,
+    /// Images visible per frame (drives the per-frame draw cost).
+    pub visible_per_frame: usize,
+    /// Per-frame UI-thread wall time across the scroll (ms).
+    pub frame_timing: MermaidTimingSummary,
+    /// Filesystem stat syscalls performed by render-cache lookups during the
+    /// scroll (the cost this benchmark was built to catch). Steady-state
+    /// scrolling should approach zero.
+    pub cache_stat_syscalls: u64,
+    /// Stat syscalls per rendered frame (cache_stat_syscalls / frames).
+    pub cache_stat_syscalls_per_frame: f64,
+    /// Frames where a visible image was not yet warm, so the UI thread skipped
+    /// the draw and scheduled an off-thread prewarm (the "blank then pop" hitch
+    /// the look-ahead prefetch is meant to eliminate).
+    pub visible_draw_skips: u64,
+    /// Kitty fit-state rebuilds during the scroll (decode + scale + transmit).
+    /// Steady-state re-scrolling within the cache working set should be zero.
+    pub fit_protocol_rebuilds: u64,
+    /// Cheap fit-state reuse hits during the scroll.
+    pub fit_state_reuse_hits: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MermaidDebugStatsDelta {
     pub image_state_hits: u64,
@@ -894,9 +954,9 @@ mod debug;
 
 pub use debug::{
     ImageStateInfo, ScrollFrameInfo, ScrollTestResult, TestRenderResult, clear_cache, debug_cache,
-    debug_flicker_benchmark, debug_image_state, debug_memory_benchmark, debug_memory_profile,
-    debug_render, debug_stats, debug_stats_json, debug_test_render, debug_test_resize_stability,
-    debug_test_scroll, reset_debug_stats,
+    debug_flicker_benchmark, debug_image_scroll_benchmark, debug_image_state,
+    debug_memory_benchmark, debug_memory_profile, debug_render, debug_stats, debug_stats_json,
+    debug_test_render, debug_test_resize_stability, debug_test_scroll, reset_debug_stats,
 };
 
 fn hash_content(content: &str) -> u64 {

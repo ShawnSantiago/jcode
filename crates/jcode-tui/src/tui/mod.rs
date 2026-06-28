@@ -32,8 +32,8 @@ pub mod permissions {
 }
 mod remote_diff;
 pub mod screenshot;
-pub mod session_picker;
 pub(crate) mod session_facts;
+pub mod session_picker;
 mod stream_buffer;
 pub mod test_harness;
 mod ui;
@@ -243,6 +243,14 @@ pub trait TuiState {
     fn output_tps(&self) -> Option<f32>;
     fn streaming_tool_calls(&self) -> Vec<ToolCall>;
     fn elapsed(&self) -> Option<Duration>;
+    /// Time since the current connection phase (authenticating/connecting/
+    /// waiting for response/retrying) began. Used to decide when a connection
+    /// attempt has been suspiciously long and should render yellow, measured
+    /// per-attempt rather than inheriting the whole-turn elapsed time. Defaults
+    /// to `elapsed()` for impls that do not track per-phase timing.
+    fn connection_phase_elapsed(&self) -> Option<Duration> {
+        self.elapsed()
+    }
     fn status(&self) -> ProcessingStatus;
     fn command_suggestions(&self) -> Vec<(String, &'static str)>;
     fn command_suggestion_selected(&self) -> usize {
@@ -350,6 +358,14 @@ pub trait TuiState {
     /// Members to render in the inline swarm gallery band.
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         Vec::new()
+    }
+    /// Selected agent index in the inline swarm panel (display order).
+    fn swarm_panel_selected(&self) -> usize {
+        0
+    }
+    /// Whether the inline swarm panel currently has keyboard focus.
+    fn swarm_panel_focused(&self) -> bool {
+        false
     }
 
     // ---- Workspace ----
@@ -1326,12 +1342,10 @@ fn idle_donut_active_with_policy(
 /// message left after onboarding is declined) is still "idle", so the decorative
 /// donut should keep spinning until the user actually starts chatting.
 fn has_started_conversation(state: &dyn TuiState) -> bool {
-    state.display_messages().iter().any(|m| {
-        matches!(
-            m.role.as_str(),
-            "user" | "assistant" | "tool" | "reasoning"
-        )
-    })
+    state
+        .display_messages()
+        .iter()
+        .any(|m| matches!(m.role.as_str(), "user" | "assistant" | "tool" | "reasoning"))
 }
 
 pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
@@ -1343,6 +1357,22 @@ fn rate_limit_countdown_redraw_active(state: &dyn TuiState) -> bool {
     state
         .rate_limit_remaining()
         .map(|remaining| remaining <= Duration::from_secs(60))
+        .unwrap_or(false)
+}
+
+/// The notification line shows a live prompt-cache indicator (`⏳ cache Ns`
+/// while warm in the final minute, `🧊 cache cold` once expired). Both states
+/// emerge long after the 30s deep-idle cutoff, so without a dedicated wakeup
+/// the idle loop never repaints to reveal them. Keep redrawing whenever the
+/// cache is within the last-minute countdown window or has just gone cold so
+/// the warning actually appears before the next prompt.
+fn cache_cold_countdown_redraw_active(state: &dyn TuiState) -> bool {
+    if state.is_processing() {
+        return false;
+    }
+    state
+        .cache_ttl_status()
+        .map(|info| info.is_cold || info.remaining_secs <= 60)
         .unwrap_or(false)
 }
 
@@ -1454,6 +1484,7 @@ pub(crate) fn redraw_interval_with_policy(
         && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
+        && !cache_cold_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
         && !state.onboarding_welcome_active()
     {
@@ -1534,6 +1565,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         && !state.chat_overscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
+        && !cache_cold_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
         && !state.onboarding_welcome_active()
     {

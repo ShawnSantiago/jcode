@@ -264,7 +264,12 @@ pub fn terminal_theme() -> Theme {
         // Uses transparent canvas so the rendered PNG integrates with the TUI,
         // while keeping nodes/labels readable against dark panes.
         background: "#00000000".to_string(),
-        font_family: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+        // Include common Linux-native sans families (DejaVu/Liberation/Noto) so
+        // label glyphs still resolve a face when Inter/Segoe UI are not installed
+        // (the typical Linux case). resvg matches the first family in this list
+        // that exists in the loaded font DB.
+        font_family: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, \
+                      \"Noto Sans\", \"DejaVu Sans\", \"Liberation Sans\", sans-serif"
             .to_string(),
         font_size: 15.0,
         primary_color: "#313244".to_string(),

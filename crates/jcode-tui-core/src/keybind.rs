@@ -391,7 +391,16 @@ pub struct EffortSwitchKeys {
 
 #[derive(Clone, Debug)]
 pub struct CenteredToggleKeys {
-    pub toggle: KeyBinding,
+    /// The toggle binding, or `None` when the user disabled it (e.g. `none`).
+    pub toggle: Option<KeyBinding>,
+}
+
+impl CenteredToggleKeys {
+    pub fn matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.toggle
+            .as_ref()
+            .is_some_and(|binding| binding.matches(code, modifiers))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -519,14 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_cmd_r_sequence_matches_open_resume_binding() {
-        // Ghostty forwards Cmd+R as ESC[114;9u (114='r', super-only).
-        let code = KeyCode::Char(char::from_u32(114).unwrap());
+    fn ghostty_cmd_b_sequence_matches_open_resume_binding() {
+        // Ghostty forwards Cmd+B as ESC[98;9u (98='b', super-only).
+        let code = KeyCode::Char(char::from_u32(98).unwrap());
         let mods = kitty_mods(9);
-        let binding = parse_keybinding("cmd+r").expect("cmd+r parses");
+        let binding = parse_keybinding("cmd+b").expect("cmd+b parses");
         assert!(
             binding.matches_for_platform(code, mods, true),
-            "Cmd+R kitty sequence must trigger the open_resume binding"
+            "Cmd+B kitty sequence must trigger the open_resume binding"
         );
     }
 
@@ -715,8 +724,14 @@ mod tests {
         // Ctrl+K / Ctrl+J (un-shifted) move up / down by prompt: the primary
         // default that survives a stock Ghostty + tiling-WM setup.
         let keys = test_scroll_keys();
-        assert_eq!(keys.prompt_jump(KeyCode::Char('k'), KeyModifiers::CONTROL), Some(-1));
-        assert_eq!(keys.prompt_jump(KeyCode::Char('j'), KeyModifiers::CONTROL), Some(1));
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            Some(1)
+        );
     }
 
     #[test]
@@ -735,7 +750,11 @@ mod tests {
                 KeyCode::Char('j'),
                 KeyCode::Char('J'),
             ] {
-                assert_eq!(keys.prompt_jump(code, mods), None, "mods={mods:?} code={code:?}");
+                assert_eq!(
+                    keys.prompt_jump(code, mods),
+                    None,
+                    "mods={mods:?} code={code:?}"
+                );
             }
         }
     }
@@ -791,10 +810,22 @@ mod tests {
     fn test_prompt_jump_option_jk() {
         // Option (Alt) + K / J mirror Cmd+K / Cmd+J for prompt navigation on macOS.
         let keys = test_scroll_keys();
-        assert_eq!(keys.prompt_jump(KeyCode::Char('k'), KeyModifiers::ALT), Some(-1));
-        assert_eq!(keys.prompt_jump(KeyCode::Char('K'), KeyModifiers::ALT), Some(-1));
-        assert_eq!(keys.prompt_jump(KeyCode::Char('j'), KeyModifiers::ALT), Some(1));
-        assert_eq!(keys.prompt_jump(KeyCode::Char('J'), KeyModifiers::ALT), Some(1));
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('k'), KeyModifiers::ALT),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('K'), KeyModifiers::ALT),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('j'), KeyModifiers::ALT),
+            Some(1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('J'), KeyModifiers::ALT),
+            Some(1)
+        );
     }
 
     #[test]

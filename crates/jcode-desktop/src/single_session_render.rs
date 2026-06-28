@@ -1617,6 +1617,7 @@ pub(crate) fn inline_widget_capture_geometry(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_single_session_inline_widget_card(
     vertices: &mut Vec<Vertex>,
     app: &SingleSessionApp,
@@ -2361,6 +2362,7 @@ fn push_inline_command_row_icon(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_inline_command_current_chip(
     vertices: &mut Vec<Vertex>,
     kind: Option<InlineWidgetKind>,
@@ -3062,6 +3064,7 @@ fn inline_widget_card_layout(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inline_widget_card_layout_with_bottom_limit(
     size: PhysicalSize<u32>,
     kind: Option<InlineWidgetKind>,
@@ -6365,7 +6368,7 @@ fn tool_card_motion_cache_key(
     let mut hasher = DefaultHasher::new();
     active.hash(&mut hasher);
     let mut entries = visuals.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(left, _)| *left);
     for (call_id, visual) in entries {
         call_id.hash(&mut hasher);
         hash_f32(visual.opacity, &mut hasher);
@@ -8345,7 +8348,7 @@ fn push_single_session_selection(
     };
     let visible_lines = &visible_lines_storage;
     let body_top = single_session_body_top_for_app(app, size);
-    for segment in app.selection_segments(&visible_lines) {
+    for segment in app.selection_segments(visible_lines) {
         let selected_columns = segment
             .end_column
             .saturating_sub(segment.start_column)
@@ -10060,7 +10063,7 @@ pub(crate) fn single_session_text_areas_for_state(
     body_bottom: i32,
     inline_widget_line_count: usize,
     inline_widget_kind: Option<InlineWidgetKind>,
-    inline_widget_preview_start_line: Option<usize>,
+    _inline_widget_preview_start_line: Option<usize>,
     inline_widget_text_width: f32,
     inline_widget_bottom_limit: f32,
     draft_top: f32,

@@ -109,3 +109,42 @@ fn mmdr_size_api_reports_explicit_png_canvas() {
     assert!(stats.last_viewbox_width.unwrap_or_default() > 0);
     assert!(stats.last_viewbox_height.unwrap_or_default() > 0);
 }
+
+/// Regression guard for inline-image scroll latency.
+///
+/// The transcript-scroll hot path must not pay a filesystem stat syscall per
+/// visible/prefetched image per frame, and steady-state re-scrolling within the
+/// cache working set must not trigger Kitty fit-state rebuilds (synchronous
+/// decode + scale + base64 re-transmit). Both showed up as p95/max frame spikes
+/// of 11-35ms while scrolling a screenshot-heavy transcript before the fix; this
+/// test pins the corrected steady-state behavior via the image-scroll benchmark.
+#[test]
+fn image_scroll_steady_state_has_no_per_frame_stats_or_rebuilds() {
+    // 60 images > the historical fit-state cap (24); 800 frames is plenty of
+    // steady-state scrolling to surface any per-frame stat/rebuild regression.
+    let result = super::debug_image_scroll_benchmark(60, 800, 3);
+
+    // Only meaningful when the Kitty stable-fit path is active (it is, because
+    // the benchmark forces a Kitty picker). If for some reason it is not, the
+    // readiness path reports Unsupported and there is nothing to assert.
+    if result.protocol.as_deref() != Some("Kitty") {
+        return;
+    }
+
+    assert_eq!(
+        result.cache_stat_syscalls, 0,
+        "steady-state image scroll must perform zero render-cache stat syscalls, got {} ({:.2}/frame)",
+        result.cache_stat_syscalls, result.cache_stat_syscalls_per_frame
+    );
+    assert_eq!(
+        result.fit_protocol_rebuilds, 0,
+        "steady-state image scroll must not rebuild Kitty fit-state (cache thrash), got {}",
+        result.fit_protocol_rebuilds
+    );
+    // Every visible image should hit the cheap reuse path each frame.
+    assert_eq!(
+        result.fit_state_reuse_hits,
+        (result.frames * result.visible_per_frame) as u64,
+        "expected one cheap fit-state reuse per visible image per frame"
+    );
+}

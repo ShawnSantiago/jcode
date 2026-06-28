@@ -181,8 +181,7 @@ impl App {
     /// image's size and return `true`. Returns `false` (so the click can fall
     /// through to link/selection handling) when no badge was hit.
     pub(super) fn try_cycle_image_expand_at(&mut self, column: u16, row: u16) -> bool {
-        let Some(image_id) =
-            super::super::ui::inline_image_expand_target_from_screen(column, row)
+        let Some(image_id) = super::super::ui::inline_image_expand_target_from_screen(column, row)
         else {
             return false;
         };
@@ -1162,7 +1161,16 @@ impl App {
                     self.enqueue_mouse_scroll(MouseScrollTarget::ChangelogOverlay, 1);
                     finish_mouse_event!(true, "changelog_overlay_scroll_down");
                 }
-                _ => finish_mouse_event!(false, "changelog_overlay_non_scroll"),
+                _ => {
+                    // Let the shared copy-selection machinery handle press/drag/
+                    // release so text in the overlay can be selected and copied,
+                    // just like the chat viewport. Mouse capture otherwise blocks
+                    // native terminal selection here.
+                    if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {
+                        finish_mouse_event!(scroll_only, "changelog_overlay_copy_selection");
+                    }
+                    finish_mouse_event!(false, "changelog_overlay_non_scroll");
+                }
             }
         }
 

@@ -269,6 +269,13 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    // The onboarding simulator owns all key handling while active (and Cmd+5
+    // toggles it on). Handle it first so it works in remote/client mode too,
+    // which is how self-dev sessions run.
+    if app.handle_onboarding_sim_key(code, modifiers) {
+        return Ok(());
+    }
+
     if app.handle_onboarding_continue_prompt_key(code) {
         return Ok(());
     }
@@ -339,6 +346,24 @@ async fn handle_remote_key_internal(
         app.toggle_side_panel();
         return Ok(());
     }
+
+    // Inline swarm panel: Alt+W focuses/unfocuses the managed-agents panel.
+    // While focused, j/k navigate, o pops out the selected agent, esc exits.
+    if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
+        let focused = app.toggle_swarm_panel_focus();
+        app.set_status_notice(if focused {
+            "Swarm panel: focused (j/k select, o pop out, esc)"
+        } else {
+            "Swarm panel: unfocused"
+        });
+        return Ok(());
+    }
+    {
+        use crate::tui::TuiState as _;
+        if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+            return Ok(());
+        }
+    }
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
     if app.toggle_keys.diagram_pane.matches(code, modifiers) {
@@ -366,7 +391,7 @@ async fn handle_remote_key_internal(
         app.toggle_typing_scroll_lock();
         return Ok(());
     }
-    if app.centered_toggle_keys.toggle.matches(code, modifiers) {
+    if app.centered_toggle_keys.matches(code, modifiers) {
         app.toggle_centered_mode();
         return Ok(());
     }
@@ -482,7 +507,7 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if app.centered_toggle_keys.toggle.matches(code, modifiers) {
+    if app.centered_toggle_keys.matches(code, modifiers) {
         app.toggle_centered_mode();
         return Ok(());
     }
@@ -1543,6 +1568,11 @@ async fn handle_remote_key_internal(
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
                     app.set_status_notice("Session cleared");
+                    return Ok(());
+                }
+
+                if trimmed == "/fork" {
+                    app.toggle_next_prompt_new_session_routing();
                     return Ok(());
                 }
 
